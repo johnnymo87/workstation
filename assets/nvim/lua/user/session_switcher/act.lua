@@ -63,10 +63,16 @@ function M.decide(row, hit, opts)
 
   -- 1. Checked FIRST: dir_missing beats attachment
   if safe_row.dir_missing == true then
+    -- live_pane: a pane (here or elsewhere) is already attached. Its TUI was
+    -- launched with the OLD directory, so after a revive the picker must tell
+    -- the human to reopen it rather than attach or jump (workstation-6lnw.7).
+    local hit_for_pane = (type(hit) == "table") and hit or nil
     return {
       kind = "refuse_dir_missing",
       directory = safe_row.directory,
       sid = safe_row.id,
+      title = safe_row.title,
+      live_pane = (hit_for_pane ~= nil and is_live(hit_for_pane)) == true,
     }
   end
 

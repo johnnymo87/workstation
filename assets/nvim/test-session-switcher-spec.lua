@@ -38,6 +38,9 @@ local flow_chunk = loadfile("assets/nvim/lua/user/session_switcher/flow.lua")
 local flow = flow_chunk and flow_chunk()
 package.preload["user.session_switcher.flow"] = function() return flow end
 
+local revive = loadfile("assets/nvim/lua/user/session_switcher/revive.lua")()
+package.preload["user.session_switcher.revive"] = function() return revive end
+
 local exec_chunk = loadfile("assets/nvim/lua/user/session_switcher/exec.lua")
 local exec = exec_chunk and exec_chunk()
 package.preload["user.session_switcher.exec"] = function() return exec end
@@ -2892,7 +2895,7 @@ do
 end
 
 -- =========================================================================
--- 86. EXEC: refuse_dir_missing oc-revive hint on read-only refusal (workstation-6lnw.3)
+-- 86. EXEC: refuse_dir_missing and the one-keypress revive (workstation-6lnw.3, .7)
 -- =========================================================================
 
 -- 86a. Descriptor carries sid (act.decide on a dir_missing row with id).
@@ -2906,57 +2909,6 @@ do
   local row_no_id = { directory = "/tmp/dir2", dir_missing = true }
   local desc_no_id = act.decide(row_no_id, nil)
   check(desc_no_id.sid == nil, "desc sid is nil when row has no id")
-end
-
--- 86b. Refusal notify fires synchronously, exactly once, text byte-identical to today's exact string, BEFORE on_exit is invoked; return true.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local system_calls = {}
-  local orig_system = vim.system
-  local dir = "/tmp/vanished_tree"
-  local sid = "ses_synctest123"
-
-  vim.system = function(cmd, opts, on_exit)
-    table.insert(system_calls, { cmd = cmd, opts = opts, on_exit = on_exit })
-    on_exit({
-      code = 0,
-      stdout = vim.json.encode({
-        revivable = true,
-        sid = sid,
-        candidates = {
-          { branch = "branch-sync", tip_short = "abcdef1", source = "slug", merged = false },
-        },
-      }),
-    })
-    return { pid = 1 }
-  end
-  local orig_schedule = vim.schedule
-  local scheduled = {}
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local res = exec.refuse_dir_missing({ directory = dir, sid = sid })
-  check(res == true, "refuse_dir_missing returns true")
-  check(#notifications == 1, "refusal notify count is exactly 1 right after refuse_dir_missing returns")
-  check(notifications[1].level == vim.log.levels.WARN, "first notification is WARN")
-  check(notifications[1].msg == string.format("session directory '%s' no longer exists on disk; session is read-only", dir),
-    "first notification is the byte-identical refusal")
-  check(#system_calls == 1, "vim.system was called")
-  check(#scheduled == 1, "one scheduled callback queued")
-
-  scheduled[1]()
-  check(#notifications == 2, "after draining schedule queue hint is notification #2")
-  check(notifications[2].level == vim.log.levels.INFO, "notification #2 is INFO level")
-  local expected_hint = "revivable: run `oc-revive " .. sid .. "` (branch branch-sync @ abcdef1, slug)"
-  check(notifications[2].msg == expected_hint, "notification #2 matches exact one-line hint format")
-  check(notifications[2].msg:find("\n", 1, true) == nil, "hint contains no newline")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
 end
 
 -- 86c. Argv is exactly {"oc-revive","plan",sid}; opts.timeout == 5000, opts.text == true, opts.stdin == false.
@@ -3046,374 +2998,17 @@ do
   vim.system = orig_system
 end
 
--- 86f. Revivable single candidate -> exactly one extra INFO notify with exact expected text; merged suffix case.
--- Also verifies the extra notify goes through vim.schedule (nothing emitted until scheduled callback runs).
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local sid = "ses_revsingle1"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid })
-  check(#notifications == 1, "refusal notification emitted")
-  check(type(last_on_exit) == "function", "on_exit callback was passed to vim.system")
-
-  -- Case 1: unmerged single candidate
-  local plan1 = {
-    revivable = true,
-    sid = sid,
-    candidates = {
-      { branch = "feature-xyz", tip_short = "a1b2c3d", source = "slug", merged = false },
-    },
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan1) })
-  check(#notifications == 1, "no extra notification before vim.schedule runs")
-  check(#scheduled == 1, "one scheduled callback")
-  scheduled[1]()
-  scheduled = {}
-  check(#notifications == 2, "exactly one extra notify emitted after schedule")
-  check(notifications[2].level == vim.log.levels.INFO, "extra notify is INFO level")
-  local expected_msg1 = "revivable: run `oc-revive " .. sid .. "` (branch feature-xyz @ a1b2c3d, slug)"
-  check(notifications[2].msg == expected_msg1, "extra notify matches exact format for single unmerged candidate")
-  check(notifications[2].msg:find("\n", 1, true) == nil, "single unmerged hint contains no newline")
-
-  -- Case 2: merged single candidate
-  local sid2 = "ses_revmerged2"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid2 })
-  local plan2 = {
-    revivable = true,
-    sid = sid2,
-    candidates = {
-      { branch = "feature-abc", tip_short = "deadbee", source = "bash-evidence", merged = true },
-    },
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan2) })
-  check(#notifications == 3, "no extra notification before schedule runs for merged case")
-  check(#scheduled == 1, "one scheduled callback for merged case")
-  scheduled[1]()
-  scheduled = {}
-  check(#notifications == 4, "total 4 notifications (2 refusal + 2 hints)")
-  check(notifications[4].level == vim.log.levels.INFO, "merged hint is INFO level")
-  local expected_msg2 = "revivable: run `oc-revive " .. sid2 .. "` (branch feature-abc @ deadbee, bash-evidence, merged)"
-  check(notifications[4].msg == expected_msg2, "extra notify matches exact format with merged suffix")
-  check(notifications[4].msg:find("\n", 1, true) == nil, "single merged hint contains no newline")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
-end
-
--- 86g. Two disagreeing candidates -> both lines plus the disagree line.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local sid = "ses_disagree12"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid })
-  local plan = {
-    revivable = true,
-    sid = sid,
-    candidates = {
-      { branch = "path-ownership", tip_short = "8fbddc6", source = "slug", merged = false },
-      { branch = "partc-pr1", tip_short = "48f662f", source = "bash-evidence", merged = true },
-    },
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan) })
-  check(#scheduled == 1, "one scheduled callback")
-  scheduled[1]()
-  scheduled = {}
-
-  check(#notifications == 2, "refusal + disagree hint")
-  check(notifications[2].level == vim.log.levels.INFO, "hint is INFO level")
-  local expected = "revivable: run `oc-revive " .. sid .. "` (2 candidates disagree, it will ask: path-ownership @ 8fbddc6, slug; partc-pr1 @ 48f662f, bash-evidence, merged)"
-  check(notifications[2].msg == expected, "extra notify matches format for disagreeing candidates")
-  check(notifications[2].msg:find("\n", 1, true) == nil, "disagree hint contains no newline")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
-end
-
--- 86h. Not revivable no_candidates -> silent; not_a_git_repo -> silent.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local sid = "ses_notrev1"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid })
-  check(#notifications == 1, "refusal notify only")
-
-  -- no_candidates
-  local plan_no_cand = {
-    revivable = false,
-    reason = "no_candidates: zero branch candidates survive validation",
-    sid = sid,
-    candidates = {},
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan_no_cand) })
-  for _, fn in ipairs(scheduled) do fn() end
-  scheduled = {}
-  check(#notifications == 1, "no_candidates reason is completely silent")
-
-  -- not_a_git_repo
-  local plan_no_git = {
-    revivable = false,
-    reason = "not_a_git_repo: /tmp/deleted_worktree is not a git repository",
-    sid = sid,
-    candidates = {},
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan_no_git) })
-  for _, fn in ipairs(scheduled) do fn() end
-  scheduled = {}
-  check(#notifications == 1, "not_a_git_repo reason is completely silent")
-
-  -- revivable is the gate, not the presence of candidates. oc-revive never
-  -- emits this shape today, but a hint saying "revivable" for a plan that says
-  -- otherwise would send the human to a command that then refuses.
-  local plan_false_with_cands = {
-    revivable = false,
-    reason = "no_candidates: zero branch candidates survive validation",
-    sid = sid,
-    candidates = { { branch = "b", tip_short = "abc1234", source = "slug", merged = false } },
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan_false_with_cands) })
-  for _, fn in ipairs(scheduled) do fn() end
-  scheduled = {}
-  check(#notifications == 1, "revivable=false is silent even when candidates are present")
-
-  -- blocked_by_worktree is matched as a PREFIX token, not anywhere in prose.
-  local plan_blocked_midstring = {
-    revivable = false,
-    reason = "no_candidates: see blocked_by_worktree: elsewhere",
-    sid = sid,
-    candidates = {},
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan_blocked_midstring) })
-  for _, fn in ipairs(scheduled) do fn() end
-  scheduled = {}
-  check(#notifications == 1, "blocked_by_worktree mid-string is not the blocked token")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
-end
-
--- 86i. blocked_by_worktree -> WARN with exact text, and does NOT contain reason resume command.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local sid = "ses_blocked1"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid })
-  check(#notifications == 1, "refusal notify only")
-
-  local plan_blocked = {
-    revivable = false,
-    reason = "blocked_by_worktree: worktree exists at /path; oc-revive apply " .. sid .. " --resume",
-    sid = sid,
-    candidates = {},
-  }
-  last_on_exit({ code = 0, stdout = vim.json.encode(plan_blocked) })
-  check(#notifications == 1, "no extra notify before schedule runs")
-  check(#scheduled == 1, "one scheduled callback")
-  scheduled[1]()
-  scheduled = {}
-
-  check(#notifications == 2, "refusal + blocked warning")
-  check(notifications[2].level == vim.log.levels.WARN, "blocked notify is WARN level")
-  local expected = "revive blocked: a revive worktree for this branch already exists; run `oc-revive " .. sid .. "` for details"
-  check(notifications[2].msg == expected, "blocked notify has exact text")
-  check(notifications[2].msg:find("oc%-revive apply") == nil and notifications[2].msg:find("oc-revive apply", 1, true) == nil,
-    "blocked notify does NOT contain resume command")
-  check(notifications[2].msg:find("--resume", 1, true) == nil, "blocked notify does NOT contain --resume")
-  check(notifications[2].msg:find("blocked_by_worktree:", 1, true) == nil, "blocked notify does NOT echo raw reason")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
-end
-
--- 86j. Code ~= 0, code 124 timeout, stdout nil/invalid, sid mismatch, empty/invalid candidates -> silent and no throw.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
-
-  local sid = "ses_edgecases"
-  exec.refuse_dir_missing({ directory = "/d", sid = sid })
-  local refusal_count = #notifications
-  check(refusal_count == 1, "refusal notify emitted")
-
-  local bad_results = {
-    { desc = "non-zero code", res = { code = 1, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "code 124 timeout", res = { code = 124, signal = 15, stdout = "" } },
-    { desc = "stdout nil", res = { code = 0, stdout = nil } },
-    { desc = "stdout not json", res = { code = 0, stdout = "not json" } },
-    { desc = "stdout null", res = { code = 0, stdout = "null" } },
-    { desc = "stdout []", res = { code = 0, stdout = "[]" } },
-    { desc = "stdout scalar number", res = { code = 0, stdout = "123" } },
-    { desc = "sid mismatch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_other","candidates":[{"branch":"b","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "candidates empty while revivable=true", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[]}' } },
-    { desc = "candidate not a table (string)", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":["not a table"]}' } },
-    { desc = "candidate not a table (number)", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[123]}' } },
-    { desc = "candidate with non-string branch", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":123,"tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "candidate with non-string tip_short", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":123,"source":"s"}]}' } },
-    { desc = "candidate with non-string source", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"b","tip_short":"1a2b","source":false}]}' } },
-    { desc = "branch empty string", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "branch containing newline", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat\\nbar","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "branch containing space", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat bar","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "branch containing backtick", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat`bar","tip_short":"1a2b","source":"s"}]}' } },
-    { desc = "tip_short zz", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat","tip_short":"zz","source":"s"}]}' } },
-    { desc = "source with space", res = { code = 0, stdout = '{"revivable":true,"sid":"ses_edgecases","candidates":[{"branch":"feat","tip_short":"1a2b","source":"a b"}]}' } },
-  }
-
-  for _, test_case in ipairs(bad_results) do
-    scheduled = {}
-    local ok = pcall(last_on_exit, test_case.res)
-    check(ok == true, "on_exit does not throw for " .. test_case.desc)
-    for _, fn in ipairs(scheduled) do fn() end
-    check(#notifications == refusal_count, "no notifications emitted for " .. test_case.desc)
-  end
-
-  -- Finding 1: Any malformed candidate in a multi-candidate plan makes the WHOLE hint silent
-  -- Case A: 2 candidates, one with non-string branch -> NO hint at all
-  scheduled = {}
-  local mixed_plan = {
-    revivable = true,
-    sid = sid,
-    candidates = {
-      { branch = 123, tip_short = "1a2b", source = "s1" },
-      { branch = "valid_branch", tip_short = "3c4d", source = "s2" },
-    },
-  }
-  local ok = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(mixed_plan) })
-  check(ok == true, "on_exit does not throw for plan with malformed candidate")
-  for _, fn in ipairs(scheduled) do fn() end
-  check(#notifications == refusal_count, "no hint emitted when any candidate has non-string branch")
-
-  -- Case B: 2 candidates, one not a table -> NO hint at all
-  scheduled = {}
-  local mixed_table_plan = {
-    revivable = true,
-    sid = sid,
-    candidates = {
-      "not a table",
-      { branch = "valid_branch", tip_short = "3c4d", source = "s2" },
-    },
-  }
-  local ok_tbl = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(mixed_table_plan) })
-  check(ok_tbl == true, "on_exit does not throw for plan with non-table candidate")
-  for _, fn in ipairs(scheduled) do fn() end
-  check(#notifications == refusal_count, "no hint emitted when any candidate is not a table")
-
-  -- Finding 2: Positive test with a realistic branch containing "/" and "." (e.g. "feat/x.y-2") that DOES produce the hint
-  scheduled = {}
-  local pos_plan = {
-    revivable = true,
-    sid = sid,
-    candidates = {
-      { branch = "feat/x.y-2", tip_short = "8fbddc6", source = "bash-evidence", merged = false },
-    },
-  }
-  local ok_pos = pcall(last_on_exit, { code = 0, stdout = vim.json.encode(pos_plan) })
-  check(ok_pos == true, "on_exit does not throw for realistic branch feat/x.y-2")
-  for _, fn in ipairs(scheduled) do fn() end
-  check(#notifications == refusal_count + 1, "realistic branch feat/x.y-2 produces hint notification")
-  local pos_msg = notifications[#notifications].msg
-  local expected_pos = "revivable: run `oc-revive " .. sid .. "` (branch feat/x.y-2 @ 8fbddc6, bash-evidence)"
-  check(pos_msg == expected_pos, "hint matches exact one-line format")
-  check(pos_msg:find("\n", 1, true) == nil, "realistic branch hint contains no newline")
-
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
-end
-
 -- =========================================================================
--- 86k. REAL-OUTPUT FIXTURE TEST: verbatim oc-revive plan JSON payloads
+-- 86f-86n. ONE-KEYPRESS REVIVE (workstation-6lnw.7)
 -- =========================================================================
--- Captured from the real CLI on 2026-10-01.
--- WHY THIS TEST EXISTS:
--- Unit tests using vim.json.encode from clean Lua tables omit JSON nulls
--- (which decode to vim.NIL), extra metadata fields (subject, tip_ct, action,
--- path, snapshot), and real-world payload shapes. A schema drift or parser
--- incompatibility in oc-revive would silently kill the hint with all other tests green.
-do
-  local notifications = {}
-  local orig_notify = vim.notify
-  vim.notify = function(msg, level)
-    table.insert(notifications, { msg = msg, level = level })
-  end
-  local last_on_exit = nil
-  local orig_system = vim.system
-  vim.system = function(cmd, opts, on_exit)
-    last_on_exit = on_exit
-    return { pid = 1 }
-  end
-  local scheduled = {}
-  local orig_schedule = vim.schedule
-  vim.schedule = function(fn) table.insert(scheduled, fn) end
+-- The #620 hint (a line in the warning bar naming a command) is gone: that text
+-- could not be copied. An actionable plan now becomes a vim.fn.confirm prompt,
+-- and accepting it runs oc-revive in a floating terminal.
 
-  -- Fixture 1: real2.json (2 candidates disagree, unmerged)
-  local real2_json = [==[{
+-- Verbatim `oc-revive plan` output captured from the real CLI on 2026-10-01.
+-- Encoded fixtures from Lua tables would omit JSON nulls (vim.NIL on decode)
+-- and the extra fields the real payload carries.
+local REAL2_JSON = [==[{
   "revivable": true,
   "reason": null,
   "sid": "ses_f8bbbea3fffez8Hy1VTopE8f8l",
@@ -3448,25 +3043,10 @@ do
     }
   ]
 }]==]
+local REAL2_SID = "ses_f8bbbea3fffez8Hy1VTopE8f8l"
+local REAL2_DEAD = "/home/dev/projects/lgtm/.worktrees/path-ownership"
 
-  local sid_real2 = "ses_f8bbbea3fffez8Hy1VTopE8f8l"
-  exec.refuse_dir_missing({ directory = "/home/dev/projects/lgtm/.worktrees/path-ownership", sid = sid_real2 })
-  check(#notifications == 1, "real2 refusal notification emitted")
-  check(type(last_on_exit) == "function", "real2 on_exit was captured")
-
-  last_on_exit({ code = 0, stdout = real2_json })
-  check(#scheduled == 1, "real2 scheduled callback queued")
-  scheduled[1]()
-  scheduled = {}
-
-  check(#notifications == 2, "real2 produced hint notification #2")
-  check(notifications[2].level == vim.log.levels.INFO, "real2 hint is INFO level")
-  local expected_real2 = "revivable: run `oc-revive " .. sid_real2 .. "` (2 candidates disagree, it will ask: path-ownership @ 8fbddc6, slug; partc-pr1 @ 48f662f, bash-evidence)"
-  check(notifications[2].msg == expected_real2, "real2 hint matches exact one-line text")
-  check(notifications[2].msg:find("\n", 1, true) == nil, "real2 hint contains no newline")
-
-  -- Fixture 2: realmerged.json (1 candidate, merged)
-  local realmerged_json = [==[{
+local REALMERGED_JSON = [==[{
   "revivable": true,
   "reason": null,
   "sid": "ses_f966a4af3ffeIXwkQcs07oAfBL",
@@ -3490,25 +3070,409 @@ do
     }
   ]
 }]==]
+local MERGED_SID = "ses_f966a4af3ffeIXwkQcs07oAfBL"
+local MERGED_DEAD = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3"
+local MERGED_PATH = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790873396"
+local MERGED_TIP = "59c9409ac39be5d024bd88a5fcc5f67b6a99da1e"
 
-  local sid_realmerged = "ses_f966a4af3ffeIXwkQcs07oAfBL"
-  exec.refuse_dir_missing({ directory = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3", sid = sid_realmerged })
-  check(#notifications == 3, "realmerged refusal notification emitted")
+-- The blocked shape #622 adds: prose reason unchanged, plus a structured
+-- `resume` object (absent, never null, when there is nothing to resume).
+local BLOCKED_JSON = [==[{
+  "revivable": false,
+  "reason": "blocked_by_worktree: branch 'cops-6757-step3' is checked out at '/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518' from a prior revive attempt. Resume this worktree rather than creating a new one. Do NOT delete '/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518' and re-run an older apply (a serve may have already resolved it). To resume, run: oc-revive apply ses_f966a4af3ffeIXwkQcs07oAfBL --resume --branch cops-6757-step3 --path /home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518 --expect-tip 59c9409ac39be5d024bd88a5fcc5f67b6a99da1e --expect-old-dir /home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3",
+  "sid": "ses_f966a4af3ffeIXwkQcs07oAfBL",
+  "dead_dir": "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3",
+  "repo": "/home/dev/projects/culinary-operations-server",
+  "snapshot": {
+    "exists": true,
+    "path": "/home/dev/.local/share/opencode/snapshot/d981ea548afe1bf9602880546657408142aa557d/2c611a4c4da5686d714ed85ed7d9b74551e78bf0"
+  },
+  "candidates": [],
+  "resume": {
+    "branch": "cops-6757-step3",
+    "path": "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518",
+    "expect_tip": "59c9409ac39be5d024bd88a5fcc5f67b6a99da1e",
+    "expect_old_dir": "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3"
+  }
+}]==]
+local BLOCKED_PATH = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518"
 
-  last_on_exit({ code = 0, stdout = realmerged_json })
-  check(#scheduled == 1, "realmerged scheduled callback queued")
-  scheduled[1]()
-  scheduled = {}
+local function argv_eq(a, b)
+  if #a ~= #b then return false end
+  for i = 1, #a do if a[i] ~= b[i] then return false end end
+  return true
+end
 
-  check(#notifications == 4, "realmerged produced hint notification #4")
-  check(notifications[4].level == vim.log.levels.INFO, "realmerged hint is INFO level")
-  local expected_realmerged = "revivable: run `oc-revive " .. sid_realmerged .. "` (branch cops-6757-step3 @ 59c9409ac, slug, merged)"
-  check(notifications[4].msg == expected_realmerged, "realmerged hint matches exact one-line text")
-  check(notifications[4].msg:find("\n", 1, true) == nil, "realmerged hint contains no newline")
+-- 86f. revive.offers on real payloads: the argv is built from plan fields only.
+do
+  local r = revive.offers(vim.json.decode(REALMERGED_JSON), MERGED_SID, MERGED_DEAD)
+  check(type(r) == "table" and r.kind == "revive", "realmerged: offers kind revive")
+  check(#r.offers == 1, "realmerged: one offer")
+  check(r.offers[1].merged == true, "realmerged: merged flag carried")
+  check(r.offers[1].date == "2026-09-03", "realmerged: date is the tip_ct day")
+  check(argv_eq(r.offers[1].argv, {
+    "oc-revive", "apply", MERGED_SID,
+    "--branch", "cops-6757-step3",
+    "--path", MERGED_PATH,
+    "--action", "add",
+    "--expect-tip", MERGED_TIP,
+    "--expect-old-dir", MERGED_DEAD,
+  }), "realmerged: apply argv is exact")
 
-  vim.notify = orig_notify
-  vim.system = orig_system
-  vim.schedule = orig_schedule
+  local r2 = revive.offers(vim.json.decode(REAL2_JSON), REAL2_SID, REAL2_DEAD)
+  check(type(r2) == "table" and #r2.offers == 2, "real2: two offers")
+  check(r2.offers[1].branch == "path-ownership" and r2.offers[2].branch == "partc-pr1", "real2: candidate order preserved")
+  check(r2.offers[2].argv[5] == "partc-pr1" and r2.offers[2].argv[11] == "48f662f423bf118c6400b7594add7320039635cd",
+    "real2: second offer carries its own branch and full tip")
+
+  local rb = revive.offers(vim.json.decode(BLOCKED_JSON), MERGED_SID, MERGED_DEAD)
+  check(type(rb) == "table" and rb.kind == "resume", "blocked: offers kind resume")
+  check(argv_eq(rb.offers[1].argv, {
+    "oc-revive", "resume", MERGED_SID,
+    "--branch", "cops-6757-step3",
+    "--path", BLOCKED_PATH,
+    "--expect-tip", MERGED_TIP,
+    "--expect-old-dir", MERGED_DEAD,
+  }), "blocked: resume argv is exact and comes from plan.resume, not the prose")
+end
+
+-- 86g. revive.offers REJECTS: any bad field makes the whole plan unusable.
+do
+  local function merged_plan() return vim.json.decode(REALMERGED_JSON) end
+  local function blocked_plan() return vim.json.decode(BLOCKED_JSON) end
+  local cases = {
+    { "sid mismatch", function(p) p.sid = "ses_other" end },
+    { "dead_dir mismatch (stale plan)", function(p) p.dead_dir = "/elsewhere" end },
+    { "repo missing", function(p) p.repo = nil end },
+    { "repo relative", function(p) p.repo = "projects/x"; p.candidates[1].path = "projects/x/.worktrees/a" end },
+    { "path outside .worktrees", function(p) p.candidates[1].path = "/tmp/evil" end },
+    { "path in another repo's .worktrees", function(p) p.candidates[1].path = "/home/dev/projects/mono/.worktrees/x" end },
+    { "path nested below .worktrees", function(p) p.candidates[1].path = MERGED_DEAD:gsub("cops%-6757%-step3$", "") .. "a/b" end },
+    { "path is the .worktrees dir itself", function(p) p.candidates[1].path = "/home/dev/projects/culinary-operations-server/.worktrees/" end },
+    { "path leaf ..", function(p) p.candidates[1].path = "/home/dev/projects/culinary-operations-server/.worktrees/.." end },
+    { "path leaf leading dash", function(p) p.candidates[1].path = "/home/dev/projects/culinary-operations-server/.worktrees/-rf" end },
+    { "path equals the dead dir", function(p) p.candidates[1].path = MERGED_DEAD end },
+    { "path with newline", function(p) p.candidates[1].path = MERGED_PATH .. "\nx" end },
+    { "branch leading dash (argv option injection)", function(p) p.candidates[1].branch = "--resume" end },
+    { "branch with space", function(p) p.candidates[1].branch = "a b" end },
+    { "branch with backtick", function(p) p.candidates[1].branch = "a`b" end },
+    { "branch empty", function(p) p.candidates[1].branch = "" end },
+    { "tip too short", function(p) p.candidates[1].tip = "59c9409ac" end },
+    { "tip not hex", function(p) p.candidates[1].tip = string.rep("z", 40) end },
+    { "tip missing", function(p) p.candidates[1].tip = nil end },
+    { "action not add", function(p) p.candidates[1].action = "reuse" end },
+    { "tip_short not hex", function(p) p.candidates[1].tip_short = "zz" end },
+    { "source with space", function(p) p.candidates[1].source = "a b" end },
+    { "candidate not a table", function(p) p.candidates[1] = "x" end },
+    { "candidates empty", function(p) p.candidates = {} end },
+    { "one valid + one invalid candidate", function(p)
+        local bad = vim.deepcopy(p.candidates[1]); bad.branch = "-x"; table.insert(p.candidates, bad) end },
+    { "revivable false, no blocked reason", function(p) p.revivable = false; p.reason = "no_candidates: zero" end },
+  }
+  local n = 0
+  for _, c in ipairs(cases) do
+    local p = merged_plan()
+    c[2](p)
+    local ok, r = pcall(revive.offers, p, MERGED_SID, MERGED_DEAD)
+    check(ok and r == nil, "offers rejects: " .. c[1])
+    n = n + 1
+  end
+  check(n == #cases and n == 26, "all 26 revivable rejection cases ran")
+
+  local bcases = {
+    { "resume absent", function(p) p.resume = nil end },
+    { "resume null (vim.NIL)", function(p) p.resume = vim.NIL end },
+    { "resume expect_old_dir mismatch", function(p) p.resume.expect_old_dir = "/elsewhere" end },
+    { "resume path outside .worktrees", function(p) p.resume.path = "/tmp/evil" end },
+    { "resume path equals dead dir", function(p) p.resume.path = MERGED_DEAD end },
+    { "resume branch leading dash", function(p) p.resume.branch = "-x" end },
+    { "resume tip short", function(p) p.resume.expect_tip = "59c9409" end },
+    { "blocked token mid-string", function(p) p.reason = "no_candidates: see blocked_by_worktree: x" end },
+    { "revivable true with empty candidates beats resume", function(p) p.revivable = true end },
+  }
+  local m = 0
+  for _, c in ipairs(bcases) do
+    local p = blocked_plan()
+    c[2](p)
+    local ok, r = pcall(revive.offers, p, MERGED_SID, MERGED_DEAD)
+    check(ok and r == nil, "offers rejects: " .. c[1])
+    m = m + 1
+  end
+  check(m == 9, "all 9 resume rejection cases ran")
+
+  for _, bad in ipairs({ { "not a table", "x", MERGED_SID, MERGED_DEAD }, { "nil plan", nil, MERGED_SID, MERGED_DEAD },
+                         { "bad sid arg", merged_plan(), "ses_a;b", MERGED_DEAD }, { "nil dead dir", merged_plan(), MERGED_SID, nil } }) do
+    local ok, r = pcall(revive.offers, bad[2], bad[3], bad[4])
+    check(ok and r == nil, "offers rejects: " .. bad[1])
+  end
+end
+
+-- 86h. revive.prompt: text, buttons, and Cancel as the default.
+do
+  local r = revive.offers(vim.json.decode(REALMERGED_JSON), MERGED_SID, MERGED_DEAD)
+  local msg, choices, default = revive.prompt(r, "COPS-6757 STEP 3 fulfiller dating", MERGED_SID)
+  check(choices == "&Revive\n&Cancel", "single: buttons are Revive and Cancel")
+  check(default == 2, "single: default is Cancel")
+  local lines = vim.split(msg, "\n", { plain = true })
+  check(lines[1] == 'Revive read-only session "COPS-6757 STEP 3 fulfiller dating"?', "single: first line names the session")
+  check(lines[2] == "  branch cops-6757-step3 @ 59c9409ac - [COPS-6757] Record the alerting as shipped and the roster sentinel tr... (2026-09-03)",
+    "single: branch line, subject truncated, tip date" .. " got: " .. tostring(lines[2]))
+  check(msg:find("new dir .worktrees/cops-6757-step3-r1790873396", 1, true) ~= nil, "single: new dir relative to repo")
+  check(msg:find("already merged", 1, true) ~= nil and msg:find("7 days", 1, true) ~= nil, "single: merged warning")
+  check(msg:find("NOT carried over", 1, true) ~= nil, "single: uncommitted warning")
+
+  local r2 = revive.offers(vim.json.decode(REAL2_JSON), REAL2_SID, REAL2_DEAD)
+  local msg2, choices2, default2 = revive.prompt(r2, "t", REAL2_SID)
+  check(choices2 == "&1 path-ownership\n&2 partc-pr1\n&Cancel", "disagree: one numbered button per candidate")
+  check(default2 == 3, "disagree: default is Cancel")
+  check(msg2:find("disagrees", 1, true) ~= nil, "disagree: says the evidence disagrees")
+  check(msg2:find("[1] branch path-ownership @ 8fbddc6", 1, true) ~= nil, "disagree: candidate 1 described")
+  check(msg2:find("[2] branch partc-pr1 @ 48f662f", 1, true) ~= nil, "disagree: candidate 2 described")
+  check(msg2:find("merged", 1, true) == nil, "disagree: no merged warning when nothing is merged")
+
+  local rb = revive.offers(vim.json.decode(BLOCKED_JSON), MERGED_SID, MERGED_DEAD)
+  local msgb, choicesb, defaultb = revive.prompt(rb, "t", MERGED_SID)
+  check(choicesb == "&Resume\n&Cancel" and defaultb == 2, "resume: Resume and Cancel, default Cancel")
+  check(msgb:find("Resume the unfinished revive", 1, true) == 1, "resume: says it is resuming")
+  check(msgb:find(".worktrees/cops-6757-step3-r1790876518", 1, true) ~= nil, "resume: names the existing worktree")
+
+  -- Untrusted display strings cannot add lines or accelerators.
+  local evil = vim.json.decode(REALMERGED_JSON)
+  evil.candidates[1].subject = "line one\nline two"
+  local re = revive.offers(evil, MERGED_SID, MERGED_DEAD)
+  local msge = revive.prompt(re, "a\nb" .. string.rep("x", 200), MERGED_SID)
+  local first = vim.split(msge, "\n", { plain = true })[1]
+  check(first:find("a b", 1, true) ~= nil, "title control characters become spaces")
+  check(#first < 100, "long title is truncated")
+  check(msge:find("line one line two", 1, true) ~= nil, "subject newline becomes a space")
+  local msg_nil = revive.prompt(r, nil, MERGED_SID)
+  check(msg_nil:find(MERGED_SID, 1, true) ~= nil, "nil title falls back to the sid")
+  local amp = vim.json.decode(REAL2_JSON)
+  amp.candidates[1].branch = "a&b"
+  local _, choices_amp = revive.prompt(revive.offers(amp, REAL2_SID, REAL2_DEAD), "t", REAL2_SID)
+  check(choices_amp:find("&1 a&&b", 1, true) == 1, "an & in a branch is doubled so it is not an accelerator")
+end
+
+-- Shared stub rig for the exec flow.
+local function rig()
+  local R = { notes = {}, sys = {}, sched = {}, confirms = {}, floats = {}, attaches = {} }
+  R.orig = { notify = vim.notify, system = vim.system, schedule = vim.schedule,
+             confirm = exec.confirm, float = exec.run_in_float, attach = exec.attach }
+  vim.notify = function(m, l) table.insert(R.notes, { msg = m, level = l }) end
+  vim.system = function(cmd, o, cb) table.insert(R.sys, { cmd = cmd, on_exit = cb }); return { pid = 1 } end
+  vim.schedule = function(fn) table.insert(R.sched, fn) end
+  R.answer = 0
+  exec.confirm = function(m, c, d) table.insert(R.confirms, { msg = m, choices = c, default = d }); return R.answer end
+  R.float_ok = true
+  exec.run_in_float = function(argv, done) table.insert(R.floats, { argv = argv, done = done }); return R.float_ok end
+  exec.attach = function(d) table.insert(R.attaches, d); return true end
+  function R.drain() local q = R.sched; R.sched = {}; for _, fn in ipairs(q) do fn() end end
+  function R.restore()
+    vim.notify, vim.system, vim.schedule = R.orig.notify, R.orig.system, R.orig.schedule
+    exec.confirm, exec.run_in_float, exec.attach = R.orig.confirm, R.orig.float, R.orig.attach
+    exec.revive_inflight = {}
+  end
+  return R
+end
+
+local MERGED_DESC = { kind = "refuse_dir_missing", sid = MERGED_SID, directory = MERGED_DEAD, title = "COPS", live_pane = false }
+
+-- 86i. Refusal first; the prompt waits for the main loop; Cancel does nothing.
+do
+  local R = rig()
+  check(exec.refuse_dir_missing(MERGED_DESC) == true, "refuse returns true")
+  check(#R.notes == 1 and R.notes[1].level == vim.log.levels.WARN
+    and R.notes[1].msg == string.format("session directory '%s' no longer exists on disk; session is read-only", MERGED_DEAD),
+    "refusal is synchronous and byte-identical")
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  check(#R.confirms == 0, "no prompt from the fast callback")
+  check(#R.sched == 1, "prompt is scheduled onto the main loop")
+  R.answer = 2 -- Cancel
+  R.drain()
+  check(#R.confirms == 1, "prompt shown once")
+  check(R.confirms[1].choices == "&Revive\n&Cancel" and R.confirms[1].default == 2, "prompt buttons and Cancel default")
+  check(#R.floats == 0 and #R.attaches == 0, "Cancel runs nothing")
+  check(#R.notes == 1, "Cancel adds no notification")
+  R.restore()
+end
+
+-- 86j. Esc (0) runs nothing; Revive runs the exact argv, then attaches on exit 0.
+do
+  local R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 0
+  R.drain()
+  check(#R.floats == 0, "Esc runs nothing")
+
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[2].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 1
+  R.drain()
+  check(#R.floats == 1, "Revive opens the terminal")
+  check(argv_eq(R.floats[1].argv, {
+    "oc-revive", "apply", MERGED_SID, "--branch", "cops-6757-step3", "--path", MERGED_PATH,
+    "--action", "add", "--expect-tip", MERGED_TIP, "--expect-old-dir", MERGED_DEAD,
+  }), "terminal runs the exact apply argv")
+  check(exec.revive_inflight[MERGED_SID] == true, "in-flight flag set while running")
+  check(#R.attaches == 0, "no attach before the job exits")
+  R.floats[1].done(0)
+  check(exec.revive_inflight[MERGED_SID] == nil, "in-flight flag cleared on exit")
+  check(#R.attaches == 1 and R.attaches[1].sid == MERGED_SID, "exit 0 attaches the revived session")
+  R.restore()
+end
+
+-- 86k. Non-zero exit: no attach, a WARN pointing at the window, guard cleared.
+do
+  local R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 1
+  R.drain()
+  local before = #R.notes
+  R.floats[1].done(1)
+  check(#R.attaches == 0, "failure does not attach")
+  check(#R.notes == before + 1 and R.notes[#R.notes].level == vim.log.levels.WARN
+    and R.notes[#R.notes].msg:find("exited 1", 1, true) ~= nil, "failure WARNs with the exit code")
+  check(exec.revive_inflight[MERGED_SID] == nil, "in-flight cleared after failure")
+  R.restore()
+end
+
+-- 86l. A pane already attached: revive, but do not attach; tell the human to reopen.
+do
+  local R = rig()
+  local d = vim.deepcopy(MERGED_DESC); d.live_pane = true
+  exec.refuse_dir_missing(d)
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 1
+  R.drain()
+  R.floats[1].done(0)
+  check(#R.attaches == 0, "live pane: no attach")
+  check(R.notes[#R.notes].level == vim.log.levels.WARN and R.notes[#R.notes].msg:find("close that pane", 1, true) ~= nil,
+    "live pane: tells the human to close and reopen")
+  R.restore()
+end
+
+-- 86m. In-flight guard; terminal failing to start clears it; disagree and resume pick the right offer.
+do
+  local R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 1
+  R.drain()
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[2].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.drain()
+  check(#R.confirms == 1, "second Enter while running does not prompt")
+  check(#R.floats == 1, "second Enter does not start a second apply")
+  check(R.notes[#R.notes].msg:find("already running", 1, true) ~= nil, "second Enter says a revive is running")
+  R.restore()
+
+  R = rig()
+  R.float_ok = false
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[1].on_exit({ code = 0, stdout = REALMERGED_JSON })
+  R.answer = 1
+  R.drain()
+  check(exec.revive_inflight[MERGED_SID] == nil, "terminal that never started does not leave the guard set")
+  R.restore()
+
+  R = rig()
+  exec.refuse_dir_missing({ sid = REAL2_SID, directory = REAL2_DEAD })
+  R.sys[1].on_exit({ code = 0, stdout = REAL2_JSON })
+  R.answer = 2
+  R.drain()
+  check(R.floats[1] and R.floats[1].argv[5] == "partc-pr1", "disagree: button 2 runs candidate 2")
+  R.restore()
+
+  R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  R.sys[1].on_exit({ code = 0, stdout = BLOCKED_JSON })
+  R.answer = 1
+  R.drain()
+  check(R.confirms[1].choices == "&Resume\n&Cancel", "blocked: prompt offers Resume")
+  check(R.floats[1] and R.floats[1].argv[2] == "resume", "blocked: Resume runs oc-revive resume")
+  R.restore()
+end
+
+-- 86n. Anything not actionable is silent: no prompt is even scheduled.
+do
+  local R = rig()
+  exec.refuse_dir_missing(MERGED_DESC)
+  local bad = {
+    { "non-zero exit", { code = 1, stdout = REALMERGED_JSON } },
+    { "timeout", { code = 124, signal = 15, stdout = "" } },
+    { "stdout nil", { code = 0 } },
+    { "not json", { code = 0, stdout = "not json" } },
+    { "json null", { code = 0, stdout = "null" } },
+    { "json array", { code = 0, stdout = "[]" } },
+    { "json number", { code = 0, stdout = "123" } },
+    { "other session's plan", { code = 0, stdout = REAL2_JSON } },
+    { "no_candidates", { code = 0, stdout = '{"revivable":false,"reason":"no_candidates: zero","sid":"' .. MERGED_SID .. '","dead_dir":"' .. MERGED_DEAD .. '","repo":"/home/dev/projects/culinary-operations-server","candidates":[]}' } },
+    { "result not a table", "x" },
+  }
+  for _, b in ipairs(bad) do
+    local ok = pcall(R.sys[1].on_exit, b[2])
+    check(ok, "on_exit does not throw: " .. b[1])
+    check(#R.sched == 0, "nothing scheduled: " .. b[1])
+  end
+  check(#R.notes == 1 and #R.confirms == 0, "only the refusal was shown")
+  R.restore()
+end
+
+-- 86o. act.decide carries the title and whether a pane is already attached.
+do
+  local row = { id = "ses_dm_title", directory = "/tmp/dir", dir_missing = true, title = "My session" }
+  local live = act.decide(row, { pane = "%1" }, { is_live = function() return true end })
+  check(live.kind == "refuse_dir_missing" and live.title == "My session", "descriptor carries the title")
+  check(live.live_pane == true, "live hit -> live_pane true")
+  local dead = act.decide(row, { pane = "%1" }, { is_live = function() return false end })
+  check(dead.live_pane == false, "dead hit -> live_pane false")
+  local none = act.decide(row, nil, { is_live = function() return true end })
+  check(none.live_pane == false, "no hit -> live_pane false, even if is_live would say yes")
+end
+
+-- 86p. The REAL floating terminal: exit 0 closes it; non-zero leaves the output up until q.
+do
+  local function floats()
+    local out = {}
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_config(w).relative ~= "" then table.insert(out, w) end
+    end
+    return out
+  end
+  local done, code = false, nil
+  check(exec.run_in_float({ "sh", "-c", "echo revived-ok; exit 0" }, function(c) done, code = true, c end) == true,
+    "real float starts")
+  check(vim.wait(10000, function() return done end, 20) == true, "real float job finished")
+  check(code == 0, "exit 0 reported")
+  check(#floats() == 0, "exit 0 closes the float")
+
+  done, code = false, nil
+  exec.run_in_float({ "sh", "-c", "echo boom-output; exit 3" }, function(c) done, code = true, c end)
+  vim.wait(10000, function() return done end, 20)
+  check(code == 3, "non-zero exit reported")
+  local fl = floats()
+  check(#fl == 1, "non-zero exit leaves the float open")
+  local buf = vim.api.nvim_win_get_buf(fl[1])
+  local text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  check(text:find("boom-output", 1, true) ~= nil, "the output is visible in the float")
+  local title = vim.api.nvim_win_get_config(fl[1]).title
+  check(vim.inspect(title):find("exited 3", 1, true) ~= nil, "float title gives the exit code")
+  vim.api.nvim_set_current_win(fl[1])
+  local map = vim.fn.maparg("q", "n", false, true)
+  check(type(map.callback) == "function", "q is mapped in the float")
+  map.callback()
+  check(#floats() == 0, "q closes the float")
+
+  local orig = vim.notify
+  local errs = {}
+  vim.notify = function(m, l) table.insert(errs, { m = m, l = l }) end
+  local started = exec.run_in_float({ "/nonexistent/oc-revive-binary" }, function() end)
+  vim.notify = orig
+  check(started == false, "a missing binary reports not-started")
+  check(#floats() == 0, "a missing binary leaves no float behind")
+  check(#errs == 1 and errs[1].l == vim.log.levels.ERROR, "a missing binary is reported as an error")
 end
 
 print("LUA_TEST_OK " .. N)

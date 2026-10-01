@@ -195,22 +195,144 @@ function M.attach(desc, opts)
   return true
 end
 
+-- IN-FLIGHT GUARD, keyed by sid. Set when the floating terminal starts and
+-- cleared when its job exits, so a second Enter on the same row while a revive
+-- is running neither prompts again nor starts a second apply.
+M.revive_inflight = {}
+
+--- Show the confirm prompt. A seam so tests can answer it.
+--- @return integer chosen button index, 0 on Esc
+function M.confirm(message, choices, default)
+  local ok, choice = pcall(vim.fn.confirm, message, choices, default, "Question")
+  return (ok and type(choice) == "number") and choice or 0
+end
+
+--- Run argv in a floating terminal and report its exit code.
+---
+--- On exit 0 the float closes itself. On any other code it STAYS OPEN with the
+--- output visible, and `q` closes it: oc-revive's failure text is the only place
+--- the human learns what happened and what to run next.
+---
+--- @param argv string[]
+--- @param on_done fun(code: integer)
+--- @return boolean started
+function M.run_in_float(argv, on_done)
+  local buf, win
+  local ok, err = pcall(function()
+    buf = vim.api.nvim_create_buf(false, true)
+    local width = math.max(40, math.min(110, math.floor(vim.o.columns * 0.8)))
+    local height = math.max(8, math.min(20, math.floor(vim.o.lines * 0.5)))
+    win = vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      width = width,
+      height = height,
+      row = math.floor((vim.o.lines - height) / 2),
+      col = math.floor((vim.o.columns - width) / 2),
+      style = "minimal",
+      border = "rounded",
+      title = " oc-revive ",
+      title_pos = "center",
+    })
+    local function close()
+      if win and vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+      end
+      if buf and vim.api.nvim_buf_is_valid(buf) then
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+      end
+    end
+    vim.keymap.set("n", "q", close, { buffer = buf, nowait = true, desc = "close oc-revive output" })
+    local job = vim.fn.jobstart(argv, {
+      term = true,
+      on_exit = function(_, code)
+        vim.schedule(function()
+          if code == 0 then
+            pcall(vim.cmd, "stopinsert")
+            close()
+          elseif win and vim.api.nvim_win_is_valid(win) then
+            pcall(vim.api.nvim_win_set_config, win, {
+              title = string.format(" oc-revive exited %d: press q to close ", code),
+              title_pos = "center",
+            })
+            pcall(vim.cmd, "stopinsert")
+          end
+          on_done(code)
+        end)
+      end,
+    })
+    if type(job) ~= "number" or job <= 0 then
+      close()
+      error("jobstart failed (" .. tostring(job) .. ")")
+    end
+  end)
+  if not ok then
+    if win and vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+    vim.notify("could not start oc-revive: " .. tostring(err), vim.log.levels.ERROR)
+    return false
+  end
+  return true
+end
+
+--- Prompt for, and run, a revive. Called on the main loop (never from a fast
+--- callback), because vim.fn.confirm and the float both need it.
+---
+--- @param desc table refusal descriptor { sid, directory, title?, live_pane? }
+--- @param result table from revive.offers
+function M.offer_revive(desc, result)
+  local revive = require("user.session_switcher.revive")
+  local sid = desc.sid
+  if M.revive_inflight[sid] then
+    vim.notify("a revive of " .. sid .. " is already running", vim.log.levels.INFO)
+    return
+  end
+  local message, choices, default = revive.prompt(result, desc.title, sid)
+  local choice = M.confirm(message, choices, default)
+  local offer = result.offers[choice]
+  if not offer then
+    return -- Cancel, Esc, or anything out of range
+  end
+  M.revive_inflight[sid] = true
+  local started = M.run_in_float(offer.argv, function(code)
+    M.revive_inflight[sid] = nil
+    if code ~= 0 then
+      vim.notify(string.format("oc-revive exited %d for %s; its output is in the window", code, sid), vim.log.levels.WARN)
+      return
+    end
+    if desc.live_pane then
+      -- That pane's TUI was launched with --dir OLD; switching to it would
+      -- land in a client whose non-session requests still carry the dead path.
+      vim.notify(
+        "revived " .. sid .. ". A pane is still attached to its old directory: close that pane, then reopen the session from the picker",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    M.attach({ sid = sid })
+  end)
+  if not started then
+    M.revive_inflight[sid] = nil
+  end
+end
+
 --- Refuse navigation to a session whose target directory is missing on disk,
---- and asynchronously query oc-revive for a recovery hint.
+--- then offer to revive it with one keypress (workstation-6lnw.7).
 ---
 --- WHY THIS MATTERS:
 --- Attaching to a pruned worktree or deleted directory allows the TUI to render history,
 --- but the session can NEVER complete a turn — user messages hang indefinitely with no error.
 --- Refusing upfront and visibly warning the user prevents the silent turn hang.
 ---
---- REVIVE HINT (ASYNC & SILENT ON FAILURE):
---- When desc.sid is valid (^ses_[%w]+$), we spawn `oc-revive plan <sid>` in the background
---- to check if the session can be revived or if revive is blocked by an existing worktree.
---- The hint is purely advisory and emitted via vim.schedule; failure to spawn, non-zero exit,
---- timeout, parse errors, or unhandled reasons are completely silent so the synchronous
---- refusal remains fast, reliable, and noise-free.
+--- THE OFFER (ASYNC, SILENT ON FAILURE):
+--- When desc.sid is valid (^ses_[%w]+$), `oc-revive plan <sid>` runs in the background.
+--- Spawn failure, non-zero exit, timeout, unparseable JSON, or a plan that fails
+--- revive.offers validation are all silent, so the refusal stays the whole story
+--- whenever there is nothing safe to offer. An actionable plan gets a confirm
+--- prompt (default Cancel) on the main loop; accepting runs oc-revive in a
+--- floating terminal (M.offer_revive).
 ---
---- @param desc table { directory?: string, sid?: string }
+--- @param desc table { directory?: string, sid?: string, title?: string, live_pane?: boolean }
 --- @return boolean
 function M.refuse_dir_missing(desc)
   local dir = (type(desc) == "table" and desc.directory) and desc.directory or "(unknown)"
@@ -222,64 +344,24 @@ function M.refuse_dir_missing(desc)
   local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
   if sid and sid:match("^ses_[%w]+$") then
     local on_exit = function(result)
+      -- FAST CONTEXT: vim.system callbacks may not call vim.fn or open
+      -- windows, so everything past validation goes through vim.schedule.
       pcall(function()
         if type(result) ~= "table" or result.code ~= 0 or type(result.stdout) ~= "string" then
           return
         end
         local ok, plan = pcall(vim.json.decode, result.stdout)
-        if not ok or type(plan) ~= "table" or plan.sid ~= sid then
+        if not ok then
           return
         end
-
-        if plan.revivable == true and type(plan.candidates) == "table" and #plan.candidates > 0 then
-          local candidate_items = {}
-          for _, cand in ipairs(plan.candidates) do
-            if type(cand) ~= "table"
-              or type(cand.branch) ~= "string"
-              or cand.branch == ""
-              or cand.branch:find("[%s%c`]") ~= nil
-              or type(cand.tip_short) ~= "string"
-              or cand.tip_short:match("^%x+$") == nil
-              or type(cand.source) ~= "string"
-              or cand.source:match("^[%w%-]+$") == nil
-            then
-              return
-            end
-
-            table.insert(candidate_items, cand)
-          end
-          if #candidate_items == 0 then
-            return
-          end
-
-          local msg
-          if #candidate_items == 1 then
-            local cand = candidate_items[1]
-            local merged_suffix = (cand.merged == true) and ", merged" or ""
-            msg = string.format("revivable: run `oc-revive %s` (branch %s @ %s, %s%s)", sid, cand.branch, cand.tip_short, cand.source, merged_suffix)
-          else
-            local rendered_cands = {}
-            for _, cand in ipairs(candidate_items) do
-              local merged_suffix = (cand.merged == true) and ", merged" or ""
-              table.insert(rendered_cands, string.format("%s @ %s, %s%s", cand.branch, cand.tip_short, cand.source, merged_suffix))
-            end
-            msg = string.format(
-              "revivable: run `oc-revive %s` (%d candidates disagree, it will ask: %s)",
-              sid,
-              #candidate_items,
-              table.concat(rendered_cands, "; ")
-            )
-          end
-
-          vim.schedule(function()
-            pcall(vim.notify, msg, vim.log.levels.INFO)
-          end)
-        elseif plan.revivable ~= true and type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
-          local msg = string.format("revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details", sid)
-          vim.schedule(function()
-            pcall(vim.notify, msg, vim.log.levels.WARN)
-          end)
+        local revive = require("user.session_switcher.revive")
+        local offers = revive.offers(plan, sid, desc.directory)
+        if not offers then
+          return
         end
+        vim.schedule(function()
+          pcall(M.offer_revive, desc, offers)
+        end)
       end)
     end
 
