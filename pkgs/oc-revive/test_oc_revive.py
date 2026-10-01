@@ -673,6 +673,9 @@ class TestPlan(unittest.TestCase):
         self.assertNotIn("session row references it: False", reason)
         self.assertIn("resume", reason.lower())
         self.assertIn("do not delete", reason.lower())
+        self.assertIn("--expect-tip", reason)
+        self.assertIn("--expect-old-dir", reason)
+        self.assertIn(dead_dir, reason)
 
         # Case 2: A session row DOES reference prior_wt
         cur = self.db_conn.cursor()
@@ -687,8 +690,8 @@ class TestPlan(unittest.TestCase):
         reason2 = plan2["reason"]
         self.assertFalse(reason2.startswith("no_candidates:"))
         self.assertIn(prior_wt, reason2)
-        self.assertIn("resume", reason2.lower())
-        self.assertIn("do not delete", reason2.lower())
+        self.assertIn("ses_holder", reason2)
+        self.assertNotIn("To resume, run:", reason2)
 
     def test_snapshot_reporting(self):
         import hashlib
@@ -1855,6 +1858,269 @@ class TestApply(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(len(self.door.move_calls), 1)
         self.assertEqual(len(self.door.prompt_async_calls), 1)
+
+    def test_plan_resume_suggestion_actually_runs_and_revives_session(self):
+        """The resume command suggested by plan must be directly runnable and revive the session end-to-end."""
+        sid = "ses_resume_run"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-run")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-run")
+        prior_wt = os.path.join(self.worktrees_dir, "feat-resume-run-r1700000000")
+        subprocess.run(["git", "worktree", "add", prior_wt, "feat-resume-run"], cwd=self.repo, check=True, capture_output=True)
+
+        plan = oc_revive.plan_revive(sid, db_path=self.db_path)
+        self.assertFalse(plan["revivable"])
+        prefix = "To resume, run: "
+        self.assertIn(prefix, plan["reason"])
+        cmd = plan["reason"].split(prefix)[1].strip()
+
+        self.door.move_status = 204
+        argv = shlex.split(cmd)[1:]  # strip 'oc-revive'
+        if "--frontdoor-url" not in argv:
+            argv.extend(["--frontdoor-url", self.door_url])
+
+        rc = oc_revive.main(argv)
+        self.assertEqual(rc, 0)
+        sess = oc_revive.fetch_door_session(self.door_url, sid)
+        self.assertEqual(sess.get("directory"), prior_wt)
+
+    def test_rollback_preserves_worktree_when_resume_mode_encounters_door_400(self):
+        """Resume mode must NOT remove pre-existing worktree on door-generated 400."""
+        sid = "ses_resume_door400"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-door400")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-door400")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-door400-r1700000000")
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-door400"], cwd=self.repo, check=True, capture_output=True)
+
+        self.door.move_status = 400
+        self.door.move_body = json.dumps({"error": "bad_request", "message": "Failed"})
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-door400",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("Door returned 400", str(ctx.exception))
+        # Crucial check: Worktree was NOT created by this run, so rollback must NOT remove it!
+        self.assertTrue(os.path.exists(new_path))
+
+    def test_resume_mode_checks_door_tripwire_inside_lock(self):
+        """Resume mode must check door tripwire inside the lock and refuse if door directory mismatches."""
+        sid = "ses_resume_door_tripwire"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-door-trip")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-door-trip")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-door-trip-r1700000000")
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-door-trip"], cwd=self.repo, check=True, capture_output=True)
+
+        self.door.get_response_data = {"id": sid, "directory": "/unexpected/drift/dir"}
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-door-trip",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("Door reports session directory '/unexpected/drift/dir'", str(ctx.exception))
+
+    def test_resume_mode_checks_busy_inside_lock(self):
+        """Resume mode must check busy session inside the lock."""
+        sid = "ses_resume_busy"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-busy")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-busy")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-busy-r1700000000")
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-busy"], cwd=self.repo, check=True, capture_output=True)
+
+        t_recent = int((time.time() - 20) * 1000)
+        self._add_message(sid, "msg_resume_busy", role="assistant", completed=False, t=t_recent)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-busy",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("busy_session", str(ctx.exception))
+
+    def test_non_resume_apply_refuses_when_recent_attempt_in_ledger_for_sid(self):
+        """In non-resume apply, refuse when ledger holds an entry for this sid younger than window (~10m)."""
+        sid = "ses_recent_attempt"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-recent-attempt")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-recent-attempt")
+        target_path = os.path.join(self.worktrees_dir, "feat-recent-attempt-r1700000000")
+        earlier_attempt = os.path.join(self.worktrees_dir, "feat-recent-attempt-r1699999900")
+
+        # Record recent attempt to earlier_attempt for sid (60s ago)
+        res = subprocess.run(["git", "-C", self.repo, "rev-parse", "--git-common-dir"], capture_output=True, text=True, check=True)
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+
+        ts_recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write(f"{earlier_attempt}\t{ts_recent}\t{sid}\n")
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-recent-attempt",
+                path=target_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=False,
+            )
+        self.assertIn("late-move-risk", str(ctx.exception))
+        self.assertFalse(os.path.exists(target_path))
+
+        # But if the attempt was 700s ago (> 600s), it is allowed to proceed
+        ts_old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 700))
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write(f"{earlier_attempt}\t{ts_old}\t{sid}\n")
+
+        self.door.move_status = 204
+        res = oc_revive.apply_revive(
+            sid=sid,
+            branch="feat-recent-attempt",
+            path=target_path,
+            action="add",
+            expect_tip=tip_sha,
+            expect_old_dir=dead_dir,
+            db_path=self.db_path,
+            frontdoor_url=self.door_url,
+            resume=False,
+        )
+        self.assertTrue(res["ok"])
+
+    def test_ledger_path_with_hash_character_is_recorded_and_refused(self):
+        """Ledger must support paths containing '#' without truncating them."""
+        sid = "ses_hash_ledger"
+        dead_dir = os.path.join(self.worktrees_dir, "feat#test")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-hash")
+        path_with_hash = os.path.join(self.worktrees_dir, "feat#test-r1700000000")
+
+        oc_revive.record_attempted_path(self.repo, path_with_hash, sid)
+        attempted = oc_revive.get_attempted_paths(self.repo)
+        self.assertIn(path_with_hash, attempted)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-hash",
+                path=path_with_hash,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=False,
+            )
+        self.assertIn("attempted", str(ctx.exception).lower())
+
+    def test_ledger_append_prepends_newline_when_trailing_newline_missing(self):
+        """Append to ledger must write a leading newline if file did not end with one."""
+        res = subprocess.run(["git", "-C", self.repo, "rev-parse", "--git-common-dir"], capture_output=True, text=True, check=True)
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+
+        partial_path = os.path.join(self.worktrees_dir, "partial-entry")
+        new_path = os.path.join(self.worktrees_dir, "new-entry")
+
+        # Write partial line without trailing newline
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write(f"{partial_path}\t2026-10-01T12:00:00Z\tses_p")
+
+        oc_revive.record_attempted_path(self.repo, new_path, "ses_n")
+
+        with open(ledger_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        self.assertEqual(len(lines), 2)
+        paths = oc_revive.get_attempted_paths(self.repo)
+        self.assertIn(partial_path, paths)
+        self.assertIn(new_path, paths)
+
+    def test_get_attempted_paths_read_error_fail_open_vs_closed(self):
+        """get_attempted_paths fails open with raise_on_error=False, but raises with raise_on_error=True."""
+        res = subprocess.run(["git", "-C", self.repo, "rev-parse", "--git-common-dir"], capture_output=True, text=True, check=True)
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write("dummy\n")
+        os.chmod(ledger_path, 0o000)
+        try:
+            # Default or raise_on_error=False: fails open
+            self.assertEqual(oc_revive.get_attempted_paths(self.repo, raise_on_error=False), set())
+            # raise_on_error=True (as called from apply): fails closed
+            with self.assertRaises(OSError):
+                oc_revive.get_attempted_paths(self.repo, raise_on_error=True)
+        finally:
+            os.chmod(ledger_path, 0o644)
+
+    def test_apply_fails_closed_when_ledger_read_errors(self):
+        """apply must fail closed if reading the attempted ledger raises OSError."""
+        sid = "ses_ledger_ioerror"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-ledger-io")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-ledger-io")
+        target_path = os.path.join(self.worktrees_dir, "feat-ledger-io-r1700000000")
+
+        res = subprocess.run(["git", "-C", self.repo, "rev-parse", "--git-common-dir"], capture_output=True, text=True, check=True)
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write("dummy\n")
+        os.chmod(ledger_path, 0o000)
+
+        try:
+            with self.assertRaises(oc_revive.ReviveError) as ctx:
+                oc_revive.apply_revive(
+                    sid=sid,
+                    branch="feat-ledger-io",
+                    path=target_path,
+                    action="add",
+                    expect_tip=tip_sha,
+                    expect_old_dir=dead_dir,
+                    db_path=self.db_path,
+                    frontdoor_url=self.door_url,
+                    resume=False,
+                )
+            self.assertIn("attempted-path ledger", str(ctx.exception))
+            self.assertFalse(os.path.exists(target_path))
+        finally:
+            os.chmod(ledger_path, 0o644)
 
     def test_apply_flock_bounded(self):
         sid = "ses_flock"

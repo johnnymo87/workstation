@@ -17,10 +17,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Any
 
 DEFAULT_DB_PATH = "~/.local/share/opencode/opencode.db"
 DEFAULT_FRONTDOOR_URL = "http://127.0.0.1:4700"
+
+# Guard against a late-landing move from an earlier attempt (e.g. 504 gateway timeout):
+# Window within which a prior move attempt to another path for the same sid blocks non-resume apply.
+LATE_MOVE_GUARD_WINDOW_SECONDS = 600
 
 # MOVE_TIMEOUT_SECONDS derived as:
 # door_forward (60s) + door_resolve_worst_case (~15s) + margin (15s) = 90s
@@ -167,18 +172,24 @@ def get_primary_root_branch(repo: str) -> str | None:
     return None
 
 
-def is_path_referenced_in_db(conn: sqlite3.Connection, path: str) -> bool:
-    """Check if path or any subdirectory of it is referenced by any session row."""
+def get_session_referencing_path(conn: sqlite3.Connection, path: str) -> str | None:
+    """Return the ID of any session referencing path or any subdirectory of it, or None."""
     cur = conn.cursor()
     paths_to_check = {path, os.path.realpath(path)}
     for p in paths_to_check:
         cur.execute(
-            "SELECT 1 FROM session WHERE directory = ? OR directory LIKE ? || '/%' LIMIT 1",
+            "SELECT id FROM session WHERE directory = ? OR directory LIKE ? || '/%' LIMIT 1",
             (p, p),
         )
-        if cur.fetchone() is not None:
-            return True
-    return False
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+    return None
+
+
+def is_path_referenced_in_db(conn: sqlite3.Connection, path: str) -> bool:
+    """Check if path or any subdirectory of it is referenced by any session row."""
+    return get_session_referencing_path(conn, path) is not None
 
 
 def get_git_common_dir(repo: str) -> str:
@@ -195,36 +206,105 @@ def get_git_common_dir(repo: str) -> str:
     return git_common
 
 
-def get_attempted_paths(repo: str) -> set[str]:
-    """Read all paths recorded in <git-common-dir>/oc-revive.attempted."""
+def parse_ledger_line(line: str) -> tuple[str, float | None, str | None] | None:
+    """Parse a ledger line into (path, timestamp_sec, sid)."""
+    line = line.rstrip("\r\n")
+    if not line:
+        return None
+    if "\t" in line:
+        parts = line.split("\t")
+        path = parts[0].strip()
+        ts_val = None
+        sid = None
+        if len(parts) > 1 and parts[1].strip():
+            try:
+                ts_val = datetime.fromisoformat(parts[1].strip().replace("Z", "+00:00")).timestamp()
+            except Exception:
+                pass
+        if len(parts) > 2 and parts[2].strip():
+            sid = parts[2].strip()
+        return path, ts_val, sid
+    # Backward compatibility with legacy format: path  # ts sid=...
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        return None
+    if " #" in stripped:
+        parts = stripped.split(" #", 1)
+        path = parts[0].strip()
+        ts_val = None
+        sid = None
+        comment = parts[1].strip()
+        m_ts = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)", comment)
+        if m_ts:
+            try:
+                ts_val = datetime.fromisoformat(m_ts.group(1).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                pass
+        m_sid = re.search(r"sid=([^\s]+)", comment)
+        if m_sid:
+            sid = m_sid.group(1)
+        return path, ts_val, sid
+    return stripped, None, None
+
+
+def get_attempted_entries(
+    repo: str,
+    raise_on_error: bool = False,
+) -> list[tuple[str, float | None, str | None]]:
+    """Read all (path, timestamp_sec, sid) entries recorded in <git-common-dir>/oc-revive.attempted."""
     try:
         git_common = get_git_common_dir(repo)
     except Exception:
-        return set()
+        if raise_on_error:
+            raise
+        return []
     ledger = os.path.join(git_common, "oc-revive.attempted")
     if not os.path.isfile(ledger):
-        return set()
-    paths = set()
+        return []
+    entries = []
     try:
         with open(ledger, "r", encoding="utf-8") as f:
             for line in f:
-                line = line.split("#", 1)[0].strip()
-                if line:
-                    paths.add(os.path.normpath(line))
-                    paths.add(os.path.realpath(line))
+                parsed = parse_ledger_line(line)
+                if parsed and parsed[0]:
+                    entries.append(parsed)
     except OSError:
-        pass
+        if raise_on_error:
+            raise
+    return entries
+
+
+def get_attempted_paths(repo: str, raise_on_error: bool = False) -> set[str]:
+    """Read all paths recorded in <git-common-dir>/oc-revive.attempted."""
+    entries = get_attempted_entries(repo, raise_on_error=raise_on_error)
+    paths = set()
+    for p, _ts, _sid in entries:
+        paths.add(os.path.normpath(p))
+        paths.add(os.path.realpath(p))
     return paths
 
 
 def record_attempted_path(repo: str, target_p: str, sid: str) -> None:
-    """Append target_p to <git-common-dir>/oc-revive.attempted."""
+    """Append target_p to <git-common-dir>/oc-revive.attempted in tab-separated format."""
     git_common = get_git_common_dir(repo)
     ledger = os.path.join(git_common, "oc-revive.attempted")
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     norm_p = os.path.normpath(target_p)
+
+    needs_newline = False
+    if os.path.isfile(ledger) and os.path.getsize(ledger) > 0:
+        try:
+            with open(ledger, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    needs_newline = True
+        except OSError:
+            pass
+
     with open(ledger, "a", encoding="utf-8") as f:
-        f.write(f"{norm_p}  # {ts} sid={sid}\n")
+        if needs_newline:
+            f.write("\n")
+        f.write(f"{norm_p}\t{ts}\t{sid}\n")
 
 
 def choose_revive_path(
@@ -741,12 +821,42 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 if b in branch_to_wt:
                     wt_p = branch_to_wt[b]
                     if re.match(pattern, os.path.basename(wt_p)):
-                        blocking_reason = (
-                            f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' from a prior revive attempt. "
-                            f"Resume this worktree rather than creating a new one. "
-                            f"Do NOT delete '{wt_p}' and re-run an older apply (a serve may have already resolved it). "
-                            f"To resume, run: oc-revive apply {shlex.quote(sid)} --resume --branch {shlex.quote(b)} --path {shlex.quote(wt_p)}"
-                        )
+                        holder_sid = get_session_referencing_path(conn, wt_p)
+                        if holder_sid is not None:
+                            blocking_reason = (
+                                f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}', "
+                                f"which is held by session '{holder_sid}'."
+                            )
+                        else:
+                            tip_res = subprocess.run(
+                                ["git", "-C", repo_dir, "rev-parse", f"refs/heads/{b}"],
+                                capture_output=True,
+                                text=True,
+                            )
+                            tip = tip_res.stdout.strip() if tip_res.returncode == 0 else ""
+                            resume_parts = [
+                                "oc-revive",
+                                "apply",
+                                shlex.quote(sid),
+                                "--resume",
+                                "--branch",
+                                shlex.quote(b),
+                                "--path",
+                                shlex.quote(wt_p),
+                                "--expect-tip",
+                                shlex.quote(tip),
+                                "--expect-old-dir",
+                                shlex.quote(dead_dir),
+                            ]
+                            if db_path:
+                                resume_parts.extend(["--db", shlex.quote(db_path)])
+                            resume_cmd = " ".join(resume_parts)
+                            blocking_reason = (
+                                f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' from a prior revive attempt. "
+                                f"Resume this worktree rather than creating a new one. "
+                                f"Do NOT delete '{wt_p}' and re-run an older apply (a serve may have already resolved it). "
+                                f"To resume, run: {resume_cmd}"
+                            )
                         break
 
             reason = blocking_reason or "no_candidates: zero branch candidates survive validation"
@@ -822,6 +932,7 @@ def apply_revive(
     db_path: str | None = None,
     frontdoor_url: str | None = None,
     resume: bool = False,
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Execute revival of session sid onto branch at path."""
     if not resume and action != "add":
@@ -943,7 +1054,11 @@ def apply_revive(
                     created = False
                 else:
                     # Non-resume mode: Refuse to create worktree at already-attempted path
-                    attempted_paths = get_attempted_paths(repo)
+                    try:
+                        attempted_paths = get_attempted_paths(repo, raise_on_error=True)
+                    except OSError as e:
+                        raise ReviveError(f"Failed to read attempted-path ledger: {e}")
+
                     if target_p in attempted_paths or target_p_real in attempted_paths:
                         raise ReviveError(
                             f"attempted-path: target path '{target_p}' is listed in attempted ledger "
@@ -951,22 +1066,48 @@ def apply_revive(
                             f"Refusing to create worktree at an already-attempted path."
                         )
 
-                    # Schema-drift tripwire: require door's GET /session/<sid> to report directory == expect_old_dir
+                    # Item 4: Guard against a late-landing move from an earlier attempt (e.g. 504 gateway timeout):
+                    # If upstream did not cancel the move when the client disconnected, that in-flight move
+                    # might still land after we verify a different path.
+                    # Note: it is unconfirmed whether upstream cancels move-session on client disconnect,
+                    # so this is a guard against an unconfirmed race, not a fix for a measured one.
+                    now_ts = now if now is not None else time.time()
                     try:
-                        door_sess = fetch_door_session(door_url, sid)
-                    except Exception as e:
-                        raise ReviveError(f"Failed to query session from door at {door_url}: {e}")
-                    door_dir = door_sess.get("directory")
-                    door_dir_real = os.path.realpath(door_dir) if door_dir else None
-                    if door_dir != expect_old_dir and (not door_dir_real or door_dir_real != expect_old_real):
-                        raise ReviveError(
-                            f"Door reports session directory '{door_dir}', expected '{expect_old_dir}'"
-                        )
+                        entries = get_attempted_entries(repo, raise_on_error=True)
+                    except OSError as e:
+                        raise ReviveError(f"Failed to read attempted-path ledger: {e}")
 
-                    # Check busy inside the lock
-                    if is_session_busy(conn, sid):
-                        raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
+                    for p, entry_ts, entry_sid in entries:
+                        if entry_sid == sid:
+                            p_norm = os.path.normpath(p)
+                            p_real = os.path.realpath(p)
+                            if p_norm != target_p and p_real != target_p_real:
+                                if entry_ts is not None and (now_ts - entry_ts) < LATE_MOVE_GUARD_WINDOW_SECONDS:
+                                    age_s = int(now_ts - entry_ts)
+                                    raise ReviveError(
+                                        f"late-move-risk: session '{sid}' has a recent move attempt to '{p}' "
+                                        f"({age_s}s ago, window is {LATE_MOVE_GUARD_WINDOW_SECONDS}s). "
+                                        f"A previous move may still land upstream; refuse to revive to a different path."
+                                    )
 
+                # Schema-drift tripwire (run on both resume and non-resume paths):
+                # require door's GET /session/<sid> to report directory == expect_old_dir
+                try:
+                    door_sess = fetch_door_session(door_url, sid)
+                except Exception as e:
+                    raise ReviveError(f"Failed to query session from door at {door_url}: {e}")
+                door_dir = door_sess.get("directory")
+                door_dir_real = os.path.realpath(door_dir) if door_dir else None
+                if door_dir != expect_old_dir and (not door_dir_real or door_dir_real != expect_old_real):
+                    raise ReviveError(
+                        f"Door reports session directory '{door_dir}', expected '{expect_old_dir}'"
+                    )
+
+                # Check busy inside the lock (run on both resume and non-resume paths)
+                if is_session_busy(conn, sid, now=now):
+                    raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
+
+                if not resume:
                     # Step 2: Re-validate inside the lock
                     if os.path.exists(target_p):
                         raise ReviveError(f"plan-changed: target path '{target_p}' already exists on disk")
@@ -1084,8 +1225,9 @@ def apply_revive(
                         except Exception:
                             pass
 
-                        if is_door_generated:
+                        if is_door_generated and created:
                             rollback_if_safe(repo, target_p, conn, sid, door_url)
+                        if is_door_generated:
                             raise ReviveError(f"Door returned {move_status}: {move_err_msg}")
                         else:
                             raise ReviveError(f"Upstream returned {move_status}: {move_err_msg}")
