@@ -58,7 +58,8 @@
     },
     "openai": {
       "options": {
-        "chunkTimeout": 600000
+        "chunkTimeout": 600000,
+        "headerTimeout": 120000
       },
       "models": {
         "gpt-5.5": {
