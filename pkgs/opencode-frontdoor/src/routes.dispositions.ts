@@ -365,10 +365,16 @@ export const ROUTE_DISPOSITIONS: Record<string, RouteDisposition> = {
     rationale: 'Process-global logging endpoint targets single process stdout/file, not a session.',
   },
   'POST /experimental/control-plane/move-session': {
-    kind: 'not-session-scopable',
-    constraint: 'needs-audit',
+    kind: 'superseded',
+    constraint: 'superseded-by-session-route',
+    supersededBy: 'POST /session/{sessionID}/move',
     tuiSurface: 'degrades',
-    rationale: 'Internal control-plane session migration mutation operates across processes without session-scoped door route wrapper. In TUI SDK surface list and recorded as denied-by-design with graceful degradation (2026-07-24-phase9-door-route-allowlist.md:35).',
+    rationale:
+      'Control-plane session migration is superseded by the door-owned alias POST /session/{sessionID}/move. The raw route stays denied because it accepts moveChanges (which can destroy uncommitted work via git change discard), carries no session scoping, and is a control-plane surface callers must not reach directly.',
+    userMessage:
+      'Raw control-plane move-session is denied because it can destroy uncommitted changes and lacks session scoping.',
+    remedy:
+      'Use the session-scoped alias POST /session/{sessionID}/move instead.',
   },
   'PATCH /global/config': {
     kind: 'not-session-scopable',

@@ -7,7 +7,7 @@ import {
   ROUTE_DISPOSITIONS,
   CLASS_DISPOSITIONS,
 } from './routes.dispositions.js';
-import { ROUTE_CLASSIFICATION_TABLE, RouteEntry } from './routes.classification.js';
+import { ROUTE_CLASSIFICATION_TABLE, RouteEntry, DOOR_ALIASES, DoorAlias } from './routes.classification.js';
 import { compilePathTemplate } from './path-template.js';
 import { isHtmlResponse, HTML_GUARD_EXEMPT_ROUTES } from './poison.js';
 
@@ -16,6 +16,7 @@ export interface GateCheckOptions {
   routeDispositions?: Record<string, RouteDisposition>;
   classDispositions?: Record<string, RouteDisposition>;
   routeClassificationTable?: RouteEntry[];
+  doorAliases?: DoorAlias[];
   expectedKindCensus?: Record<string, number>;
   expectedConstraintCensus?: Record<string, number>;
   expectedNeedsMechanismKeys?: string[];
@@ -62,6 +63,7 @@ export interface GateCheckResult {
   mediaTypeCensus: Record<string, number>;
   htmlDeclaringRoutes: HtmlDeclaringRoute[];
   octetStreamRoutes: string[];
+  checkEViolations: string[];
   passed: boolean;
   error?: string;
 }
@@ -73,9 +75,9 @@ export interface GateCheckResult {
 export const EXPECTED_KIND_CENSUS: Record<string, number> = {
   'by-design-501': 21,
   'not-session-scopable-absent': 21,
-  'not-session-scopable-degrades': 12,
+  'not-session-scopable-degrades': 11,
   'not-session-scopable-unverified': 0,
-  superseded: 7,
+  superseded: 8,
   'needs-mechanism': 0,
   'terminal-denial-absent': 5,
   'terminal-denial-degrades': 4,
@@ -102,11 +104,11 @@ export const EXPECTED_KIND_CENSUS: Record<string, number> = {
  */
 export const EXPECTED_CONSTRAINT_CENSUS: Record<string, number> = {
   'class-level-501': 21,
-  'superseded-by-session-route': 7,
+  'superseded-by-session-route': 8,
   'process-pinned-ram': 9,
   'shared-disk-plus-stale-cache': 2,
   'process-local-side-effect': 5,
-  'needs-audit': 26,
+  'needs-audit': 25,
 };
 
 /**
@@ -147,6 +149,7 @@ const NON_DENYING_ACTIONS = new Set<RouteAction>([
   'route-session',
   'create',
   'fork',
+  'move-session',
   'forward-anchor',
   'forward-pool',
 ]);
@@ -276,10 +279,14 @@ export function checkDocRoutes(
       mediaTypeCensus: {},
       htmlDeclaringRoutes: [],
       octetStreamRoutes: [],
+      checkEViolations: [],
       passed: false,
       error: 'Invalid /doc format: "paths" object is missing or invalid',
     };
   }
+
+  const doorAliases = options.doorAliases ?? DOOR_ALIASES;
+  const docDeclaredRoutes = new Set<string>();
 
   const exactNormalizedTableKeys = new Set<string>();
   for (const entry of classificationTable) {
@@ -310,6 +317,7 @@ export function checkDocRoutes(
       }
 
       const method = lowerKey.toUpperCase();
+      docDeclaredRoutes.add(`${method} ${normalizeTemplatePath(path)}`);
       const routeClass = classify(method, path);
       const dispatched = dispatch(method, path);
       const action = dispatched.action;
@@ -608,6 +616,7 @@ export function checkDocRoutes(
       mediaTypeCensus,
       htmlDeclaringRoutes,
       octetStreamRoutes,
+      checkEViolations: [],
       passed: false,
       error: `Sanity floor failed: checked ${totalChecked} route(s), expected at least ${minRoutes}`,
     };
@@ -743,6 +752,86 @@ export function checkDocRoutes(
     errors.push(`Check D failed: octet-stream exemption mismatch (${diffs.join('; ')})`);
   }
 
+  // Check E: Door Alias Invariants
+  // (1) and (2) are gated on `usingRealTables` because ~7 existing tests inject tiny synthetic docs with
+  // `routeDispositions: {}` and expect `passed === true`, and those docs legitimately do not declare
+  // `move-session`. (3) is table-only, gated on `usingRealTables || options.doorAliases !== undefined`
+  // so a synthetic classificationTable does not spuriously conflict with the production DOOR_ALIASES registry.
+  // The authoritative CLI path passes no overrides so (1)+(2) always run there.
+  const checkEViolations: string[] = [];
+
+  if (usingRealTables) {
+    for (const alias of doorAliases) {
+      const aParts = alias.alias.trim().split(/\s+/);
+      const aMethod = aParts[0].toUpperCase();
+      const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
+      const aKey = `${aMethod} ${aNormPath}`;
+
+      // 1. Alias absent from /doc (must not hijack real upstream route)
+      if (docDeclaredRoutes.has(aKey)) {
+        checkEViolations.push(
+          `Door alias "${alias.alias}" is declared by upstream /doc; upstream routes must not be shadowed by door aliases`
+        );
+      }
+
+      // 2. Forward target present in /doc (upstream must not have removed or renamed it)
+      const fParts = alias.forwardsTo.trim().split(/\s+/);
+      const fMethod = fParts[0].toUpperCase();
+      const fNormPath = normalizeTemplatePath(fParts.slice(1).join(' '));
+      const fKey = `${fMethod} ${fNormPath}`;
+      if (!docDeclaredRoutes.has(fKey)) {
+        checkEViolations.push(
+          `Forward target "${alias.forwardsTo}" for alias "${alias.alias}" is missing from upstream /doc`
+        );
+      }
+    }
+  }
+
+  // 3. Registry <-> table agreement
+  // Gated on `usingRealTables || options.doorAliases !== undefined`: a synthetic classificationTable
+  // that carries no door aliases would otherwise spuriously fail against the production DOOR_ALIASES registry.
+  if (usingRealTables || options.doorAliases !== undefined) {
+    const tableDoorAliases = classificationTable.filter((e) => e.class === 'door-alias');
+    for (const alias of doorAliases) {
+      const aParts = alias.alias.trim().split(/\s+/);
+      const aMethod = aParts[0].toUpperCase();
+      const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
+
+      const foundInTable = classificationTable.some(
+        (e) =>
+          e.class === 'door-alias' &&
+          e.method.toUpperCase() === aMethod &&
+          normalizeTemplatePath(e.path) === aNormPath
+      );
+      if (!foundInTable) {
+        checkEViolations.push(
+          `Door alias "${alias.alias}" has no matching "door-alias" row in ROUTE_CLASSIFICATION_TABLE`
+        );
+      }
+    }
+
+    for (const entry of tableDoorAliases) {
+      const eMethod = entry.method.toUpperCase();
+      const eNormPath = normalizeTemplatePath(entry.path);
+
+      const foundInAliases = doorAliases.some((alias) => {
+        const aParts = alias.alias.trim().split(/\s+/);
+        const aMethod = aParts[0].toUpperCase();
+        const aNormPath = normalizeTemplatePath(aParts.slice(1).join(' '));
+        return aMethod === eMethod && aNormPath === eNormPath;
+      });
+      if (!foundInAliases) {
+        checkEViolations.push(
+          `ROUTE_CLASSIFICATION_TABLE row "${entry.method} ${entry.path}" with class "door-alias" is missing from DOOR_ALIASES`
+        );
+      }
+    }
+  }
+
+  if (checkEViolations.length > 0) {
+    errors.push(`Check E failed: ${checkEViolations.join('; ')}`);
+  }
+
   if (errors.length > 0) {
     return {
       totalChecked,
@@ -758,6 +847,7 @@ export function checkDocRoutes(
       mediaTypeCensus,
       htmlDeclaringRoutes,
       octetStreamRoutes,
+      checkEViolations,
       passed: false,
       error: errors.join('; '),
     };
@@ -777,6 +867,7 @@ export function checkDocRoutes(
     mediaTypeCensus,
     htmlDeclaringRoutes: [],
     octetStreamRoutes,
+    checkEViolations: [],
     passed: true,
   };
 }
@@ -860,6 +951,12 @@ export function runRouteGateCli(args: string[]): number {
       console.error('HTML declaring routes (Check C):');
       for (const offender of result.htmlDeclaringRoutes) {
         console.error(`  ${offender.method} ${offender.path} [${offender.status}]: declared media type "${offender.mediaType}"`);
+      }
+    }
+    if (result.checkEViolations.length > 0) {
+      console.error('Door alias violations (Check E):');
+      for (const offender of result.checkEViolations) {
+        console.error(`  ${offender}`);
       }
     }
     return 1;

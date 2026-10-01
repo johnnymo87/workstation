@@ -49,7 +49,29 @@ export type RouteClass =
   | "web-ui"
   | "tui"
   | "per-process-ro"
+  | "door-alias"
   | "unrecognized";
+
+export interface DoorAlias {
+  /** Door-owned path, template form. Upstream MUST NOT declare this. */
+  alias: string;      // "POST /session/{sessionID}/move"
+  /** Upstream route the alias forwards to. MUST exist in /doc. */
+  forwardsTo: string; // "POST /experimental/control-plane/move-session"
+}
+
+/**
+ * Door-owned route aliases.
+ *
+ * This path is NOT in upstream's `/doc`; it is door-owned. Check E in `route-gate.ts`
+ * fails loudly if upstream ever adds an alias path (which would otherwise be silently
+ * hijacked) or removes the forward target route.
+ */
+export const DOOR_ALIASES: DoorAlias[] = [
+  {
+    alias: "POST /session/{sessionID}/move",
+    forwardsTo: "POST /experimental/control-plane/move-session",
+  },
+];
 
 export interface RouteEntry {
   method: string;
@@ -259,6 +281,9 @@ export const ROUTE_CLASSIFICATION_TABLE: RouteEntry[] = [
   { method: "GET", path: "/session/{sessionID}/message/{messageID}", class: "session-path" },
   { method: "DELETE", path: "/session/{sessionID}/message/{messageID}/part/{partID}", class: "session-path" },
   { method: "PATCH", path: "/session/{sessionID}/message/{messageID}/part/{partID}", class: "session-path" },
+  // Door-owned route: NOT in upstream's /doc. Bare surface only (no /api/ mirror). Check E fails loudly
+  // if upstream ever adds it (silently hijacking) or removes the forward target.
+  { method: "POST", path: "/session/{sessionID}/move", class: "door-alias", note: "Door-owned alias for move-session (workstation-6lnw.1); not in upstream /doc. Check E guards against upstream declaration or forward target removal." },
   { method: "GET", path: "/session/{sessionID}/permissions", class: "session-path", note: "FABLE-P5-F2 (session-scoped variant): pending permissions live in PER-PROCESS memory on the owning serve. Correct while the lease resolves; but on the degrade-to-anchor path (resolve.ts, pigeon down / lease missing) this returns the ANCHOR's view of a session it does not own -- i.e. HTTP 200 [] rather than an error. The TUI's pending-reconcile cannot distinguish that from 'genuinely nothing pending' and will not retry. Suspected, not yet observed. Consider failing closed (503) for these four routes when degraded." },
   { method: "POST", path: "/session/{sessionID}/permissions/{permissionID}", class: "session-path" },
   { method: "POST", path: "/session/{sessionID}/prompt_async", class: "session-path" },

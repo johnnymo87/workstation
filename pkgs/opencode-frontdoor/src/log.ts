@@ -63,6 +63,8 @@ export interface RequestLogEntry {
   viaParent?: boolean;
   /** sq1v: the sid pigeon lease ops used (the root). Differs from `sid` for children. */
   routingSid?: string | null;
+  /** move-session or route resolution reason (e.g. active, not-routed, pigeon-unreachable) */
+  reason?: string;
 }
 
 export interface MetricsSnapshot {
@@ -298,6 +300,7 @@ export class RequestLogger {
       action: entry.action,
       viaParent: entry.viaParent,
       routingSid: entry.routingSid,
+      reason: entry.reason,
     });
     this.sink(logLine);
   }
