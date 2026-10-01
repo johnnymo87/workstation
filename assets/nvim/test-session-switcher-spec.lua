@@ -2995,13 +2995,22 @@ do
   local orig_notify = vim.notify
   vim.notify = function() end
 
-  local invalid_sids = { nil, "", "ses_a;rm -rf", "abc", "ses_" }
-  for _, bad_sid in ipairs(invalid_sids) do
+  -- NOT `ipairs({ nil, ... })`: ipairs stops at the first nil, so a list that
+  -- leads with nil iterates ZERO times and every assertion below silently
+  -- vanishes. That is exactly what this test did at first, and a mutant that
+  -- weakened the sid pattern to "^ses_" survived it. Count explicitly, and
+  -- assert the count, so the loop cannot quietly shrink again.
+  local invalid_sids = { n = 5, nil, "", "ses_a;rm -rf", "abc", "ses_" }
+  local iterated = 0
+  for i = 1, invalid_sids.n do
+    local bad_sid = invalid_sids[i]
+    iterated = iterated + 1
     system_calls = {}
     local res = exec.refuse_dir_missing({ directory = "/x", sid = bad_sid })
     check(res == true, "refuse_dir_missing returns true for invalid sid " .. tostring(bad_sid))
     check(#system_calls == 0, "no vim.system call for invalid sid " .. tostring(bad_sid))
   end
+  check(iterated == 5, "all 5 invalid sids were actually exercised")
   system_calls = {}
   check(exec.refuse_dir_missing(nil) == true, "nil desc returns true")
   check(#system_calls == 0, "no vim.system call for nil desc")
@@ -3190,6 +3199,32 @@ do
   for _, fn in ipairs(scheduled) do fn() end
   scheduled = {}
   check(#notifications == 1, "not_a_git_repo reason is completely silent")
+
+  -- revivable is the gate, not the presence of candidates. oc-revive never
+  -- emits this shape today, but a hint saying "revivable" for a plan that says
+  -- otherwise would send the human to a command that then refuses.
+  local plan_false_with_cands = {
+    revivable = false,
+    reason = "no_candidates: zero branch candidates survive validation",
+    sid = sid,
+    candidates = { { branch = "b", tip_short = "abc1234", source = "slug", merged = false } },
+  }
+  last_on_exit({ code = 0, stdout = vim.json.encode(plan_false_with_cands) })
+  for _, fn in ipairs(scheduled) do fn() end
+  scheduled = {}
+  check(#notifications == 1, "revivable=false is silent even when candidates are present")
+
+  -- blocked_by_worktree is matched as a PREFIX token, not anywhere in prose.
+  local plan_blocked_midstring = {
+    revivable = false,
+    reason = "no_candidates: see blocked_by_worktree: elsewhere",
+    sid = sid,
+    candidates = {},
+  }
+  last_on_exit({ code = 0, stdout = vim.json.encode(plan_blocked_midstring) })
+  for _, fn in ipairs(scheduled) do fn() end
+  scheduled = {}
+  check(#notifications == 1, "blocked_by_worktree mid-string is not the blocked token")
 
   vim.notify = orig_notify
   vim.system = orig_system
