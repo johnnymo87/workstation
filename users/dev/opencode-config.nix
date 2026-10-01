@@ -296,9 +296,9 @@ let
   # this repo's own .opencode skill — a plan-time dispatch from anywhere else
   # loads neither, and would otherwise stop, or fall back without saying so.
   devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to adversarial-reviewer-opus and say so — a failed astra dispatch is not a review";
+    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If astra-probe says DOWN, or a dispatch to this variant is refused, errors, or returns empty, fall back to adversarial-reviewer-opus and say so — a failed astra dispatch is not a review";
   devboxOracleCaution =
-    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If astra-probe says DOWN, or a dispatch to this variant errors or returns empty, fall back to oracle-opus and say so";
+    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If astra-probe says DOWN, or a dispatch to this variant is refused, errors, or returns empty, fall back to oracle-opus and say so";
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -675,6 +675,26 @@ let
   # /v1/models and opencode calls against it start failing. That is a codex-lb
   # degradation, not a subscription problem. `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION`
   # can pin it higher if this turns out to be flaky.
+  #
+  # WHY opencode.base.json SETS `openai.options.headerTimeout = 120000`. When no
+  # codex-lb account is selectable (all usage-limited), codex-lb does not answer
+  # 429; it parks the request -- sending NO bytes, not even headers -- in 300s
+  # "waiting for an account to recover" sleeps for up to its 7200s bridge budget,
+  # then 429s, and opencode retries straight into another 2h wait. `chunkTimeout`
+  # cannot see this (it only wraps the body, after headers), and opencode's own
+  # 300s openai headerTimeout default never applies here (its custom loader is
+  # skipped when `providers.openai` does not exist yet at loader time). On
+  # 2026-10-01 seven astra reviewer dispatches hung for hours this way. With the
+  # explicit value each attempt aborts at 120s; ~6 attempts (opencode's retry
+  # count) + backoff bound a dead codex-lb at ~13 min of PRE-HEADER stall. It
+  # cannot hurt a slow healthy turn: healthy codex-lb sends headers within its
+  # ~2s startup probe, and after headers it injects SSE keepalives every 10s.
+  # The same keepalives mean a stall AFTER headers is NOT bounded by this (nor by
+  # chunkTimeout). The assets/opencode/plugins/subagent-failure.ts pre-dispatch
+  # astra-probe check is what keeps the common case off this path entirely.
+  # Rollback is not a plain revert: the runtime merge keeps unmanaged keys, so
+  # also `jq 'del(.provider.openai.options.headerTimeout)'` ~/.config/opencode/opencode.json.
+  # See docs/plans/2026-10-01-reviewer-fail-fast-design.md.
   # `cost` has deliberately NO default: a new codex-lb model added without a
   # sourced price must fail at eval rather than ship silently at $0.00, which is
   # the exact failure this block is fixing.
@@ -959,6 +979,13 @@ in
      # Plugins (SRP: shell env injection, compaction context, subagent routing)
       xdg.configFile."opencode/plugins/shell-env.ts".source = "${assetsPath}/opencode/plugins/shell-env.ts";
      xdg.configFile."opencode/plugins/compaction-context.ts".source = "${assetsPath}/opencode/plugins/compaction-context.ts";
+    # subagent-failure: a Task dispatch whose model is unavailable fails loudly
+    # (refused pre-dispatch when astra-probe says DOWN; a child that died on an
+    # API error comes back as a task_error naming the -opus twin, not as an
+    # empty "completed" result). All hosts: the after-hook is generic, and the
+    # astra pre-check fails open where astra-probe is absent (macOS).
+    # See docs/plans/2026-10-01-reviewer-fail-fast-design.md.
+    xdg.configFile."opencode/plugins/subagent-failure.ts".source = "${assetsPath}/opencode/plugins/subagent-failure.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.

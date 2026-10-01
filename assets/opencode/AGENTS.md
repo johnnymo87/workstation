@@ -106,6 +106,24 @@ unavailable and opus answered. If the `-opus` twin is unavailable too, stop and
 report. There is no reverse fallback: on cloudbox a dead `-opus` does not
 authorize astra, which stays opt-in there.
 
+**A dead astra now fails loudly, not silently.** The `subagent-failure` plugin
+runs `astra-probe` before every `-astra` dispatch and *refuses* the Task call
+when it says DOWN. The error names the `-opus` twin, so just follow it. If the
+child dies mid-dispatch, the plugin turns the empty or truncated "completed"
+result into a `state="error"` `<task_error>` that names the same twin.
+Truncated text in it is not a review. If codex-lb stalls before sending
+headers, `headerTimeout` ends the child in about 13 minutes. Every one of these
+counts as "errors" above.
+
+**A hang is still possible, and it is not yours to time out.** A dispatch can
+hang if codex-lb stalls *after* response headers, because keepalives defeat
+every client timeout. Elapsed time is not evidence of a hang: about 1 in 5
+healthy astra reviews run longer than 15 minutes, and some run for hours. The
+dispatching agent is blocked inside the call and cannot act anyway. The signal
+is lack of **progress**: the child session has gained no new parts for 15+
+minutes, or its status is `retry`. Whoever notices that (the human, or a
+watcher) aborts the child, and the parent then falls back as for an error.
+
 **`-fable` means one of two things, and the list tells you which.** It was
 the name of the default slot until 2026-09-28, when that slot was renamed
 `-opus` (same prompt, model moved from fable-5-1 to opus-5-5). A serve loads its
