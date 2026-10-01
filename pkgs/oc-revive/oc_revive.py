@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import sqlite3
 import subprocess
@@ -180,6 +181,52 @@ def is_path_referenced_in_db(conn: sqlite3.Connection, path: str) -> bool:
     return False
 
 
+def get_git_common_dir(repo: str) -> str:
+    """Return absolute path to git-common-dir for repo."""
+    res = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    git_common = res.stdout.strip()
+    if not os.path.isabs(git_common):
+        git_common = os.path.normpath(os.path.join(repo, git_common))
+    return git_common
+
+
+def get_attempted_paths(repo: str) -> set[str]:
+    """Read all paths recorded in <git-common-dir>/oc-revive.attempted."""
+    try:
+        git_common = get_git_common_dir(repo)
+    except Exception:
+        return set()
+    ledger = os.path.join(git_common, "oc-revive.attempted")
+    if not os.path.isfile(ledger):
+        return set()
+    paths = set()
+    try:
+        with open(ledger, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    paths.add(os.path.normpath(line))
+                    paths.add(os.path.realpath(line))
+    except OSError:
+        pass
+    return paths
+
+
+def record_attempted_path(repo: str, target_p: str, sid: str) -> None:
+    """Append target_p to <git-common-dir>/oc-revive.attempted."""
+    git_common = get_git_common_dir(repo)
+    ledger = os.path.join(git_common, "oc-revive.attempted")
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    norm_p = os.path.normpath(target_p)
+    with open(ledger, "a", encoding="utf-8") as f:
+        f.write(f"{norm_p}  # {ts} sid={sid}\n")
+
+
 def choose_revive_path(
     repo: str,
     dead_dir: str,
@@ -194,11 +241,17 @@ def choose_revive_path(
     wt_paths = get_git_worktrees(repo)
     wt_realpaths = {os.path.realpath(p) for p in wt_paths}
     dead_dir_real = os.path.realpath(dead_dir)
+    attempted_paths = get_attempted_paths(repo)
 
     k = 0
     while True:
         candidate = os.path.join(worktrees_dir, f"{base}-r{epoch + k}")
         cand_real = os.path.realpath(candidate)
+
+        # 0. Never an attempted path
+        if candidate in attempted_paths or cand_real in attempted_paths:
+            k += 1
+            continue
 
         # 1. Never the dead dir
         if candidate == dead_dir or cand_real == dead_dir_real:
@@ -531,7 +584,9 @@ def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or os.environ.get("OPENCODE_DB", DEFAULT_DB_PATH)
     expanded = os.path.abspath(os.path.expanduser(path))
     conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
-    conn.isolation_level = None
+    # Note: isolation_level does not change snapshot behavior in read-only sqlite3.
+    # In SQLite, an un-reset cursor holds open the read transaction snapshot.
+    # Step-1 and step-8 reads use fresh short-lived connections to guarantee fresh snapshots.
     return conn
 
 
@@ -686,10 +741,11 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 if b in branch_to_wt:
                     wt_p = branch_to_wt[b]
                     if re.match(pattern, os.path.basename(wt_p)):
-                        is_ref = is_path_referenced_in_db(conn, wt_p)
                         blocking_reason = (
-                            f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' "
-                            f"(session row references it: {is_ref})"
+                            f"blocked_by_worktree: branch '{b}' is checked out at '{wt_p}' from a prior revive attempt. "
+                            f"Resume this worktree rather than creating a new one. "
+                            f"Do NOT delete '{wt_p}' and re-run an older apply (a serve may have already resolved it). "
+                            f"To resume, run: oc-revive apply {shlex.quote(sid)} --resume --branch {shlex.quote(b)} --path {shlex.quote(wt_p)}"
                         )
                         break
 
@@ -760,14 +816,15 @@ def apply_revive(
     sid: str,
     branch: str,
     path: str,
-    action: str,
-    expect_tip: str,
-    expect_old_dir: str,
+    action: str = "add",
+    expect_tip: str = "",
+    expect_old_dir: str = "",
     db_path: str | None = None,
     frontdoor_url: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Execute revival of session sid onto branch at path."""
-    if action != "add":
+    if not resume and action != "add":
         raise ReviveError(f"Action '{action}' not permitted. Only 'add' is supported in v1.")
 
     door_url = frontdoor_url or os.environ.get("OPENCODE_FRONTDOOR_URL", DEFAULT_FRONTDOOR_URL)
@@ -797,15 +854,7 @@ def apply_revive(
         if not os.path.isdir(repo):
             raise ReviveError(f"Repo directory '{repo}' not found")
 
-        res = subprocess.run(
-            ["git", "-C", repo, "rev-parse", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        git_common = res.stdout.strip()
-        if not os.path.isabs(git_common):
-            git_common = os.path.normpath(os.path.join(repo, git_common))
+        git_common = get_git_common_dir(repo)
         lock_path = os.path.join(git_common, "oc-revive.lock")
 
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
@@ -822,10 +871,15 @@ def apply_revive(
                         raise ReviveError(f"Timed out waiting for lock on {lock_path}")
                     time.sleep(0.05)
 
-            # Step 1: Idempotent retry check
-            cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
-            fresh_row = cur.fetchone()
-            fresh_dir = fresh_row[0] if fresh_row else None
+            # Step 1: Idempotent retry check on fresh connection
+            fresh_conn = get_db_connection(db_path)
+            try:
+                f_cur = fresh_conn.cursor()
+                f_cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+                fresh_row = f_cur.fetchone()
+                fresh_dir = fresh_row[0] if fresh_row else None
+            finally:
+                fresh_conn.close()
 
             target_p_real = os.path.realpath(target_p)
             expect_old_real = os.path.realpath(expect_old_dir) if expect_old_dir else None
@@ -842,72 +896,134 @@ def apply_revive(
 
             created = False
             if not already_moved:
-                # Schema-drift tripwire: require door's GET /session/<sid> to report directory == expect_old_dir
-                try:
-                    door_sess = fetch_door_session(door_url, sid)
-                except Exception as e:
-                    raise ReviveError(f"Failed to query session from door at {door_url}: {e}")
-                door_dir = door_sess.get("directory")
-                door_dir_real = os.path.realpath(door_dir) if door_dir else None
-                if door_dir != expect_old_dir and (not door_dir_real or door_dir_real != expect_old_real):
-                    raise ReviveError(
-                        f"Door reports session directory '{door_dir}', expected '{expect_old_dir}'"
+                if resume:
+                    # Resume mode: accept existing P only when P is a LIVE, non-prunable worktree on
+                    # branch at expect_tip, no session row references it, and its basename matches <base>-r\d{10}.
+                    # If P is gone, refuse and point the user at fresh oc-revive <sid>.
+                    if not os.path.exists(target_p):
+                        raise ReviveError(
+                            f"resume-failed: target path '{target_p}' does not exist on disk. "
+                            f"To revive session '{sid}', run a fresh 'oc-revive {sid}'."
+                        )
+                    wt_entries = get_worktree_entries(repo)
+                    matched_entry = None
+                    for entry in wt_entries:
+                        e_p = entry.get("path")
+                        if e_p and (e_p == target_p or os.path.realpath(e_p) == target_p_real):
+                            matched_entry = entry
+                            break
+                    if not matched_entry or matched_entry.get("prunable"):
+                        raise ReviveError(
+                            f"resume-failed: target path '{target_p}' is not a live worktree (missing or prunable)"
+                        )
+                    if matched_entry.get("branch") != branch:
+                        raise ReviveError(
+                            f"resume-failed: target path '{target_p}' is on branch '{matched_entry.get('branch')}', expected '{branch}'"
+                        )
+                    tip_check = subprocess.run(
+                        ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if tip_check.returncode != 0 or tip_check.stdout.strip() != expect_tip:
+                        actual = tip_check.stdout.strip() if tip_check.returncode == 0 else "missing"
+                        raise ReviveError(
+                            f"resume-failed: branch '{branch}' tip changed (expected {expect_tip}, got {actual})"
+                        )
+                    base = compute_base_slug(os.path.basename(expect_old_dir))
+                    pattern = rf"^{re.escape(base)}-r\d{{10}}$"
+                    if not re.match(pattern, os.path.basename(target_p)):
+                        raise ReviveError(
+                            f"resume-failed: target path '{target_p}' basename does not match expected pattern '{pattern}'"
+                        )
+                    if is_path_referenced_in_db(conn, target_p):
+                        raise ReviveError(
+                            f"resume-failed: target path '{target_p}' is referenced in session DB"
+                        )
+                    created = False
+                else:
+                    # Non-resume mode: Refuse to create worktree at already-attempted path
+                    attempted_paths = get_attempted_paths(repo)
+                    if target_p in attempted_paths or target_p_real in attempted_paths:
+                        raise ReviveError(
+                            f"attempted-path: target path '{target_p}' is listed in attempted ledger "
+                            f"({os.path.join(git_common, 'oc-revive.attempted')}). "
+                            f"Refusing to create worktree at an already-attempted path."
+                        )
+
+                    # Schema-drift tripwire: require door's GET /session/<sid> to report directory == expect_old_dir
+                    try:
+                        door_sess = fetch_door_session(door_url, sid)
+                    except Exception as e:
+                        raise ReviveError(f"Failed to query session from door at {door_url}: {e}")
+                    door_dir = door_sess.get("directory")
+                    door_dir_real = os.path.realpath(door_dir) if door_dir else None
+                    if door_dir != expect_old_dir and (not door_dir_real or door_dir_real != expect_old_real):
+                        raise ReviveError(
+                            f"Door reports session directory '{door_dir}', expected '{expect_old_dir}'"
+                        )
+
+                    # Check busy inside the lock
+                    if is_session_busy(conn, sid):
+                        raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
+
+                    # Step 2: Re-validate inside the lock
+                    if os.path.exists(target_p):
+                        raise ReviveError(f"plan-changed: target path '{target_p}' already exists on disk")
+
+                    wt_paths = get_git_worktrees(repo)
+                    wt_realpaths = {os.path.realpath(p) for p in wt_paths}
+                    if target_p in wt_paths or target_p_real in wt_realpaths:
+                        raise ReviveError(f"plan-changed: target path '{target_p}' is in git worktree list")
+
+                    if is_path_referenced_in_db(conn, target_p):
+                        raise ReviveError(f"plan-changed: target path '{target_p}' is referenced in session DB")
+
+                    tip_check = subprocess.run(
+                        ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if tip_check.returncode != 0 or tip_check.stdout.strip() != expect_tip:
+                        actual = tip_check.stdout.strip() if tip_check.returncode == 0 else "missing"
+                        raise ReviveError(
+                            f"plan-changed: branch '{branch}' tip changed (expected {expect_tip}, got {actual})"
+                        )
+
+                    # Step 3: git worktree prune
+                    subprocess.run(
+                        ["git", "-C", repo, "worktree", "prune"],
+                        check=True,
+                        capture_output=True,
                     )
 
-                # Check busy inside the lock
-                if is_session_busy(conn, sid):
-                    raise ReviveError(f"busy_session: session '{sid}' has an unfinalized assistant turn in progress")
-
-                # Step 2: Re-validate inside the lock
-                if os.path.exists(target_p):
-                    raise ReviveError(f"plan-changed: target path '{target_p}' already exists on disk")
-
-                wt_paths = get_git_worktrees(repo)
-                wt_realpaths = {os.path.realpath(p) for p in wt_paths}
-                if target_p in wt_paths or os.path.realpath(target_p) in wt_realpaths:
-                    raise ReviveError(f"plan-changed: target path '{target_p}' is in git worktree list")
-
-                if is_path_referenced_in_db(conn, target_p):
-                    raise ReviveError(f"plan-changed: target path '{target_p}' is referenced in session DB")
-
-                tip_check = subprocess.run(
-                    ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
-                    capture_output=True,
-                    text=True,
-                )
-                if tip_check.returncode != 0 or tip_check.stdout.strip() != expect_tip:
-                    actual = tip_check.stdout.strip() if tip_check.returncode == 0 else "missing"
-                    raise ReviveError(
-                        f"plan-changed: branch '{branch}' tip changed (expected {expect_tip}, got {actual})"
+                    # Step 4: git worktree add P B (no -b, no --force)
+                    subprocess.run(
+                        ["git", "-C", repo, "worktree", "add", target_p, branch],
+                        check=True,
+                        capture_output=True,
                     )
+                    created = True
 
-                # Step 3: git worktree prune
-                subprocess.run(
-                    ["git", "-C", repo, "worktree", "prune"],
-                    check=True,
-                    capture_output=True,
-                )
-
-                # Step 4: git worktree add P B (no -b, no --force)
-                subprocess.run(
-                    ["git", "-C", repo, "worktree", "add", target_p, branch],
-                    check=True,
-                    capture_output=True,
-                )
-                created = True
-
-            reconcile_cmd = (
-                f"oc-revive apply {sid} --branch {branch} --path {target_p} "
-                f"--action add --expect-tip {expect_tip} --expect-old-dir {expect_old_dir}"
-            )
-            post_sent = False
-            reconcile_printed = False
-
-            def print_reconcile() -> None:
-                nonlocal reconcile_printed
-                if post_sent and not reconcile_printed:
-                    print(f"To reconcile, run:\n  {reconcile_cmd}", file=sys.stderr)
-                    reconcile_printed = True
+            reconcile_parts = [
+                "oc-revive",
+                "apply",
+                shlex.quote(sid),
+                "--resume",
+                "--branch",
+                shlex.quote(branch),
+                "--path",
+                shlex.quote(target_p),
+                "--expect-tip",
+                shlex.quote(expect_tip),
+                "--expect-old-dir",
+                shlex.quote(expect_old_dir),
+            ]
+            if db_path:
+                reconcile_parts.extend(["--db", shlex.quote(db_path)])
+            if frontdoor_url:
+                reconcile_parts.extend(["--frontdoor-url", shlex.quote(frontdoor_url)])
+            reconcile_cmd = " ".join(reconcile_parts)
 
             # Steps 5-8 must survive SIGTERM, SIGINT, SIGHUP
             received_signal: int | None = None
@@ -915,6 +1031,10 @@ def apply_revive(
             def handle_signal(signum: int, frame: Any) -> None:
                 nonlocal received_signal
                 received_signal = signum
+                try:
+                    os.write(2, b"\nFinishing in-flight move...\n")
+                except OSError:
+                    pass
 
             old_handlers = {}
             for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -925,6 +1045,11 @@ def apply_revive(
 
             try:
                 if not already_moved:
+                    # Record in attempted-path ledger BEFORE POST
+                    record_attempted_path(repo, target_p, sid)
+                    # Write resume command to stderr BEFORE POST
+                    print(f"To reconcile, run:\n  {reconcile_cmd}", file=sys.stderr, flush=True)
+
                     # Step 5: The move POST $DOOR/session/<sid>/move
                     move_url = f"{door_url.rstrip('/')}/session/{sid}/move"
                     move_payload = json.dumps({"destination": {"directory": target_p}}).encode("utf-8")
@@ -935,7 +1060,6 @@ def apply_revive(
                         method="POST",
                     )
 
-                    post_sent = True
                     move_status = None
                     move_err_msg = ""
                     try:
@@ -1078,10 +1202,15 @@ def apply_revive(
                         if not landed:
                             print(f"WARNING: notice sent to {sid} but not yet confirmed in parts")
 
-                # Step 8: Re-read DB row to ensure move was not undone, and assert P exists on disk
-                cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
-                db_row = cur.fetchone()
-                db_dir = db_row[0] if db_row else None
+                # Step 8: Re-read DB row on fresh short-lived connection, and assert P exists on disk
+                fresh_conn = get_db_connection(db_path)
+                try:
+                    f_cur = fresh_conn.cursor()
+                    f_cur.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+                    db_row = f_cur.fetchone()
+                    db_dir = db_row[0] if db_row else None
+                finally:
+                    fresh_conn.close()
                 target_p_real = os.path.realpath(target_p)
                 db_dir_real = os.path.realpath(db_dir) if db_dir else None
                 if db_dir != target_p and (not db_dir_real or db_dir_real != target_p_real):
@@ -1102,16 +1231,17 @@ def apply_revive(
                     "reconcile_cmd": reconcile_cmd,
                 }
             finally:
-                if sys.exc_info()[0] is not None:
-                    print_reconcile()
                 for sig, old_h in old_handlers.items():
                     try:
                         signal.signal(sig, old_h)
                     except (ValueError, OSError):
                         pass
                 if received_signal is not None:
-                    print_reconcile()
-                    os.kill(os.getpid(), received_signal)
+                    if received_signal == signal.SIGINT:
+                        if sys.exc_info()[0] is not None:
+                            os.kill(os.getpid(), signal.SIGINT)
+                    else:
+                        os.kill(os.getpid(), received_signal)
 
         finally:
             if locked:
@@ -1144,17 +1274,28 @@ def main(argv: list[str] | None = None) -> int:
     apply_p.add_argument("--path", required=True, help="New worktree path")
     apply_p.add_argument(
         "--action",
-        required=True,
         choices=["add"],
+        default="add",
         help="Action (only 'add' is supported in v1)",
     )
     apply_p.add_argument("--expect-tip", required=True, help="Expected tip commit SHA")
     apply_p.add_argument("--expect-old-dir", required=True, help="Expected dead directory")
     apply_p.add_argument("--db", help="Path to opencode.db")
     apply_p.add_argument("--frontdoor-url", help="Frontdoor URL")
+    apply_p.add_argument("--resume", action="store_true", help="Resume an in-flight revival without creating a worktree")
 
-    # If first argument is neither 'plan' nor 'apply' and not a help flag:
-    if argv and argv[0] not in ("plan", "apply", "-h", "--help"):
+    # resume subcommand
+    resume_p = subparsers.add_parser("resume", help="Resume an in-flight revival without creating a worktree")
+    resume_p.add_argument("sid", help="Session ID")
+    resume_p.add_argument("--branch", required=True, help="Branch name")
+    resume_p.add_argument("--path", required=True, help="Worktree path")
+    resume_p.add_argument("--expect-tip", required=True, help="Expected tip commit SHA")
+    resume_p.add_argument("--expect-old-dir", required=True, help="Expected dead directory")
+    resume_p.add_argument("--db", help="Path to opencode.db")
+    resume_p.add_argument("--frontdoor-url", help="Frontdoor URL")
+
+    # If first argument is neither 'plan', 'apply', 'resume' nor a help flag:
+    if argv and argv[0] not in ("plan", "apply", "resume", "-h", "--help"):
         # Interactive mode: oc-revive <sid>
         sid = argv[0]
         # Parse any optional flags like --db or --frontdoor-url
@@ -1261,17 +1402,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(plan, indent=2))
         return 0
 
-    if args.command == "apply":
+    if args.command in ("apply", "resume"):
+        is_resume = getattr(args, "resume", False) or args.command == "resume"
+        action = getattr(args, "action", "add")
         try:
             res = apply_revive(
                 sid=args.sid,
                 branch=args.branch,
                 path=args.path,
-                action=args.action,
+                action=action,
                 expect_tip=args.expect_tip,
                 expect_old_dir=args.expect_old_dir,
                 db_path=args.db,
                 frontdoor_url=args.frontdoor_url,
+                resume=is_resume,
             )
             if not res.get("notice_sent", True):
                 print(

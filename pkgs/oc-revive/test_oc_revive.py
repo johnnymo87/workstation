@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import shlex
 import signal
 import fcntl
 import unittest
@@ -167,6 +168,31 @@ class TestPathPSelection(unittest.TestCase):
         p = oc_revive.choose_revive_path(self.repo, dead_dir, self.db_conn, start_epoch=epoch)
         expected_2 = os.path.join(self.worktrees_dir, f"{slug}-r{epoch + 2}")
         self.assertEqual(p, expected_2)
+
+    def test_path_p_skips_attempted_ledger_paths(self):
+        epoch = 1700000000
+        slug = "ledger-test"
+        dead_dir = os.path.join(self.worktrees_dir, slug)
+        cand_0 = os.path.join(self.worktrees_dir, f"{slug}-r{epoch}")
+        cand_1 = os.path.join(self.worktrees_dir, f"{slug}-r{epoch + 1}")
+
+        # Record cand_0 in <git-common-dir>/oc-revive.attempted
+        res = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write(f"# Prior attempt\n{cand_0}  # 2026-10-01T12:00:00Z sid=ses_old\n")
+
+        # choose_revive_path must skip cand_0 because it is in the attempted ledger, advancing to cand_1
+        p = oc_revive.choose_revive_path(self.repo, dead_dir, self.db_conn, start_epoch=epoch)
+        self.assertEqual(p, cand_1)
 
 
 class TestBranchCandidates(unittest.TestCase):
@@ -644,7 +670,9 @@ class TestPlan(unittest.TestCase):
         reason = plan["reason"]
         self.assertFalse(reason.startswith("no_candidates:"))
         self.assertIn(prior_wt, reason)
-        self.assertIn("session row references it: False", reason)
+        self.assertNotIn("session row references it: False", reason)
+        self.assertIn("resume", reason.lower())
+        self.assertIn("do not delete", reason.lower())
 
         # Case 2: A session row DOES reference prior_wt
         cur = self.db_conn.cursor()
@@ -659,7 +687,8 @@ class TestPlan(unittest.TestCase):
         reason2 = plan2["reason"]
         self.assertFalse(reason2.startswith("no_candidates:"))
         self.assertIn(prior_wt, reason2)
-        self.assertIn("session row references it: True", reason2)
+        self.assertIn("resume", reason2.lower())
+        self.assertIn("do not delete", reason2.lower())
 
     def test_snapshot_reporting(self):
         import hashlib
@@ -1470,40 +1499,52 @@ class TestApply(unittest.TestCase):
 
         self.door.on_move = on_move
 
-        parent_sigint_called = False
-
-        def parent_handler(signum, frame):
-            nonlocal parent_sigint_called
-            parent_sigint_called = True
-
-        prev_handler = signal.signal(signal.SIGINT, parent_handler)
+        # Test the production path: default_int_handler is active, NO custom parent handler
+        prev_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
         stderr = io.StringIO()
-        try:
-            with mock.patch("sys.stderr", stderr):
-                res = oc_revive.apply_revive(
-                    sid=sid,
-                    branch="feat-sigint",
-                    path=new_path,
-                    action="add",
-                    expect_tip=tip_sha,
-                    expect_old_dir=dead_dir,
-                    db_path=self.db_path,
-                    frontdoor_url=self.door_url,
-                )
-            self.assertTrue(signal_delivered)
-            self.assertTrue(res["ok"])
-            self.assertEqual(len(self.door.move_calls), 1)
-            self.assertEqual(len(self.door.prompt_async_calls), 1)
-            self.assertTrue(os.path.isdir(new_path))
-            self.assertTrue(parent_sigint_called)
-            # Must print copy-pasteable reconcile command on exit after signal received
-            expected_reconcile = (
-                f"oc-revive apply {sid} --branch feat-sigint --path {new_path} "
-                f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
-            )
-            self.assertIn(expected_reconcile, stderr.getvalue())
-        finally:
-            signal.signal(signal.SIGINT, prev_handler)
+
+        # Capture raw fd 2 writes to verify signal handler wrote "Finishing in-flight move..."
+        with tempfile.TemporaryFile() as tmp_fd2:
+            old_fd2 = os.dup(2)
+            os.dup2(tmp_fd2.fileno(), 2)
+            try:
+                with mock.patch("sys.stderr", stderr):
+                    res = oc_revive.apply_revive(
+                        sid=sid,
+                        branch="feat-sigint",
+                        path=new_path,
+                        action="add",
+                        expect_tip=tip_sha,
+                        expect_old_dir=dead_dir,
+                        db_path=self.db_path,
+                        frontdoor_url=self.door_url,
+                    )
+            finally:
+                os.dup2(old_fd2, 2)
+                os.close(old_fd2)
+                signal.signal(signal.SIGINT, prev_handler)
+
+            tmp_fd2.seek(0)
+            raw_fd2_out = tmp_fd2.read().decode("utf-8", errors="replace")
+
+        self.assertTrue(signal_delivered)
+        # Production path must exit cleanly without KeyboardInterrupt traceback
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(self.door.move_calls), 1)
+        self.assertEqual(len(self.door.prompt_async_calls), 1)
+        self.assertTrue(os.path.isdir(new_path))
+
+        # Raw fd 2 must have received "Finishing in-flight move" from signal handler
+        self.assertIn("Finishing in-flight move", raw_fd2_out)
+
+        # Resume command must have been written before POST
+        expected_reconcile = (
+            f"oc-revive apply {shlex.quote(sid)} --resume --branch {shlex.quote('feat-sigint')} "
+            f"--path {shlex.quote(new_path)} --expect-tip {shlex.quote(tip_sha)} "
+            f"--expect-old-dir {shlex.quote(dead_dir)} "
+            f"--db {shlex.quote(self.db_path)} --frontdoor-url {shlex.quote(self.door_url)}"
+        )
+        self.assertIn(expected_reconcile, stderr.getvalue())
 
     def test_apply_ambiguous_outcomes_print_reconcile_command(self):
         sid = "ses_apply_ambig"
@@ -1529,10 +1570,291 @@ class TestApply(unittest.TestCase):
                     frontdoor_url=self.door_url,
                 )
         expected_reconcile = (
-            f"oc-revive apply {sid} --branch feat-ambig --path {new_path} "
-            f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
+            f"oc-revive apply {shlex.quote(sid)} --resume --branch {shlex.quote('feat-ambig')} "
+            f"--path {shlex.quote(new_path)} --expect-tip {shlex.quote(tip_sha)} "
+            f"--expect-old-dir {shlex.quote(dead_dir)} "
+            f"--db {shlex.quote(self.db_path)} --frontdoor-url {shlex.quote(self.door_url)}"
         )
         self.assertIn(expected_reconcile, stderr.getvalue())
+
+        # Assert the printed command actually works: drive the resume path from 1(b) and show it succeeds
+        self.door.move_status = 204
+        argv = shlex.split(expected_reconcile)[1:]  # strip 'oc-revive'
+        rc = oc_revive.main(argv)
+        self.assertEqual(rc, 0)
+        sess = oc_revive.fetch_door_session(self.door_url, sid)
+        self.assertEqual(sess.get("directory"), new_path)
+
+    def test_apply_step8_fresh_connection_sees_external_update_despite_active_cursor(self):
+        """Step 8 must read on a fresh connection so an un-reset cursor does not hide external updates."""
+        sid = "ses_step8_fresh"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-step8-fresh")
+        self._add_session(sid, dead_dir)
+        # Seed a second row so a multi-row query leaves an unexhausted/un-reset cursor
+        self._add_session("ses_other", os.path.join(self.worktrees_dir, "feat-other"))
+        tip_sha = self._commit_branch("feat-step8-fresh")
+        new_path = os.path.join(self.worktrees_dir, "feat-step8-fresh-r1700000000")
+        self.door.move_status = 204
+        self.door.get_response_data = {"id": sid, "directory": dead_dir}
+
+        # Track the main connection passed to apply_revive
+        real_get_db = oc_revive.get_db_connection
+        first_call = True
+        main_conn = None
+        active_cursor = None
+
+        def hooked_get_db(db_path=None):
+            nonlocal first_call, main_conn, active_cursor
+            conn = real_get_db(db_path)
+            if first_call:
+                first_call = False
+                main_conn = conn
+                # Execute query and fetch only 1 of 2 rows, deliberately leaving
+                # an active un-reset statement on this connection
+                active_cursor = conn.cursor()
+                active_cursor.execute("SELECT * FROM session")
+                active_cursor.fetchone()
+            return conn
+
+        with mock.patch("oc_revive.get_db_connection", side_effect=hooked_get_db):
+            res = oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-step8-fresh",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertTrue(res["ok"])
+
+    def test_apply_refuses_attempted_ledger_path(self):
+        sid = "ses_ledger_refuse"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-ledger-refuse")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-ledger-refuse")
+        new_path = os.path.join(self.worktrees_dir, "feat-ledger-refuse-r1700000000")
+
+        # Record new_path in <git-common-dir>/oc-revive.attempted
+        res = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write(f"{new_path}  # 2026-10-01T12:00:00Z sid={sid}\n")
+
+        # apply must refuse to CREATE one
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-ledger-refuse",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+        self.assertIn("attempted", str(ctx.exception).lower())
+        # Worktree must NOT be created
+        self.assertFalse(os.path.exists(new_path))
+
+    def test_apply_records_attempted_path_before_post(self):
+        sid = "ses_ledger_record"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-ledger-record")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-ledger-record")
+        new_path = os.path.join(self.worktrees_dir, "feat-ledger-record-r1700000000")
+
+        res = subprocess.run(
+            ["git", "-C", self.repo, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_common = res.stdout.strip()
+        if not os.path.isabs(git_common):
+            git_common = os.path.normpath(os.path.join(self.repo, git_common))
+        ledger_path = os.path.join(git_common, "oc-revive.attempted")
+
+        ledger_error = None
+
+        # Hook door to assert ledger already has new_path BEFORE move POST executes
+        def on_move_verify_ledger(path, body):
+            nonlocal ledger_error
+            try:
+                if not os.path.exists(ledger_path):
+                    raise AssertionError(f"ledger file '{ledger_path}' does not exist before move POST")
+                with open(ledger_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if new_path not in content or sid not in content:
+                    raise AssertionError(f"ledger missing new_path or sid before move POST: {content}")
+            except Exception as e:
+                ledger_error = e
+
+        self.door.on_move = on_move_verify_ledger
+        self.door.move_status = 504  # Even if POST fails
+
+        with self.assertRaises(oc_revive.ReviveError):
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-ledger-record",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+            )
+
+        if ledger_error is not None:
+            raise ledger_error
+
+        # Even after failed 504 POST, ledger persists
+        with open(ledger_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn(new_path, content)
+
+    def test_resume_mode_refuses_when_path_is_absent(self):
+        sid = "ses_resume_absent"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-absent")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-absent")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-absent-r1700000000")
+
+        # new_path does not exist on disk
+        self.assertFalse(os.path.exists(new_path))
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-absent",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        err = str(ctx.exception)
+        self.assertIn("does not exist", err.lower())
+        self.assertIn(f"oc-revive {sid}", err)
+        # MUST NOT create worktree
+        self.assertFalse(os.path.exists(new_path))
+
+    def test_resume_mode_refuses_when_prunable(self):
+        sid = "ses_resume_prunable"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-prun")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-prun")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-prun-r1700000000")
+
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-prun"], cwd=self.repo, check=True, capture_output=True)
+        # Corrupt worktree's .git pointer so it exists on disk but is marked prunable in git
+        os.remove(os.path.join(new_path, ".git"))
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-prun",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("not a live worktree", str(ctx.exception).lower())
+
+    def test_resume_mode_refuses_when_session_row_references_p(self):
+        sid = "ses_resume_row"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-row")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-row")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-row-r1700000000")
+
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-row"], cwd=self.repo, check=True, capture_output=True)
+
+        # Seed another session referencing new_path
+        cur = self.db_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, project_id, directory, time_created, time_updated) VALUES (?, ?, ?, ?, ?)",
+            ("ses_other", "proj", new_path, 1000, 1000),
+        )
+        self.db_conn.commit()
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-row",
+                path=new_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("referenced in session db", str(ctx.exception).lower())
+
+    def test_resume_mode_refuses_when_basename_pattern_mismatches(self):
+        sid = "ses_resume_name"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-name")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-name")
+        bad_path = os.path.join(self.worktrees_dir, "feat-resume-name-custom")
+
+        subprocess.run(["git", "worktree", "add", bad_path, "feat-resume-name"], cwd=self.repo, check=True, capture_output=True)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_revive(
+                sid=sid,
+                branch="feat-resume-name",
+                path=bad_path,
+                action="add",
+                expect_tip=tip_sha,
+                expect_old_dir=dead_dir,
+                db_path=self.db_path,
+                frontdoor_url=self.door_url,
+                resume=True,
+            )
+        self.assertIn("basename", str(ctx.exception).lower())
+
+    def test_resume_mode_succeeds_and_reposts(self):
+        sid = "ses_resume_success"
+        dead_dir = os.path.join(self.worktrees_dir, "feat-resume-ok")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("feat-resume-ok")
+        new_path = os.path.join(self.worktrees_dir, "feat-resume-ok-r1700000000")
+
+        # Create valid live worktree
+        subprocess.run(["git", "worktree", "add", new_path, "feat-resume-ok"], cwd=self.repo, check=True, capture_output=True)
+
+        self.door.move_status = 204
+
+        res = oc_revive.apply_revive(
+            sid=sid,
+            branch="feat-resume-ok",
+            path=new_path,
+            action="add",
+            expect_tip=tip_sha,
+            expect_old_dir=dead_dir,
+            db_path=self.db_path,
+            frontdoor_url=self.door_url,
+            resume=True,
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(self.door.move_calls), 1)
+        self.assertEqual(len(self.door.prompt_async_calls), 1)
 
     def test_apply_flock_bounded(self):
         sid = "ses_flock"
@@ -1769,6 +2091,61 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.isdir(new_path))
 
+    def test_cli_apply_with_resume_flag(self):
+        sid = "ses_cli_resume_flag"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-resume-feat")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("cli-resume-feat")
+        new_path = os.path.join(self.worktrees_dir, "cli-resume-feat-r1700000000")
+        subprocess.run(["git", "worktree", "add", new_path, "cli-resume-feat"], cwd=self.repo, check=True, capture_output=True)
+
+        self.door.move_status = 204
+
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            rc = oc_revive.main([
+                "apply",
+                sid,
+                "--resume",
+                "--branch",
+                "cli-resume-feat",
+                "--path",
+                new_path,
+                "--expect-tip",
+                tip_sha,
+                "--expect-old-dir",
+                dead_dir,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertIn("Successfully revived", stdout.getvalue())
+
+    def test_cli_resume_subcommand(self):
+        sid = "ses_cli_resume_sub"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-sub-feat")
+        self._add_session(sid, dead_dir)
+        tip_sha = self._commit_branch("cli-sub-feat")
+        new_path = os.path.join(self.worktrees_dir, "cli-sub-feat-r1700000000")
+        subprocess.run(["git", "worktree", "add", new_path, "cli-sub-feat"], cwd=self.repo, check=True, capture_output=True)
+
+        self.door.move_status = 204
+
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            rc = oc_revive.main([
+                "resume",
+                sid,
+                "--branch",
+                "cli-sub-feat",
+                "--path",
+                new_path,
+                "--expect-tip",
+                tip_sha,
+                "--expect-old-dir",
+                dead_dir,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertIn("Successfully revived", stdout.getvalue())
+
     def test_cli_apply_missing_expect_old_dir_exits_2(self):
         stderr = io.StringIO()
         with mock.patch("sys.stderr", stderr):
@@ -1816,8 +2193,9 @@ class TestCLI(unittest.TestCase):
         self.assertIn("Partial success", combined)
         self.assertIn("notice", combined.lower())
         expected_reconcile = (
-            f"oc-revive apply {sid} --branch cli-notice-fail --path {new_path} "
-            f"--action add --expect-tip {tip_sha} --expect-old-dir {dead_dir}"
+            f"oc-revive apply {shlex.quote(sid)} --resume --branch {shlex.quote('cli-notice-fail')} "
+            f"--path {shlex.quote(new_path)} --expect-tip {shlex.quote(tip_sha)} "
+            f"--expect-old-dir {shlex.quote(dead_dir)}"
         )
         self.assertIn(expected_reconcile, combined)
 

@@ -22,4 +22,9 @@ oc-revive <session_id>
 
 # Machine apply interface (called by interactive mode)
 oc-revive apply <session_id> --branch <branch> --path <path> --action add --expect-tip <sha> --expect-old-dir <dead_dir>
+
+# Resume an in-flight revival without creating a worktree
+oc-revive apply <session_id> --resume --branch <branch> --path <path> --expect-tip <sha> --expect-old-dir <dead_dir>
+# or
+oc-revive resume <session_id> --branch <branch> --path <path> --expect-tip <sha> --expect-old-dir <dead_dir>
 ```
