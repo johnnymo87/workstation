@@ -604,6 +604,9 @@ in
     localPkgs.oc-cost
     localPkgs.oc-tags
 
+    # Revive a read-only session whose git worktree was deleted
+    localPkgs.oc-revive
+
     # OpenCode per-session context-window usage ("who should compact?")
     localPkgs.oc-context
     localPkgs.oc-search

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """oc-revive: revive an opencode session whose worktree directory was deleted."""
 
 from __future__ import annotations

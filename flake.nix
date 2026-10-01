@@ -84,6 +84,7 @@
       oc-cost = p.callPackage ./pkgs/oc-cost { };
       oc-mcp-enable = p.callPackage ./pkgs/oc-mcp-enable { };
       oc-scoped-shell = p.callPackage ./pkgs/oc-scoped-shell { };
+      oc-revive = p.callPackage ./pkgs/oc-revive { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       oc-tags = p.callPackage ./pkgs/oc-tags { };
       oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
@@ -1123,6 +1124,38 @@
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: update-cfp-sources suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # oc-revive's suite: hermetic -- stdlib unittest over a temp sqlite fixture
+      # built with the real `session`/`message`/`part` column set, throwaway git
+      # repos under $TMPDIR, and a fake front door on http.server in a thread.
+      # It never touches the real opencode.db and makes no network calls.
+      #
+      # `git` is a genuine dependency, not a convenience: the path-selection and
+      # branch-candidate rules are tested against real `git worktree list`
+      # output and real commit graphs. HOME must be writable because git refuses
+      # to run without one, and the fixtures set user.email/user.name LOCALLY
+      # per throwaway repo (the one context where an inline identity is correct).
+      oc-revive-tests = devboxPkgs.runCommand "oc-revive-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.git devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/oc-revive/test_oc_revive.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-tags-tests. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 56 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 56 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: oc-revive suite did not report OK." >&2
           exit 1
         }
         touch $out
