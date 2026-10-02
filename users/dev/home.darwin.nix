@@ -1541,10 +1541,13 @@ EOF
   # xdg.configFile."tmux/extra.conf".enable = lib.mkForce false;
 
   # Auto-expire old home-manager generations (same as Linux)
+  # store.options also expires the user nix profile's generations, which
+  # nothing else does -- see the matching block in home.devbox.nix.
   services.home-manager.autoExpire = {
     enable = true;
     frequency = "daily";
     timestamp = "-7 days";
     store.cleanup = true;
+    store.options = "--delete-older-than 7d";
   };
 }

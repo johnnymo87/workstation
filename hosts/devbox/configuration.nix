@@ -959,6 +959,13 @@ in
   # the store is collected daily, so raising the cadence here would add churn
   # without adding reclamation.
   #
+  # CORRECTION, 2026-10-01: "collected daily" was true only of paths that were
+  # already dead. The user nix profile's generations were never expired by
+  # either job (this one runs as root; the HM cleanup ran a bare
+  # nix-collect-garbage), so every past home-manager-path stayed live. 845
+  # generations had piled up; expiring them freed 7.6G. Fixed in
+  # users/dev/home.devbox.nix via autoExpire store.options -- not here.
+  #
   # The gap this incident exposed was not cadence, it was that a calendar
   # schedule has no floor and nothing was watching between runs -- the disk
   # filled on the 11th/12th, mid-window, with the next weekly run due on the
