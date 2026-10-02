@@ -1059,11 +1059,14 @@ lib.mkIf isCloudbox {
   };
 
   # Auto-expire old home-manager generations
+  # store.options also expires the user nix profile's generations, which
+  # nothing else does -- see the matching block in home.devbox.nix.
   services.home-manager.autoExpire = {
     enable = true;
     frequency = "daily";
     timestamp = "-7 days";
     store.cleanup = true;
+    store.options = "--delete-older-than 7d";
   };
 
   # Git SSH wrapper for systemd services (avoids Environment= quoting issues)

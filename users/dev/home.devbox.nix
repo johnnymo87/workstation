@@ -622,11 +622,24 @@ lib.mkIf isDevbox {
 
   # Auto-expire old home-manager generations
   # System nix.gc runs weekly; this cleans up HM generations daily
+  #
+  # store.options IS LOAD-BEARING. Without it the cleanup is a bare
+  # `nix-collect-garbage`, which deletes no generations at all -- and the
+  # system nix.gc runs as root, so it never touches this user's
+  # ~/.local/state/nix/profiles/profile either. Every home-manager activation
+  # adds TWO generations to that profile (HM's installPackages does
+  # `nix profile remove home-manager-path` then `nix profile install`, even
+  # when nothing changed), pull-workstation activates every 4h, and nothing
+  # ever expired them: 845 generations had accumulated by 2026-10-01, pinning
+  # every past home-manager-path. Expiring them freed 7.6G. Steady-state cost
+  # of retention is ~130 MB/day, so 7d (~0.9G) keeps a useful rollback window
+  # for the unattended pull-workstation switches without meaningful space.
   services.home-manager.autoExpire = {
     enable = true;
     frequency = "daily";
     timestamp = "-7 days";
     store.cleanup = true;  # Also run nix-collect-garbage for user store
+    store.options = "--delete-older-than 7d";  # expire the user nix profile too (see above)
   };
 
   # Git SSH wrapper for systemd services (avoids Environment= quoting issues)
