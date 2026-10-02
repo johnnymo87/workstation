@@ -639,42 +639,12 @@ in
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
-        "NLTK_DATA=/persist/my-podcasts/nltk_data"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
-      # nltk.download() contacts raw.githubusercontent.com on EVERY call, even
-      # when the data is already on local disk, because it fetches the package
-      # index to check freshness -- and it has NO network timeout, so an
-      # unreachable index blocks forever rather than failing. On 2026-08-17
-      # that host became unreachable (host IPv6 egress down, plus GitHub rate
-      # limiting that the restart loop itself sustained); this step blocked
-      # past TimeoutStartSec, the unit failed, systemd retried every 30s, and
-      # the pipeline was down for ~40 minutes -- for data already on disk.
-      # So: conditional, time-bounded, and non-fatal. A third party must not be
-      # able to stop this service from starting. See my-podcasts-2h7.
       ExecStartPre = "${pkgs.writeShellScript "my-podcasts-consumer-setup" ''
         set -euo pipefail
         cd /home/dev/projects/my-podcasts
         ${pkgs.uv}/bin/uv sync --frozen
-
-        NLTK_DIR=/persist/my-podcasts/nltk_data
-        # Test a LEAF FILE, not the directory. `timeout` killing nltk mid-unzip
-        # leaves a partial tokenizers/punkt_tab/ that a -d test accepts forever,
-        # while sent_tokenize still raises LookupError on every job -- and if the
-        # .zip finished, nltk considers the package installed, so even ttsjoin's
-        # own runtime download will not repair it.
-        if [ -f "$NLTK_DIR/tokenizers/punkt_tab/english/collocations.tab" ]; then
-          echo "punkt_tab already present; skipping download"
-        else
-          # Kept as a ONE-LINE `python -c` on purpose: Nix indented strings strip
-          # the common leading indent, so a multi-line Python body here is only
-          # valid while its lines sit at exactly the strip baseline. A later
-          # re-indent would produce IndentationError on every start, which the
-          # `|| echo` below would silently swallow forever.
-          echo "punkt_tab missing; attempting bounded download"
-          ${pkgs.coreutils}/bin/timeout 60 ${pkgs.uv}/bin/uv run python -c "import pathlib, ssl, certifi, nltk; pathlib.Path('$NLTK_DIR').mkdir(parents=True, exist_ok=True); ssl._create_default_https_context=lambda: ssl.create_default_context(cafile=certifi.where()); nltk.download('punkt_tab', download_dir='$NLTK_DIR', quiet=True)" \
-            || echo "WARNING: punkt_tab download failed or timed out (exit $?); starting anyway"
-        fi
       ''}";
       ExecStart = "${pkgs.writeShellScript "my-podcasts-consumer-start" ''
         set -euo pipefail
@@ -690,8 +660,9 @@ in
         cd /home/dev/projects/my-podcasts
         exec ${pkgs.uv}/bin/uv run python -m pipeline consume
       ''}";
-      # `uv sync --frozen` on a cold cache can exceed the 90s default, and the
-      # bounded nltk fetch above can add up to 60s on top of it.
+      # `uv sync --frozen` on a cold cache can exceed the 90s default. (The
+      # bounded punkt_tab download that used to run here is gone: my-podcasts
+      # stopped using nltk when its in-repo TTS renderer replaced ttsjoin.)
       TimeoutStartSec = 180;
       Restart = "on-failure";
       RestartSec = 30;
@@ -717,7 +688,6 @@ in
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
-        "NLTK_DATA=/persist/my-podcasts/nltk_data"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
       ExecStart = "${pkgs.writeShellScript "fp-digest-start" ''
@@ -761,7 +731,6 @@ in
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
-        "NLTK_DATA=/persist/my-podcasts/nltk_data"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
       ExecStart = "${pkgs.writeShellScript "the-rundown-start" ''
@@ -805,7 +774,6 @@ in
       WorkingDirectory = "/home/dev/projects/my-podcasts";
       Environment = [
         "HOME=/home/dev"
-        "NLTK_DATA=/persist/my-podcasts/nltk_data"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
       ExecStart = "${pkgs.writeShellScript "sync-sources-start" ''
