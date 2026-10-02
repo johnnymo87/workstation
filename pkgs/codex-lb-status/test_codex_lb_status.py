@@ -145,14 +145,14 @@ class Case(unittest.TestCase):
         self.assertRegex(out, r"Weekly\s+\[[█░]{18}\] 44% used, reset 5d11h")
         self.assertNoNull(out)
 
-    def test_refresh_age_parses_fractional_seconds(self):
-        rc, out = self.run_tool({"accounts": [account()]})
+    def test_token_age_parses_fractional_seconds(self):
+        rc, out = self.run_tool({"accounts": [account(lastRefreshAt=iso(-3 * 86400, frac=True))]})
         self.assertEqual(rc, 0, out)
-        self.assertRegex(out, r"Refresh\s+2m ago\n")
+        self.assertRegex(out, r"Token\s+refreshed 3d0h ago\n")
 
     def test_usage_line(self):
         rc, out = self.run_tool({"accounts": [account()]})
-        self.assertRegex(out, r"Usage\s+104 req, 10\.1m tok, \$4\.34")
+        self.assertRegex(out, r"Lifetime\s+104 req, 10\.1m tok, \$4\.34")
 
     def test_alias_preferred_over_display_name(self):
         rc, out = self.run_tool({"accounts": [account(alias="work")]})
@@ -188,13 +188,16 @@ class Case(unittest.TestCase):
         self.assertRegex(out, r"5h\s+no data")
         self.assertNoNull(out)
 
-    def test_stale_refresh_is_flagged(self):
+    def test_overdue_token_refresh_is_flagged(self):
+        # codex-lb refreshes tokens every 8 days, so 7d is normal and 10d is stuck
+        rc, out = self.run_tool({"accounts": [account(lastRefreshAt=iso(-7 * 86400))]})
+        self.assertNotIn("OVERDUE", out)
         rc, out = self.run_tool({"accounts": [account(lastRefreshAt=iso(-10 * 86400))]})
-        self.assertRegex(out, r"Refresh\s+10d0h ago \(STALE")
+        self.assertRegex(out, r"Token\s+refreshed 10d0h ago \(OVERDUE")
 
     def test_never_refreshed(self):
         rc, out = self.run_tool({"accounts": [account(lastRefreshAt=None)]})
-        self.assertRegex(out, r"Refresh\s+never")
+        self.assertRegex(out, r"Token\s+never refreshed")
 
     def test_reset_in_the_past_is_marked_stale(self):
         rc, out = self.run_tool({"accounts": [account(resetAtPrimary=iso(-3 * 3600))]})

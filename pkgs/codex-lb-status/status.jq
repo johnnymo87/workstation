@@ -70,15 +70,19 @@ def account_block:
       (if ($u.monthlyRemainingPercent | num) != null
        then window("Monthly"; $u.monthlyRemainingPercent; $a.resetAtMonthly)
        else empty end),
-      "  Refresh  " + (
-        if $refresh == null then "never"
-        else "\([0, $now - $refresh] | max | dur) ago"
-          + (if $now - $refresh > 3600
-             then " (STALE: usage not refreshed in over 1h; numbers above may be old)"
+      # lastRefreshAt is the OAuth TOKEN refresh, which codex-lb does every
+      # 8 days (TOKEN_REFRESH_INTERVAL_DAYS) -- NOT usage freshness, which the
+      # no-auth API does not expose (usage_refreshed_at is exclude=True).
+      # Past 9 days the refresh is overdue, i.e. auth is stuck.
+      "  Token    " + (
+        if $refresh == null then "never refreshed"
+        else "refreshed \([0, $now - $refresh] | max | dur) ago"
+          + (if $now - $refresh > 9 * 86400
+             then " (OVERDUE: codex-lb refreshes every 8d; auth is stuck)"
              else "" end)
         end),
       (if ($ru.requestCount | num) != null then
-         "  Usage    \($ru.requestCount) req"
+         "  Lifetime \($ru.requestCount) req"
          + (if ($ru.totalTokens | num) != null then ", \($ru.totalTokens | human) tok" else "" end)
          + (if ($ru.totalCostUsd | num) != null
             then ", $\(($ru.totalCostUsd * 100 | round) / 100)" else "" end)

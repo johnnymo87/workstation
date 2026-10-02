@@ -2,7 +2,7 @@
 #
 # Per-account usage of the local codex-lb rotator (5h / weekly / monthly USED
 # percent with time-to-reset, account status, last usage refresh, deactivation
-# reason, request totals), then a fleet footer from /api/usage/summary.
+# reason, lifetime request totals), then a fleet footer from /api/usage/summary.
 #
 # DESIGN DECISIONS (from an adversarial review, session ses_f5ffc5011ffe...):
 #
@@ -16,9 +16,17 @@
 # * PERCENT, NOT CREDITS. codex-lb's "credits" are synthesized from a
 #   hard-coded plan table x (1 - used%); used-percent is the only real datum.
 #
-# * "Refresh N ago (STALE...)" and "Reason" are the silent-failure signals: an
-#   account in reauth_required keeps showing its last-known percentages, so a
-#   frozen lastRefreshAt is how you tell those numbers are old.
+# * STALENESS SIGNALS. An account in reauth_required keeps showing its
+#   last-known percentages, so the readout marks old numbers three ways:
+#   "reset passed ... (stale)" on a window whose reset time is in the past,
+#   the status/"Reason" lines, and "Token refreshed N ago (OVERDUE...)".
+#   Note lastRefreshAt is the OAuth TOKEN refresh (every 8 days upstream),
+#   not usage freshness: codex-lb's per-account usage timestamp
+#   (usage_refreshed_at) is excluded from /api/accounts and only exposed on
+#   the API-key-authenticated /api/fleet/summary. Hence the 9-day threshold.
+#
+# * "Lifetime" request/token/cost totals are per-account lifetime, unlike the
+#   footer's 7d figures -- they are not expected to agree.
 #
 # AUTH: NONE, AND THAT IS FRAGILE ON PURPOSE. codex-lb grants implicit admin to
 # a request that is LOCAL -- loopback socket AND Host header in {localhost,
