@@ -2516,6 +2516,20 @@
       ];
     };
 
+    # NixOS system configuration for the physical x86_64 gaming PC (headless
+    # Sunshine streaming host). The flake's only x86_64-linux output: CI runs
+    # on aarch64, so this is evaluated by `nix flake check` but never built
+    # there. Build it on the box itself.
+    nixosConfigurations.gamebox = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        disko.nixosModules.disko
+        ./hosts/gamebox/configuration.nix
+        ./hosts/gamebox/hardware.nix
+        ./hosts/gamebox/disko.nix
+      ];
+    };
+
     # Home-manager configuration (standalone for fast iteration on devbox)
     homeConfigurations.dev = home-manager.lib.homeManagerConfiguration {
       pkgs = devboxPkgs;

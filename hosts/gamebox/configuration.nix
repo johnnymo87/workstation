@@ -1,0 +1,78 @@
+# NixOS configuration for gamebox: a physical x86_64 gaming PC that will run
+# headless as a Sunshine game-streaming host (Moonlight client on the Mac),
+# and later host opencode agent sessions like devbox.
+#
+# Phase 1 (this file): the minimum to install with nixos-anywhere and get back
+# in over the network -- boot, Wi-Fi/Ethernet via NetworkManager, SSH, user.
+# The GPU driver, Plasma, and Sunshine come in a follow-up rebuild performed
+# on the box itself (devbox is aarch64 and cannot build x86_64 closures).
+#
+# Network: the Wi-Fi profile (office guest network) is NOT declared here, so
+# its password stays out of this public repo. It is seeded at install time
+# into /etc/NetworkManager/system-connections/ via nixos-anywhere
+# --extra-files, and NetworkManager persists it from there. Ethernet needs no
+# profile: NetworkManager brings it up with DHCP automatically.
+{ config, lib, pkgs, ... }:
+
+{
+  nixpkgs.config.allowUnfree = true;
+
+  networking.hostName = "gamebox";
+  networking.networkmanager = {
+    enable = true;
+    # Power-save on the AX210 adds latency spikes; bad for streaming.
+    wifi.powersave = false;
+  };
+
+  time.timeZone = "America/New_York";
+  i18n.defaultLocale = "en_US.UTF-8";
+
+  nix.settings = {
+    experimental-features = [ "nix-command" "flakes" ];
+    trusted-users = [ "root" "@wheel" ];
+    auto-optimise-store = true;
+  };
+  nix.gc = {
+    automatic = true;
+    dates = "weekly";
+    options = "--delete-older-than 14d";
+  };
+
+  services.openssh = {
+    enable = true;
+    settings = {
+      PermitRootLogin = "no";
+      PasswordAuthentication = false;
+      KbdInteractiveAuthentication = false;
+      AllowUsers = [ "dev" ];
+    };
+  };
+
+  networking.firewall.enable = true;
+
+  users.users.dev = {
+    isNormalUser = true;
+    uid = 1000;
+    extraGroups = [ "wheel" "networkmanager" ];
+    shell = pkgs.bashInteractive;
+    linger = true;
+    openssh.authorizedKeys.keys = [
+      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIjoX7P9gYCGqSbqoIvy/seqAbtzbLAdhaGCYRRVbDR2 johnnymo87@gmail.com"
+    ];
+  };
+
+  security.sudo.wheelNeedsPassword = false;
+
+  environment.systemPackages = with pkgs; [
+    curl
+    efibootmgr
+    git
+    htop
+    lm_sensors
+    pciutils
+    usbutils
+    vim
+  ];
+
+  system.stateVersion = "25.11";
+}
