@@ -574,6 +574,11 @@ in
     # Headless opencode session launcher
     localPkgs.opencode-launch
 
+    # `teamclaude status` for codex-lb: per-account 5h/weekly used %, resets,
+    # status, refresh age. Cross-host (codex-lb runs on devbox, cloudbox and
+    # macOS, each opt-in); says "not enabled on this host" where it is not.
+    localPkgs.codex-lb-status
+
     # Grant an MCP server to an ALREADY-RUNNING session (the mid-flight
     # counterpart to `opencode-launch --mcp`, which is launch-time only).
     localPkgs.oc-mcp-enable
