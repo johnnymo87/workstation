@@ -1316,10 +1316,29 @@ in
     ];
   };
 
-  # P1: Protect sshd from OOM killer — always the last thing to die.
+  # P1: sshd's LISTENER is protected from the OOM killer by sshd itself, not
+  # by systemd. Do NOT add OOMScoreAdjust = "-1000" here (workstation-aj1m,
+  # devbox mirror of cloudbox's workstation-o5s1.29 / PR #608).
+  #
+  # OpenSSH is built with LINUX_OOM_ADJUST: at startup the listener saves its
+  # inherited oom_score_adj and sets itself to -1000 (platform_pre_listen ->
+  # oom_adjust_setup), and every connection child writes the SAVED value back
+  # before becoming sshd-session (platform_post_fork_child ->
+  # oom_adjust_restore). Setting -1000 in systemd makes the saved value -1000,
+  # so every login shell, mosh-server, tmux client, and anything started from
+  # them ran at -1000: immune to both the kernel OOM killer and earlyoom
+  # (which skips -1000 outright).
+  #
+  # Related: users/dev/home.devbox.nix (tmux-spawn-.scope.d,
+  # OOMPolicy=continue). On devbox the tmux server is tmux-main.service
+  # (adj 200), so panes were already killable and that drop-in stands on its
+  # own; it is not a consequence of this change as it was on cloudbox.
+  #
+  # If you ever see the LISTENER at 0, the binary lost LINUX_OOM_ADJUST --
+  # check `strings $(which sshd) | grep oom_adjust`.
+  #
   # CPUWeight > default (100) ensures SSH remains responsive under load.
   systemd.services.sshd.serviceConfig = {
-    OOMScoreAdjust = "-1000";
     CPUWeight = 200;
   };
 
