@@ -938,6 +938,40 @@
         touch $out
       '';
 
+      # Devbox's nightly venv sweeper (idle worktrees' devenv venvs, plus
+      # devenv's shell-*.sh caches). Same SRC seam and same anti-vacuity pin as
+      # tmp-scratch-sweep-tests above, and the same reason for existing: the
+      # failure mode is `shutil.rmtree` inside a worktree somebody works in.
+      # Every keep-assertion was confirmed to FAIL under a mutation that
+      # disables the guard it covers (see the commit that added the suite).
+      #
+      # The suite drives the sweeper at fixture trees through VENV_SWEEP_ROOTS,
+      # at a fixture database through VENV_SWEEP_SESSION_DB, and never touches
+      # the real ~/projects or the real opencode.db.
+      venv-sweep-tests = devboxPkgs.runCommand "venv-sweep-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
+          devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.findutils
+        ];
+        VENV_SWEEP_SRC = self.homeConfigurations.dev.config.home.file.".local/bin/venv-sweep".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
+        export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
+        bash users/dev/test-venv-sweep.sh 2>&1 | tee "$TMPDIR/vs.txt"
+        grep -q '^all venv-sweep tests passed' "$TMPDIR/vs.txt" || {
+          echo "GATE FAILURE: venv-sweep suite did not reach its final banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")" = 53 ] || {
+          echo "GATE FAILURE: expected 53 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       opencode-llm-audit-tests = devboxPkgs.runCommand "opencode-llm-audit-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
