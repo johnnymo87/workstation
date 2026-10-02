@@ -1,6 +1,6 @@
 # Disk hygiene for the NixOS hosts.
 #
-# THREE SEPARATE THINGS LIVE HERE, with different host scopes:
+# FOUR SEPARATE THINGS LIVE HERE, with different host scopes:
 #
 #   disk-cleanup  CLOUDBOX ONLY. Auto-discovers repos with worktrees, cleans
 #                 orphan Bazel output bases, prunes stale caches, runs nix GC.
@@ -14,6 +14,14 @@
 #                 via tmpScratchSweepPy; only the wrapper and schedule differ.
 #                 Cloudbox reaches it through disk-cleanup, so it deliberately
 #                 does NOT get a second unit.
+#
+#   venv-sweep    DEVBOX ONLY. Nightly removal of idle git worktrees' devenv
+#                 Python venvs (~0.95G each, nothing else ever removes them) and
+#                 pruning of devenv's shell-*.sh caches (2026-10-01). Deletes
+#                 ONE cache directory per worktree, never the worktree. It
+#                 shares the /proc probe (pathsInUsePy) and the opencode-session
+#                 probe (sessionOwnsPy) with tmp-scratch-sweep. Cloudbox has no
+#                 devenv worktree population to speak of, so it gets no unit.
 #
 #   disk-watch    BOTH NixOS HOSTS. The between-cleanups threshold alarm. One
 #                 implementation, instantiated per host with its own thresholds
@@ -81,6 +89,85 @@ let
         return inuse
   '';
 
+  # ONE implementation of "does a recent opencode session live in this
+  # directory", shared by tmp-scratch-sweep and venv-sweep rather than written
+  # twice and allowed to drift (it was inline in tmpScratchSweepPy until
+  # venv-sweep needed the same answer). Interpolated into each sweeper's python
+  # heredoc AFTER its `import os, sqlite3, time`; the database path is a
+  # parameter, so each sweeper keeps its own env-var test seam for it.
+  #
+  # The opencode session table is a guard of its own because
+  # paths_in_use() is documented as sufficient on the grounds that "an agent
+  # sitting in a worktree always has it as cwd even when idle". That is true of
+  # a shell or an nvim and FALSE of an opencode session, whose working
+  # directory is a ROW IN opencode.db and not any process's cwd -- the serve
+  # that owns the session runs from its own directory and holds no handle
+  # inside the tree. Measured on cloudbox 2026-09-01, when the sibling worktree
+  # sweeper deleted a live session's directory with /proc showing nothing there.
+  #
+  # This is not a theoretical overlap with /tmp. Sessions live in these very
+  # roots: cloudbox's opencode.db has 130 sessions whose directory is under
+  # /tmp, mostly /tmp/opencode/<name>, two of them touched within the window
+  # tmp-scratch-sweep calls stale. A clean throwaway clone that a week-long
+  # review session reads from but never writes to is exactly the shape that
+  # clears every other guard.
+  #
+  # Tri-state, and only "free" permits removal. Anything that goes wrong --
+  # unreadable, corrupt, locked -- is "unknown", because an empty answer from a
+  # probe that never ran looks exactly like "no session lives here".
+  #
+  # A MISSING db is the one case the callers disagree on, so it is a parameter
+  # rather than a second implementation. The default, "free", is
+  # tmp-scratch-sweep's: no opencode, no sessions, stay inert on a host that
+  # never runs it. venv-sweep passes "unknown": it only ever runs on devbox, where
+  # opencode IS installed, so a missing db there means the path is wrong or the
+  # data directory moved -- and the guard would silently go inert on exactly the
+  # sessions it exists to protect.
+  sessionOwnsPy = ''
+    SESSION_ACTIVE_DAYS = 7
+
+    def session_owns(p, db_path, missing="free"):
+        """'session' | 'free' | 'unknown'. Only 'free' permits removal.
+
+        `missing` is what a db file that does not exist counts as.
+        """
+        if not os.path.isfile(db_path):
+            return missing
+        candidates = {p.rstrip("/") or "/"}
+        try:
+            candidates.add(os.path.realpath(p))
+        except OSError:
+            pass
+        cutoff_ms = int((time.time() - SESSION_ACTIVE_DAYS * 86400) * 1000)
+        try:
+            # Read-only URI: a concurrent serve is writing this database and
+            # must never be disturbed by a cleanup probe.
+            con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
+            # Filter in SQL by TIME only, then match paths in python. The
+            # worktree sweeper compares directory with `in (...)`, which is an
+            # exact match -- fine there, because it is handed the worktree path
+            # itself. Here the candidate is a DIRECTORY and the session may be
+            # sitting in a subdirectory of it (a clone inside a scratch dir, a
+            # `cd src` inside a worktree), which an exact match misses while
+            # deleting the parent out from under it. Recent sessions are few;
+            # the stale rows that make this table large are excluded by the
+            # time predicate.
+            rows = con.execute(
+                "select id, directory from session where time_updated >= ?",
+                (cutoff_ms,),
+            ).fetchall()
+        except Exception:
+            return "unknown"
+        for _id, directory in rows:
+            if not directory:
+                continue
+            directory = directory.rstrip("/") or "/"
+            for c in candidates:
+                if directory == c or directory.startswith(c + "/"):
+                    return "session"
+        return "free"
+  '';
+
   # ONE implementation of the stale-/tmp-scratch sweep, shared by cloudbox's
   # nightly disk-cleanup (as cleanup_tmp_scratch) and devbox's standalone
   # tmp-scratch-sweep, for the same reason mkDiskWatch is a function: the guards
@@ -92,6 +179,8 @@ let
     import os, shutil, sqlite3, subprocess, sys, time
 
     ${pathsInUsePy}
+
+    ${sessionOwnsPy}
 
     age_days, min_mb = int(sys.argv[1]), int(sys.argv[2])
     cutoff = time.time() - age_days * 86400
@@ -107,68 +196,12 @@ let
     # step.
     dry_run = bool(os.environ.get("TMP_SCRATCH_DRY_RUN"))
 
-    # GUARD 4: the opencode session table.
-    #
-    # paths_in_use() is documented as sufficient because "an agent sitting in a
-    # worktree always has it as cwd even when idle". That is true of a shell or
-    # an nvim and FALSE of an opencode session, whose working directory is a
-    # ROW IN opencode.db and not any process's cwd -- the serve that owns the
-    # session runs from its own directory and holds no handle inside the tree.
-    # Measured on cloudbox 2026-09-01, when the sibling worktree sweeper
-    # deleted a live session's directory with /proc showing nothing there.
-    #
-    # This is not a theoretical overlap with /tmp. Sessions live in these very
-    # roots: cloudbox's opencode.db has 130 sessions whose directory is under
-    # /tmp, mostly /tmp/opencode/<name>, two of them touched within the window
-    # this sweeper calls stale. A clean throwaway clone that a week-long review
-    # session reads from but never writes to is exactly the shape that clears
-    # every other guard here.
-    #
-    # The worktree sweeper already carries this check; it was never applied to
-    # the /tmp sweep. Same query, same read-only connection, same tri-state.
-    # MISSING db is not an error -- no opencode, no sessions -- so this stays
-    # inert on a host that never runs it. Unreadable or locked IS an error and
-    # keeps the tree.
+    # GUARD 4: the opencode session table. Shared with venv-sweep, see
+    # sessionOwnsPy for why it exists and how it fails. MISSING db is not an
+    # error -- no opencode, no sessions -- so this stays inert on a host that
+    # never runs it. Unreadable or locked IS an error and keeps the tree.
     SESSION_DB = os.environ.get("TMP_SCRATCH_SESSION_DB") or os.path.expanduser(
         "~/.local/share/opencode/opencode.db")
-    SESSION_ACTIVE_DAYS = 7
-
-    def session_owns(p):
-        """'session' | 'free' | 'unknown'. Only 'free' permits removal."""
-        if not os.path.isfile(SESSION_DB):
-            return "free"
-        candidates = {p.rstrip("/") or "/"}
-        try:
-            candidates.add(os.path.realpath(p))
-        except OSError:
-            pass
-        cutoff_ms = int((time.time() - SESSION_ACTIVE_DAYS * 86400) * 1000)
-        try:
-            # Read-only URI: a concurrent serve is writing this database and
-            # must never be disturbed by a cleanup probe.
-            con = sqlite3.connect("file:%s?mode=ro" % SESSION_DB, uri=True, timeout=10)
-            # Filter in SQL by TIME only, then match paths in python. The
-            # worktree sweeper compares directory with `in (...)`, which is an
-            # exact match -- fine there, because it is handed the worktree path
-            # itself. Here the candidate is a /tmp scratch DIRECTORY and the
-            # session may be sitting in a subdirectory of it (a clone inside the
-            # scratch dir), which an exact match misses while deleting the
-            # parent out from under it. Recent sessions are few; the stale rows
-            # that make this table large are excluded by the time predicate.
-            rows = con.execute(
-                "select id, directory from session where time_updated >= ?",
-                (cutoff_ms,),
-            ).fetchall()
-        except Exception:
-            return "unknown"
-        for _id, directory in rows:
-            if not directory:
-                continue
-            directory = directory.rstrip("/") or "/"
-            for c in candidates:
-                if directory == c or directory.startswith(c + "/"):
-                    return "session"
-        return "free"
 
     def measure(p):
         """(megabytes, newest mtime anywhere in the tree).
@@ -251,7 +284,7 @@ let
     for mb, p in sorted(cands, reverse=True):
         if p in inuse:
             print(f"  keep {mb}M {p} (open by a live process)"); continue
-        owner = session_owns(p)
+        owner = session_owns(p, SESSION_DB)
         if owner != "free":
             print(f"  keep {mb}M {p} (recent opencode session)" if owner == "session"
                   else f"  keep {mb}M {p} (session probe failed)")
@@ -288,6 +321,523 @@ let
   tmpScratchAgeDays = 7;
   tmpScratchMinMb = 100;
   tmpScratchRoots = "/tmp /tmp/opencode";
+
+  # ONE implementation of the venv sweep. Reads its knobs from the environment
+  # (the wrapper in the devbox block below supplies the shipped defaults), not
+  # argv, so a root with a glob character in it is never re-split by a shell.
+  #
+  # WHAT THIS RECLAIMS, MEASURED ON DEVBOX 2026-10-01. Every
+  # eternal-machinery worktree (~/projects/eternal-machinery/.worktrees/<slug>)
+  # gets a devenv-built Python venv at <wt>/.devenv/state/venv: ~0.95G each, real
+  # bytes (no hardlinks), and nothing on devbox ever removed one. A by-hand
+  # cleanup that day took 14 of them out of idle worktrees for 12.9G on a 149G
+  # root that disk-watch already treats as 84% full on an ordinary day.
+  #
+  # WHY IT IS SAFE TO DELETE AT ALL. devenv recreates the venv by itself on the
+  # next `devenv shell` / direnv entry, so the price of a wrong deletion is one
+  # rebuild, not lost work. That is why this sweeper deletes ONE directory per
+  # worktree and nothing else, and why the guards below are about not breaking a
+  # session that is USING the venv right now rather than about protecting data.
+  # They are still written fail-safe: any "cannot tell" keeps the venv.
+  #
+  # TWO PHASES, IN THIS ORDER, and the order is load-bearing:
+  #   1. venv decisions, for registered linked worktrees only;
+  #   2. shell-*.sh cache pruning, for every .devenv dir.
+  # Phase 2 unlinks files, which bumps the mtime of the .devenv directory --
+  # and .devenv is INSIDE the worktree phase 1 judges for idleness. Pruned
+  # first, a worktree would look touched this minute and keep its venv for
+  # another night. The suite has a worktree with both and asserts the venv goes.
+  #
+  # Order protects only TONIGHT, though. Phase 2 also puts the directory's
+  # times back after pruning (a cache prune is not activity); without that, a
+  # worktree idling toward the window has its clock reset every night a prune
+  # fires, and its venv goes at 5-6 days idle instead of 3.
+  venvSweepPy = ''
+    import fnmatch, os, shutil, sqlite3, stat, subprocess, time
+
+    ${pathsInUsePy}
+
+    ${sessionOwnsPy}
+
+    age_days = int(os.environ["VENV_SWEEP_AGE_DAYS"])
+    min_mb = int(os.environ["VENV_SWEEP_MIN_MB"])
+    shell_age_days = int(os.environ["VENV_SWEEP_SHELL_AGE_DAYS"])
+    roots = [r.rstrip("/") or "/" for r in os.environ["VENV_SWEEP_ROOTS"].split()]
+    SESSION_DB = os.environ["VENV_SWEEP_SESSION_DB"]
+    # Test seam only; see paths_in_use.
+    proc_dir = os.environ.get("VENV_SWEEP_PROC") or "/proc"
+    # Rehearsal mode: decide exactly as a real sweep would, delete nothing, and
+    # say "would remove". Every guard is upstream of the rmtree/unlink, so the
+    # rehearsal exercises all of them and only skips the irreversible step. The
+    # first run on a host is the one nobody can check afterwards.
+    dry_run = bool(os.environ.get("VENV_SWEEP_DRY_RUN"))
+
+    now = time.time()
+    cutoff = now - age_days * 86400
+    shell_cutoff = now - shell_age_days * 86400
+    uid = os.getuid()
+    MB = 1024 * 1024
+    VENV_REL = os.path.join(".devenv", "state", "venv")
+
+    def real_dir(p):
+        """A directory that is not a symlink. Never follows."""
+        try:
+            return stat.S_ISDIR(os.lstat(p).st_mode)
+        except OSError:
+            return False
+
+    def list_dirs(parent):
+        """Real (non-symlink) subdirectories of `parent`, sorted; [] if unreadable."""
+        try:
+            names = sorted(os.listdir(parent))
+        except OSError:
+            return []
+        return [os.path.join(parent, n) for n in names
+                if real_dir(os.path.join(parent, n))]
+
+    def worktree_dirs(root):
+        """Candidate worktree directories under `root`.
+
+        Two shapes, because both exist: `root/*/.worktrees/*` (root is a
+        projects directory holding repos) and `root/.worktrees/*` (root is
+        itself a repo). Only the path SHAPE is judged here; whether the
+        directory is really a linked worktree is the caller's .git-file test.
+        """
+        out = []
+        for container in [root] + list_dirs(root):
+            wts = os.path.join(container, ".worktrees")
+            if real_dir(wts):
+                out += list_dirs(wts)
+        return out
+
+    def venv_stats(p, dev):
+        """(megabytes, crossed_mount) of REAL bytes under `p`.
+
+        st_blocks, not st_size: the same measure tmp-scratch-sweep uses, and the
+        one that agrees with what `df` will say afterwards. Symlinks are not
+        counted and not followed (a venv's bin/python links into /nix/store, and
+        following that would both overcount and walk the store). A subdirectory
+        on another device is not descended into and is reported, because
+        rmtree would walk straight through it.
+        """
+        total = 0
+        crossed = False
+        for dirpath, dirnames, filenames in os.walk(p, onerror=lambda e: None):
+            descend = []
+            for name in filenames + dirnames:
+                try:
+                    st = os.lstat(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    continue
+                if st.st_dev != dev:
+                    crossed = True
+                    continue
+                total += getattr(st, "st_blocks", 0) * 512
+                if name in dirnames:
+                    descend.append(name)
+            dirnames[:] = descend
+        return total // MB, crossed
+
+    def last_activity(root, skip):
+        """(newest_mtime, path, complete) -- stops at the first entry newer than `cutoff`.
+
+        "Idle" has to mean NOTHING ANYWHERE UNDER the worktree changed within
+        the window. A directory's own mtime only moves when its top-level
+        entries change, so judging the tree by lstat(root) would read a
+        worktree that was edited five minutes ago, in a nested file, as
+        untouched for a month. (Same reasoning as tmp-scratch-sweep's
+        measure().) Hence the walk, which also notices a build, a test run, a
+        __pycache__ write.
+
+        `skip` is the one path not examined: the venv itself. devenv writes
+        inside it on every entry and pip/uv write into it on every install, so
+        counting it would make the venv's own churn the reason it is kept --
+        exactly the case this sweeper exists for.
+
+        Never follows symlinks, never descends into another filesystem.
+        `complete` is False if any directory could not be read: an unreadable
+        subtree is "cannot tell", and the caller keeps the venv.
+        """
+        errors = []
+        newest, where = 0.0, root
+        try:
+            rst = os.lstat(root)
+        except OSError:
+            return newest, where, False
+        newest = rst.st_mtime
+        if newest >= cutoff:
+            return newest, where, True
+        for dirpath, dirnames, filenames in os.walk(root, onerror=errors.append):
+            descend = []
+            for name in filenames + dirnames:
+                full = os.path.join(dirpath, name)
+                if skip is not None and full == skip:
+                    continue
+                try:
+                    st = os.lstat(full)
+                except OSError:
+                    errors.append(full)
+                    continue
+                if st.st_mtime > newest:
+                    newest, where = st.st_mtime, full
+                    if newest >= cutoff:
+                        return newest, where, True
+                if name in dirnames and not stat.S_ISLNK(st.st_mode) and st.st_dev == rst.st_dev:
+                    descend.append(name)
+            dirnames[:] = descend
+        return newest, where, not errors
+
+    def admin_gitdir(wt):
+        """The worktree's admin gitdir (<main>/.git/worktrees/<name>), or None.
+
+        Its HEAD, index and logs move on a commit, a checkout or a `git status`
+        -- activity that touches NO file in the working tree. A session that
+        committed an hour ago and has been reading code since looks idle to a
+        worktree-only walk.
+        """
+        try:
+            with open(os.path.join(wt, ".git")) as fh:
+                line = fh.readline().strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        if not line.startswith("gitdir:"):
+            return None
+        gd = line.split(":", 1)[1].strip()
+        if not os.path.isabs(gd):
+            gd = os.path.join(wt, gd)
+        gd = os.path.normpath(gd)
+        return gd if real_dir(gd) else None
+
+    def ignore_status(wt):
+        """0 = the venv is gitignored there, 1 = it is not, anything else = cannot tell.
+
+        Why this is a guard at all: the venv is only a disposable cache if git
+        agrees. A venv that is NOT ignored is either tracked or something
+        somebody is about to commit; deleting it is not a cache eviction.
+        GIT_DIR and friends are dropped from the environment: inherited from a
+        hook or a wrapper they would point git at a DIFFERENT repository, whose
+        ignore rules would then answer for this one.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        try:
+            r = subprocess.run(
+                ["git", "--no-optional-locks", "-C", wt, "check-ignore", "-q", "--",
+                 VENV_REL.replace(os.sep, "/")],
+                capture_output=True, timeout=60, env=env)
+        except Exception:
+            return 128
+        return r.returncode
+
+    def env_in_use(paths, proc):
+        """The subset of `paths` that a live process of OURS points into.
+
+        paths_in_use sees cwd, exe and open fds. A python process running out of
+        a venv has none of the three there: its exe resolves into /nix/store,
+        its imports are mmaps rather than fds, and its cwd can be anywhere.
+        What it does carry is the venv in its ENVIRONMENT -- VIRTUAL_ENV for an
+        activated venv, DEVENV_ROOT for anything started from a devenv shell,
+        which includes every tool launched out of a direnv terminal -- and, for
+        a script run through the venv's interpreter, in argv[0].
+
+        Only processes owned by this uid: /proc/<pid>/environ is unreadable to
+        any other, and a process that is not ours is not one this sweeper's
+        owner can have started in their worktree anyway. A pid whose entries
+        cannot be read is skipped one at a time, as paths_in_use does.
+
+        Raises OSError if `proc` cannot be listed. Callers MUST treat that as
+        "cannot tell".
+        """
+        paths = [p.rstrip("/") or "/" for p in paths]
+        hit = set()
+        for pid in os.listdir(proc):
+            if not pid.isdigit():
+                continue
+            base = os.path.join(proc, pid)
+            try:
+                if os.stat(base).st_uid != uid:
+                    continue
+            except OSError:
+                continue
+            values = []
+            try:
+                with open(base + "/environ", "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                raw = b""
+            for item in raw.split(b"\0"):
+                for key in (b"VIRTUAL_ENV=", b"DEVENV_ROOT="):
+                    if item.startswith(key):
+                        values.append(item[len(key):])
+            try:
+                with open(base + "/cmdline", "rb") as fh:
+                    argv0 = fh.read().split(b"\0", 1)[0]
+            except OSError:
+                argv0 = b""
+            if argv0:
+                values.append(argv0)
+            for v in values:
+                v = os.fsdecode(v).rstrip("/")
+                for p in paths:
+                    if v == p or v.startswith(p + "/"):
+                        hit.add(p)
+        return hit
+
+    def keep(mb, path, why):
+        size = "?M" if mb is None else "%dM" % mb
+        print("  keep %s %s (%s)" % (size, path, why))
+
+    # ---- phase 1: venvs ----------------------------------------------------
+
+    cands = []
+    seen = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for wt in worktree_dirs(root):
+            if wt in seen:
+                continue
+            seen.add(wt)
+            # A mount point under a root is another filesystem wearing a
+            # worktree's name.
+            if os.path.ismount(wt):
+                continue
+            # ONLY a registered linked worktree: its .git is a FILE. A primary
+            # checkout has a .git DIRECTORY, and a full clone dropped into
+            # .worktrees/ has one too. Neither is ours to judge.
+            try:
+                if not stat.S_ISREG(os.lstat(os.path.join(wt, ".git")).st_mode):
+                    continue
+            except OSError:
+                continue
+            target = os.path.join(wt, VENV_REL)
+            # Every component down to the venv must be a real directory.
+            # lstat() of the last component alone would quietly follow a
+            # symlinked .devenv or .devenv/state to wherever it points.
+            parts = [os.path.join(wt, ".devenv"), os.path.join(wt, ".devenv", "state"), target]
+            sts = []
+            for part in parts:
+                try:
+                    sts.append(os.lstat(part))
+                except OSError:
+                    break
+            if len(sts) < len(parts):
+                continue                # no venv here: the common case, and silent
+            if any(stat.S_ISLNK(s.st_mode) for s in sts):
+                keep(None, target, "symlink in the path to the venv; never followed")
+                continue
+            tst = sts[-1]
+            if not stat.S_ISDIR(tst.st_mode):
+                continue
+            try:
+                same_fs = tst.st_dev == os.lstat(wt).st_dev
+            except OSError:
+                same_fs = False
+            if os.path.ismount(target) or not same_fs:
+                keep(None, target, "mount point or other filesystem")
+                continue
+            if tst.st_uid != uid:
+                keep(None, target, "not owned by this user")
+                continue
+
+            mb, crossed = venv_stats(target, tst.st_dev)
+            if crossed:
+                keep(mb, target, "another filesystem is mounted inside the venv")
+                continue
+            if mb < min_mb:
+                keep(mb, target, "below the size floor of %d MB" % min_mb)
+                continue
+
+            # GUARD: idle. The worktree, EXCLUDING the venv, and its admin
+            # gitdir, must both be untouched for the whole window.
+            newest, where, complete = last_activity(wt, target)
+            if newest >= cutoff:
+                keep(mb, target, "touched %.1fd ago: %s" % (
+                    (now - newest) / 86400, os.path.relpath(where, wt)))
+                continue
+            if not complete:
+                keep(mb, target, "could not read the whole worktree; cannot tell if idle")
+                continue
+            admin = admin_gitdir(wt)
+            if admin is None:
+                keep(mb, target, "admin gitdir missing or unreadable; cannot see commit activity")
+                continue
+            newest, where, complete = last_activity(admin, None)
+            if newest >= cutoff:
+                keep(mb, target, "git admin dir touched %.1fd ago: %s" % (
+                    (now - newest) / 86400, os.path.relpath(where, admin)))
+                continue
+            if not complete:
+                keep(mb, target, "could not read the admin gitdir; cannot tell if idle")
+                continue
+            cands.append((mb, wt, target))
+
+    # GUARD: liveness, re-checked for EACH candidate immediately before its
+    # rmtree rather than once up front. Phase 1 above is a walk of every
+    # worktree plus a `git check-ignore` per candidate: minutes, on a box where
+    # a session can start in any worktree at any moment. An answer taken before
+    # the walk says nothing about the instant of deletion, and the cost of
+    # asking again is one /proc listing per candidate.
+    #
+    # Three independent questions, any "yes" or "cannot tell" keeps the venv:
+    #   1. paths_in_use: a process with cwd, exe or an open fd inside the
+    #      WORKTREE, not merely the venv. A shell or `npm run dev` sitting in
+    #      src/ never touches the venv path -- and it is the venv it imports
+    #      from next. /proc links are already resolved, so the resolved form of
+    #      the path is probed too: a worktree reached through a symlinked
+    #      parent would otherwise never match.
+    #   2. env_in_use: see below.
+    #   3. session_owns: an opencode session's directory is a row, not a handle.
+    #
+    # VENV_SWEEP_PRE_REMOVE_HOOK is a TEST SEAM and nothing shipped sets it: an
+    # executable run with the venv path just before the probe, which is the only
+    # way a suite can make something happen "between the walk and the delete"
+    # deterministically.
+    pre_hook = os.environ.get("VENV_SWEEP_PRE_REMOVE_HOOK")
+    warned_proc = []
+
+    def liveness_block(wt):
+        """None if the worktree is demonstrably unused, else the reason to keep it."""
+        paths = {wt: wt}
+        try:
+            paths[os.path.realpath(wt)] = wt
+        except OSError:
+            pass
+        try:
+            if paths_in_use(sorted(paths), proc_dir):
+                return "live process inside the worktree"
+            if env_in_use(sorted(paths), proc_dir):
+                return "live process: environment or argv[0] points into the worktree"
+        except OSError as exc:
+            # "Could not look" is not "nothing is there". Keep every venv.
+            if not warned_proc:
+                warned_proc.append(1)
+                print("  WARN: cannot read %s (%s); keeping every venv this run" % (proc_dir, exc))
+            return "liveness probe failed"
+        owner = session_owns(wt, SESSION_DB, missing="unknown")
+        if owner == "session":
+            return "recent opencode session"
+        if owner != "free":
+            return ("session db missing" if not os.path.isfile(SESSION_DB)
+                    else "session probe failed")
+        return None
+
+    if cands and not os.path.isfile(SESSION_DB):
+        print("  WARN: session db missing at %s; keeping all venvs" % SESSION_DB)
+
+    freed = 0
+    for mb, wt, target in sorted(cands, reverse=True):
+        rc = ignore_status(wt)
+        if rc != 0:
+            keep(mb, target, "not gitignored in this worktree" if rc == 1
+                 else "git check-ignore failed, rc=%d" % rc)
+            continue
+        if pre_hook:
+            try:
+                subprocess.run([pre_hook, target], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=30)
+            except Exception:
+                pass
+        why = liveness_block(wt)
+        if why:
+            keep(mb, target, why)
+            continue
+        # Said in the log because the worktree owner is not reading it tonight:
+        # the next person to find a venv missing wants the one-line fix.
+        rebuild = "rebuild: cd %s && devenv shell" % wt
+        if dry_run:
+            print("  would remove %dM %s (idle >%dd; %s)" % (mb, target, age_days, rebuild))
+            freed += mb
+            continue
+        try:
+            shutil.rmtree(target)
+        except OSError as exc:
+            print("  WARN: could not fully remove %s: %s" % (target, exc))
+            continue
+        print("  removed %dM %s (idle >%dd; %s)" % (mb, target, age_days, rebuild))
+        freed += mb
+    print("  venv sweep %s %d MB" % ("would free" if dry_run else "freed", freed))
+
+    # ---- phase 2: shell-*.sh caches ----------------------------------------
+    #
+    # devenv writes .devenv/shell-<hash>.sh on every environment change and
+    # never prunes: 14k files, 1.6G across ~/projects on 2026-10-01. They are
+    # pure caches (regenerated on the next entry), which is why this phase also
+    # covers PRIMARY checkouts, unlike the venv phase.
+    #
+    # The newest is kept regardless of age: it is the one a live direnv session
+    # is most likely to have sourced, and a lone old file in an idle checkout is
+    # the cheapest thing in the world to leave alone.
+    #
+    # Only regular files owned by us. A symlink named shell-x.sh is not a cache
+    # file and is neither deleted nor allowed to count as "the newest".
+    devenv_dirs = {}
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for d in ([os.path.join(root, ".devenv")]
+                  + [os.path.join(c, ".devenv") for c in list_dirs(root)]
+                  + [os.path.join(w, ".devenv") for w in worktree_dirs(root)]):
+            if real_dir(d):
+                devenv_dirs[d] = True
+
+    shell_files = 0
+    shell_bytes = 0
+    for d in sorted(devenv_dirs):
+        try:
+            names = os.listdir(d)
+            dir_st = os.lstat(d)
+        except OSError:
+            continue
+        found = []
+        for n in names:
+            if not fnmatch.fnmatchcase(n, "shell-*.sh"):
+                continue
+            p = os.path.join(d, n)
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                found.append((st.st_mtime, n, p, st))
+        found.sort()
+        pruned_here = False
+        # found[-1] is the newest and always stays.
+        for mtime, _n, p, st in found[:-1]:
+            if mtime >= shell_cutoff or st.st_uid != uid:
+                continue
+            if not dry_run:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    continue
+                pruned_here = True
+            shell_files += 1
+            shell_bytes += getattr(st, "st_blocks", 0) * 512
+        # A cache prune is not ACTIVITY, and unlinking bumped this directory's
+        # mtime. For a worktree that matters: .devenv is inside the tree phase 1
+        # judges for idleness, so every night a prune ran, the next night's
+        # idle test would see "touched a day ago" and restart the clock -- a
+        # venv meant to go at 3 days idle would go at 5 or 6. Put the times
+        # back. Same-night ordering (venvs first) is not enough: it protects
+        # tonight's decision and nothing after it.
+        if pruned_here:
+            try:
+                os.utime(d, ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+            except OSError:
+                pass
+    print("  shell cache prune: %s %d files (%.1f MB), older than %dd, newest per dir kept"
+          % ("would remove" if dry_run else "removed", shell_files,
+             shell_bytes / MB, shell_age_days))
+  '';
+
+  venvSweepAgeDays = 3;
+  venvSweepMinMb = 50;
+  venvSweepShellAgeDays = 2;
 
   # --------------------------------------------------------------------------
   # disk-watch, the alarm BETWEEN cleanups -- ONE implementation, instantiated
@@ -1985,6 +2535,111 @@ lib.mkMerge [
         OnCalendar = "*-*-* 02:00:00";
         Persistent = true;
         RandomizedDelaySec = "30min";
+      };
+      Install = {
+        WantedBy = [ "timers.target" ];
+      };
+    };
+  })
+
+  # ==========================================================================
+  # DEVBOX venv-sweep: nightly removal of idle worktrees' devenv Python venvs,
+  # and pruning of devenv's shell-*.sh caches.
+  #
+  # Why it exists and why deleting is safe: see venvSweepPy above. The short
+  # form is ~0.95G per eternal-machinery worktree, nothing ever removing one,
+  # 12.9G reclaimed by hand on 2026-10-01 -- and devenv rebuilds a venv on the
+  # next entry, so a worktree that is still wanted costs a rebuild, not work.
+  #
+  # DEVBOX ONLY, and not an extension of tmp-scratch-sweep: that one judges a
+  # whole DIRECTORY as scratch and removes all of it, this one removes a single
+  # cache directory inside trees that are not scratch at all. Folding them
+  # together would blur which of the two blast radii a guard protects. They
+  # share what is genuinely common (the /proc probe, the session-table probe).
+  #
+  # NO sudo, for the same reason as tmp-scratch-sweep: every candidate is
+  # rejected unless it is owned by this uid.
+  #
+  # Rehearse before trusting it on a host it has never run on:
+  #   VENV_SWEEP_DRY_RUN=1 ~/.local/bin/venv-sweep
+  # ==========================================================================
+  (lib.mkIf isDevbox {
+    home.file.".local/bin/venv-sweep" = {
+      executable = true;
+      text = ''
+        #!${pkgs.bash}/bin/bash
+        set -euo pipefail
+
+        PATH="${lib.makeBinPath [
+          pkgs.coreutils
+          pkgs.git
+          pkgs.python3
+        ]}:$PATH"
+
+        # Env-overridable so the suite can drive this at a fixture tree instead
+        # of the real ~/projects, and at a fixture session database instead of
+        # the real opencode.db. Nothing shipped overrides them.
+        export VENV_SWEEP_ROOTS="''${VENV_SWEEP_ROOTS:-$HOME/projects}"
+        export VENV_SWEEP_AGE_DAYS="''${VENV_SWEEP_AGE_DAYS:-${toString venvSweepAgeDays}}"
+        export VENV_SWEEP_MIN_MB="''${VENV_SWEEP_MIN_MB:-${toString venvSweepMinMb}}"
+        export VENV_SWEEP_SHELL_AGE_DAYS="''${VENV_SWEEP_SHELL_AGE_DAYS:-${toString venvSweepShellAgeDays}}"
+        export VENV_SWEEP_SESSION_DB="''${VENV_SWEEP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+
+        log() { echo "[venv-sweep] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+
+        log "Sweeping idle worktree venvs in $VENV_SWEEP_ROOTS (idle >''${VENV_SWEEP_AGE_DAYS}d, >=''${VENV_SWEEP_MIN_MB}MB; shell caches >''${VENV_SWEEP_SHELL_AGE_DAYS}d)..."
+        # A python failure is logged, not propagated: a unit in `failed` is a
+        # state nobody reads, and tomorrow's run is the retry.
+        python3 - <<'PYEOF' || log "WARN: venv sweep failed"
+        ${venvSweepPy}
+        PYEOF
+        log "Sweep complete"
+      '';
+    };
+
+    systemd.user.services.venv-sweep = {
+      Unit = {
+        Description = "Sweep idle worktrees' devenv Python venvs";
+      };
+      Service = {
+        Type = "oneshot";
+        ExecStart = "%h/.local/bin/venv-sweep";
+        StandardOutput = "journal";
+        StandardError = "journal";
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        Environment = [
+          "HOME=%h"
+          # No /run/wrappers/bin: this sweeper must never want sudo.
+          "PATH=/run/current-system/sw/bin"
+        ];
+      };
+    };
+
+    systemd.user.timers.venv-sweep = {
+      Unit = {
+        Description = "Idle worktree venv sweep timer";
+      };
+      Timer = {
+        # BEFORE 03:00, for the reason tmp-scratch-sweep's timer spells out:
+        # hosts/devbox/configuration.nix runs nightly-restart-background at
+        # 03:00, which SIGKILLs every nvim and reaps every opencode TUI hosted
+        # under one. The /proc liveness guard can only see processes that are
+        # ALIVE when it runs, so sweeping after the reset would leave the guard
+        # present, correct and blind -- and a worktree nobody has touched since
+        # the reset is indistinguishable from an abandoned one.
+        #
+        # 02:15 + up to 15min of jitter starts no later than 02:30, which leaves
+        # the run 30 minutes to finish before the reset. That is plenty: the work
+        # is an mtime walk of a few dozen worktrees at idle I/O priority.
+        # Staggered from tmp-scratch-sweep (02:00 + <=30min) so the two walks
+        # are less likely to contend for the same disk, not as a correctness
+        # matter.
+        #
+        # Persistent so a box that was off at 02:15 still sweeps.
+        OnCalendar = "*-*-* 02:15:00";
+        Persistent = true;
+        RandomizedDelaySec = "15min";
       };
       Install = {
         WantedBy = [ "timers.target" ];
