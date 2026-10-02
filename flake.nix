@@ -64,6 +64,7 @@
       # cannot build it first. See pkgs/cfp-prefetch-darwin/default.nix.
       cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
       clerk = p.callPackage ./pkgs/clerk { };
+      codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
       # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
       # two can never drift to different @devcycle/cli versions.
@@ -381,6 +382,29 @@
         }
         grep -q '^Ran 19 tests' "$TMPDIR/astra.txt" || {
           echo "GATE FAILURE: expected 19 tests; a suite that stops asserting still prints OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # ---- pkgs/codex-lb-status (bead workstation-dmkv) ---------------------
+      #
+      # Runs the SHIPPED binary against throwaway loopback fixtures (via
+      # CODEX_LB_PORT); no live codex-lb or subscription involved. Count pinned
+      # like astra-probe: several cases assert absence (no `null`, no crash), and
+      # those pass trivially if the suite stops running them.
+      codex-lb-status-tests = devboxPkgs.runCommand "codex-lb-status-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+        CODEX_LB_STATUS_BIN = "${devboxPkgs.callPackage ./pkgs/codex-lb-status { }}/bin/codex-lb-status";
+      } ''
+        cd ${self}
+        python3 pkgs/codex-lb-status/test_codex_lb_status.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^OK' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: codex-lb-status suite did not pass." >&2
+          exit 1
+        }
+        grep -q '^Ran 22 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 22 tests; a suite that stops asserting still prints OK." >&2
           exit 1
         }
         touch $out
