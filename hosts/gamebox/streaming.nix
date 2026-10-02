@@ -21,10 +21,27 @@ let
   # an unpinned build would silently produce a Sunshine whose CUDA kernels
   # cannot run on the GTX 1080 Ti. Compiles locally (unfree CUDA is not in
   # cache.nixos.org).
-  sunshine = unstable.sunshine.override {
+  #
+  # Patch: force a fixed capture frame rate. For KWin < 6.7.80 Sunshine asks
+  # PipeWire for a *variable* rate, sending 0/1 as the preferred
+  # maxFramerate. KWin 6.5 offers maxFramerate as a range [1/1 .. 60/1], so
+  # the 0/1 preference clamps to the range minimum and the stream is
+  # negotiated at maxFramerate=1/1: KWin then delivers ~1 frame/s and
+  # Sunshine pads to its 30 fps floor with repeats (observed: jerky motion,
+  # ~28 fps incoming in Moonlight, `pw-cli enum-params <kwin node> Format`
+  # showing maxFramerate 1/1). Requesting the client's fps instead makes the
+  # preferred max 60/1, which KWin honours.
+  sunshine = (unstable.sunshine.override {
     cudaSupport = true;
     cudaPackages = unstable.cudaPackages_12_9;
-  };
+  }).overrideAttrs (old: {
+    postPatch = (old.postPatch or "") + ''
+      substituteInPlace src/platform/linux/pipewire.cpp \
+        --replace-fail \
+          'const AVRational fps = (negotiate_variable_rate ? AVRational {0, 1} : ::video::framerate_to_rational(config));' \
+          'const AVRational fps = ((void) negotiate_variable_rate, ::video::framerate_to_rational(config));'
+    '';
+  });
 in
 {
   # --- GPU -----------------------------------------------------------------
