@@ -952,6 +952,7 @@
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
           devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.findutils
+          devboxPkgs.procps
         ];
         VENV_SWEEP_SRC = self.homeConfigurations.dev.config.home.file.".local/bin/venv-sweep".source;
       } ''
@@ -964,8 +965,8 @@
           echo "GATE FAILURE: venv-sweep suite did not reach its final banner." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")" = 53 ] || {
-          echo "GATE FAILURE: expected 53 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")" = 74 ] || {
+          echo "GATE FAILURE: expected 74 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")." >&2
           exit 1
         }

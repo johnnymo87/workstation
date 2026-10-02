@@ -27,7 +27,13 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmpdir="$(mktemp -d)"
 pids=()
 cleanup() {
-  for p in "${pids[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+  # -P first: the argv[0] fixture is a bash with a `sleep` CHILD, which would
+  # outlive its parent holding this suite's stdout open.
+  for p in "${pids[@]:-}"; do
+    [ -n "$p" ] || continue
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+  done
   rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -112,7 +118,17 @@ old_stamp=202401010000            # far outside any plausible age window
 g() { git -c user.email=t@t -c user.name=t "$@"; }
 
 # A fixture tree is never allowed to see the developer's real session database.
+# The default is a VALID database with no rows: venv-sweep treats a MISSING
+# database as "cannot tell" and keeps everything, so "no sessions" has to be a
+# database that exists and says so. `no_db` is the path that does not exist.
 no_db="$tmpdir/no-such-opencode.db"
+empty_db="$tmpdir/empty-opencode.db"
+python3 - "$empty_db" <<'PYEOF'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table session (id text, directory text, time_updated integer)")
+con.commit()
+PYEOF
 
 # mkrepo <path> <ignore: yes|no>: a primary checkout with one commit. `yes`
 # gitignores .devenv/ (as the real repos do); `no` is the repo that "lacks the
@@ -143,7 +159,7 @@ venv_into() {
 # deliberately LEFT FRESH: its own mtimes must not count as worktree activity
 # (devenv writes there on every entry), and leaving it fresh is what proves it.
 age_tree() {
-  find "$1" -path "$1/.devenv/state/venv" -prune -o -exec touch -h -t "$old_stamp" {} +
+  find "$1" -path "$1/.devenv/state/venv" -prune -o -exec touch -h -t "${2:-$old_stamp}" {} +
 }
 
 # mkwt <repo> <name>: a registered linked worktree at <repo>/.worktrees/<name>,
@@ -151,11 +167,11 @@ age_tree() {
 # treats a fresh commit/checkout as activity and a fresh `git worktree add`
 # would otherwise make every fixture look busy.
 mkwt() {
-  local repo="$1" name="$2" wt="$1/.worktrees/$2"
+  local repo="$1" name="$2" wt="$1/.worktrees/$2" stamp="${3:-$old_stamp}"
   git -C "$repo" worktree add --quiet -b "$name" "$wt" > /dev/null 2>&1
   venv_into "$wt"
-  age_tree "$wt"
-  age_tree "$repo/.git/worktrees/$name"
+  age_tree "$wt" "$stamp"
+  age_tree "$repo/.git/worktrees/$name" "$stamp"
 }
 
 # One process whose cwd is a given directory. /proc/<pid>/cwd is only correct
@@ -170,6 +186,27 @@ sleeper_in() {
   done
 }
 
+# A process that is NOT in the worktree by any /proc handle (its cwd is outside
+# it, it holds no fd there, its exe is /usr/bin/sleep) but whose ENVIRONMENT or
+# argv[0] points into it -- which is what a python process running out of a
+# venv looks like. Each waits for the exec to land before returning, because
+# /proc/<pid>/environ shows the PARENT's environment until it does.
+sleeper_env() {        # <VAR> <value>
+  ( cd "$tmpdir" && exec env "$1=$2" sleep 300 ) &
+  local pid=$!
+  pids+=("$pid")
+  for _ in $(seq 1 50); do grep -qaF "$1=$2" "/proc/$pid/environ" 2>/dev/null && break; sleep 0.1; done
+}
+sleeper_argv0() {      # <argv0>
+  # bash, not sleep: coreutils' multicall sleep dispatches on argv[0] and dies
+  # as "unknown program". The trailing `:` stops bash exec-ing the sleep itself,
+  # which would replace the argv[0] being tested.
+  ( cd "$tmpdir" && exec -a "$1" bash -c 'sleep 300; :' ) > /dev/null 2>&1 &
+  local pid=$!
+  pids+=("$pid")
+  for _ in $(seq 1 50); do grep -qaF "$1" "/proc/$pid/cmdline" 2>/dev/null && break; sleep 0.1; done
+}
+
 # run_sweep <log> [VAR=value ...]: one sweep over $sweep_roots. MIN_MB is 1 so
 # 3MB fixtures qualify; AGE_DAYS and SHELL_AGE_DAYS are deliberately NOT set so
 # the suite exercises the shipped defaults (3 and 2).
@@ -177,7 +214,7 @@ run_sweep() {
   local log="$1"; shift
   env VENV_SWEEP_ROOTS="$sweep_roots" \
       VENV_SWEEP_MIN_MB=1 \
-      VENV_SWEEP_SESSION_DB="$no_db" \
+      VENV_SWEEP_SESSION_DB="$empty_db" \
       "$@" \
       "$script_src" > "$log" 2>&1 || fail "sweeper exited non-zero ($log)" "log: $(cat "$log")"
 }
@@ -185,6 +222,7 @@ run_sweep() {
 # --- scenario 1: the main run ------------------------------------------------
 
 root="$tmpdir/proj"
+wt() { echo "$root/repo/.worktrees/$1"; }
 mkdir -p "$root"
 mkrepo "$root/repo" yes
 mkrepo "$root/repo-noignore" no
@@ -260,6 +298,17 @@ rm -rf "$root/repo/.worktrees/symdevenv/.devenv"
 ln -s "$tmpdir/outside-devenv" "$root/repo/.worktrees/symdevenv/.devenv"
 age_tree "$root/repo/.worktrees/symdevenv"
 
+# 13. processes whose cwd is OUTSIDE the worktree and who hold nothing in it,
+#     but whose environment (VIRTUAL_ENV, DEVENV_ROOT) or argv[0] points into
+#     it -> kept. paths_in_use cannot see these: a python running out of a venv
+#     has its exe in /nix/store and its imports mmapped, not open.
+mkwt "$root/repo" envvenv
+sleeper_env VIRTUAL_ENV "$(wt envvenv)/.devenv/state/venv"
+mkwt "$root/repo" envroot
+sleeper_env DEVENV_ROOT "$(wt envroot)"
+mkwt "$root/repo" envargv
+sleeper_argv0 "$(wt envargv)/.devenv/state/venv/bin/python"
+
 # A SECOND root that is itself a repo, so the `R/.worktrees/*` discovery shape
 # (as opposed to `R/*/.worktrees/*`) is exercised.
 selfroot="$tmpdir/selfrepo"
@@ -294,15 +343,21 @@ echo only > "$shell_d3/shell-only.sh"; touch -t "$old_stamp" "$shell_d3/shell-on
 
 sweep_roots="$root $selfroot"
 main_log="$tmpdir/main.log"
+d1_mtime_before="$(stat -c %y "$shell_d1")"
 run_sweep "$main_log"
-
-wt() { echo "$root/repo/.worktrees/$1"; }
 
 assert_gone "$(wt idle)/.devenv/state/venv"        "idle worktree: venv is removed"
 assert_kept "$(wt idle)/.devenv/state/other"       "idle worktree: the rest of .devenv is intact"
 assert_kept "$(wt idle)/src/app.txt"               "idle worktree: tracked files are intact"
 assert_kept "$(wt idle)/.git"                      "idle worktree: its .git file is intact"
 assert_log  'removed [0-9]+M .*/idle/\.devenv/state/venv' "idle worktree: the removal is logged" "$main_log"
+
+assert_log  'removed [0-9]+M .*/idle/\.devenv/state/venv \(.*rebuild: cd .*/idle && devenv shell\)' "a removal says how to rebuild the venv" "$main_log"
+
+assert_kept "$(wt envvenv)/.devenv/state/venv" "a process with VIRTUAL_ENV in the venv (cwd elsewhere) keeps the venv"
+assert_kept "$(wt envroot)/.devenv/state/venv" "a process with DEVENV_ROOT = the worktree (cwd elsewhere) keeps the venv"
+assert_kept "$(wt envargv)/.devenv/state/venv" "a process whose argv[0] is under the worktree (cwd elsewhere) keeps the venv"
+assert_log  'keep .*envvenv.* \(live process: environment' "the VIRTUAL_ENV keep says why" "$main_log"
 
 assert_kept "$(wt nested-recent)/.devenv/state/venv" "recently-touched NESTED file keeps the venv"
 assert_log  'keep .*nested-recent.* \(touched' "the nested-mtime keep says why" "$main_log"
@@ -336,6 +391,10 @@ assert_kept "$root/solo/.devenv/state/venv" "the primary checkout's venv is neve
 
 assert_gone "$(wt both)/.devenv/state/venv" "venv removed even though shell caches are also pruned in the same worktree"
 assert_gone "$selfroot/.worktrees/selfwt/.devenv/state/venv" "worktrees directly under a repo root (R/.worktrees/*) are swept"
+
+[ "$(stat -c %y "$shell_d1")" = "$d1_mtime_before" ] \
+  && pass "a shell-cache prune leaves the .devenv directory's mtime alone" \
+  || fail "a shell-cache prune leaves the .devenv directory's mtime alone" "before: $d1_mtime_before" "after: $(stat -c %y "$shell_d1")"
 
 assert_log 'freed [1-9][0-9]* MB' "the run totals what it freed" "$main_log"
 
@@ -441,6 +500,120 @@ assert_log  'WARN: cannot read .*keeping every venv' "the unreadable /proc is re
 # The shell caches are pure caches with no liveness question, so a blind /proc
 # must not cost the run its other half.
 assert_gone "$shell_blind/shell-a.sh" "unreadable /proc does not stop the shell-cache prune"
+
+# --- scenario 5: a MISSING session database ---------------------------------
+#
+# venv-sweep runs only on devbox, where opencode is installed. A database that
+# does not exist there means a wrong path or a moved data directory, and the
+# session guard would silently go inert on exactly the sessions it protects.
+# (tmp-scratch-sweep keeps the opposite policy; its own suite pins that.)
+root6="$tmpdir/proj-nodb"
+mkdir -p "$root6"
+mkrepo "$root6/repo" yes
+mkwt "$root6/repo" nodb
+sweep_roots="$root6"
+nodb_log="$tmpdir/nodb.log"
+run_sweep "$nodb_log" VENV_SWEEP_SESSION_DB="$no_db"
+assert_kept "$root6/repo/.worktrees/nodb/.devenv/state/venv" "a missing session database keeps every venv"
+assert_log  'WARN: session db missing at .*no-such-opencode\.db; keeping all venvs' "the missing session database is reported" "$nodb_log"
+assert_log  'keep .*nodb.* \(session db missing' "the missing-database keep says why" "$nodb_log"
+
+# --- scenario 6: the idle clock across nights --------------------------------
+#
+# A worktree 3.5 days idle (window: 3) whose shell caches are old enough to
+# prune, with a shell open in it tonight. Night 1: the venv stays (live
+# process), the caches are pruned. Night 2: the shell is gone, nothing in the
+# tree has changed -- so the venv must go. If pruning leaves .devenv's mtime at
+# "now", night 2 reads "touched 0.0d ago" and the venv survives another 3 days.
+root7="$tmpdir/proj-nights"
+mkdir -p "$root7"
+mkrepo "$root7/repo" yes
+stamp_35d="$(date -d '84 hours ago' +%Y%m%d%H%M)"
+mkwt "$root7/repo" night "$stamp_35d"
+night_wt="$root7/repo/.worktrees/night"
+for n in a b c; do echo "# $n" > "$night_wt/.devenv/shell-$n.sh"; done
+age_tree "$night_wt" "$stamp_35d"
+touch -t "$(date -d '5 days ago' +%Y%m%d%H%M)" "$night_wt/.devenv/shell-a.sh"
+touch -t "$(date -d '4 days ago' +%Y%m%d%H%M)" "$night_wt/.devenv/shell-b.sh"
+# (shell-c keeps the 3.5d stamp: it is the newest and stays)
+sleeper_in "$night_wt/src"
+night_pid="${pids[${#pids[@]}-1]}"
+night_mtime_before="$(stat -c %y "$night_wt/.devenv")"
+sweep_roots="$root7"
+night1_log="$tmpdir/night1.log"
+run_sweep "$night1_log"
+assert_kept "$night_wt/.devenv/state/venv" "night 1: the venv of a worktree with a live shell is kept"
+assert_gone "$night_wt/.devenv/shell-a.sh" "night 1: old shell caches are pruned anyway"
+assert_kept "$night_wt/.devenv/shell-c.sh" "night 1: the newest shell cache stays"
+[ "$(stat -c %y "$night_wt/.devenv")" = "$night_mtime_before" ] \
+  && pass "night 1: pruning left the worktree's .devenv mtime alone" \
+  || fail "night 1: pruning left the worktree's .devenv mtime alone" "before: $night_mtime_before" "after: $(stat -c %y "$night_wt/.devenv")"
+kill "$night_pid"; wait "$night_pid" 2>/dev/null || true
+night2_log="$tmpdir/night2.log"
+run_sweep "$night2_log"
+assert_gone "$night_wt/.devenv/state/venv" "night 2: the pruned worktree's venv goes once it is 3 days idle (the prune did not reset the clock)"
+
+# --- scenario 7: environ/argv probe against a fake /proc ---------------------
+#
+# The probe reads per-pid files, so a fixture directory can stand in for /proc
+# without privileges. A pid whose files cannot be read must be skipped, not
+# fatal; and a process that points at a SIBLING worktree whose name merely
+# shares a prefix must not pin this one.
+root8="$tmpdir/proj-fakeproc"
+mkdir -p "$root8"
+mkrepo "$root8/repo" yes
+for n in pfx pfx-2 fzv fza; do mkwt "$root8/repo" "$n"; done
+fw() { echo "$root8/repo/.worktrees/$1"; }
+fake="$tmpdir/fakeproc"
+mkdir -p "$fake/self" "$fake/2222" "$fake/3333" "$fake/4444" "$fake/5555" "$fake/6666/environ"
+ln -s / "$fake/self/cwd"                # the probe proves it can read ITS OWN cwd first
+printf 'PATH=/bin\0DEVENV_ROOT=%s\0' "$(fw pfx-2)" > "$fake/3333/environ"
+printf 'VIRTUAL_ENV=%s\0' "$(fw fzv)/.devenv/state/venv/" > "$fake/4444/environ"
+printf '%s\0--flag\0' "$(fw fza)/.devenv/state/venv/bin/python" > "$fake/5555/cmdline"
+# 2222: a pid dir with nothing readable. 6666: environ is a directory (EISDIR).
+sweep_roots="$root8"
+fake_log="$tmpdir/fake.log"
+run_sweep "$fake_log" VENV_SWEEP_PROC="$fake"
+assert_gone "$(fw pfx)/.devenv/state/venv"   "environ probe: a process in a sibling whose name shares a prefix does not pin this worktree"
+assert_kept "$(fw pfx-2)/.devenv/state/venv" "environ probe: DEVENV_ROOT in a fake /proc keeps its worktree"
+assert_kept "$(fw fzv)/.devenv/state/venv"   "environ probe: VIRTUAL_ENV with a trailing slash in a fake /proc keeps its worktree"
+assert_kept "$(fw fza)/.devenv/state/venv"   "environ probe: argv[0] in a fake /proc keeps its worktree"
+refute_log  'WARN: cannot read' "environ probe: unreadable per-pid entries are skipped, not fatal" "$fake_log"
+
+# --- scenario 8: liveness is re-checked just before each deletion ------------
+#
+# race-a (4MB) is decided first; the hook, which runs just before each
+# candidate's liveness probe, starts a process in race-b while race-a is being
+# handled. A probe taken before the loop never sees it.
+root9="$tmpdir/proj-race"
+mkdir -p "$root9"
+mkrepo "$root9/repo" yes
+mkwt "$root9/repo" race-a
+dd if=/dev/zero of="$root9/repo/.worktrees/race-a/.devenv/state/venv/payload" bs=1M count=4 status=none
+mkwt "$root9/repo" race-b
+race_hook="$tmpdir/race-hook.sh"
+# Shebang is the resolved bash, not /usr/bin/env: the nix build sandbox has no
+# /usr/bin/env, and a hook that cannot exec is swallowed by the sweeper.
+cat > "$race_hook" <<HOOKEOF
+#!$(command -v bash)
+case "\$1" in
+  */race-a/*)
+    ( cd "$root9/repo/.worktrees/race-b/src" && exec sleep 300 ) > /dev/null 2>&1 &
+    echo \$! > "$tmpdir/race.pid"
+    for _ in \$(seq 1 50); do
+      [ "\$(readlink /proc/\$!/cwd 2>/dev/null || true)" = "$root9/repo/.worktrees/race-b/src" ] && break
+      sleep 0.1
+    done
+    ;;
+esac
+HOOKEOF
+chmod +x "$race_hook"
+sweep_roots="$root9"
+race_log="$tmpdir/race.log"
+run_sweep "$race_log" VENV_SWEEP_PRE_REMOVE_HOOK="$race_hook"
+pids+=("$(cat "$tmpdir/race.pid" 2>/dev/null || true)")
+assert_gone "$root9/repo/.worktrees/race-a/.devenv/state/venv" "re-probe: the candidate decided first is removed"
+assert_kept "$root9/repo/.worktrees/race-b/.devenv/state/venv" "re-probe: a process that appears after the first candidate keeps the next one"
 
 # NOT COVERED, deliberately: the os.path.ismount() / st_dev and st_uid guards.
 # Creating a mount point or a foreign-owned tree needs privileges the build
