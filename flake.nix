@@ -27,6 +27,11 @@
     devenv = {
       url = "github:cachix/devenv";
     };
+
+    # Used ONLY by gamebox, for Sunshine: 25.11 ships Sunshine 2025.924,
+    # which lacks the KWin capture backend the headless-streaming design
+    # depends on. Everything else stays on the stable nixpkgs above.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
   outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, ... }@inputs:
@@ -2522,11 +2527,13 @@
     # there. Build it on the box itself.
     nixosConfigurations.gamebox = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
+      specialArgs = { inherit (inputs) nixpkgs-unstable; };
       modules = [
         disko.nixosModules.disko
         ./hosts/gamebox/configuration.nix
         ./hosts/gamebox/hardware.nix
         ./hosts/gamebox/disko.nix
+        ./hosts/gamebox/streaming.nix
       ];
     };
 
