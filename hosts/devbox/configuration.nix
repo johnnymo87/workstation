@@ -1329,8 +1329,10 @@ in
   # them ran at -1000: immune to both the kernel OOM killer and earlyoom
   # (which skips -1000 outright).
   #
-  # Killable panes need the companion setting in users/dev/home.devbox.nix
-  # (tmux-spawn-.scope.d, OOMPolicy=continue).
+  # Related: users/dev/home.devbox.nix (tmux-spawn-.scope.d,
+  # OOMPolicy=continue). On devbox the tmux server is tmux-main.service
+  # (adj 200), so panes were already killable and that drop-in stands on its
+  # own; it is not a consequence of this change as it was on cloudbox.
   #
   # If you ever see the LISTENER at 0, the binary lost LINUX_OOM_ADJUST --
   # check `strings $(which sshd) | grep oom_adjust`.

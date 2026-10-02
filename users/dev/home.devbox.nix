@@ -603,9 +603,10 @@ lib.mkIf isDevbox {
   # tmux puts every pane in its own transient tmux-spawn-<uuid>.scope, and
   # systemd's default OOMPolicy=stop stops the whole unit after an oom_kill in
   # it: the shell, nvim (unsaved buffers), the scrollback, an attach TUI.
-  # Companion to workstation-aj1m (hosts/devbox/configuration.nix, the sshd
-  # block), which stops ssh sessions inheriting oom_score_adj=-1000; mirrors
-  # users/dev/home.cloudbox.nix (workstation-o5s1.29). A prefix drop-in applies
+  # On devbox panes are ALREADY killable (the tmux server is tmux-main.service,
+  # oom_score_adj 200), so this closes a live hazard rather than following
+  # from the sshd fix in workstation-aj1m. Mirrors users/dev/home.cloudbox.nix
+  # (workstation-o5s1.29). A prefix drop-in applies
   # to transient scopes, including already-running ones at the next user-
   # manager daemon-reload (verified on cloudbox 2026-09-29).
   xdg.configFile."systemd/user/tmux-spawn-.scope.d/oom-policy.conf".text = ''
