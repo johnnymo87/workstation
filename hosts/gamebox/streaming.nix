@@ -54,10 +54,13 @@ in
     # Pascal (GP102) is NOT supported by the open kernel module.
     open = false;
     modesetting.enable = true;
-    # 580 is the last driver branch supporting Pascal. Pin by branch name
-    # (production == 580.142 in 25.11) rather than `stable`, which will
-    # eventually move to a branch that drops this card.
-    package = config.boot.kernelPackages.nvidiaPackages.production;
+    # 580 is the last driver branch supporting Pascal. `production` is 580
+    # in 25.11 but is a moving pointer (595, Pascal-less, in unstable), so
+    # prefer `legacy_580`, which appears once 580 leaves `production` (it
+    # exists in unstable, not yet in 25.11).
+    package =
+      let p = config.boot.kernelPackages.nvidiaPackages;
+      in p.legacy_580 or p.production;
     nvidiaSettings = false;
     powerManagement.enable = false;
   };
