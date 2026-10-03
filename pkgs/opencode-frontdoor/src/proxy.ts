@@ -12,7 +12,7 @@ import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, isStatePinningRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
 import { probeServeHealth } from "./health.js";
-import type { Config } from "./config.js";
+import { DEFAULT_ABANDONED_UPSTREAM_MAX_MS, DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT, type Config } from "./config.js";
 import { RequestLogger, redactQuery } from "./log.js";
 import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
@@ -65,6 +65,9 @@ export function buildForwardSearch(search: string, serveAuthHeader?: string): st
 
 let poolCursor = 0;
 
+// Upstream requests currently detached by abandonUpstream (process-wide).
+let abandonedInFlight = 0;
+
 export function resetPoolCursor(): void {
   poolCursor = 0;
 }
@@ -83,7 +86,22 @@ export function poolOrder(poolUrls: string[], anchorUrl: string): string[] {
   return [primary, ...restWithoutAnchor];
 }
 
-export type ProxyOutcome = "completed" | "upstream-unreachable";
+export type ProxyOutcome = "completed" | "upstream-unreachable" | "upstream-spurious-499";
+
+/**
+ * Status opencode's HTTP layer (effect HttpServerError.causeResponse) returns,
+ * with an EMPTY body, for a cause that is interrupt-only and carries the
+ * ClientAbort annotation — "client closed request". The door can never
+ * legitimately receive one: it is reading the response, so its connection to
+ * the serve is demonstrably open. A 499 here means the serve is REPLAYING an
+ * earlier aborted request's memoized interruption (workstation-27r8).
+ */
+const UPSTREAM_CLIENT_CLOSED = 499;
+
+const SPURIOUS_499_MESSAGE =
+  "The upstream serve answered 499 (client closed request) although the front door's connection to it was open. " +
+  "It is replaying an earlier aborted initialization for this directory and will keep doing so until that serve is restarted; " +
+  "retrying the same request against it will not help.";
 
 async function proxyRequest(
   target: string,
@@ -93,7 +111,7 @@ async function proxyRequest(
   res: ServerResponse,
   ctx: ProxyContext,
   extraction: SidExtraction | null,
-  options?: { failoverIfUnreachable?: boolean }
+  options?: { failoverIfUnreachable?: boolean; failoverOnSpurious499?: boolean }
 ): Promise<ProxyOutcome> {
   return new Promise<ProxyOutcome>((resolve) => {
     const targetParsed = new URL(target);
@@ -133,6 +151,72 @@ async function proxyRequest(
     let resolved = false;
     let cheapTimeoutId: ReturnType<typeof setTimeout> | null = null;
     let wedgeProbe: ReturnType<typeof createWedgeProbe> | null = null;
+    // Set once this attempt has handed the client response to the NEXT pool member
+    // (spurious-499 failover). Anything this upstream does afterwards is not ours.
+    let handedOff = false;
+
+    // workstation-27r8: whether the upstream has sent response headers yet, and
+    // whether we have detached from it. See abandonUpstream.
+    let upstreamResponded = false;
+    let abandoned = false;
+    const detachable = method === "GET" || method === "HEAD";
+
+    /**
+     * Stop caring about the upstream's answer WITHOUT closing the connection.
+     *
+     * opencode builds per-directory state lazily, inside the request fiber of
+     * the first caller that needs it, and memoizes the result for the life of
+     * the process (InstanceState -> ScopedCache, infinite TTL). If that socket
+     * closes mid-init the fiber is interrupted with a ClientAbort annotation,
+     * the interrupted Exit is what gets memoized, and every later request for the
+     * directory is answered 499 until the serve restarts. That is what a
+     * destroy() here did on 2026-10-02: one 5s timeout on the first
+     * GET /config/providers for ~/Code wedged it on the anchor for 2.5h+.
+     *
+     * So for side-effect-free methods, before the upstream has answered, let the
+     * request run to completion and drain it. The client still gets its 503 on
+     * time — the 5s budget and its fast-fail semantics are unchanged — and the
+     * serve's init completes and caches a success, so the client's retry works.
+     * Bounded by abandonedUpstreamMaxMs; past that we destroy as before.
+     *
+     * Not for other methods: a mutation the client has given up on is better
+     * cancelled than completed unobserved, and that is the pre-existing contract.
+     */
+    const abandonUpstream = (why: string) => {
+      if (abandoned) return;
+      abandoned = true;
+      // Bounded concurrency. Detaching turns cancellation into completion, so
+      // under a burst against an already-saturated serve it no longer sheds
+      // work. Poisoning only needs the FIRST caller per directory to survive,
+      // and a burst's tail is mostly waiters on that same init, so a modest cap
+      // keeps the protection while restoring eon4's load-shedding past it.
+      const maxConcurrent = ctx.config.abandonedUpstreamMaxConcurrent ?? DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT;
+      if (abandonedInFlight >= maxConcurrent) {
+        ctx.metrics.upstreamAbandonedKilled++;
+        console.warn(
+          `[FRONTDOOR WARN] ${abandonedInFlight} upstreams already detached (cap ${maxConcurrent}); destroying ${method} ${url.pathname} -> ${target} (${why}), which may poison that serve's per-directory state (499s)`
+        );
+        upstreamReq.destroy();
+        return;
+      }
+      abandonedInFlight++;
+      ctx.metrics.upstreamAbandoned++;
+      const maxMs = ctx.config.abandonedUpstreamMaxMs ?? DEFAULT_ABANDONED_UPSTREAM_MAX_MS;
+      const ceiling = setTimeout(() => {
+        if (upstreamResponded) return;
+        ctx.metrics.upstreamAbandonedKilled++;
+        console.warn(
+          `[FRONTDOOR WARN] abandoned upstream ${method} ${url.pathname} -> ${target} still unanswered after ${maxMs}ms (${why}); destroying it, which may poison that serve's per-directory state (499s)`
+        );
+        upstreamReq.destroy();
+      }, maxMs);
+      // Never hold the process open for a request nobody is waiting on.
+      ceiling.unref();
+      upstreamReq.once("close", () => {
+        clearTimeout(ceiling);
+        abandonedInFlight--;
+      });
+    };
 
     const onReqError = (err: any) => {
       upstreamReq.destroy();
@@ -150,7 +234,14 @@ async function proxyRequest(
 
     const onClose = () => {
       if (!res.writableEnded) {
-        upstreamReq.destroy();
+        if (detachable && !upstreamResponded) {
+          // The client hung up before the upstream answered (e.g. a TUI quit
+          // during a slow startup). Same poisoning hazard as the first-byte
+          // timeout; see abandonUpstream.
+          abandonUpstream("client closed");
+        } else {
+          upstreamReq.destroy();
+        }
       }
       safeResolve();
     };
@@ -184,7 +275,11 @@ async function proxyRequest(
           headersSent = true;
           res.writeHead(503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "service_unavailable", message: "Upstream did not send response headers in time" }));
-          upstreamReq.destroy();
+          if (detachable) {
+            abandonUpstream("first-byte timeout");
+          } else {
+            upstreamReq.destroy();
+          }
           safeResolve();
         }
       }, ctx.config.cheapFirstByteMs);
@@ -207,6 +302,20 @@ async function proxyRequest(
     }
 
     upstreamReq.on("response", (upstreamRes) => {
+      upstreamResponded = true;
+      if (abandoned) {
+        // Nobody is waiting for this answer, and on the client-close path `res`
+        // is already destroyed: piping into it would stall the upstream body
+        // forever once it outgrows the socket buffer. A stream never ends on its
+        // own, so close it; headers mean the handler (and any init it ran)
+        // already completed, so that cannot poison anything. Otherwise drain.
+        if (isEventStreamResponse(upstreamRes.headers)) {
+          upstreamReq.destroy();
+        } else {
+          upstreamRes.resume();
+        }
+        return;
+      }
       if (cheapTimeoutId) {
         clearTimeout(cheapTimeoutId);
         cheapTimeoutId = null;
@@ -215,10 +324,34 @@ async function proxyRequest(
         wedgeProbe.stop();
         wedgeProbe = null;
       }
-      if (res.headersSent || headersSent) {
+      if (res.headersSent || headersSent || handedOff) {
         upstreamRes.resume(); // drain to release the socket back to the pool
         return;
       }
+
+      if (upstreamRes.statusCode === UPSTREAM_CLIENT_CLOSED) {
+        ctx.metrics.upstreamSpurious499++;
+        upstreamRes.resume();
+        const failover = options?.failoverOnSpurious499 === true;
+        const q = redactQuery(url.search);
+        // The operator log names the serve and the directory: that pair is the
+        // poisoned cache entry, and restarting that serve is the remedy.
+        console.warn(
+          `[FRONTDOOR WARN] spurious 499: ${method} ${url.pathname}${q ? "?" + q : ""} -> ${target} answered 499 on an open connection (memoized aborted init; restart that serve); ${failover ? "failing over to next pool member" : "returned 503"}`
+        );
+        if (failover) {
+          handedOff = true;
+          safeResolve("upstream-spurious-499");
+          return;
+        }
+        headersSent = true;
+        // Target serve is omitted from client-visible response for network opacity.
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "service_unavailable", message: SPURIOUS_499_MESSAGE }));
+        safeResolve();
+        return;
+      }
+
       headersSent = true;
 
       if (isHtmlResponse(upstreamRes.headers["content-type"]) && !isHtmlGuardExempt(method, url.pathname)) {
@@ -289,6 +422,8 @@ async function proxyRequest(
     });
 
     upstreamReq.on("error", (err) => {
+      // After a hand-off, `res` belongs to the next pool member's attempt.
+      if (handedOff) return;
       if (!headersSent && !res.headersSent) {
         if (options?.failoverIfUnreachable) {
           req.unpipe(upstreamReq);
@@ -1031,13 +1166,19 @@ export async function handleRequest(
         const isLast = i === order.length - 1;
         const outcome = await proxyRequest(target, method, url, req, res, ctx, null, {
           failoverIfUnreachable: !isLast,
+          // poolSafe routes are pool-invariant by construction, so another
+          // member's answer is as good as this one's (workstation-27r8).
+          failoverOnSpurious499: !isLast,
         });
-        if (outcome !== "upstream-unreachable") return;
-        ctx.metrics.poolFailover++;
+        if (outcome === "completed") return;
         const nextTarget = order[i + 1];
-        console.warn(
-          `[FRONTDOOR WARN] pool member ${target} unreachable for ${method} ${url.pathname}; failing over to ${nextTarget}`
-        );
+        if (outcome === "upstream-unreachable") {
+          ctx.metrics.poolFailover++;
+          console.warn(
+            `[FRONTDOOR WARN] pool member ${target} unreachable for ${method} ${url.pathname}; failing over to ${nextTarget}`
+          );
+        }
+        // upstream-spurious-499: already logged and counted inside proxyRequest.
       }
       return;
     }
