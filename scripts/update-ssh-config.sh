@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update local SSH config with devbox and cloudbox IPs
+# Update local SSH config with devbox and cloudbox IPs, and the gamebox entry
 set -euo pipefail
 
 SSH_CONFIG="$HOME/.ssh/config"
@@ -343,3 +343,25 @@ EOF
     upsert_block "$CLOUDBOX_MARKER_START" "$CLOUDBOX_MARKER_END" "$CLOUDBOX_BLOCK"
     echo "Cloudbox IP: $CLOUDBOX_IP"
 fi
+
+# --- Gamebox (physical gaming PC, reached over Tailscale) ---
+#
+# No IP lookup: the box moves between home and office, so it is addressed
+# by its Tailscale MagicDNS name, which the Tailscale app resolves on any
+# network. Requires the Mac to be logged in to the same tailnet.
+
+GAMEBOX_MARKER_START="# BEGIN gamebox managed block"
+GAMEBOX_MARKER_END="# END gamebox managed block"
+
+GAMEBOX_BLOCK=$(cat <<EOB
+$GAMEBOX_MARKER_START
+Host gamebox
+    HostName gamebox
+    User dev
+    ServerAliveInterval 30
+$GAMEBOX_MARKER_END
+EOB
+)
+
+upsert_block "$GAMEBOX_MARKER_START" "$GAMEBOX_MARKER_END" "$GAMEBOX_BLOCK"
+echo "Gamebox: via Tailscale (MagicDNS name 'gamebox')"

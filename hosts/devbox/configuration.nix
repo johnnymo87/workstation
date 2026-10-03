@@ -990,6 +990,23 @@ in
   # Range is generous; each session uses one port.
   networking.firewall.allowedUDPPortRanges = [{ from = 60000; to = 61000; }];
 
+  # Tailscale: outbound only, so devbox can reach gamebox (a physical PC that
+  # moves between networks). gamebox is addressed by its stable tailnet IP
+  # (programs.ssh.matchBlocks.gamebox in home.devbox.nix), so MagicDNS is not
+  # accepted and devbox's resolver is left alone.
+  #
+  # Inbound is blocked by --shields-up, NOT by nixos-fw: tailscaled installs
+  # its own ts-input chain at the top of INPUT that ends in
+  # `-i tailscale0 -j ACCEPT`, which would otherwise expose every 0.0.0.0
+  # listener (and Docker-published ports, whose DOCKER-USER guard matches
+  # enp1s0 only) to every tailnet peer. First join:
+  #   sudo tailscale up --accept-dns=false --shields-up
+  services.tailscale = {
+    enable = true;
+    openFirewall = true; # UDP 41641, for direct (non-relayed) connections
+    extraSetFlags = [ "--shields-up" "--accept-dns=false" ];
+  };
+
   # Persistent volume for state that survives rebuilds
   fileSystems."/persist" = {
     device = "/dev/disk/by-id/scsi-0HC_Volume_104378953";

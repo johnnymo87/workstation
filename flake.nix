@@ -27,6 +27,11 @@
     devenv = {
       url = "github:cachix/devenv";
     };
+
+    # Used ONLY by gamebox, for Sunshine: 25.11 ships Sunshine 2025.924,
+    # which lacks the KWin capture backend the headless-streaming design
+    # depends on. Everything else stays on the stable nixpkgs above.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
   outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, ... }@inputs:
@@ -2513,6 +2518,22 @@
         ./hosts/cloudbox/configuration.nix
         ./hosts/cloudbox/hardware.nix
         ./hosts/cloudbox/disko.nix
+      ];
+    };
+
+    # NixOS system configuration for the physical x86_64 gaming PC (headless
+    # Sunshine streaming host). The flake's only x86_64-linux output: CI runs
+    # on aarch64, so this is evaluated by `nix flake check` but never built
+    # there. Build it on the box itself.
+    nixosConfigurations.gamebox = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      specialArgs = { inherit (inputs) nixpkgs-unstable; };
+      modules = [
+        disko.nixosModules.disko
+        ./hosts/gamebox/configuration.nix
+        ./hosts/gamebox/hardware.nix
+        ./hosts/gamebox/disko.nix
+        ./hosts/gamebox/streaming.nix
       ];
     };
 
