@@ -1101,6 +1101,12 @@ in
         # frontdoor-exempt(C3): the door's own upstream; it cannot proxy through itself
         "OPENCODE_ANCHOR_URL=http://127.0.0.1:4096"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # Which box this is, for lgtm's multi-box ownership (lgtm-5ksr; design
+        # in lgtm docs/plans/2026-10-02-multi-box-ownership-design.md). Inert
+        # until lgtm.yml carries an `ownership:` block; once it does, every
+        # dispatching lgtm invocation without it throws, so this must be live
+        # before that block merges.
+        "LGTM_BOX=cloudbox"
         # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
         # (lgtm-j6k). Those pinned the shared opencode.db for the run-era
         # detached `opencode run` children this service used to spawn. lgtm-a3r
@@ -1226,6 +1232,12 @@ in
       Environment = [
         "HOME=/home/dev"
         "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # Which box this is, for lgtm's multi-box ownership (lgtm-5ksr; design
+        # in lgtm docs/plans/2026-10-02-multi-box-ownership-design.md). Inert
+        # until lgtm.yml carries an `ownership:` block; once it does, every
+        # dispatching lgtm invocation without it throws, so this must be live
+        # before that block merges.
+        "LGTM_BOX=cloudbox"
         # The kill switch. Flipping this (or enableLgtmShepherd) off is the
         # whole rollback story: nothing else reads shepherd state.
         "LGTM_ENABLE_SHEPHERD=1"
