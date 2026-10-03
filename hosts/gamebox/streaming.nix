@@ -134,7 +134,12 @@ in
     enable = true;
     package = sunshine;
     autoStart = true;
-    openFirewall = true;
+    # Tailscale-only: ports are NOT opened on the LAN/Wi-Fi interfaces. The
+    # box lives on an office guest network, and every client (Mac, any
+    # future TV box) reaches it over the tailnet, whose interface is trusted
+    # in configuration.nix. Sunshine treats Tailscale's 100.64.0.0/10 as LAN,
+    # so the web UI and pairing still work over it.
+    openFirewall = false;
     # KWin capture needs no CAP_SYS_ADMIN (that is only for KMS capture).
     capSysAdmin = false;
     # Declarative settings make the web UI's config pages read-only; PIN
@@ -148,7 +153,47 @@ in
       # Only ds5 carries motion/gyro through to the host.
       gamepad = "ds5";
     };
+    # Moonlight's launch menu. Replaces Sunshine's default apps.json, whose
+    # X11/xrandr and Steam entries don't work on this box. Ryubing flags were
+    # checked against its 1.3.3 source (src/Ryujinx/Utilities/
+    # CommandLineState.cs); `-p` selects a profile by name from
+    # ~/.config/Ryujinx/system/Profiles.json. The ROM is the bare positional
+    # argument; never pass `-r`, which relocates the whole data directory.
+    # Ryubing is an X11 (Avalonia) app; Sunshine's user service inherits
+    # DISPLAY/XAUTHORITY from the Plasma session.
+    applications.apps =
+      let
+        ryujinx = name: rom: profile: {
+          inherit name;
+          cmd = ''${lib.getExe' pkgs.ryubing "ryujinx"} -f --docked-mode --hide-cursor always -p ${profile} "/home/gamer/Games/${rom}"'';
+          image-path = "desktop.png";
+          # Default is 5 s from SIGTERM to SIGKILL when Moonlight quits;
+          # give the emulator time to stop and flush its caches.
+          exit-timeout = 15;
+        };
+      in
+      [
+        {
+          name = "Desktop";
+          image-path = "desktop.png";
+        }
+        {
+          # Ryubing's own window, for settings and controller mapping.
+          name = "Ryubing";
+          cmd = lib.getExe' pkgs.ryubing "ryujinx";
+          image-path = "desktop.png";
+        }
+        (ryujinx "Super Mario Bros. Wonder" "Super Mario Bros. Wonder [010015100B514000][v0][US].xci" "Jonathan")
+        # The update .nsp sits beside the base game; Ryubing picks it up once
+        # added under Manage Title Updates (one-time, in the Ryubing GUI).
+        (ryujinx "Mario Party Superstars" "Mario Party Superstars[01006FE013472000][v0].nsp" "Jonathan")
+      ];
   };
+
+  # The Sunshine module enables Avahi to advertise the host on the LAN. That
+  # is useless here (Tailscale carries no multicast; Moonlight adds the host
+  # by name) and would announce it on the office guest Wi-Fi.
+  services.avahi.openFirewall = false;
 
   # --- Power / Wake-on-LAN -------------------------------------------------
   services.logind.settings.Login.IdleAction = "ignore";
