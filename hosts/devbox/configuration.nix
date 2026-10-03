@@ -990,6 +990,16 @@ in
   # Range is generous; each session uses one port.
   networking.firewall.allowedUDPPortRanges = [{ from = 60000; to = 61000; }];
 
+  # Tailscale: outbound only, so devbox can reach gamebox (a physical PC that
+  # moves between networks). Join with `tailscale up --accept-dns=false`:
+  # devbox's resolver is left alone, and gamebox is addressed by its stable
+  # tailnet IP (see programs.ssh.matchBlocks.gamebox in home.devbox.nix).
+  # tailscale0 is deliberately NOT a trusted interface here.
+  services.tailscale = {
+    enable = true;
+    openFirewall = true; # UDP 41641, for direct (non-relayed) connections
+  };
+
   # Persistent volume for state that survives rebuilds
   fileSystems."/persist" = {
     device = "/dev/disk/by-id/scsi-0HC_Volume_104378953";

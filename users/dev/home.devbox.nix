@@ -308,6 +308,15 @@ lib.mkIf isDevbox {
   # home.stateVersion for this platform
   home.stateVersion = "25.11";
 
+  # gamebox over Tailscale. Addressed by its tailnet IP because devbox joins
+  # the tailnet with --accept-dns=false (no MagicDNS); a node keeps its
+  # 100.x address for as long as it stays in the tailnet.
+  programs.ssh.matchBlocks.gamebox = {
+    hostname = "100.123.122.47";
+    user = "dev";
+    serverAliveInterval = 30;
+  };
+
   # Constrain vitest worker count — default uses all cores, which starves
   # opencode sessions and devenv services when tests run in watch mode.
   home.sessionVariables.VITEST_MAX_WORKERS = "4";  # 16-core box, keep 75% free
