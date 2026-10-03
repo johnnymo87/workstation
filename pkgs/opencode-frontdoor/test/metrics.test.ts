@@ -5,7 +5,8 @@ describe('metrics', () => {
   test('creates a metrics object starting at 0', () => {
     const metrics = createMetrics();
     expect(metrics).toEqual({ degradedRequests: 0, notRoutedMutationToAnchor: 0,
-      promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 });
+      promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0,
+      upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 });
   });
 
   test('can increment degradedRequests', () => {

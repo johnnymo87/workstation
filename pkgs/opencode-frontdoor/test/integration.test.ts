@@ -1277,6 +1277,9 @@ describe("FrontDoor Integration", () => {
       expect(duration).toBeLessThan(400); // should be around 100ms, not much longer
     } finally {
       await new Promise<void>((resolve) => timeoutFrontDoor.close(() => resolve()));
+      // workstation-27r8: a timed-out GET is DETACHED, not destroyed, so the
+      // stalled upstream connection is still open here by design.
+      slowServer.closeAllConnections();
       await new Promise<void>((resolve) => slowServer.close(() => resolve()));
     }
   });

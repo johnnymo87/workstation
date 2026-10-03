@@ -20,6 +20,22 @@ export interface Config {
   routeTimeoutMs: number;
   cheapFirstByteMs: number;
   /*
+   * workstation-27r8. When a GET/HEAD's client side ends before the upstream has
+   * sent headers (the cheapFirstByteMs 503 above, or the client hanging up), the
+   * door DETACHES from the upstream request and lets it finish in the background
+   * instead of destroying it: a destroyed socket interrupts opencode's lazy
+   * per-directory init mid-flight, and opencode memoizes that interruption for the
+   * life of the process (every later request for the directory -> 499).
+   *
+   * This is the ceiling on that background wait; past it the upstream is destroyed
+   * anyway (counted as upstreamAbandonedKilled). Generous on purpose: an idle
+   * loopback socket is nearly free, whereas firing too early re-creates the poison.
+   * First init with the network down measured ~20-30s (two 10s models.dev fetch
+   * timeouts per serve on 2026-10-02). Optional only so hand-built test configs
+   * need not spell it out; loadConfig always sets it.
+   */
+  abandonedUpstreamMaxMs?: number;
+  /*
    * INVARIANT (LOW-2): stickyTtlMs <= pigeon PIGEON_LEASE_TTL_MS (both default 30s).
    * HIGH-2 renewal at 1/2 TTL re-places a sticky-pinned session in pigeon.
    *
@@ -51,6 +67,8 @@ export interface Config {
   /* How often the door emits its aggregate request_summary line. */
   logSummaryIntervalMs: number;
 }
+
+export const DEFAULT_ABANDONED_UPSTREAM_MAX_MS = 300000;
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
   if (value === undefined) {
@@ -107,6 +125,7 @@ export function loadConfig(): Config {
   }
   const routeTimeoutMs = parsePositiveInteger('FRONTDOOR_ROUTE_TIMEOUT_MS', process.env.FRONTDOOR_ROUTE_TIMEOUT_MS, 3000);
   const cheapFirstByteMs = parsePositiveInteger('FRONTDOOR_CHEAP_FIRST_BYTE_MS', process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS, 5000);
+  const abandonedUpstreamMaxMs = parsePositiveInteger('FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS', process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS, DEFAULT_ABANDONED_UPSTREAM_MAX_MS);
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);
   const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
   const wedgeProbeIntervalMs = parsePositiveInteger('FRONTDOOR_WEDGE_PROBE_INTERVAL_MS', process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS, 5000);
@@ -138,6 +157,7 @@ export function loadConfig(): Config {
     serveAuthHeader,
     routeTimeoutMs,
     cheapFirstByteMs,
+    abandonedUpstreamMaxMs,
     stickyTtlMs,
     driftCheckMs,
     wedgeProbeIntervalMs,

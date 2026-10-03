@@ -73,6 +73,9 @@ export async function handleHealthz(
     // gap is never detection, it is delivery.
     htmlPoisonBlocked: metrics.htmlPoisonBlocked,
     poolFailover: metrics.poolFailover,
+    upstreamAbandoned: metrics.upstreamAbandoned,
+    upstreamAbandonedKilled: metrics.upstreamAbandonedKilled,
+    upstreamSpurious499: metrics.upstreamSpurious499,
     version: config.version,
   };
 

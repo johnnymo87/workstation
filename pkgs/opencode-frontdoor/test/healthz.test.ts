@@ -57,7 +57,7 @@ describe('healthz', () => {
 
     test('both reachable -> 200, degraded: false, pigeon: true, anchor: true', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 5, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 5, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -91,13 +91,16 @@ describe('healthz', () => {
         notRoutedMutationToAnchor: 0, promotedOnConnect: 0,
         htmlPoisonBlocked: 0,
         poolFailover: 0,
+        upstreamAbandoned: 0,
+        upstreamAbandonedKilled: 0,
+        upstreamSpurious499: 0,
         version: 'v1.2.3-test',
       });
     });
 
     test('pigeon unreachable, anchor 200 -> 200, degraded: true, pigeon: false, anchor: true', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 10, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 10, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -127,13 +130,16 @@ describe('healthz', () => {
         notRoutedMutationToAnchor: 0, promotedOnConnect: 0,
         htmlPoisonBlocked: 0,
         poolFailover: 0,
+        upstreamAbandoned: 0,
+        upstreamAbandonedKilled: 0,
+        upstreamSpurious499: 0,
         version: 'v1.2.3-test',
       });
     });
 
     test('pigeon 404 (reachable), anchor times out -> 200, degraded: true, pigeon: true, anchor: false', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         if (url.startsWith('http://pigeon.local/route')) {
@@ -165,13 +171,16 @@ describe('healthz', () => {
         notRoutedMutationToAnchor: 0, promotedOnConnect: 0,
         htmlPoisonBlocked: 0,
         poolFailover: 0,
+        upstreamAbandoned: 0,
+        upstreamAbandonedKilled: 0,
+        upstreamSpurious499: 0,
         version: 'v1.2.3-test',
       });
     });
 
     test('both unreachable -> 503, degraded: false, pigeon: false, anchor: false', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 2, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 2, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         throw new Error('Network offline');
@@ -190,13 +199,16 @@ describe('healthz', () => {
         notRoutedMutationToAnchor: 0, promotedOnConnect: 0,
         htmlPoisonBlocked: 0,
         poolFailover: 0,
+        upstreamAbandoned: 0,
+        upstreamAbandonedKilled: 0,
+        upstreamSpurious499: 0,
         version: 'v1.2.3-test',
       });
     });
 
     test('HEAD request with both reachable -> 200, no body written', async () => {
       const res = createMockResponse('HEAD');
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 
       const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
         return {
@@ -236,7 +248,7 @@ describe('healthz', () => {
 
     test('a non-zero htmlPoisonBlocked actually surfaces (not hardcoded)', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 7, poolFailover: 0 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 7, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
       await handleHealthz(res, { config: dummyConfig, method: 'GET', deps: { fetch: okFetch() }, metrics });
       const body = JSON.parse(res.end.mock.calls[0][0]);
       expect(body.htmlPoisonBlocked).toBe(7);
@@ -244,7 +256,7 @@ describe('healthz', () => {
 
     test('a non-zero poolFailover actually surfaces (not hardcoded)', async () => {
       const res = createMockResponse();
-      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 3 };
+      const metrics: Metrics = { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 3, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
       await handleHealthz(res, { config: dummyConfig, method: 'GET', deps: { fetch: okFetch() }, metrics });
       const body = JSON.parse(res.end.mock.calls[0][0]);
       expect(body.poolFailover).toBe(3);

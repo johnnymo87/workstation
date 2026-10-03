@@ -34,8 +34,29 @@ export interface Metrics {
    * Count of connection-level failovers across pool members during forward-pool.
    */
   poolFailover: number;
+  /**
+   * workstation-27r8. GET/HEAD requests whose client side ended (cheap first-byte
+   * timeout, or the client hung up) BEFORE the upstream sent headers, and which
+   * the door therefore DETACHED from rather than destroyed. Destroying them is
+   * what poisoned a serve: opencode runs lazy per-directory init inside the first
+   * caller's request fiber and memoizes an interruption forever (replayed as 499).
+   */
+  upstreamAbandoned: number;
+  /**
+   * Abandoned upstreams that were still unanswered at `abandonedUpstreamMaxMs`
+   * and were destroyed anyway. Each one may have poisoned a serve's per-directory
+   * state; nonzero means the ceiling is too low for how slow first init gets.
+   */
+  upstreamAbandonedKilled: number;
+  /**
+   * Upstream responses with status 499. Through the door these are ALWAYS
+   * spurious — the door's own upstream socket is demonstrably open, since it is
+   * reading the response — so they mean the serve is replaying a memoized client
+   * abort for that directory. Converted to 503 (or failed over on forward-pool).
+   */
+  upstreamSpurious499: number;
 }
 
 export function createMetrics(): Metrics {
-  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0 };
+  return { degradedRequests: 0, notRoutedMutationToAnchor: 0, promotedOnConnect: 0, htmlPoisonBlocked: 0, poolFailover: 0, upstreamAbandoned: 0, upstreamAbandonedKilled: 0, upstreamSpurious499: 0 };
 }
