@@ -314,6 +314,9 @@ lib.mkIf isDevbox {
   programs.ssh.matchBlocks.gamebox = {
     hostname = "100.123.122.47";
     user = "dev";
+    # Dedicated key; its public half is authorized in hosts/gamebox.
+    identityFile = "~/.ssh/id_ed25519_gamebox";
+    identitiesOnly = true;
     serverAliveInterval = 30;
   };
 
