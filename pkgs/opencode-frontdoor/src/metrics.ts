@@ -43,9 +43,10 @@ export interface Metrics {
    */
   upstreamAbandoned: number;
   /**
-   * Abandoned upstreams that were still unanswered at `abandonedUpstreamMaxMs`
-   * and were destroyed anyway. Each one may have poisoned a serve's per-directory
-   * state; nonzero means the ceiling is too low for how slow first init gets.
+   * Detachable upstreams destroyed anyway: still unanswered at
+   * `abandonedUpstreamMaxMs`, or over `abandonedUpstreamMaxConcurrent`. Each one
+   * may have poisoned a serve's per-directory state (the warn log says which
+   * limit fired). Sustained nonzero means a limit is too low for real traffic.
    */
   upstreamAbandonedKilled: number;
   /**

@@ -209,6 +209,49 @@ describe("workstation-27r8: door must not poison a serve's memoized per-director
     expect((later as any).status).toBe(200);
   });
 
+  test("after a client hang-up, a large late upstream body is drained, not left pinned on a dead response", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let finished = false;
+    const big = Buffer.alloc(4 * 1024 * 1024, "x");
+    const serve = http.createServer((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.on("finish", () => (finished = true));
+        res.end(big);
+      }, 150);
+    });
+    await new Promise<void>((r) => serve.listen(0, "127.0.0.1", () => r()));
+    cleanups.push(() => closeServer(serve));
+    const url = `http://127.0.0.1:${(serve.address() as AddressInfo).port}`;
+    const metrics = createMetrics();
+    const { door, port } = await startDoor(makeConfig(url, [url], { cheapFirstByteMs: 2000 }), metrics);
+    cleanups.push(() => closeServer(door));
+
+    expect(await get(port, PROVIDERS, { abortAfterMs: 50 })).toBe("aborted");
+    await sleep(700);
+    expect(metrics.upstreamAbandoned).toBe(1);
+    expect(finished).toBe(true);
+  });
+
+  test("detaching is capped: past the cap, abandoned GETs are destroyed as before", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const serve = await startMemoizingServe(10_000);
+    cleanups.push(() => closeServer(serve.server));
+    const metrics = createMetrics();
+    const { door, port } = await startDoor(
+      makeConfig(serve.url, [serve.url], { cheapFirstByteMs: 50, abandonedUpstreamMaxConcurrent: 2 }),
+      metrics
+    );
+    cleanups.push(() => closeServer(door));
+
+    // Three distinct directories so each is its own first-caller init.
+    await Promise.all([1, 2, 3].map((i) => get(port, `/config/providers?directory=%2Fd${i}`)));
+    await sleep(100);
+    expect(metrics.upstreamAbandoned).toBe(2);
+    expect(metrics.upstreamAbandonedKilled).toBe(1);
+    expect(serve.closesBeforeResponse).toBe(1);
+  });
+
   test("an abandoned upstream is still torn down at the abandon ceiling (bounded, not leaked)", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const serve = await startMemoizingServe(10_000); // never finishes within the test

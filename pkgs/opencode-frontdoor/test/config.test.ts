@@ -20,6 +20,7 @@ describe('loadConfig', () => {
     delete process.env.FRONTDOOR_ROUTE_TIMEOUT_MS;
     delete process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS;
     delete process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS;
+    delete process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_CONCURRENT;
     delete process.env.FRONTDOOR_STICKY_TTL_MS;
     delete process.env.FRONTDOOR_DRIFT_CHECK_MS;
     delete process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS;
@@ -52,7 +53,8 @@ describe('loadConfig', () => {
       serveAuthHeader: undefined,
       routeTimeoutMs: 3000,
       cheapFirstByteMs: 5000,
-      abandonedUpstreamMaxMs: 300000,
+      abandonedUpstreamMaxMs: 120000,
+      abandonedUpstreamMaxConcurrent: 128,
       stickyTtlMs: 30000,
       driftCheckMs: 5000,
       wedgeProbeIntervalMs: 5000,
@@ -98,6 +100,7 @@ describe('loadConfig', () => {
     process.env.FRONTDOOR_ROUTE_TIMEOUT_MS = '1500';
     process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS = '2500';
     process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS = '90000';
+    process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_CONCURRENT = '16';
     process.env.FRONTDOOR_STICKY_TTL_MS = '10000';
     process.env.FRONTDOOR_DRIFT_CHECK_MS = '2000';
     process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS = '1000';
@@ -118,6 +121,7 @@ describe('loadConfig', () => {
       routeTimeoutMs: 1500,
       cheapFirstByteMs: 2500,
       abandonedUpstreamMaxMs: 90000,
+      abandonedUpstreamMaxConcurrent: 16,
       stickyTtlMs: 10000,
       driftCheckMs: 2000,
       wedgeProbeIntervalMs: 1000,

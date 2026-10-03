@@ -30,11 +30,21 @@ export interface Config {
    * This is the ceiling on that background wait; past it the upstream is destroyed
    * anyway (counted as upstreamAbandonedKilled). Generous on purpose: an idle
    * loopback socket is nearly free, whereas firing too early re-creates the poison.
-   * First init with the network down measured ~20-30s (two 10s models.dev fetch
-   * timeouts per serve on 2026-10-02). Optional only so hand-built test configs
+   * Sizing: with the network down, models.dev alone costs 10s per fetch attempt
+   * (two TimeoutErrors per serve were logged on 2026-10-02), and plugin model/auth
+   * hooks on the same init path have no door-visible bound, so 120s is several
+   * multiples of the one cost we have measured. Optional only so hand-built test configs
    * need not spell it out; loadConfig always sets it.
    */
   abandonedUpstreamMaxMs?: number;
+  /*
+   * workstation-27r8. Cap on upstreams detached at once (process-wide); past it
+   * an abandoned GET is destroyed as before (counted in upstreamAbandonedKilled).
+   * Restores load-shedding under a burst against a saturated serve, where the
+   * pre-27r8 destroy was what cancelled the work. Optional for the same reason
+   * as abandonedUpstreamMaxMs.
+   */
+  abandonedUpstreamMaxConcurrent?: number;
   /*
    * INVARIANT (LOW-2): stickyTtlMs <= pigeon PIGEON_LEASE_TTL_MS (both default 30s).
    * HIGH-2 renewal at 1/2 TTL re-places a sticky-pinned session in pigeon.
@@ -68,7 +78,8 @@ export interface Config {
   logSummaryIntervalMs: number;
 }
 
-export const DEFAULT_ABANDONED_UPSTREAM_MAX_MS = 300000;
+export const DEFAULT_ABANDONED_UPSTREAM_MAX_MS = 120000;
+export const DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT = 128;
 
 function parsePositiveInteger(envName: string, value: string | undefined, defaultValue: number): number {
   if (value === undefined) {
@@ -126,6 +137,7 @@ export function loadConfig(): Config {
   const routeTimeoutMs = parsePositiveInteger('FRONTDOOR_ROUTE_TIMEOUT_MS', process.env.FRONTDOOR_ROUTE_TIMEOUT_MS, 3000);
   const cheapFirstByteMs = parsePositiveInteger('FRONTDOOR_CHEAP_FIRST_BYTE_MS', process.env.FRONTDOOR_CHEAP_FIRST_BYTE_MS, 5000);
   const abandonedUpstreamMaxMs = parsePositiveInteger('FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS', process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_MS, DEFAULT_ABANDONED_UPSTREAM_MAX_MS);
+  const abandonedUpstreamMaxConcurrent = parsePositiveInteger('FRONTDOOR_ABANDONED_UPSTREAM_MAX_CONCURRENT', process.env.FRONTDOOR_ABANDONED_UPSTREAM_MAX_CONCURRENT, DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT);
   const stickyTtlMs = parsePositiveInteger('FRONTDOOR_STICKY_TTL_MS', process.env.FRONTDOOR_STICKY_TTL_MS, 30000);
   const driftCheckMs = parsePositiveInteger('FRONTDOOR_DRIFT_CHECK_MS', process.env.FRONTDOOR_DRIFT_CHECK_MS, 5000);
   const wedgeProbeIntervalMs = parsePositiveInteger('FRONTDOOR_WEDGE_PROBE_INTERVAL_MS', process.env.FRONTDOOR_WEDGE_PROBE_INTERVAL_MS, 5000);
@@ -158,6 +170,7 @@ export function loadConfig(): Config {
     routeTimeoutMs,
     cheapFirstByteMs,
     abandonedUpstreamMaxMs,
+    abandonedUpstreamMaxConcurrent,
     stickyTtlMs,
     driftCheckMs,
     wedgeProbeIntervalMs,

@@ -12,7 +12,7 @@ import { resolveOwner } from "./resolve.js";
 import { isPromotingRequest, isStatePinningRequest, maybePromote, PromotionGate, placeSession } from "./place.js";
 import { StickyMap, isMutatingSessionRequest, sidsForStickiness } from "./sticky.js";
 import { probeServeHealth } from "./health.js";
-import { DEFAULT_ABANDONED_UPSTREAM_MAX_MS, type Config } from "./config.js";
+import { DEFAULT_ABANDONED_UPSTREAM_MAX_MS, DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT, type Config } from "./config.js";
 import { RequestLogger, redactQuery } from "./log.js";
 import { isAbsoluteHttpUrl, boundedFetch, stripTrailingSlashes, discardBody } from "./http.js";
 import { isEventStreamResponse, pipeEventStream } from "./sse.js";
@@ -64,6 +64,9 @@ export function buildForwardSearch(search: string, serveAuthHeader?: string): st
 }
 
 let poolCursor = 0;
+
+// Upstream requests currently detached by abandonUpstream (process-wide).
+let abandonedInFlight = 0;
 
 export function resetPoolCursor(): void {
   poolCursor = 0;
@@ -182,6 +185,21 @@ async function proxyRequest(
     const abandonUpstream = (why: string) => {
       if (abandoned) return;
       abandoned = true;
+      // Bounded concurrency. Detaching turns cancellation into completion, so
+      // under a burst against an already-saturated serve it no longer sheds
+      // work. Poisoning only needs the FIRST caller per directory to survive,
+      // and a burst's tail is mostly waiters on that same init, so a modest cap
+      // keeps the protection while restoring eon4's load-shedding past it.
+      const maxConcurrent = ctx.config.abandonedUpstreamMaxConcurrent ?? DEFAULT_ABANDONED_UPSTREAM_MAX_CONCURRENT;
+      if (abandonedInFlight >= maxConcurrent) {
+        ctx.metrics.upstreamAbandonedKilled++;
+        console.warn(
+          `[FRONTDOOR WARN] ${abandonedInFlight} upstreams already detached (cap ${maxConcurrent}); destroying ${method} ${url.pathname} -> ${target} (${why}), which may poison that serve's per-directory state (499s)`
+        );
+        upstreamReq.destroy();
+        return;
+      }
+      abandonedInFlight++;
       ctx.metrics.upstreamAbandoned++;
       const maxMs = ctx.config.abandonedUpstreamMaxMs ?? DEFAULT_ABANDONED_UPSTREAM_MAX_MS;
       const ceiling = setTimeout(() => {
@@ -194,7 +212,10 @@ async function proxyRequest(
       }, maxMs);
       // Never hold the process open for a request nobody is waiting on.
       ceiling.unref();
-      upstreamReq.once("close", () => clearTimeout(ceiling));
+      upstreamReq.once("close", () => {
+        clearTimeout(ceiling);
+        abandonedInFlight--;
+      });
     };
 
     const onReqError = (err: any) => {
@@ -282,6 +303,19 @@ async function proxyRequest(
 
     upstreamReq.on("response", (upstreamRes) => {
       upstreamResponded = true;
+      if (abandoned) {
+        // Nobody is waiting for this answer, and on the client-close path `res`
+        // is already destroyed: piping into it would stall the upstream body
+        // forever once it outgrows the socket buffer. A stream never ends on its
+        // own, so close it; headers mean the handler (and any init it ran)
+        // already completed, so that cannot poison anything. Otherwise drain.
+        if (isEventStreamResponse(upstreamRes.headers)) {
+          upstreamReq.destroy();
+        } else {
+          upstreamRes.resume();
+        }
+        return;
+      }
       if (cheapTimeoutId) {
         clearTimeout(cheapTimeoutId);
         cheapTimeoutId = null;
@@ -291,13 +325,6 @@ async function proxyRequest(
         wedgeProbe = null;
       }
       if (res.headersSent || headersSent || handedOff) {
-        if (abandoned && isEventStreamResponse(upstreamRes.headers)) {
-          // A stream never ends on its own; draining it would pin the socket
-          // until the ceiling. Headers mean the handler (and any init it ran)
-          // already completed, so closing now cannot poison anything.
-          upstreamReq.destroy();
-          return;
-        }
         upstreamRes.resume(); // drain to release the socket back to the pool
         return;
       }
