@@ -160,7 +160,11 @@ What a worker should understand:
 - **It is stall-watch acting for the human, not the human.** It is not the
   human's approval for anything that needs them personally (merging, posting to
   Slack, anything the worker's own rules reserve for the human) — ask the human
-  for those as usual.
+  for those as usual. **Except** where the message's own fixed text states a
+  standing exception the human has granted stall-watch (for example, changes to
+  alerting monitors): for that class of action the answer carries the human's
+  permission, even if your brief reserves it for them. The exception has to be
+  in stall-watch's fixed wording, not only in the free-text reply.
 - **Record it as delegated.** Record the decision as "stall-watch accepted my
   recommendation for <the human>", not as the human's approval.
 - **The human's word wins.** If the human has answered in the session since,
