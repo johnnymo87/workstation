@@ -50,6 +50,19 @@
 
   networking.firewall.enable = true;
 
+  # Tailscale: reach the box (SSH + Moonlight) from any network. Office guest
+  # Wi-Fi isolates clients and the home LAN address isn't known in advance,
+  # so the tailnet name `gamebox` is the stable way in. Personal free-plan
+  # tailnet; disable key expiry for this node in the admin console, since a
+  # headless box cannot re-authenticate itself.
+  services.tailscale = {
+    enable = true;
+    openFirewall = true; # UDP 41641, for direct (non-relayed) connections
+  };
+  # Everything arriving over the tailnet is already authenticated by
+  # Tailscale; trust it so Sunshine's ports work without listing them twice.
+  networking.firewall.trustedInterfaces = [ "tailscale0" ];
+
   users.users.dev = {
     isNormalUser = true;
     uid = 1000;
