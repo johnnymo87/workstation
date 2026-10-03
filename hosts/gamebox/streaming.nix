@@ -167,6 +167,9 @@ in
           inherit name;
           cmd = ''${lib.getExe' pkgs.ryubing "ryujinx"} -f --docked-mode --hide-cursor always -p ${profile} "/home/gamer/Games/${rom}"'';
           image-path = "desktop.png";
+          # Default is 5 s from SIGTERM to SIGKILL when Moonlight quits;
+          # give the emulator time to stop and flush its caches.
+          exit-timeout = 15;
         };
       in
       [
@@ -186,6 +189,11 @@ in
         (ryujinx "Mario Party Superstars" "Mario Party Superstars[01006FE013472000][v0].nsp" "Jonathan")
       ];
   };
+
+  # The Sunshine module enables Avahi to advertise the host on the LAN. That
+  # is useless here (Tailscale carries no multicast; Moonlight adds the host
+  # by name) and would announce it on the office guest Wi-Fi.
+  services.avahi.openFirewall = false;
 
   # --- Power / Wake-on-LAN -------------------------------------------------
   services.logind.settings.Login.IdleAction = "ignore";
