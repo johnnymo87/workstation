@@ -672,6 +672,7 @@ g_repo=""
 g_pr=""
 g_head=""
 g_requested=""
+policy_err=/dev/null
 
 # Best-effort, like record_denial: never the reason a refusal fails to happen.
 # Writes nothing it knows the reader would reject (lgtm counts, and logs every
@@ -802,7 +803,9 @@ gate_review() {
   if floor_has "$g_repo"; then check_requested_head; fi
 
   set +o errexit
-  out="$(run_approval_policy "$g_repo#$g_pr" "$g_head" 2>/dev/null)"
+  policy_err="$(mktemp 2>/dev/null)" || policy_err=/dev/null
+  [ "$policy_err" = /dev/null ] || cleanup_files+=("$policy_err")
+  out="$(run_approval_policy "$g_repo#$g_pr" "$g_head" 2>"$policy_err")"
   rc=$?
   set -o errexit
 
@@ -845,6 +848,15 @@ gate_review() {
        record_floor_drift "$payload_one" ;;
   esac
 
+  # Anything but an allow keeps lgtm's own stderr, so that if the gate ever
+  # starts refusing every approve (a broken checkout, an empty scope, a bad
+  # PAT) the operator deciding whether to roll back can see WHY. Never shown
+  # to the session: it is not lgtm's refusal text.
+  case "$decision" in
+    allow-*) ;;
+    *) record_policy_stderr "$rc" "$decision" ;;
+  esac
+
   case "$decision" in
     allow-governed)
       check_requested_head
@@ -860,10 +872,25 @@ gate_review() {
     mismatch)
       gate_fallback payload-mismatch "lgtm's answer is about a different repository, PR or head than the one asked about" ;;
     untrusted)
-      gate_fallback answer-untrusted "lgtm's answer cannot be trusted (wrong or missing config echo, or it contradicts the governed floor)" 1 "$payload_one" ;;
+      # No payload copied: an untrusted answer's `reason` must not decide how
+      # the reader classifies the page (a copied no-verdict-for-head would be
+      # held as a race).
+      gate_fallback answer-untrusted "lgtm's answer cannot be trusted (wrong or missing config echo, or it contradicts the governed floor)" ;;
     *)
       gate_fallback policy-command-failed "lgtm --approval-policy did not give a usable answer (exit $rc)" 1 "$payload_one" ;;
   esac
+}
+
+record_policy_stderr() {
+  local rc="$1" decision="$2"
+  [ -s "$policy_err" ] || return 0
+  mkdir -p "$state_dir" 2>/dev/null || return 0
+  {
+    printf '%s %s#%s head=%s rc=%s decision=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$g_repo" "$g_pr" "$g_head" "$rc" "$decision"
+    tail -n 20 "$policy_err" | sed 's/^/  /'
+  } >> "$state_dir/gate-errors.log" 2>/dev/null || true
+  return 0
 }
 
 # Item (7) of lgtm-dwic: lgtm governs a repo this file's floor does not list.
@@ -1001,7 +1028,9 @@ rc=$?
 set -o errexit
 cat "$tmp"
 # Only a successful call created an artifact worth recording.
-if [ "$rc" -eq 0 ]; then
+# (matched_endpoint is empty when the capture path was forced only by a temp
+# body -- e.g. a SAFE /events submission -- which is not an artifact to record.)
+if [ "$rc" -eq 0 ] && [ -n "$matched_endpoint" ]; then
   record_artifact "$matched_endpoint" "$tmp"
 fi
 rm -f "$tmp"

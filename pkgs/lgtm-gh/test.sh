@@ -120,6 +120,7 @@ gate_lgtm_home="/home/dev"
 gate_governed_floor=("food-truck/mono")
 run_approval_policy() {
   printf '%s\n' "\$*" >> "$policy_log"
+  if [ -n "\${FAKE_POLICY_ERR:-}" ]; then printf '%s\n' "\$FAKE_POLICY_ERR" >&2; fi
   if [ -n "\${FAKE_POLICY_OUT:-}" ]; then printf '%s\n' "\$FAKE_POLICY_OUT"; fi
   return "\${FAKE_POLICY_RC:-0}"
 }
@@ -859,6 +860,30 @@ gate_tmp2="$sandbox/gate-tmp2"; mkdir -p "$gate_tmp2"
 printf '{"event":"COMMENT"}' > "$body"
 TMPDIR="$gate_tmp2" run_gate "/events COMMENT via --input" 0 -- api -X POST $REVIEWS/77/events --input "$body"
 assert_eq "0" "$(find "$gate_tmp2" -type f | wc -l | tr -d ' ')" "GATE /events --input leaves no temp file"
+
+# --- review fixes -------------------------------------------------------------
+errlog="$HOME/.local/state/lgtm/gate-errors.log"
+reset_gate; rm -f "$errlog"
+run_approval_policy_stderr='Error: something broke inside lgtm'
+FAKE_POLICY_OUT="" FAKE_POLICY_RC=1 FAKE_POLICY_ERR="$run_approval_policy_stderr" \
+  run_gate "lgtm fails with stderr" 5 -- api -X POST $REVIEWS -f event=APPROVE
+assert_contains "$(cat "$errlog" 2>/dev/null)" "something broke inside lgtm" "GATE a failing lgtm's stderr is kept for the operator"
+assert_eq "" "$(grep -F 'something broke' <<<"$err")" "GATE ...but not shown to the session"
+reset_gate; rm -f "$errlog"
+FAKE_POLICY_OUT="$(payload)" FAKE_POLICY_ERR="noise" run_gate "allowed, with stderr noise" 0 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "no" "$([ -f "$errlog" ] && echo yes || echo no)" "GATE an allow writes no error log"
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.path="/x" | .verdict="undetermined" | .reason="no-verdict-for-head" | .refusal={class:"plumbing", message:["m"]}')" \
+  FAKE_POLICY_RC=2 run_gate "untrusted answer that names a race reason" 5 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "null|answer-untrusted" "$(jq -r '[(.reason // "null"), .refusal.cause] | join("|")' "$refusals" 2>/dev/null || true)" \
+  "GATE answer-untrusted copies no reason (it must not be held as a race)"
+
+reset_gate; rm -f "$ledger"
+printf '{"event":"COMMENT"}' > "$body"
+FAKE_GH_BODY='{"id":4444}' run_gate "/events COMMENT via --input (artifact)" 0 -- api -X POST $REVIEWS/77/events --input "$body"
+assert_eq "0" "$([ -f "$ledger" ] && wc -l < "$ledger" | tr -d ' ' || echo 0)" \
+  "GATE a forced capture with no review endpoint records no malformed artifact"
 
 # --- floor drift (never a refusal) ---------------------------------------------
 reset_gate
