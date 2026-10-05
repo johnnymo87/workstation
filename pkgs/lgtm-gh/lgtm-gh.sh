@@ -105,6 +105,24 @@ gql_query=""     # inline graphql query text, concatenated
 gql_opaque=0     # graphql query supplied by file/stdin: cannot be inspected
 disable_auto=0
 
+# Review-submission facts, for the approval gate (lgtm-f6ue). Read by
+# classify_review below; the merge policy ignores them.
+ev_vals=()       # every `event` value from a field flag, verbatim
+ev_bad=0         # an event key this scan cannot read (event[...])
+commit_ids=()    # every `commit_id` value from a field flag
+field_count=0    # -f/-F/--field/--raw-field occurrences
+input_count=0    # --input occurrences
+input_idx=-1     # argv index of the (last) --input value, or of --input=VALUE
+input_attached=0 # 1 when that index holds `--input=VALUE`
+input_val=""
+has_dashdash=0
+rv_create_path=""  # a positional shaped like .../pulls/N/reviews
+rv_events_path=""  # a positional shaped like .../pulls/N/reviews/ID/events
+rv_paths=0
+pr_approve=0     # `pr review` flags
+pr_comment=0
+pr_request=0
+
 # WHY a refusal happened, in the caller's words. Without this the "cannot
 # determine the target repository" message tells an agent to pass --repo, which
 # is wrong advice for four of the five ways a hint goes unparseable -- it
@@ -132,9 +150,12 @@ add_repo_hint() {
   repo_hints="$repo_hints $n"
 }
 
-# A `key=value` field. Only `query` matters, and only for graphql.
+# A `key=value` field. `query` matters for graphql; `event` and `commit_id`
+# for the approval gate. (A `-F event=@file` value needs no special case: the
+# literal "@file" is never exactly COMMENT, so it is gated.)
 scan_field() {
   local kv="$1" k v
+  field_count=$((field_count + 1))
   k="${kv%%=*}"
   v="${kv#*=}"
   if [ "$k" = "query" ]; then
@@ -143,6 +164,11 @@ scan_field() {
       *)  gql_query="$gql_query $v" ;;
     esac
   fi
+  case "$k" in
+    event)      ev_vals+=("$v") ;;
+    event\[*) ev_bad=1 ;;
+    commit_id) commit_ids+=("$v") ;;
+  esac
 }
 
 # Every positional after the subcommand, classified by SHAPE rather than by
@@ -158,6 +184,14 @@ scan_path() {
   case "$t" in
     graphql|*/graphql) graphql_path=1 ;;
   esac
+  # Deliberately LOOSE (any case, any prefix): a path the gate's strict parse
+  # then cannot read is refused, which is the safe way for a near-miss to fail.
+  local lower="${t,,}"
+  if [[ "$lower" =~ (^|/)pulls/[^/]+/reviews/[^/]+/events$ ]]; then
+    rv_events_path="$t"; rv_paths=$((rv_paths + 1))
+  elif [[ "$lower" =~ (^|/)pulls/[^/]+/reviews$ ]]; then
+    rv_create_path="$t"; rv_paths=$((rv_paths + 1))
+  fi
   case "$t" in
     */pulls/*/reviews|*/pulls/*/comments|*/pulls/comments/*/replies)
       review_endpoint="$t" ;;
@@ -206,13 +240,15 @@ scan_pr_selector() {
 }
 
 scan_argv() {
-  local a pending="" v
+  local a pending="" v i=-1
   for a in "$@"; do
+    i=$((i + 1))
     case "$pending" in
       repo)   add_repo_hint "$a"; pending=""; continue ;;
       method) method="$a";        pending=""; continue ;;
       field)  scan_field "$a";    pending=""; continue ;;
-      input)  gql_opaque=1;       pending=""; continue ;;
+      input)  gql_opaque=1; input_idx=$i; input_attached=0; input_val="$a"
+              pending=""; continue ;;
     esac
     case "$a" in
       # Both the separated and the ATTACHED form of every flag that can carry a
@@ -229,9 +265,15 @@ scan_argv() {
       --field=*|--raw-field=*)   scan_field "${a#*=}"; mutating=1 ;;
       -f?*|-F?*)                 v="${a#-?}"; scan_field "${v#=}"; mutating=1 ;;
       # `gh api --input FILE` is a POST with no field flag at all.
-      --input)                   pending=input; mutating=1 ;;
-      --input=*)                 gql_opaque=1; mutating=1 ;;
+      --input)                   pending=input; mutating=1; input_count=$((input_count + 1)) ;;
+      --input=*)                 gql_opaque=1; mutating=1; input_count=$((input_count + 1))
+                                 input_idx=$i; input_attached=1; input_val="${a#--input=}" ;;
       --disable-auto)            disable_auto=1 ;;
+      --)                        has_dashdash=1 ;;
+      # `pr review` event flags. Only read when the command IS `pr review`.
+      -a|--approve|--approve=*)  pr_approve=1 ;;
+      -c|--comment|--comment=*)  pr_comment=1 ;;
+      -r|--request-changes|--request-changes=*) pr_request=1 ;;
       --*)                       : ;;
       -[A-Za-z])                 : ;;
       # A short CLUSTER. `-sR food-truck/mono` is `--squash --repo
@@ -459,6 +501,411 @@ if [ -n "$merge_kind" ]; then
   fi
 fi
 
+# ---- approval gate (lgtm-f6ue) ---------------------------------------------
+#
+# WHY THIS EXISTS. Some repos (food-truck/mono) have teams whose code lgtm may
+# never approve on its own. lgtm records, per PR head, whether the change is
+# clear of those teams; `lgtm --approval-policy` reads that record back. This
+# block is the enforcement: an APPROVE goes through only when that command says
+# `clear` for the PR's LIVE head and every key in its answer matches. A refused
+# session is told (by lgtm's own text, or the fallback below) to leave a COMMENT
+# and stop, and the refusal is appended to gate-refusals.jsonl, which lgtm reads
+# every cycle to page Jonathan. Design: lgtm bead lgtm-f6ue and lgtm repo
+# docs/plans/2026-09-10-blocked-owner-enforcement-plan.md §7.
+#
+# A POSITIVE ALLOWLIST, NOT AN APPROVE BLOCKLIST. Approve spellings are not
+# enumerable (field, --input body, stdin, /events, `pr review -a`, GraphQL), so
+# the question asked is the other one: is the event PROVABLY COMMENT or
+# REQUEST_CHANGES? Those are never touched, in any state. Everything else that
+# submits a review -- APPROVE, no event (a PENDING review), a lowercase event,
+# an event read from a file -- is gated, on every repo, because whether a repo
+# is governed is itself part of lgtm's answer.
+#
+# THE LIVE HEAD, NOT THE WORKTREE'S. The head comes from GET pulls/N, never
+# `git rev-parse HEAD`: on the reawaken path the worktree sits at the old sha by
+# design, and a stale verdict would match a stale worktree. A clear APPROVE on a
+# governed repo is then PINNED to that head with commit_id, so it cannot land on
+# a commit pushed after the check.
+#
+# THE FLOOR. `gate_governed_floor` is unioned with lgtm's answer: a wrong
+# lgtm.yml (lgtm-dwic) can make lgtm say "ungoverned" for mono, and the floor is
+# what refuses that. It only ever ADDS refusals, so if it drifts behind lgtm.yml
+# nothing is unprotected that lgtm protects; gate-floor-drift.jsonl records it.
+#
+# WHAT THIS IS NOT, same as the merge policy above: a security boundary. Plain
+# `gh` bypasses it (an accepted gap, lgtm-3za8). It catches a CONFUSED session,
+# and its strictness stops there -- see the cases deliberately left ungated.
+#
+# Exit codes: 3 policy (lgtm judged the head), 5 plumbing (could not judge).
+# Never 4: gh already uses 4 for "authentication required".
+#
+# The pins and the lgtm invocation are one delimited block so test.sh can swap
+# in a sandbox for exactly that and nothing else; test.sh also asserts this
+# block byte for byte. Every pin must equal what lgtm ECHOES (payload.config:
+# path is path.resolve()d, stateDir verbatim), or every approve is refused:
+# literal, normalised, no $HOME. roundtrip.sh proves it against the live lgtm.
+# BEGIN GATE PINS
+gate_lgtm_dir="/home/dev/projects/lgtm"
+gate_lgtm_config="/home/dev/projects/lgtm/lgtm.yml"
+gate_lgtm_state_dir="/home/dev/.local/state/lgtm"
+gate_lgtm_tokens_dir="/home/dev/.config/lgtm/tokens"
+gate_lgtm_projects_dir="/home/dev/projects"
+gate_lgtm_home="/home/dev"
+gate_governed_floor=("food-truck/mono")
+run_approval_policy() {
+  local node_bin
+  node_bin="$(command -v node)" || return 127
+  ( cd "$gate_lgtm_dir" || exit 126
+    timeout -k 2 20 env -i \
+      HOME="$gate_lgtm_home" PATH="${node_bin%/*}" \
+      LGTM_CONFIG="$gate_lgtm_config" LGTM_STATE_DIR="$gate_lgtm_state_dir" \
+      LGTM_TOKENS_DIR="$gate_lgtm_tokens_dir" LGTM_PROJECTS_DIR="$gate_lgtm_projects_dir" \
+      "$node_bin" "$gate_lgtm_dir/node_modules/tsx/dist/cli.mjs" src/index.ts \
+      --approval-policy "$1" --head "$2" )
+}
+# END GATE PINS
+
+GATE_MARKER="lgtm-gh: refusing to approve"
+gate_refusals_file="$state_dir/gate-refusals.jsonl"
+gate_drift_file="$state_dir/gate-floor-drift.jsonl"
+
+review_kind=""    # "" | create | events | pr-review | graphql
+review_safe=0     # 1 = provably COMMENT / REQUEST_CHANGES: never gated
+gh_args=("$@")    # what gh is finally run with (the gate may pin it)
+cleanup_files=()  # temp files to remove; their presence forces the capture path
+body_copy=""      # private copy of an --input body
+body_bad=0        # that body could not be read as exactly one JSON object
+body_ev_vals=()
+body_commit_ids=()
+
+# Submitting, not reading: explicit POST, or gh's implicit POST (a field or
+# --input with no method). An undecomposable short cluster might hide -XPOST.
+is_submission() {
+  [ "$sub1" = api ] || return 1
+  [ "$unknown_flag" -eq 0 ] || return 0
+  case "${method^^}" in
+    POST) return 0 ;;
+    "")   [ "$mutating" -eq 1 ] ;;
+    *)    return 1 ;;
+  esac
+}
+
+# Copy an --input body (file, or stdin for `-`) somewhere private, read its
+# top-level event/commit_id, and point gh at the copy -- so gh sends exactly
+# the bytes that were classified, and a pin can be added without touching the
+# session's own file.
+copy_review_body() {
+  local raw
+  body_copy="$(mktemp 2>/dev/null)" || { body_bad=1; return 0; }
+  cleanup_files+=("$body_copy")
+  if [ "$input_val" = "-" ]; then
+    cat > "$body_copy" 2>/dev/null || { body_bad=1; return 0; }
+  else
+    cat -- "$input_val" > "$body_copy" 2>/dev/null || { body_bad=1; return 0; }
+  fi
+  if [ "$input_attached" -eq 1 ]; then
+    gh_args[input_idx]="--input=$body_copy"
+  else
+    gh_args[input_idx]="$body_copy"
+  fi
+  jq -e -s 'length == 1 and (.[0] | type) == "object"' < "$body_copy" >/dev/null 2>&1 \
+    || { body_bad=1; return 0; }
+  # --stream sees EVERY occurrence of a duplicated key; `.event` keeps the last.
+  raw="$(jq -r --stream '
+      select(length == 2 and (.[0][0] == "event" or .[0][0] == "commit_id"))
+      | if (.[0] | length) != 1 or (.[1] | type) != "string" then "BAD"
+        else (.[0][0]) + "\t" + .[1] end' < "$body_copy" 2>/dev/null)" || { body_bad=1; return 0; }
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "") ;;
+      BAD) body_bad=1 ;;
+      event$'\t'*)     body_ev_vals+=("${line#event$'\t'}") ;;
+      commit_id$'\t'*) body_commit_ids+=("${line#commit_id$'\t'}") ;;
+      *) body_bad=1 ;;
+    esac
+  done <<<"$raw"
+  return 0
+}
+
+# Every event seen, from fields and body together, must be exactly COMMENT or
+# REQUEST_CHANGES -- and there must be at least one.
+events_are_safe() {
+  local v n=0
+  [ "$ev_bad" -eq 0 ] && [ "$body_bad" -eq 0 ] || return 1
+  for v in "${ev_vals[@]}" "${body_ev_vals[@]}"; do
+    case "$v" in
+      COMMENT|REQUEST_CHANGES) n=$((n + 1)) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$n" -gt 0 ]
+}
+
+classify_review() {
+  if [ "$sub1" = pr ] && [ "$sub2" = review ]; then
+    review_kind=pr-review
+    if [ "$pr_approve" -eq 0 ] && [ "$unknown_flag" -eq 0 ] \
+       && { [ "$pr_comment" -eq 1 ] || [ "$pr_request" -eq 1 ]; }; then
+      review_safe=1
+    fi
+    return 0
+  fi
+  [ "$sub1" = api ] || return 0
+  if [ "$graphql_path" -eq 1 ]; then
+    if [[ "$gql_query" =~ (addPullRequestReview|submitPullRequestReview)([^A-Za-z0-9_]|$) ]]; then
+      review_kind=graphql
+    fi
+    return 0
+  fi
+  [ "$rv_paths" -gt 0 ] || return 0
+  is_submission || return 0
+  if [ -n "$rv_events_path" ]; then review_kind=events; else review_kind=create; fi
+  if [ "$input_count" -eq 1 ]; then copy_review_body; fi
+  if [ "$input_count" -le 1 ] && events_are_safe; then review_safe=1; fi
+  return 0
+}
+
+# The refused PR, for the ledger and the messages. g_repo is the canonical
+# name once the live-head read has supplied it.
+g_repo=""
+g_pr=""
+g_head=""
+g_requested=""
+
+# Best-effort, like record_denial: never the reason a refusal fails to happen.
+# Writes nothing it knows the reader would reject (lgtm counts, and logs every
+# cycle, each invalid line forever).
+record_gate_refusal() {
+  local class="$1" cause="$2" payload="${3:-null}" ts head="" req=""
+  [[ "$g_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 0
+  [[ "$g_pr" =~ ^[0-9]{1,9}$ ]] && [ "$((10#$g_pr))" -gt 0 ] || return 0
+  [[ "$g_head" =~ ^[0-9a-f]{40}$ ]] && head="$g_head"
+  [[ "$g_requested" =~ ^[0-9a-f]{40}$ ]] && req="$g_requested"
+  mkdir -p "$state_dir" 2>/dev/null || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -cn \
+    --arg ts "$ts" --arg login "$login" --arg repo "$g_repo" --argjson pr "$((10#$g_pr))" \
+    --arg head "$head" --arg req "$req" --arg class "$class" --arg cause "$cause" \
+    --argjson p "$payload" '
+      {ts: $ts, login: $login, repo: $repo, prNumber: $pr}
+      + (if $head != "" then {head: $head} else {} end)
+      + (if $req != "" then {requestedHead: $req} else {} end)
+      + (if ($p | type) == "object"
+         then ({reason: $p.reason, verdict: $p.verdict, warningClass: $p.warningClass}
+               | with_entries(select((.value | type) == "string" and (.value | length) > 0)))
+         else {} end)
+      + {refusal: ({class: $class} + (if $cause != "" then {cause: $cause} else {} end))}' \
+    >> "$gate_refusals_file" 2>/dev/null || true
+  return 0
+}
+
+# The wrapper's OWN refusal text, for everything lgtm did not answer. It must
+# carry the same instruction as lgtm's (gateRefusal.ts) and the review prompt:
+# no retry, no re-route, one pinned COMMENT, stop.
+gate_fallback() {
+  local cause="$1" detail="$2" recorded="${3:-1}" payload="${4:-null}" where target
+  if [ -n "$g_repo" ]; then where="$g_repo${g_pr:+#$g_pr}"
+  elif [ -n "$g_pr" ]; then where="PR #$g_pr"
+  else where="this PR"; fi
+  target="repos/${g_repo:-OWNER/NAME}/pulls/${g_pr:-N}/reviews"
+  if [ "$recorded" -eq 1 ]; then record_gate_refusal plumbing "$cause" "$payload"; fi
+  {
+    echo "$GATE_MARKER $where: $detail ($cause)."
+    echo "lgtm-gh: this is not a judgement on the code -- the approval gate could not clear this approval. It is still final for this session."
+    echo "lgtm-gh: do NOT retry the approval, and do NOT approve any other way: not plain gh, not gh pr review --approve, not the GraphQL API. Re-running anything will not change this answer."
+    echo "lgtm-gh: instead, submit your review ONCE as event=COMMENT ('lgtm-gh api -X POST $target'), pinned with -f commit_id=<sha> to the commit you were dispatched to review (your instructions name it; never drop commit_id), and start its body with: Would approve; lgtm's ownership gate refused the approval: $cause."
+    if [ "$recorded" -eq 1 ] && [ -n "$g_repo" ]; then
+      echo "lgtm-gh: then end your session. Do not REQUEST_CHANGES to compensate (nothing is wrong with the code) and do not @-mention anyone. lgtm records this refusal and alerts a human."
+    else
+      echo "lgtm-gh: then end your session. Do not REQUEST_CHANGES to compensate and do not @-mention anyone. This refusal could NOT be recorded, so say in your final report that lgtm-gh refused the approval, and why."
+    fi
+  } >&2
+  exit 5
+}
+
+# OWNER/NAME and N from a review path, or nothing.
+parse_review_path() {
+  local t="$1" re
+  t="${t#https://api.github.com}"
+  t="${t#/}"
+  re='^repos/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pulls/([0-9]{1,9})/reviews(/[0-9]+/events)?$'
+  if [[ "$t" =~ $re ]]; then
+    g_repo="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    g_pr="$((10#${BASH_REMATCH[3]}))"
+    return 0
+  fi
+  return 1
+}
+
+floor_has() {
+  local r
+  for r in "${gate_governed_floor[@]}"; do
+    [ "${r,,}" = "${1,,}" ] && return 0
+  done
+  return 1
+}
+
+# Any commit_id the session asked for that is not the live head -> the race the
+# pin exists for. Checked only once the repo is known to be governed.
+check_requested_head() {
+  local c
+  for c in "${commit_ids[@]}" "${body_commit_ids[@]}"; do
+    if [ "${c,,}" != "$g_head" ]; then
+      g_requested="${c,,}"
+      gate_fallback head-mismatch "you asked to approve commit '$c', but the PR's head is now $g_head; that head has not been checked"
+    fi
+  done
+}
+
+gate_review() {
+  local line live canon out rc decision floor_json payload_one
+  case "$review_kind" in
+    graphql)
+      gate_fallback unsupported-surface "GraphQL review mutations name no repository, so this wrapper cannot check them" 0 ;;
+    pr-review)
+      resolve_repo
+      g_repo="$target_repo"
+      if [[ "$sub3" =~ ^#?([0-9]{1,9})$ ]]; then
+        g_pr="$((10#${BASH_REMATCH[1]}))"
+      elif [[ "$sub3" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/([0-9]{1,9})$ ]]; then
+        g_pr="$((10#${BASH_REMATCH[1]}))"
+      fi
+      gate_fallback unsupported-surface "'gh pr review' cannot be pinned to the commit that was checked, so this wrapper does not approve through it" ;;
+    events)
+      parse_review_path "$rv_events_path" || true
+      gate_fallback unsupported-surface "submitting a pending review cannot be checked against the PR's live head" ;;
+  esac
+
+  # create: POST .../pulls/N/reviews
+  if [ "$rv_paths" -ne 1 ] || ! parse_review_path "$rv_create_path"; then
+    g_repo=""; g_pr=""
+    gate_fallback unresolvable-target "the repository and PR cannot be read from '$rv_create_path'; use repos/OWNER/NAME/pulls/N/reviews" 0
+  fi
+  if [ "$input_count" -gt 1 ] || [ "$has_dashdash" -eq 1 ] || [ "$body_bad" -eq 1 ] \
+     || { [ "$input_count" -eq 1 ] && [ "$field_count" -gt 0 ]; }; then
+    gate_fallback unparseable-event "the review event cannot be determined from this command line (one --input body with no field flags, or field flags alone)"
+  fi
+
+  # The live head, and the repository's canonical name (which also settles a
+  # renamed repo: GitHub answers under the new name).
+  line="$(timeout -k 2 20 env GH_TOKEN="$(cat "$token_file")" gh api "repos/$g_repo/pulls/$g_pr" \
+            --jq '.head.sha + " " + .base.repo.full_name' 2>/dev/null)" || line=""
+  live="${line%% *}"
+  canon="${line#* }"
+  if ! [[ "$live" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$canon" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    gate_fallback live-head-unreadable "the PR's current head could not be read from GitHub"
+  fi
+  g_head="$live"
+  g_repo="$canon"
+
+  if floor_has "$g_repo"; then check_requested_head; fi
+
+  set +o errexit
+  out="$(run_approval_policy "$g_repo#$g_pr" "$g_head" 2>/dev/null)"
+  rc=$?
+  set -o errexit
+
+  floor_json="$(printf '%s\n' "${gate_governed_floor[@]}" | jq -R 'ascii_downcase' | jq -sc .)"
+  decision="$(printf '%s' "$out" | jq -rs \
+      --arg repo "$g_repo" --argjson pr "$g_pr" --arg head "$g_head" \
+      --arg cfg "$gate_lgtm_config" --arg sd "$gate_lgtm_state_dir" \
+      --argjson floor "$floor_json" --argjson rc "$rc" '
+    if length != 1 or (.[0] | type) != "object" then "nodoc"
+    else .[0] as $p
+    | if ($p.repo | type) != "string" or ($p.repo | ascii_downcase) != ($repo | ascii_downcase)
+         or ($p.prNumber | type) != "number" or $p.prNumber != $pr or $p.head != $head
+      then "mismatch"
+      elif ($p.config | type) != "object" or $p.config.path != $cfg or $p.config.stateDir != $sd
+           or ($p.config.governedRepos | type) != "array"
+      then "untrusted"
+      else [$p.config.governedRepos[] | strings | ascii_downcase] as $gr
+      | ($gr | index($repo | ascii_downcase)) as $listed
+      | ($floor | index($repo | ascii_downcase)) as $onfloor
+      | if $rc == 0 and $p.governed == true and $listed != null and $p.verdict == "clear"
+        then "allow-governed"
+        elif $rc == 0 and $p.governed == false and $p.verdict == "ungoverned"
+             and $listed == null and $onfloor == null and (($floor - $gr) | length) == 0
+        then "allow-ungoverned"
+        elif $p.governed == true and $listed != null and $p.verdict != "clear"
+             and ($p.refusal | type) == "object"
+             and ($p.refusal.class == "policy" or $p.refusal.class == "plumbing")
+             and ($p.refusal.message | type) == "array" and ($p.refusal.message | length) > 0
+             and all($p.refusal.message[]; type == "string")
+        then "refuse-" + $p.refusal.class
+        elif $rc != 0 and ($p.verdict == "clear" or $p.verdict == "ungoverned") then "failed"
+        else "untrusted" end
+      end
+    end' 2>/dev/null)" || decision="nodoc"
+
+  payload_one="null"
+  case "$decision" in
+    nodoc|mismatch|"") ;;
+    *) payload_one="$(printf '%s' "$out" | jq -c . 2>/dev/null)" || payload_one="null"
+       record_floor_drift "$payload_one" ;;
+  esac
+
+  case "$decision" in
+    allow-governed)
+      check_requested_head
+      pin_to_live_head
+      return 0 ;;
+    allow-ungoverned)
+      return 0 ;;
+    refuse-policy|refuse-plumbing)
+      record_gate_refusal "${decision#refuse-}" "" "$payload_one"
+      printf '%s' "$payload_one" | jq -r '.refusal.message[]' >&2
+      if [ "$decision" = refuse-policy ]; then exit 3; fi
+      exit 5 ;;
+    mismatch)
+      gate_fallback payload-mismatch "lgtm's answer is about a different repository, PR or head than the one asked about" ;;
+    untrusted)
+      gate_fallback answer-untrusted "lgtm's answer cannot be trusted (wrong or missing config echo, or it contradicts the governed floor)" 1 "$payload_one" ;;
+    *)
+      gate_fallback policy-command-failed "lgtm --approval-policy did not give a usable answer (exit $rc)" 1 "$payload_one" ;;
+  esac
+}
+
+# Item (7) of lgtm-dwic: lgtm governs a repo this file's floor does not list.
+# Recorded, never refused and never shown to the session.
+record_floor_drift() {
+  local p="$1" extra
+  extra="$(printf '%s' "$p" | jq -c --argjson floor "$floor_json" \
+    '[(.config.governedRepos // [])[] | strings | ascii_downcase] - $floor' 2>/dev/null)" || return 0
+  [ -n "$extra" ] && [ "$extra" != "[]" ] || return 0
+  mkdir -p "$state_dir" 2>/dev/null || return 0
+  jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson extra "$extra" \
+    '{ts: $ts, extra: $extra}' >> "$gate_drift_file" 2>/dev/null || true
+  return 0
+}
+
+# Governed allow: the approval must land on the commit that was checked.
+pin_to_live_head() {
+  local pinned
+  if [ "${#commit_ids[@]}" -gt 0 ] || [ "${#body_commit_ids[@]}" -gt 0 ]; then
+    return 0  # already present, and check_requested_head proved it is the live head
+  fi
+  if [ "$input_count" -eq 1 ]; then
+    pinned="$(mktemp 2>/dev/null)" || gate_fallback policy-command-failed "could not pin the approval to the checked commit"
+    cleanup_files+=("$pinned")
+    jq --arg c "$g_head" '. + {commit_id: $c}' < "$body_copy" > "$pinned" 2>/dev/null \
+      || gate_fallback policy-command-failed "could not pin the approval to the checked commit"
+    if [ "$input_attached" -eq 1 ]; then
+      gh_args[input_idx]="--input=$pinned"
+    else
+      gh_args[input_idx]="$pinned"
+    fi
+  else
+    gh_args+=(-f "commit_id=$g_head")
+  fi
+}
+
+trap 'rm -f "${cleanup_files[@]}"' EXIT
+classify_review
+if [ -n "$review_kind" ] && [ "$review_safe" -eq 0 ]; then
+  gate_review
+fi
+
 # ---- review-artifact ledger --------------------------------------------
 #
 # WHY THIS EXISTS. lgtm reviews as a POOL OF REAL HUMAN LOGINS
@@ -535,18 +982,21 @@ record_artifact() {
 # path verbatim: same process replacement, same streaming, no capture.
 # This wrapper mediates EVERY state-changing call lgtm makes, so the
 # deviation below is confined to the calls whose ids we actually need.
-if ! is_review_post; then
+# A temp body (the gate's --input copy) must outlive gh and then be removed, so
+# its presence also forces the non-exec path.
+if ! is_review_post && [ "${#cleanup_files[@]}" -eq 0 ]; then
   # exec so GH_TOKEN lives only for gh's lifetime; the agent never sees it.
-  exec env GH_TOKEN="$(cat "$token_file")" gh "$@"
+  exec env GH_TOKEN="$(cat "$token_file")" gh "${gh_args[@]}"
 fi
 
 # Capture path. stdout is buffered to a temp file so the id can be read
 # out of it, then replayed byte-for-byte; stderr is untouched and gh's
 # exit code is preserved exactly.
-tmp="$(mktemp 2>/dev/null)" || exec env GH_TOKEN="$(cat "$token_file")" gh "$@"
+tmp="$(mktemp 2>/dev/null)" || exec env GH_TOKEN="$(cat "$token_file")" gh "${gh_args[@]}"
+cleanup_files+=("$tmp")
 rc=0
 set +o errexit
-env GH_TOKEN="$(cat "$token_file")" gh "$@" > "$tmp"
+env GH_TOKEN="$(cat "$token_file")" gh "${gh_args[@]}" > "$tmp"
 rc=$?
 set -o errexit
 cat "$tmp"

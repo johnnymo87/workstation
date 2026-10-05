@@ -1349,7 +1349,10 @@
           # still passes on a dev box (jq is on the ambient PATH) and fails
           # only in the sandbox -- green under the shell I ran it in, red in
           # the one that counts.
+          # gawk: builds the copy under test (GATE PINS block swap).
+          # findutils: the gate's no-leaked-temp-file assertion.
           devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.jq
+          devboxPkgs.gawk devboxPkgs.findutils
         ];
       } ''
         cd ${self}
@@ -1366,8 +1369,12 @@
         # lgtm-gh.sh, the real body), and gained the merge-policy cases: 92 of
         # these 147 fail if the policy block is neutered, which is the number
         # that makes them evidence rather than decoration.
-        grep -q '^147 passed, 0 failed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected '147 passed, 0 failed'." >&2
+        #
+        # 147 -> 473 deliberately: the approval gate (lgtm-f6ue) -- every
+        # review surface, every refusal cause, the ledger shape, and the
+        # shipped GATE PINS block byte for byte.
+        grep -q '^473 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '473 passed, 0 failed'." >&2
           echo "Update deliberately, in the same commit." >&2
           exit 1
         }
