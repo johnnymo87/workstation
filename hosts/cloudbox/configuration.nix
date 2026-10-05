@@ -818,6 +818,13 @@ in
         # default. (devbox has no Vertex creds and keeps the default.) Parsed by
         # packages/daemon/src/config.ts.
         "PIGEON_ALLOWED_PROVIDERS=anthropic,openai,google-vertex,google-vertex-anthropic"
+        # Who may leave a message for a pull-mode session (a goose lane, which
+        # cannot be pushed to; pigeon #165). Empty means nobody, and such a
+        # session answers "not reachable". This is the owner's Telegram user id
+        # (the same id as the private chat in the worker's ALLOWED_CHAT_IDS).
+        # It is half of a two-part switch: the lane only reads banked messages
+        # when its own flag file exists, so set and unset the two together.
+        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"
