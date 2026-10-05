@@ -759,8 +759,31 @@ check_requested_head() {
   done
 }
 
+# The live head and canonical name: GET pulls/N. Sets g_head/g_repo and
+# succeeds only on a well-formed answer. (The canonical name also settles a
+# renamed repo: GitHub answers under the new name.)
+read_live_head() {
+  local line live canon
+  line="$(timeout -k 2 20 env GH_TOKEN="$(cat "$token_file")" gh api "repos/$g_repo/pulls/$g_pr" \
+            --jq '.head.sha + " " + .base.repo.full_name' 2>/dev/null)" || line=""
+  live="${line%% *}"
+  canon="${line#* }"
+  [[ "$live" =~ ^[0-9a-f]{40}$ ]] && [[ "$canon" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || return 1
+  g_head="$live"
+  g_repo="$canon"
+}
+
+# Refusals that need no lgtm answer still carry the live head when it can be
+# read: the reader pages once per (repo, PR, head), so a head-less record would
+# file every later head-less refusal on that PR under one stamp, silently.
+best_effort_head() {
+  if [[ "$g_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && [[ "$g_pr" =~ ^[0-9]{1,9}$ ]]; then
+    read_live_head || true
+  fi
+}
+
 gate_review() {
-  local line live canon out rc decision floor_json payload_one
+  local out rc decision floor_json payload_one
   case "$review_kind" in
     graphql)
       gate_fallback unsupported-surface "GraphQL review mutations name no repository, so this wrapper cannot check them" 0 ;;
@@ -772,9 +795,11 @@ gate_review() {
       elif [[ "$sub3" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/([0-9]{1,9})$ ]]; then
         g_pr="$((10#${BASH_REMATCH[1]}))"
       fi
+      best_effort_head
       gate_fallback unsupported-surface "'gh pr review' cannot be pinned to the commit that was checked, so this wrapper does not approve through it" ;;
     events)
       parse_review_path "$rv_events_path" || true
+      best_effort_head
       gate_fallback unsupported-surface "submitting a pending review cannot be checked against the PR's live head" ;;
   esac
 
@@ -788,17 +813,9 @@ gate_review() {
     gate_fallback unparseable-event "the review event cannot be determined from this command line (one --input body with no field flags, or field flags alone)"
   fi
 
-  # The live head, and the repository's canonical name (which also settles a
-  # renamed repo: GitHub answers under the new name).
-  line="$(timeout -k 2 20 env GH_TOKEN="$(cat "$token_file")" gh api "repos/$g_repo/pulls/$g_pr" \
-            --jq '.head.sha + " " + .base.repo.full_name' 2>/dev/null)" || line=""
-  live="${line%% *}"
-  canon="${line#* }"
-  if ! [[ "$live" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$canon" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  if ! read_live_head; then
     gate_fallback live-head-unreadable "the PR's current head could not be read from GitHub"
   fi
-  g_head="$live"
-  g_repo="$canon"
 
   if floor_has "$g_repo"; then check_requested_head; fi
 

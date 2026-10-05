@@ -766,7 +766,12 @@ fallback_case "dashdash" unparseable-event
 reset_gate
 run_gate "pr review --approve" 5 -- pr review 42 --repo food-truck/mono --approve
 fallback_case "pr review --approve" unsupported-surface
-assert_eq "0" "$(gets)" "GATE pr review --approve -> no network"
+assert_eq "$H1" "$(jq -r .head "$refusals" 2>/dev/null || true)" \
+  "GATE pr review --approve -> ledger carries the live head (one page per head)"
+assert_eq "0" "$(policy_calls)" "GATE pr review --approve -> lgtm is not asked"
+reset_gate
+FAKE_PR_RC=1 FAKE_PR_LINE="" run_gate "pr review --approve, head unreadable" 5 -- pr review 42 --repo food-truck/mono --approve
+fallback_case "pr review --approve, no head" unsupported-surface
 reset_gate
 run_gate "pr review -a on an ungoverned repo" 5 -- pr review 9 --repo blueapron/internal-frontends -a
 assert_eq "no" "$(posted)" "GATE pr review -a refused on every repo"
@@ -777,6 +782,7 @@ assert_eq "no" "$(posted)" "GATE pr review without -c/-r is gated"
 reset_gate
 run_gate "/events APPROVE" 5 -- api -X POST $REVIEWS/77/events -f event=APPROVE
 fallback_case "/events APPROVE" unsupported-surface
+assert_eq "$H1" "$(jq -r .head "$refusals" 2>/dev/null || true)" "GATE /events APPROVE -> ledger carries the live head"
 reset_gate
 run_gate "/events COMMENT" 0 -- api -X POST $REVIEWS/77/events -f event=COMMENT
 assert_eq "yes" "$(posted)" "GATE /events COMMENT -> posted"

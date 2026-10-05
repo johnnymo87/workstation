@@ -1370,11 +1370,11 @@
         # these 147 fail if the policy block is neutered, which is the number
         # that makes them evidence rather than decoration.
         #
-        # 147 -> 482 deliberately: the approval gate (lgtm-f6ue) -- every
+        # 147 -> 490 deliberately: the approval gate (lgtm-f6ue) -- every
         # review surface, every refusal cause, the ledger shape, and the
         # shipped GATE PINS block byte for byte.
-        grep -q '^482 passed, 0 failed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected '482 passed, 0 failed'." >&2
+        grep -q '^490 passed, 0 failed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected '490 passed, 0 failed'." >&2
           echo "Update deliberately, in the same commit." >&2
           exit 1
         }
