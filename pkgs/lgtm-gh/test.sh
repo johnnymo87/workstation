@@ -21,8 +21,14 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # in lgtm-gh.sh and default.nix reads it verbatim, so these assertions run
 # PRODUCTION SOURCE -- a subprocess, so its exec/exit are fine, with the fake
 # `gh` below winning on PATH because nothing has prepended a pinned one.
+#
+# ONE substitution, and it is bounded: the approval gate's pins and its lgtm
+# invocation live between `# BEGIN GATE PINS` / `# END GATE PINS`, and the copy
+# under test swaps ONLY that block for a sandbox one whose policy command
+# prints a canned payload. Every other byte is the shipped source, and a guard
+# at the bottom asserts the shipped block byte for byte (lgtm-f6ue).
 lgtm_gh() {
-  bash "$script_dir/lgtm-gh.sh" "$@"
+  bash "$gate_src" "$@"
 }
 
 # ---- test infrastructure ----------------------------------------------------
@@ -67,15 +73,64 @@ gh_record="$sandbox/gh-record"
 # made every behavioural case here die with "env: 'gh': No such file or
 # directory" once this suite was wired as a check. A shebang is an absolute
 # path, so no amount of PATH in the check can fix it from outside.
+gh_log="$sandbox/gh-log"
 cat > "$fakebin/gh" <<EOF
 #!$BASH
+printf '%s\n' "\$*" >> "$gh_log"
+# The approval gate's live-head read: \`api repos/O/R/pulls/N --jq ...\`. It
+# answers from FAKE_PR_LINE ("<sha> <full_name>") and does NOT touch the
+# record, so gh_record always describes the LAST non-GET call.
+if [ "\$1" = api ] && [[ "\$2" =~ ^repos/[^/]+/[^/]+/pulls/[0-9]+\$ ]] && [ "\${3:-}" = --jq ]; then
+  if [ -n "\${FAKE_PR_LINE:-}" ]; then printf '%s\n' "\$FAKE_PR_LINE"; fi
+  exit "\${FAKE_PR_RC:-0}"
+fi
 { echo "GH_TOKEN=\$GH_TOKEN"; echo "ARGS=\$*"; echo "GH_CONFIG_DIR=\${GH_CONFIG_DIR:-}"; echo "XDG_DATA_HOME=\${XDG_DATA_HOME:-}"; } > "$gh_record"
+# What gh would have SENT as the --input body, if any (the wrapper may hand gh
+# a rewritten copy; the copy is deleted when the wrapper exits).
+prev=""
+for a in "\$@"; do
+  case "\$prev" in --input) cat "\$a" > "$gh_record.input" ;; esac
+  case "\$a" in --input=*) cat "\${a#--input=}" > "$gh_record.input" ;; esac
+  prev="\$a"
+done
 # FAKE_GH_BODY / FAKE_GH_RC let a test drive the response the wrapper parses.
 if [ -n "\${FAKE_GH_BODY:-}" ]; then printf '%s' "\$FAKE_GH_BODY"; fi
 exit "\${FAKE_GH_RC:-0}"
 EOF
 chmod +x "$fakebin/gh"
 export PATH="$fakebin:$PATH"
+
+# ---- the copy under test: shipped source with a sandbox GATE PINS block ----
+#
+# The sandbox block keeps the SHIPPED pin values (they are only strings the
+# payload is compared against) and replaces the one thing that cannot run here:
+# the lgtm invocation. It prints FAKE_POLICY_OUT, exits FAKE_POLICY_RC, and logs
+# its argv so a test can prove the gate asked about the right repo/PR/head.
+policy_log="$sandbox/policy-log"
+gate_src="$sandbox/lgtm-gh.sh"
+sandbox_block="$sandbox/pins.sh"
+cat > "$sandbox_block" <<EOF
+# BEGIN GATE PINS
+gate_lgtm_dir="/home/dev/projects/lgtm"
+gate_lgtm_config="/home/dev/projects/lgtm/lgtm.yml"
+gate_lgtm_state_dir="/home/dev/.local/state/lgtm"
+gate_lgtm_tokens_dir="/home/dev/.config/lgtm/tokens"
+gate_lgtm_projects_dir="/home/dev/projects"
+gate_lgtm_home="/home/dev"
+gate_governed_floor=("food-truck/mono")
+run_approval_policy() {
+  printf '%s\n' "\$*" >> "$policy_log"
+  if [ -n "\${FAKE_POLICY_ERR:-}" ]; then printf '%s\n' "\$FAKE_POLICY_ERR" >&2; fi
+  if [ -n "\${FAKE_POLICY_OUT:-}" ]; then printf '%s\n' "\$FAKE_POLICY_OUT"; fi
+  return "\${FAKE_POLICY_RC:-0}"
+}
+# END GATE PINS
+EOF
+awk -v blk="$sandbox_block" '
+  /^# BEGIN GATE PINS$/ { while ((getline l < blk) > 0) print l; skip=1; next }
+  /^# END GATE PINS$/   { skip=0; next }
+  !skip { print }
+' "$script_dir/lgtm-gh.sh" > "$gate_src"
 
 worktree="$sandbox/worktree"
 mkdir -p "$worktree"
@@ -106,10 +161,10 @@ assert_contains "$err" "Krosantos.pat" "missing token file -> names the token pa
 printf 'ghp_krosantostoken\n' > "$HOME/.config/lgtm/tokens/Krosantos.pat"
 chmod 600 "$HOME/.config/lgtm/tokens/Krosantos.pat"
 rm -f "$gh_record"
-lgtm_gh pr review --approve 123
+lgtm_gh pr view 123 --json state
 assert_eq "GH_TOKEN=ghp_krosantostoken" "$(sed -n 1p "$gh_record")" \
   "happy path -> gh sees the resolved PAT as GH_TOKEN"
-assert_eq "ARGS=pr review --approve 123" "$(sed -n 2p "$gh_record")" \
+assert_eq "ARGS=pr view 123 --json state" "$(sed -n 2p "$gh_record")" \
   "happy path -> gh receives args verbatim"
 
 # 5. Whitespace/newline around the login is stripped before lookup.
@@ -377,6 +432,537 @@ assert_eq "1" "$([ -f "$denials" ] && wc -l < "$denials" || echo 0)" \
 assert_eq "food-truck/mono" "$(jq -r .repo < "$denials")" "denial records the repo"
 assert_eq "Krosantos" "$(jq -r .login < "$denials")" "denial records the acting login"
 
+# ---- approval gate (lgtm-f6ue) ----------------------------------------------
+#
+# On a governed repo an APPROVE goes through only when lgtm --approval-policy
+# says `clear` for the PR's LIVE head, with every key and config pin matching.
+# A POSITIVE ALLOWLIST: a review whose event is not provably COMMENT or
+# REQUEST_CHANGES is gated, whatever spelling carried it. COMMENT and
+# REQUEST_CHANGES are never touched. Refusals start with the marker the review
+# prompt keys on, exit 3 (policy) or 5 (plumbing), and append one line to the
+# ledger lgtm pages from.
+
+H1="1111111111111111111111111111111111111111"
+H2="2222222222222222222222222222222222222222"
+refusals="$HOME/.local/state/lgtm/gate-refusals.jsonl"
+drift="$HOME/.local/state/lgtm/gate-floor-drift.jsonl"
+MARKER="lgtm-gh: refusing to approve"
+CFG='{"path":"/home/dev/projects/lgtm/lgtm.yml","stateDir":"/home/dev/.local/state/lgtm","scopeSize":9,"governedRepos":["food-truck/mono"]}'
+printf 'jamesvec\n' > "$worktree/.lgtm-reviewer"
+
+# payload <jq-merge-expression>: a matching `clear` answer for mono#42@H1,
+# with the expression applied on top.
+payload() {
+  jq -cn --argjson cfg "$CFG" --arg h "$H1" \
+    "{repo:\"food-truck/mono\", prNumber:42, head:\$h, governed:true, verdict:\"clear\", reason:\"answered\", blockedOwners:[], ownerReviewers:[], warnings:0, config:\$cfg} | ${1:-.}"
+}
+POLICY_MSG='["lgtm-gh: refusing to approve food-truck/mono#42 at 111111111111: line one.","lgtm-gh: line two, verbatim."]'
+
+reset_gate() {
+  rm -f "$gh_record" "$gh_record.input" "$gh_log" "$policy_log" "$refusals" "$drift"
+  unset FAKE_POLICY_OUT FAKE_POLICY_RC FAKE_PR_RC
+  export FAKE_PR_LINE="$H1 food-truck/mono"
+}
+posted() { [ -f "$gh_record" ] && echo yes || echo no; }
+policy_calls() { [ -f "$policy_log" ] && wc -l < "$policy_log" || echo 0; }
+gets() { if [ -f "$gh_log" ]; then grep -c -- '--jq' "$gh_log" || true; else echo 0; fi; }
+refusal_lines() { [ -f "$refusals" ] && wc -l < "$refusals" || echo 0; }
+REVIEWS=repos/food-truck/mono/pulls/42/reviews
+
+# run_gate <label> <expected-rc> -- <lgtm-gh args...>; leaves $err and $rc.
+run_gate() {
+  local label="$1" want="$2"; shift 3
+  err="$(lgtm_gh "$@" 2>&1 1>/dev/null)" && rc=0 || rc=$?
+  assert_eq "$want" "$rc" "GATE $label -> exit $want"
+}
+
+# --- never gated: COMMENT / REQUEST_CHANGES, reads, edits --------------------
+reset_gate
+run_gate "COMMENT on mono" 0 -- api -X POST $REVIEWS -f event=COMMENT -f body=x
+assert_eq "0" "$(policy_calls)" "GATE COMMENT -> lgtm is not asked"
+assert_eq "0" "$(gets)" "GATE COMMENT -> no live-head read"
+assert_eq "ARGS=api -X POST $REVIEWS -f event=COMMENT -f body=x" "$(sed -n 2p "$gh_record")" \
+  "GATE COMMENT -> argv untouched"
+
+reset_gate
+run_gate "COMMENT pinned to an OLD head (kxt6 fallback)" 0 -- \
+  api -X POST $REVIEWS -f event=COMMENT -f commit_id=$H2 -f body=x
+assert_eq "ARGS=api -X POST $REVIEWS -f event=COMMENT -f commit_id=$H2 -f body=x" "$(sed -n 2p "$gh_record")" \
+  "GATE COMMENT keeps the session's commit_id (never force-pinned)"
+
+reset_gate
+run_gate "REQUEST_CHANGES with inline comments" 0 -- \
+  api -X POST $REVIEWS -f event=REQUEST_CHANGES -F 'comments[][path]=a' -F 'comments[][line]=1'
+assert_eq "0" "$(policy_calls)" "GATE REQUEST_CHANGES -> lgtm is not asked"
+
+reset_gate
+run_gate "pr review --comment" 0 -- pr review 42 --repo food-truck/mono --comment -b hi
+run_gate "pr review -r" 0 -- pr review 42 --repo food-truck/mono -r -b hi
+assert_eq "0" "$(policy_calls)" "GATE pr review comment/request-changes -> lgtm is not asked"
+
+reset_gate
+run_gate "-X GET read of reviews with a field" 0 -- api -X GET $REVIEWS -f per_page=100
+assert_eq "0" "$(policy_calls)" "GATE a GET with -f is a read, not a submission"
+run_gate "PUT reviews/ID (edit a body)" 0 -- api -X PUT $REVIEWS/77 -f body=edited
+run_gate "dismissal" 0 -- api -X PUT $REVIEWS/77/dismissals -f message=m
+run_gate "graphql review THREAD (a comment surface)" 0 -- \
+  api graphql -f 'query=mutation{addPullRequestReviewThread(input:{}){thread{id}}}'
+assert_eq "0" "$(policy_calls)" "GATE edits/dismissals/threads -> lgtm is not asked"
+
+# --- governed + clear: allowed, PINNED to the live head ----------------------
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "APPROVE on mono, clear" 0 -- \
+  api -X POST $REVIEWS -f event=APPROVE -f body=lgtm
+assert_eq "food-truck/mono#42 $H1" "$(cat "$policy_log")" \
+  "GATE asks lgtm about the LIVE head, canonical repo"
+assert_eq "ARGS=api -X POST $REVIEWS -f event=APPROVE -f body=lgtm -f commit_id=$H1" "$(sed -n 2p "$gh_record")" \
+  "GATE clear APPROVE is pinned with commit_id=<live head>"
+
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "APPROVE already pinned to the live head" 0 -- \
+  api -X POST $REVIEWS -f event=APPROVE -f commit_id=$H1
+assert_eq "ARGS=api -X POST $REVIEWS -f event=APPROVE -f commit_id=$H1" "$(sed -n 2p "$gh_record")" \
+  "GATE an existing matching commit_id is not duplicated"
+
+reset_gate
+export FAKE_PR_LINE="$H1 food-truck/mono"
+FAKE_POLICY_OUT="$(payload)" run_gate "APPROVE spelled Food-Truck/MONO" 0 -- \
+  api -X POST repos/Food-Truck/MONO/pulls/42/reviews -f event=APPROVE
+assert_eq "food-truck/mono#42 $H1" "$(cat "$policy_log")" \
+  "GATE canonicalises the repo from the PR GET before asking lgtm"
+
+reset_gate
+rm -f "$ledger"
+FAKE_GH_BODY='{"id":31337}' FAKE_POLICY_OUT="$(payload)" run_gate "allowed APPROVE still ledgered" 0 -- \
+  api -X POST $REVIEWS -f event=APPROVE
+assert_eq "31337" "$(jq -r .id < "$ledger")" "GATE an allowed APPROVE still records its artifact id"
+
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "absent event (PENDING) is gated" 0 -- \
+  api -X POST $REVIEWS -f body=x
+assert_eq "1" "$(policy_calls)" "GATE no event -> gated, lgtm asked"
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "lowercase event=comment is gated" 0 -- \
+  api -X POST $REVIEWS -f event=comment
+assert_eq "1" "$(policy_calls)" "GATE event=comment (not exactly COMMENT) -> gated"
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "COMMENT then APPROVE fields is gated" 0 -- \
+  api -X POST $REVIEWS -f event=COMMENT -f event=APPROVE
+assert_eq "1" "$(policy_calls)" "GATE any non-SAFE event value -> gated"
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "-F event=@file is gated" 0 -- \
+  api -X POST $REVIEWS -F event=@/dev/null
+assert_eq "1" "$(policy_calls)" "GATE -F event=@file -> gated"
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "implicit POST (no -X) APPROVE is gated" 0 -- \
+  api $REVIEWS -f event=APPROVE
+assert_eq "1" "$(policy_calls)" "GATE implicit POST -> gated"
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "full API URL path is gated" 0 -- \
+  api -X POST https://api.github.com/$REVIEWS -f event=APPROVE
+assert_eq "1" "$(policy_calls)" "GATE https://api.github.com/ path -> gated"
+
+# --- governed + not clear: lgtm's refusal, verbatim ---------------------------
+reset_gate
+FAKE_POLICY_OUT="$(payload '.verdict="blocked" | .refusal={class:"policy", message:'"$POLICY_MSG"'}')" \
+  run_gate "blocked" 3 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "no" "$(posted)" "GATE blocked -> nothing posted"
+assert_eq "$(jq -r '.[]' <<<"$POLICY_MSG")" "$err" "GATE blocked -> lgtm's message printed verbatim, nothing else"
+assert_eq "policy|blocked|answered|$H1" \
+  "$(jq -r '[.refusal.class, .verdict, .reason, .head] | join("|")' < "$refusals")" \
+  "GATE blocked -> ledger line carries class/verdict/reason/live head"
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.verdict="undetermined" | .reason="no-verdict-for-head" | .refusal={class:"plumbing", message:'"$POLICY_MSG"'}')" \
+  FAKE_POLICY_RC=2 run_gate "undetermined (exit 2 with a refusal)" 5 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "plumbing|no-verdict-for-head" "$(jq -r '[.refusal.class, .reason] | join("|")' < "$refusals")" \
+  "GATE plumbing refusal -> ledgered as plumbing with lgtm's reason"
+
+# --- the wrapper's own fallbacks ----------------------------------------------
+fallback_case() {  # <label> <cause>  (runs after the caller set FAKE_* and ran)
+  assert_eq "no" "$(posted)" "GATE $1 -> nothing posted"
+  assert_eq "$MARKER" "${err:0:${#MARKER}}" "GATE $1 -> starts with the marker"
+  assert_contains "$err" "event=COMMENT" "GATE $1 -> tells the session to COMMENT"
+  assert_contains "$err" "commit_id" "GATE $1 -> tells the session to pin commit_id"
+  assert_eq "plumbing|$2" "$(jq -r '[.refusal.class, .refusal.cause] | join("|")' "$refusals" 2>/dev/null || true)" \
+    "GATE $1 -> ledgered as plumbing/$2"
+}
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.verdict="undetermined" | .reason="no-verdict-for-head"')" FAKE_POLICY_RC=2 \
+  run_gate "governed non-clear WITHOUT refusal (version skew)" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "version skew" answer-untrusted
+
+reset_gate
+FAKE_POLICY_RC=1 run_gate "lgtm failed, no output" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "lgtm failed" policy-command-failed
+assert_eq "null" "$(jq -r '.verdict // "null"' < "$refusals")" "GATE no answer -> no verdict copied"
+
+reset_gate
+FAKE_POLICY_OUT='not json' run_gate "garbled answer" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "garbled" policy-command-failed
+
+reset_gate
+FAKE_POLICY_OUT="$(payload) $(payload)" run_gate "two JSON documents" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "two documents" policy-command-failed
+
+reset_gate
+FAKE_POLICY_OUT="$(payload)" FAKE_POLICY_RC=2 run_gate "clear payload but nonzero exit" 5 -- \
+  api -X POST $REVIEWS -f event=APPROVE
+fallback_case "clear+rc2" policy-command-failed
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.prNumber=43 | .verdict="blocked" | .refusal={class:"policy", message:'"$POLICY_MSG"'}')" \
+  run_gate "answer about another PR" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "payload pr mismatch" payload-mismatch
+assert_eq "" "$(grep -F 'line two, verbatim' <<<"$err")" "GATE mismatched payload -> its message is NOT printed"
+reset_gate
+FAKE_POLICY_OUT="$(payload ".head=\"$H2\"")" run_gate "answer about another head" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "payload head mismatch" payload-mismatch
+reset_gate
+FAKE_POLICY_OUT="$(payload '.repo="food-truck/other"')" run_gate "answer about another repo" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "payload repo mismatch" payload-mismatch
+reset_gate
+FAKE_POLICY_OUT="$(payload '.prNumber="42"')" run_gate "prNumber as a string" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "prNumber string" payload-mismatch
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.path="/home/dev/other/lgtm.yml"')" run_gate "config path not the pin" 5 -- \
+  api -X POST $REVIEWS -f event=APPROVE
+fallback_case "config path" answer-untrusted
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.stateDir="/home/dev/.local/state/lgtm/"')" run_gate "stateDir with trailing slash" 5 -- \
+  api -X POST $REVIEWS -f event=APPROVE
+fallback_case "stateDir" answer-untrusted
+reset_gate
+FAKE_POLICY_OUT="$(payload 'del(.config)')" run_gate "no config echo (old lgtm)" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "no config" answer-untrusted
+reset_gate
+FAKE_POLICY_OUT="$(payload '.governed=false')" run_gate "clear but governed:false" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "clear+ungoverned" answer-untrusted
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.governedRepos=["food-truck/other"]')" run_gate "governed but absent from governedRepos" 5 -- \
+  api -X POST $REVIEWS -f event=APPROVE
+fallback_case "governed not listed" answer-untrusted
+
+reset_gate
+FAKE_PR_RC=1 FAKE_PR_LINE="" run_gate "live head unreadable" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "GET failed" live-head-unreadable
+assert_eq "0" "$(policy_calls)" "GATE GET failed -> lgtm not asked"
+assert_eq "null" "$(jq -r '.head // "null"' < "$refusals")" "GATE GET failed -> no head recorded"
+reset_gate
+FAKE_PR_LINE="nothex food-truck/mono" run_gate "live head garbled" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "GET garbled" live-head-unreadable
+
+# The race the pin exists for: the session reviewed H2, the author pushed H1.
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "APPROVE pinned to a stale head" 5 -- \
+  api -X POST $REVIEWS -f event=APPROVE -f commit_id=$H2
+fallback_case "stale commit_id" head-mismatch
+assert_eq "$H1|$H2" "$(jq -r '[.head, .requestedHead] | join("|")' < "$refusals")" \
+  "GATE head-mismatch -> head=live, requestedHead=the session's"
+assert_eq "0" "$(policy_calls)" "GATE floor repo + stale pin -> refused before asking lgtm"
+
+# --- ungoverned repos ----------------------------------------------------------
+UNG=repos/blueapron/internal-frontends/pulls/9/reviews
+ungov() {
+  jq -cn --argjson cfg "$CFG" --arg h "$H1" \
+    "{repo:\"blueapron/internal-frontends\", prNumber:9, head:\$h, governed:false, verdict:\"ungoverned\", reason:\"ungoverned\", blockedOwners:[], ownerReviewers:[], warnings:0, config:\$cfg} | ${1:-.}"
+}
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov)" run_gate "APPROVE on an ungoverned repo" 0 -- api -X POST $UNG -f event=APPROVE
+assert_eq "ARGS=api -X POST $UNG -f event=APPROVE" "$(sed -n 2p "$gh_record")" \
+  "GATE ungoverned allow -> argv untouched (no pin)"
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov)" run_gate "ungoverned APPROVE with a stale commit_id" 0 -- \
+  api -X POST $UNG -f event=APPROVE -f commit_id=$H2
+assert_eq "0" "$(refusal_lines)" "GATE no head check on ungoverned repos"
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov '.config.governedRepos=[]')" run_gate "ungoverned but floor not in governedRepos" 5 -- \
+  api -X POST $UNG -f event=APPROVE
+fallback_case "floor not subset" answer-untrusted
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov '.config.governedRepos=["food-truck/mono","blueapron/internal-frontends"]')" \
+  run_gate "ungoverned but listed in governedRepos" 5 -- api -X POST $UNG -f event=APPROVE
+fallback_case "ungoverned but listed" answer-untrusted
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov '.config.path="/tmp/lgtm.yml"')" run_gate "ungoverned from the wrong config" 5 -- \
+  api -X POST $UNG -f event=APPROVE
+fallback_case "ungoverned wrong config" answer-untrusted
+# dwic: the wrong lgtm.yml says mono is ungoverned. The FLOOR catches it.
+reset_gate
+FAKE_POLICY_OUT="$(payload '.governed=false | .verdict="ungoverned" | .reason="ungoverned" | .config.governedRepos=[]')" \
+  run_gate "lgtm says mono is ungoverned (wrong config)" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "floor overrides ungoverned" answer-untrusted
+
+# --- --input bodies -------------------------------------------------------------
+body="$sandbox/review.json"
+reset_gate
+printf '{"event":"COMMENT","body":"x"}' > "$body"
+run_gate "--input COMMENT body" 0 -- api -X POST $REVIEWS --input "$body"
+assert_eq "0" "$(policy_calls)" "GATE --input COMMENT -> not gated"
+assert_eq '{"event":"COMMENT","body":"x"}' "$(cat "$gh_record.input")" "GATE --input COMMENT -> gh sends the same bytes"
+
+reset_gate
+printf '{"event":"APPROVE","body":"x"}' > "$body"
+FAKE_POLICY_OUT="$(payload)" run_gate "--input APPROVE body, clear" 0 -- api -X POST $REVIEWS --input "$body"
+assert_eq "APPROVE|$H1" "$(jq -r '[.event, .commit_id] | join("|")' < "$gh_record.input")" \
+  "GATE --input APPROVE -> body sent with commit_id=<live head>"
+assert_eq '{"event":"APPROVE","body":"x"}' "$(cat "$body")" "GATE --input -> the session's file is not modified"
+assert_eq "" "$(grep -F -- "-f commit_id" "$gh_record")" "GATE --input -> pin is NOT appended as a query field"
+
+reset_gate
+err="$(printf '{"event":"APPROVE"}' | FAKE_POLICY_OUT="$(payload)" lgtm_gh api -X POST $REVIEWS --input - 2>&1 1>/dev/null)" && rc=0 || rc=$?
+assert_eq "0" "$rc" "GATE --input - (stdin) APPROVE, clear -> exit 0"
+assert_eq "$H1" "$(jq -r .commit_id < "$gh_record.input")" "GATE --input - -> body sent pinned"
+
+# Private copies are removed on every exit path (allow, refusal, capture).
+reset_gate
+gate_tmp="$sandbox/gate-tmp"; mkdir -p "$gate_tmp"
+printf '{"event":"APPROVE"}' > "$body"
+TMPDIR="$gate_tmp" FAKE_POLICY_OUT="$(payload)" run_gate "--input APPROVE (temp-file check)" 0 -- \
+  api -X POST $REVIEWS --input "$body"
+TMPDIR="$gate_tmp" run_gate "--input APPROVE refused (temp-file check)" 5 -- \
+  api -X POST $REVIEWS --input "$body" -f x=y
+printf '{"event":"COMMENT"}' > "$body"
+TMPDIR="$gate_tmp" run_gate "--input COMMENT (temp-file check)" 0 -- api -X POST $REVIEWS --input "$body"
+assert_eq "0" "$(find "$gate_tmp" -type f | wc -l | tr -d ' ')" "GATE leaves no temp files behind"
+
+reset_gate
+printf '{"event":"APPROVE","commit_id":"%s"}' "$H2" > "$body"
+FAKE_POLICY_OUT="$(payload)" run_gate "--input body pinned to a stale head" 5 -- api -X POST $REVIEWS --input "$body"
+fallback_case "--input stale" head-mismatch
+
+reset_gate
+printf '{"event":"COMMENT","event":"APPROVE"}' > "$body"
+FAKE_POLICY_OUT="$(payload)" run_gate "--input duplicate event keys" 0 -- api -X POST $REVIEWS --input "$body"
+assert_eq "1" "$(policy_calls)" "GATE duplicate event keys in a body -> gated"
+
+reset_gate
+printf '["not an object"]' > "$body"
+run_gate "--input non-object body" 5 -- api -X POST $REVIEWS --input "$body"
+fallback_case "--input non-object" unparseable-event
+reset_gate
+run_gate "--input missing file" 5 -- api -X POST $REVIEWS --input "$sandbox/nope.json"
+fallback_case "--input missing" unparseable-event
+
+reset_gate
+printf '{"event":"APPROVE"}' > "$body"
+run_gate "--input plus a field" 5 -- api -X POST $REVIEWS --input "$body" -f commit_id=$H1
+fallback_case "--input + field" unparseable-event
+reset_gate
+run_gate "repeated --input" 5 -- api -X POST $REVIEWS --input "$body" --input "$body"
+fallback_case "repeated --input" unparseable-event
+reset_gate
+run_gate "-- in a gated argv" 5 -- api -X POST $REVIEWS -f event=APPROVE --
+fallback_case "dashdash" unparseable-event
+
+# --- surfaces refused everywhere, without asking anyone ------------------------
+reset_gate
+run_gate "pr review --approve" 5 -- pr review 42 --repo food-truck/mono --approve
+fallback_case "pr review --approve" unsupported-surface
+assert_eq "$H1" "$(jq -r .head "$refusals" 2>/dev/null || true)" \
+  "GATE pr review --approve -> ledger carries the live head (one page per head)"
+assert_eq "0" "$(policy_calls)" "GATE pr review --approve -> lgtm is not asked"
+reset_gate
+FAKE_PR_RC=1 FAKE_PR_LINE="" run_gate "pr review --approve, head unreadable" 5 -- pr review 42 --repo food-truck/mono --approve
+fallback_case "pr review --approve, no head" unsupported-surface
+reset_gate
+run_gate "pr review -a on an ungoverned repo" 5 -- pr review 9 --repo blueapron/internal-frontends -a
+assert_eq "no" "$(posted)" "GATE pr review -a refused on every repo"
+reset_gate
+run_gate "pr review with no event flag" 5 -- pr review 42 --repo food-truck/mono -b hi
+assert_eq "no" "$(posted)" "GATE pr review without -c/-r is gated"
+
+reset_gate
+run_gate "/events APPROVE" 5 -- api -X POST $REVIEWS/77/events -f event=APPROVE
+fallback_case "/events APPROVE" unsupported-surface
+assert_eq "$H1" "$(jq -r .head "$refusals" 2>/dev/null || true)" "GATE /events APPROVE -> ledger carries the live head"
+reset_gate
+run_gate "/events COMMENT" 0 -- api -X POST $REVIEWS/77/events -f event=COMMENT
+assert_eq "yes" "$(posted)" "GATE /events COMMENT -> posted"
+
+reset_gate
+run_gate "graphql addPullRequestReview" 5 -- \
+  api graphql -f 'query=mutation{addPullRequestReview(input:{pullRequestId:"X",event:APPROVE}){clientMutationId}}'
+assert_eq "no" "$(posted)" "GATE graphql addPullRequestReview -> nothing posted"
+assert_eq "$MARKER" "${err:0:${#MARKER}}" "GATE graphql -> starts with the marker"
+assert_eq "0" "$(refusal_lines)" "GATE graphql -> no ledger line (no repo to name)"
+reset_gate
+run_gate "graphql submitPullRequestReview" 5 -- \
+  api graphql -f 'query=mutation{submitPullRequestReview(input:{pullRequestReviewId:"X",event:APPROVE}){clientMutationId}}'
+assert_eq "no" "$(posted)" "GATE graphql submitPullRequestReview -> nothing posted"
+
+reset_gate
+run_gate "placeholder repo in the path" 5 -- api -X POST 'repos/{owner}/{repo}/pulls/42/reviews' -f event=APPROVE
+assert_eq "$MARKER" "${err:0:${#MARKER}}" "GATE placeholder path -> starts with the marker"
+assert_eq "0" "$(gets)" "GATE placeholder path -> no network"
+assert_eq "0" "$(refusal_lines)" "GATE placeholder path -> no (invalid) ledger line"
+reset_gate
+run_gate "numeric repositories/<id> route" 5 -- api -X POST repositories/123/pulls/42/reviews -f event=APPROVE
+assert_eq "no" "$(posted)" "GATE repositories/<id> reviews -> nothing posted"
+reset_gate
+run_gate "a short cluster on a review path" 5 -- api -iXPOST $REVIEWS -f event=APPROVE
+assert_eq "no" "$(posted)" "GATE short cluster on a review submission -> refused"
+
+# --- gaps found by mutation testing ---------------------------------------------
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "COMMENT plus an event[] key" 0 -- \
+  api -X POST $REVIEWS -f event=COMMENT -f 'event[]=APPROVE'
+assert_eq "1" "$(policy_calls)" "GATE an event[...] key makes the event unreadable -> gated"
+reset_gate
+printf '{"event":"COMMENT"}{"event":"COMMENT"}' > "$body"
+run_gate "--input with two JSON documents" 5 -- api -X POST $REVIEWS --input "$body"
+fallback_case "--input two documents" unparseable-event
+reset_gate
+printf '{"event":["COMMENT"]}' > "$body"
+run_gate "--input with a non-string event" 5 -- api -X POST $REVIEWS --input "$body"
+fallback_case "--input nested event" unparseable-event
+reset_gate
+printf '{"event":"COMMENT","event":{"a":"APPROVE"}}' > "$body"
+run_gate "--input COMMENT then an object-valued duplicate event" 5 -- api -X POST $REVIEWS --input "$body"
+fallback_case "--input duplicate object event" unparseable-event
+reset_gate
+run_gate "a short cluster hiding -XPOST, no fields" 5 -- api -iXPOST $REVIEWS
+assert_eq "no" "$(posted)" "GATE -iXPOST with no fields is still a submission -> gated"
+reset_gate
+export FAKE_PR_LINE="$H1 blueapron/internal-frontends"
+FAKE_POLICY_OUT="$(ungov)" FAKE_POLICY_RC=2 run_gate "ungoverned answer with a nonzero exit" 5 -- \
+  api -X POST $UNG -f event=APPROVE
+fallback_case "ungoverned+rc2" policy-command-failed
+reset_gate
+run_gate "pr review --comment AND --approve" 5 -- pr review 42 --repo food-truck/mono -c -a
+assert_eq "no" "$(posted)" "GATE pr review with -a is gated even beside -c"
+reset_gate
+FAKE_POLICY_OUT="$(payload '.verdict="blocked" | .refusal={class:"policy", message:[1,2]}')" \
+  run_gate "refusal message that is not strings" 5 -- api -X POST $REVIEWS -f event=APPROVE
+fallback_case "non-string refusal message" answer-untrusted
+reset_gate
+export FAKE_PR_LINE="$H1 food-truck/other"
+FAKE_POLICY_OUT="$(payload '.repo="food-truck/other" | .config.governedRepos=["food-truck/mono","food-truck/other"]')" \
+  run_gate "governed repo OFF the floor, stale commit_id" 5 -- \
+  api -X POST repos/food-truck/other/pulls/42/reviews -f event=APPROVE -f commit_id=$H2
+fallback_case "governed off-floor stale pin" head-mismatch
+reset_gate
+printf '{"event":"COMMENT"}' > "$body"
+FAKE_POLICY_OUT="$(payload)" run_gate "event=COMMENT field plus two --input bodies" 5 -- \
+  api -X POST $REVIEWS -f event=COMMENT --input "$body" --input "$body"
+assert_eq "no" "$(posted)" "GATE two --input bodies are never SAFE"
+reset_gate
+run_gate "pr review -a with a branch selector" 5 -- pr review some-branch --repo food-truck/mono -a
+assert_eq "0" "$(refusal_lines)" "GATE no PR number -> no (invalid) ledger line"
+assert_eq "$MARKER" "${err:0:${#MARKER}}" "GATE no PR number -> still the marker"
+reset_gate
+run_gate "two review paths in one call" 5 -- \
+  api -X POST $REVIEWS repos/food-truck/other/pulls/1/reviews -f event=APPROVE
+assert_eq "0" "$(gets)" "GATE two review paths -> refused before any network"
+reset_gate
+gate_tmp2="$sandbox/gate-tmp2"; mkdir -p "$gate_tmp2"
+printf '{"event":"COMMENT"}' > "$body"
+TMPDIR="$gate_tmp2" run_gate "/events COMMENT via --input" 0 -- api -X POST $REVIEWS/77/events --input "$body"
+assert_eq "0" "$(find "$gate_tmp2" -type f | wc -l | tr -d ' ')" "GATE /events --input leaves no temp file"
+
+# --- review fixes -------------------------------------------------------------
+errlog="$HOME/.local/state/lgtm/gate-errors.log"
+reset_gate; rm -f "$errlog"
+run_approval_policy_stderr='Error: something broke inside lgtm'
+FAKE_POLICY_OUT="" FAKE_POLICY_RC=1 FAKE_POLICY_ERR="$run_approval_policy_stderr" \
+  run_gate "lgtm fails with stderr" 5 -- api -X POST $REVIEWS -f event=APPROVE
+assert_contains "$(cat "$errlog" 2>/dev/null)" "something broke inside lgtm" "GATE a failing lgtm's stderr is kept for the operator"
+assert_eq "" "$(grep -F 'something broke' <<<"$err")" "GATE ...but not shown to the session"
+reset_gate; rm -f "$errlog"
+FAKE_POLICY_OUT="$(payload)" FAKE_POLICY_ERR="noise" run_gate "allowed, with stderr noise" 0 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "no" "$([ -f "$errlog" ] && echo yes || echo no)" "GATE an allow writes no error log"
+
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.path="/x" | .verdict="undetermined" | .reason="no-verdict-for-head" | .refusal={class:"plumbing", message:["m"]}')" \
+  FAKE_POLICY_RC=2 run_gate "untrusted answer that names a race reason" 5 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq "null|answer-untrusted" "$(jq -r '[(.reason // "null"), .refusal.cause] | join("|")' "$refusals" 2>/dev/null || true)" \
+  "GATE answer-untrusted copies no reason (it must not be held as a race)"
+
+reset_gate; rm -f "$ledger"
+printf '{"event":"COMMENT"}' > "$body"
+FAKE_GH_BODY='{"id":4444}' run_gate "/events COMMENT via --input (artifact)" 0 -- api -X POST $REVIEWS/77/events --input "$body"
+assert_eq "0" "$([ -f "$ledger" ] && wc -l < "$ledger" | tr -d ' ' || echo 0)" \
+  "GATE a forced capture with no review endpoint records no malformed artifact"
+
+# --- floor drift (never a refusal) ---------------------------------------------
+reset_gate
+FAKE_POLICY_OUT="$(payload '.config.governedRepos=["food-truck/mono","food-truck/newteam"]')" \
+  run_gate "lgtm governs a repo the floor lacks" 0 -- api -X POST $REVIEWS -f event=APPROVE
+assert_eq '["food-truck/newteam"]' "$(jq -c .extra < "$drift")" "GATE drift -> recorded, not refused"
+assert_eq "" "$(grep -i drift <<<"$err")" "GATE drift -> nothing on stderr"
+
+# --- every ledger line this suite wrote satisfies the reader's validator -------
+# (src/gateRefusalAlert.ts validate(): repo regex, integer prNumber > 0,
+# 40-hex head/requestedHead, class enum.) The real-parser round trip is in
+# roundtrip.sh, which runs lgtm's own parseGateRefusals on cloudbox.
+all_lines="$sandbox/all-refusals.jsonl"
+: > "$all_lines"
+validate_line() {
+  jq -e '
+    (.ts|type=="string") and (.ts|test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")) and
+    (.repo|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+    (.prNumber|type=="number" and . == floor and . > 0) and
+    ((.head // "0000000000000000000000000000000000000000")|test("^[0-9a-f]{40}$")) and
+    ((.requestedHead // "0000000000000000000000000000000000000000")|test("^[0-9a-f]{40}$")) and
+    (.refusal.class=="policy" or .refusal.class=="plumbing") and
+    (.login|test("^[A-Za-z0-9][A-Za-z0-9-]{0,38}$"))
+  ' >/dev/null
+}
+reset_gate
+FAKE_POLICY_OUT="$(payload '.verdict="blocked" | .warningClass="attribution" | .refusal={class:"policy", message:'"$POLICY_MSG"'}')" \
+  run_gate "ledger shape: policy" 3 -- api -X POST $REVIEWS -f event=APPROVE
+{ cat "$refusals" >> "$all_lines"; } 2>/dev/null || true
+reset_gate
+run_gate "ledger shape: fallback" 5 -- pr review 42 --repo food-truck/mono -a
+{ cat "$refusals" >> "$all_lines"; } 2>/dev/null || true
+reset_gate
+FAKE_POLICY_OUT="$(payload)" run_gate "ledger shape: head-mismatch" 5 -- api -X POST $REVIEWS -f event=APPROVE -f commit_id=$H2
+{ cat "$refusals" >> "$all_lines"; } 2>/dev/null || true
+bad=0
+while IFS= read -r l; do validate_line <<<"$l" || bad=$((bad + 1)); done < "$all_lines"
+assert_eq "3|0" "$(wc -l < "$all_lines" | tr -d ' ')|$bad" "GATE every ledger line passes the reader's validation rules"
+assert_eq "attribution" "$(head -1 "$all_lines" | jq -r .warningClass)" "GATE ledger copies warningClass"
+assert_eq "jamesvec" "$(head -1 "$all_lines" | jq -r .login)" "GATE ledger records the acting login"
+
+# --- the shipped GATE PINS block, byte for byte ---------------------------------
+#
+# The sandbox above replaces this block, so nothing else here would notice a
+# drifted pin. A pin that differs from what lgtm echoes refuses EVERY approve
+# (dwic item 6): no $HOME, no trailing slash, the exact live paths.
+expected_block="$sandbox/expected-pins.sh"
+cat > "$expected_block" <<'EOF'
+# BEGIN GATE PINS
+gate_lgtm_dir="/home/dev/projects/lgtm"
+gate_lgtm_config="/home/dev/projects/lgtm/lgtm.yml"
+gate_lgtm_state_dir="/home/dev/.local/state/lgtm"
+gate_lgtm_tokens_dir="/home/dev/.config/lgtm/tokens"
+gate_lgtm_projects_dir="/home/dev/projects"
+gate_lgtm_home="/home/dev"
+gate_governed_floor=("food-truck/mono")
+run_approval_policy() {
+  local node_bin
+  node_bin="$(command -v node)" || return 127
+  ( cd "$gate_lgtm_dir" || exit 126
+    timeout -k 2 20 env -i \
+      HOME="$gate_lgtm_home" PATH="${node_bin%/*}" \
+      LGTM_CONFIG="$gate_lgtm_config" LGTM_STATE_DIR="$gate_lgtm_state_dir" \
+      LGTM_TOKENS_DIR="$gate_lgtm_tokens_dir" LGTM_PROJECTS_DIR="$gate_lgtm_projects_dir" \
+      "$node_bin" "$gate_lgtm_dir/node_modules/tsx/dist/cli.mjs" src/index.ts \
+      --approval-policy "$1" --head "$2" )
+}
+# END GATE PINS
+EOF
+assert_eq "$(cat "$expected_block")" \
+  "$(sed -n '/^# BEGIN GATE PINS$/,/^# END GATE PINS$/p' "$script_dir/lgtm-gh.sh")" \
+  "GATE the shipped pin block is exactly the live pins"
+
 # ---- packaging check (default.nix) ------------------------------------------
 #
 # Everything above runs lgtm-gh.sh directly, which proves the LOGIC but not
@@ -398,6 +984,7 @@ if [ -f "$default_nix" ]; then
   grep_guard 'pkgs\.coreutils' "derivation pins coreutils (tr/cat/date/mktemp/mkdir)"
   grep_guard 'pkgs\.gh' "derivation pins the gh it wraps"
   grep_guard 'pkgs\.jq' "derivation pins jq (ledger + denial records)"
+  grep_guard 'pkgs\.nodejs_22' "derivation pins node for the approval gate's env -i lgtm call"
 
   body_sh="$script_dir/lgtm-gh.sh"
   if [ -f "$body_sh" ]; then

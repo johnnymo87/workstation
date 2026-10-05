@@ -11,8 +11,9 @@
 # reasoning context — the agent only ever sees the identity *name*.
 #
 # It ALSO records the id of every review artifact it creates to a JSONL ledger,
-# and REFUSES a merge whose target repo is not one of the two the assist lane
-# is allowed to merge in. Both are explained where they are implemented.
+# REFUSES a merge whose target repo is not one of the two the assist lane is
+# allowed to merge in, and GATES every APPROVE on lgtm's ownership verdict for
+# the PR's live head (lgtm-f6ue). All three are explained where implemented.
 #
 # The script body is `lgtm-gh.sh`, read verbatim. It is a separate file so that
 # pkgs/lgtm-gh/test.sh can execute the real source with a fake `gh` on PATH —
@@ -25,10 +26,14 @@
 # Behavior is locked by pkgs/lgtm-gh/test.sh (source) and test-real.sh (binary).
 pkgs.writeShellApplication {
   name = "lgtm-gh";
-  # coreutils: cat/tr/env/date/mktemp/mkdir. gh: the wrapped CLI itself, pinned
-  # so the wrapper works even under a restricted systemd PATH. jq: parses the id
-  # out of gh's response and emits the ledger line. writeShellApplication
-  # prepends these to PATH (it does not clobber the inherited PATH).
-  runtimeInputs = [ pkgs.coreutils pkgs.gh pkgs.jq ];
+  # coreutils: cat/tr/env/date/mktemp/mkdir/timeout. gh: the wrapped CLI
+  # itself, pinned so the wrapper works even under a restricted systemd PATH.
+  # jq: parses the id out of gh's response, the approval gate's payload, and
+  # emits the ledger lines. nodejs_22: the approval gate runs lgtm's
+  # `--approval-policy` under `env -i` with ONLY node's directory on PATH, so
+  # node must come from here, not the session's PATH -- the same major lgtm-run
+  # uses. writeShellApplication prepends these to PATH (it does not clobber the
+  # inherited PATH).
+  runtimeInputs = [ pkgs.coreutils pkgs.gh pkgs.jq pkgs.nodejs_22 ];
   text = builtins.readFile ./lgtm-gh.sh;
 }

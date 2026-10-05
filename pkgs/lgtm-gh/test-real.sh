@@ -60,10 +60,10 @@ ledger_lines() { [ -f "$ledger" ] && wc -l < "$ledger" || echo 0; }
 # 1. Identity still resolves and args still pass through verbatim, on the
 #    ordinary (exec) path. If the ledger work broke this, nothing else matters.
 rm -f "$GH_RECORD"
-"$wrapper" pr review --approve 123 >/dev/null
+"$wrapper" pr view 123 --json state >/dev/null
 assert_eq "GH_TOKEN=ghp_krosantostoken" "$(sed -n 1p "$GH_RECORD")" \
   "real binary: non-review call threads the resolved PAT"
-assert_eq "ARGS=pr review --approve 123" "$(sed -n 2p "$GH_RECORD")" \
+assert_eq "ARGS=pr view 123 --json state" "$(sed -n 2p "$GH_RECORD")" \
   "real binary: non-review call passes args verbatim"
 assert_eq "0" "$(ledger_lines)" "real binary: non-review call records nothing"
 
@@ -331,6 +331,27 @@ rm -f "$ledger"
 FAKE_GH_BODY='{"id":31337}' \
   "$wrapper" api -X POST repos/food-truck/mono/pulls/42/reviews -f event=COMMENT >/dev/null
 assert_eq "31337" "$(jq -r .id < "$ledger")" "real binary: review POST still recorded after rewrite"
+
+# --- approval gate (lgtm-f6ue): FAILS CLOSED in the built artifact -----------
+#
+# The nix sandbox has no lgtm checkout at the pinned path, so the gate's lgtm
+# call cannot answer. The shipped binary must then REFUSE the approval -- exit
+# 5, the marker the review prompt keys on -- and never send the review. (Run
+# outside the sandbox on cloudbox, the real lgtm answers about a fake head with
+# its own plumbing refusal: also exit 5 with the marker.) A COMMENT is never
+# gated, so it still posts.
+H="1111111111111111111111111111111111111111"
+rm -f "$GH_RECORD"
+err="$(FAKE_GH_BODY="$H food-truck/mono" \
+  "$wrapper" api -X POST repos/food-truck/mono/pulls/42/reviews -f event=APPROVE 2>&1 1>/dev/null)" && rc=0 || rc=$?
+assert_eq "5" "$rc" "real binary: APPROVE with no answer from lgtm -> exit 5"
+assert_contains "$err" "lgtm-gh: refusing to approve" "real binary: refusal carries the marker"
+assert_eq "" "$(grep -F 'event=APPROVE' "$GH_RECORD" 2>/dev/null || true)" \
+  "real binary: the APPROVE was never sent"
+rm -f "$GH_RECORD"
+FAKE_GH_BODY='{"id":1}' \
+  "$wrapper" api -X POST repos/food-truck/mono/pulls/42/reviews -f event=COMMENT >/dev/null
+assert_contains "$(cat "$GH_RECORD")" "event=COMMENT" "real binary: a COMMENT is not gated"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
