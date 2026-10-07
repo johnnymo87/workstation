@@ -144,16 +144,23 @@ q -c "SELECT model, count(*) FROM gateway_request_log WHERE input_tokens IS NOT 
 ```
 
 Timestamp columns are `request_started_at` / `request_completed_at` (there is no
-`created_at`). `context_tier` is `under_200k` / `over_200k`; `is_streaming` flags
+`created_at`). `context_tier` is `under_200k` / `over_200k` for most models and
+`under_100k` / `over_100k` for models whose long-context tier starts at 100K
+(claude-haiku-5-5); the set is a closed CHECK constraint. `is_streaming` flags
 SSE responses.
 
 ## Adding a model price (most common change)
 
-1. Add the entry to `PriceTable.kt` test-first against `PriceTableTest`.
+1. Add the entry to `PriceTable.kt` test-first against `PriceTableTest`. Give it
+   the right `TierBoundary`; a boundary with new labels also needs a migration
+   widening `context_tier_values`, and then **`migrate.jar` must ship with the
+   server** — a new server alone fails the CHECK and the rows are lost, which is
+   worse than the NULL-dollar rows they replace.
 2. `bazel test --config ai $GW/server/testing:PriceTableTest`
 3. Deploy (below). Unpriced models already ledger tokens with NULL dollars, so
-   this is forward-only — historical NULL-dollar rows cannot be backfilled (the
-   tokens were never stored).
+   pricing is forward-only unless you backfill: rows written since
+   `V20260605181028` keep their tokens, so their dollars can be computed by hand
+   from the new rates. Older NULL-dollar rows have no tokens to price.
 
 ## Deploying gateway code changes
 

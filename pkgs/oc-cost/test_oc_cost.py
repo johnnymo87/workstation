@@ -437,25 +437,26 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
             self.assertEqual(e["cache_read"], 0.20, prov)
             self.assertEqual(e["cache_write"], 5, prov)
 
-    def test_haiku_5_5_base_tier_up_to_and_including_100k(self):
-        # Published as "=< 100K": exactly 100,000 tokens of context is base.
+    def test_haiku_5_5_base_tier_below_100k(self):
+        # 99,999 tokens of context is the last base-tier request.
+        for prov, mid in (("anthropic", "claude-haiku-5-5"),
+                          ("google-vertex-anthropic", "claude-haiku-5-5@default")):
+            toks = {"input": 59_999, "output": 1_000, "reasoning": 0,
+                    "cache": {"read": 30_000, "write": 10_000}}
+            cost, tier = oc_cost.cost_for_message(prov, mid, toks)
+            expected = (59_999 * 0.10 + 1_000 * 0.50
+                        + 30_000 * 0.01 + 10_000 * 0.125) / 1e6
+            self.assertAlmostEqual(cost, expected, places=9, msg=prov)
+            self.assertEqual(tier, "base", prov)
+
+    def test_haiku_5_5_from_100k_is_5x_for_whole_request(self):
+        # Vertex bills "longer than or equal to 100k" at the long rates.
         for prov, mid in (("anthropic", "claude-haiku-5-5"),
                           ("google-vertex-anthropic", "claude-haiku-5-5@default")):
             toks = {"input": 60_000, "output": 1_000, "reasoning": 0,
                     "cache": {"read": 30_000, "write": 10_000}}
             cost, tier = oc_cost.cost_for_message(prov, mid, toks)
-            expected = (60_000 * 0.10 + 1_000 * 0.50
-                        + 30_000 * 0.01 + 10_000 * 0.125) / 1e6
-            self.assertAlmostEqual(cost, expected, places=9, msg=prov)
-            self.assertEqual(tier, "base", prov)
-
-    def test_haiku_5_5_over_100k_is_5x_for_whole_request(self):
-        for prov, mid in (("anthropic", "claude-haiku-5-5"),
-                          ("google-vertex-anthropic", "claude-haiku-5-5@default")):
-            toks = {"input": 60_001, "output": 1_000, "reasoning": 0,
-                    "cache": {"read": 30_000, "write": 10_000}}
-            cost, tier = oc_cost.cost_for_message(prov, mid, toks)
-            expected = (60_001 * 0.50 + 1_000 * 2.50
+            expected = (60_000 * 0.50 + 1_000 * 2.50
                         + 30_000 * 0.05 + 10_000 * 0.625) / 1e6
             self.assertAlmostEqual(cost, expected, places=9, msg=prov)
             self.assertEqual(tier, "long_context", prov)
