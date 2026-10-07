@@ -69,7 +69,16 @@ if [ -d "$LOCK" ]; then
   exit 0
 fi
 
-if ! timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
+# Retried for ~90s to ride out the gcloud-reauth-chrome agent's respawn gap
+# (60s ThrottleInterval); see refresh.sh.
+cdp_up=no
+for _ in 1 2 3 4 5 6; do
+  if timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
+    cdp_up=yes; break
+  fi
+  sleep 15
+done
+if [ "$cdp_up" != yes ]; then
   # The old version treated this as success. It is not: the isolated browser is
   # supposed to be running, and while it is not, the IdP session is silently
   # ageing out toward a state only a human can fix.

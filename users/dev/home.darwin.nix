@@ -253,6 +253,11 @@ lib.mkIf isDarwin {
 
       text = builtins.readFile "${assetsPath}/gcloud-reauth/keepalive.sh";
     })
+    (pkgs.writeShellApplication {
+      name = "gcloud-reauth-chrome";
+      runtimeInputs = [ pkgs.curl pkgs.coreutils pkgs.gnugrep ];
+      text = builtins.readFile "${assetsPath}/gcloud-reauth/chrome.sh";
+    })
 
     pkgs.google-cloud-sdk
     pkgs.cloudflared
@@ -364,6 +369,27 @@ lib.mkIf isDarwin {
         StartInterval = 5400;  # 90 min, comfortably inside the ~2h idle timeout
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.err.log";
+      };
+    };
+
+    # The isolated Chrome both agents above drive, on 127.0.0.1:9223. Nothing
+    # used to start it: it was launched by hand once, died, and the refresher
+    # logged cdp_unreachable for two weeks. Always-on rather than on-demand
+    # because the keepalive needs it every 90 min and a human_required refresh
+    # must leave it up for the human anyway. The wrapper adopts an instance it
+    # did not start (Chrome's own relaunch-after-update) instead of handing off
+    # to it and exiting 0, which under KeepAlive would respawn forever. See
+    # assets/gcloud-reauth/chrome.sh.
+    gcloud-reauth-chrome = {
+      enable = true;
+      config = {
+        ProgramArguments = [ "${config.home.profileDirectory}/bin/gcloud-reauth-chrome" ];
+        RunAtLoad = true;
+        KeepAlive = true;
+        ThrottleInterval = 60;
+        ProcessType = "Interactive";
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-chrome.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-chrome.err.log";
       };
     };
 
