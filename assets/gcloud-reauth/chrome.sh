@@ -20,6 +20,8 @@
 #
 # STOPPING IT DELIBERATELY: Cmd-Q comes back within a minute, by design. Use
 #   launchctl bootout "gui/$(id -u)/org.nix-community.home.gcloud-reauth-chrome"
+# That stops Chrome only if launchd launched it. In the adopt branch it kills
+# just this wrapper; quit the adopted Chrome yourself afterwards.
 #
 # SECURITY: the DevTools port binds loopback only, but any local process can
 # drive this browser, which holds a live SSO session. That was already true of
