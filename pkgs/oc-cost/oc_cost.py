@@ -46,6 +46,16 @@ RATES: dict[tuple[str, str], object] = {
     ("anthropic", "claude-opus-4-8"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-opus-4-6"):              {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("anthropic", "claude-sonnet-4-6"):            {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    # claude-haiku-5-5 (released 2026-10-07) is NOT flat: every rate is 5x for
+    # requests with 100K or more of context. Column headers read "=< 100K" /
+    # "> 100K", but Vertex's footnote bills "longer than or equal to 100k" at the
+    # long rates (same convention as the 200K tiers), so the threshold is 100,000.
+    # Source: anthropic.com/claude-haiku-5-5; Vertex Global lists the same
+    # numbers (cloud.google.com .../generative-ai/pricing), so both rows share it.
+    ("anthropic", "claude-haiku-5-5"): {
+        "input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125,
+        "tier": {"threshold": 100_000, "input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625},
+    },
     # claude-sonnet-5 (launched 2026-06-30) on the FIRST-PARTY Anthropic API is at
     # INTRODUCTORY pricing (2/10, cache 0.2/2.5) through 2026-08-31, after which it
     # reverts to STANDARD 3/15 (cache 0.30/3.75 — same as sonnet-4-6). The intro
@@ -70,6 +80,13 @@ RATES: dict[tuple[str, str], object] = {
     ("google-vertex-anthropic", "claude-opus-4-8"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-opus-4-6"):   {"input": 5, "output": 25, "cache_read": 0.50, "cache_write": 6.25},
     ("google-vertex-anthropic", "claude-sonnet-4-6"): {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    # Interactive/agent use only: title calls (small_model) write no message row,
+    # so oc-cost never sees them; their spend is in the aigateway ledger. See the
+    # anthropic row for the rates.
+    ("google-vertex-anthropic", "claude-haiku-5-5"): {
+        "input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125,
+        "tier": {"threshold": 100_000, "input": 0.50, "output": 2.50, "cache_read": 0.05, "cache_write": 0.625},
+    },
     # Vertex resells Claude at Anthropic's STANDARD list (3/15, cache 0.30/3.75 —
     # same as sonnet-4-6); the Anthropic-API intro promo above is NOT honored here,
     # so no 2026-08-31 flip is needed. cloudbox claude traffic takes this route

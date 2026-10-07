@@ -53,6 +53,14 @@
             },
             "effort": "high"
           }
+        },
+        "claude-haiku-5-5": {
+          "options": {
+            "thinking": {
+              "type": "adaptive"
+            },
+            "effort": "low"
+          }
         }
       }
     },
@@ -104,6 +112,14 @@
               "display": "summarized"
             },
             "effort": "high"
+          }
+        },
+        "claude-haiku-5-5@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive"
+            },
+            "effort": "low"
           }
         }
       }

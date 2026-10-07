@@ -829,6 +829,17 @@ let
       # Primary model: Vertex Opus 5.5 on both cloudbox and macOS. The plan-
       # execution subagents + compaction stay on cheap Gemini Flash below.
       model = vertexOpusModel;
+      # Session titles (and other "small" calls) on Claude Haiku 5.5. Without a
+      # pin, opencode's getSmallModel picks the newest model of the first
+      # matching family (gemini-flash, gpt-nano, claude-haiku) in the SESSION's
+      # provider, so the choice drifts silently with the models.dev catalog:
+      # it picked claude-haiku-4-5 for Opus sessions until the catalog listed
+      # haiku-5-5, and a newly-listed model can be one this Vertex project has
+      # not enabled yet (haiku-5-5 404'd here until it was enabled in Model
+      # Garden on 2026-10-07). Pinning also moves gemini-session titles off
+      # Flash: Haiku 5.5 is cheaper (0.10/0.50 per 1M vs 0.75/3.75) and runs at
+      # low effort for these calls (opencode.base.json).
+      small_model = "google-vertex-anthropic/claude-haiku-5-5@default";
       agent = {
         # Route the built-in `compaction` agent to Gemini 3.8 Flash. This is the
         # cheap fix for compaction cost on Opus-heavy sessions: Opus pays
