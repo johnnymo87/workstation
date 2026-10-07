@@ -97,8 +97,18 @@ PY
 # --- preflight: the local browser ------------------------------------------
 # A refresh cannot work without the isolated Chrome, and finding that out after
 # starting a login on the remote host would leave a dangling flow there.
-if ! timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
-  finish "cdp_unreachable" "Isolated Chrome is not listening on $CDP_URL; start it and re-run" yes
+# Retried for ~90s: the gcloud-reauth-chrome agent respawns a dead browser within
+# its 60s ThrottleInterval, and a timer that lands in that gap should wait it
+# out rather than notify a human about a problem that is fixing itself.
+cdp_up=no
+for _ in 1 2 3 4 5 6; do
+  if timeout 10 curl -sf "$CDP_URL/json/version" -o /dev/null 2>/dev/null; then
+    cdp_up=yes; break
+  fi
+  sleep 15
+done
+if [ "$cdp_up" != yes ]; then
+  finish "cdp_unreachable" "Isolated Chrome is not listening on $CDP_URL; check the gcloud-reauth-chrome agent (~/Library/Logs/gcloud-reauth-chrome.err.log)" yes
 fi
 
 # --- 1. start the remote login, holding stdin open --------------------------
