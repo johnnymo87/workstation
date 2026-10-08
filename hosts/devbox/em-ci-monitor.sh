@@ -95,7 +95,13 @@ fi
 # Queued and in-progress runs (any age), plus runs created in the last 3 h for
 # the setup-failure check. One page each; at two runners that is far more than
 # can be active at once, and a full page is reported rather than ignored.
-jobs_rows=""   # TSV: status, conclusion, name, created_at, completed_at, url, runner, setup_failed
+# Each em-ci job becomes at most one line, computed in jq so that bash never
+# splits a row with empty fields (tab is IFS whitespace, so `read` would
+# collapse them):  Q <tab> queued-minutes <tab> name: url
+#                  S <tab> 0 <tab> name on runner: url   (setup failed recently)
+# Coverage note: a rerun of a run created more than 3 h ago that starts and
+# fails between two passes is not seen; it still shows as a red check.
+job_lines=""
 obs_ok=1
 run_ids=""
 for q in "status=queued" "status=in_progress" "created=%3E%3D$since_iso"; do
@@ -113,13 +119,18 @@ while read -r run_id; do
   [ -n "$run_id" ] || continue
   if jobs_json=$(gh_api "/repos/$EM_CI_REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100") &&
      jq -e '.jobs | type == "array"' >/dev/null <<<"$jobs_json" &&
-     rows=$(jq -r --arg l "$EM_CI_LABEL" '
-       .jobs | map(select(.labels | index($l)))
-       | map([.status, (.conclusion // ""), .name, .created_at, (.completed_at // ""), .html_url, (.runner_name // ""),
-              ((.steps // []) | any(.name == "Run ./.github/ci/setup" and .conclusion == "failure") | tostring)]
-             | @tsv)
-       | .[]' <<<"$jobs_json"); then
-    [ -z "$rows" ] || jobs_rows+="$rows"$'\n'
+     lines=$(jq -r --arg l "$EM_CI_LABEL" --argjson now "$now" --argjson win "$EM_CI_SETUP_WINDOW_MIN" '
+       .jobs[]
+       | select(.labels | index($l))
+       | if .status == "queued" then
+           ["Q", ((($now - (.created_at | fromdateiso8601)) / 60) | floor | tostring), "\(.name): \(.html_url)"]
+         elif .status == "completed" and .conclusion == "failure" and .completed_at != null
+              and ((.steps // []) | any(.name == "Run ./.github/ci/setup" and .conclusion == "failure"))
+              and (($now - (.completed_at | fromdateiso8601)) / 60) < $win then
+           ["S", "0", "\(.name) on \(.runner_name // "?"): \(.html_url)"]
+         else empty end
+       | @tsv' <<<"$jobs_json"); then
+    [ -z "$lines" ] || job_lines+="$lines"$'\n'
   else
     obs_ok=0
   fi
@@ -141,23 +152,19 @@ limit_min=$EM_CI_BACKLOG_MAX_MIN
 
 stuck_n=0; stuck_oldest=0; stuck_links=()
 setup_n=0; setup_links=()
-while IFS=$'\t' read -r st concl name created completed url runner setup_failed; do
-  [ -n "$st" ] || continue
-  if [ "$st" = queued ]; then
-    age_min=$(( (now - $(date -d "$created" +%s)) / 60 ))
-    if [ "$age_min" -ge "$limit_min" ]; then
-      stuck_n=$(( stuck_n + 1 ))
-      [ "$age_min" -le "$stuck_oldest" ] || stuck_oldest=$age_min
-      [ "${#stuck_links[@]}" -ge 3 ] || stuck_links+=("$name: $url")
-    fi
-  elif [ "$st" = completed ] && [ "$concl" = failure ] && [ "$setup_failed" = true ] && [ -n "$completed" ]; then
-    done_min=$(( (now - $(date -d "$completed" +%s)) / 60 ))
-    if [ "$done_min" -lt "$EM_CI_SETUP_WINDOW_MIN" ]; then
+while IFS=$'\t' read -r kind age_min what; do
+  case "$kind" in
+    Q)
+      if [ "$age_min" -ge "$limit_min" ]; then
+        stuck_n=$(( stuck_n + 1 ))
+        [ "$age_min" -le "$stuck_oldest" ] || stuck_oldest=$age_min
+        [ "${#stuck_links[@]}" -ge 3 ] || stuck_links+=("$what")
+      fi ;;
+    S)
       setup_n=$(( setup_n + 1 ))
-      [ "${#setup_links[@]}" -ge 3 ] || setup_links+=("$name on $runner: $url")
-    fi
-  fi
-done <<<"$jobs_rows"
+      [ "${#setup_links[@]}" -ge 3 ] || setup_links+=("$what") ;;
+  esac
+done <<<"$job_lines"
 
 if [ "$stuck_n" -gt 0 ]; then
   add "queue" "$stuck_n em-ci job(s) queued >= $limit_min min (oldest $stuck_oldest min; idle em-ci runners: $idle). E.g. $(printf '%s; ' "${stuck_links[@]}")"
