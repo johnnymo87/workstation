@@ -135,6 +135,12 @@ let
       serviceOverrides = {
         # Warm caches (ccache, pip, npm, mix/hex) live outside the workDir wipe.
         ReadWritePaths = [ "/var/lib/em-ci/cache" ];
+        # The module's ProtectHome=yes makes /home mode 000, so eternal-
+        # machinery's devenv.nix `builtins.pathExists "/home/dev"` gets EACCES,
+        # which Nix throws on (only ENOENT reads as false) and devenv reports
+        # as an unrelated "restricted setting" warning. tmpfs keeps /home
+        # hidden but makes the lookup a clean ENOENT.
+        ProtectHome = "tmpfs";
         # The container is the isolation boundary. Unprivileged user + mount
         # namespaces are needed by eternal-machinery's sandboxed shell test
         # (test/bin/test_prepare-workspace.sh) and by Chromium's sandbox in
