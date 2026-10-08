@@ -2507,12 +2507,19 @@
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
+      # em-ci.nix: github-runner from unstable (the stable pin is too old for
+      # GitHub's 30-day runner policy) and the same devenv dev uses.
+      specialArgs = {
+        inherit (inputs) nixpkgs-unstable;
+        devenvPkg = devenv.packages.${devboxSystem}.devenv;
+      };
       modules = [
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         ./hosts/devbox/configuration.nix
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
+        ./hosts/devbox/em-ci.nix
       ];
     };
 
