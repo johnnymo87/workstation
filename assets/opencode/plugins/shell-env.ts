@@ -63,6 +63,8 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
     // TYPESAFE_API_KEY by default. Declared on devbox and cloudbox.
     // Inert on any host without /run/secrets/typesafe_api_key.
     ["typesafe_api_key", "TYPESAFE_API_KEY"],
+    // Hetzner Cloud API token for the hcloud CLI. devbox-only secret.
+    ["hcloud_token", "HCLOUD_TOKEN"],
     ["atlassian_api_token", "ATLASSIAN_API_TOKEN"],
     ["atlassian_site", "ATLASSIAN_SITE"],
     ["atlassian_email", "ATLASSIAN_EMAIL"],

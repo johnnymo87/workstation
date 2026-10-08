@@ -237,6 +237,14 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Hetzner Cloud API token (Read & Write, project holding devbox). Lets
+      # devbox manage its own volumes/servers with hcloud; read as
+      # HCLOUD_TOKEN, exported in home.devbox.nix and shell-env.ts.
+      hcloud_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
     };
 
   };

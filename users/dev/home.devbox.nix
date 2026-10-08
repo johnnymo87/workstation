@@ -384,6 +384,12 @@ lib.mkIf isDevbox {
       export TYPESAFE_API_KEY="$(cat /run/secrets/typesafe_api_key)"
     fi
 
+    # Hetzner Cloud API token; the hcloud CLI reads HCLOUD_TOKEN. Mirrors the
+    # row in shell-env.ts.
+    if [ -r /run/secrets/hcloud_token ]; then
+      export HCLOUD_TOKEN="$(cat /run/secrets/hcloud_token)"
+    fi
+
     # OpenAI API key (for tec-codex embeddings via text-embedding-3-small)
     if [ -r /run/secrets/openai_api_key ]; then
       export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
@@ -1722,7 +1728,8 @@ down and its silence means nothing. This host has no second leg.
   # (~/.config/teamclaude.json), so it survives restarts but is LOST on a full
   # reseed — re-run it as part of any from-scratch seed (alongside `login`).
   # Nix-packaged (pkgs/teamclaude) — pulled + installed by home-manager, no checkout.
-  home.packages = [ localPkgs.teamclaude ];
+  # hcloud: Hetzner CLI, authenticated by HCLOUD_TOKEN (sops hcloud_token).
+  home.packages = [ localPkgs.teamclaude pkgs.hcloud ];
 
   # TeamClaude: multi-account Claude Max rotator. A local Anthropic-API proxy on
   # 127.0.0.1:3456 that rotates across personal Max accounts and injects the
