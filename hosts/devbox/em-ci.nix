@@ -77,6 +77,11 @@ let
     # are client-side settings for `nix` and devenv inside the container.
     nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
+    # The devenv venv pip-installs generic-Linux wheels with native binaries
+    # (ruff, for one). As on the devbox host, nix-ld supplies the loader;
+    # without it they exit 127 "Could not start dynamically linked executable".
+    programs.nix-ld.enable = true;
+
     users.groups.em-ci.gid = ciUid;
     users.users.em-ci = {
       isSystemUser = true;
