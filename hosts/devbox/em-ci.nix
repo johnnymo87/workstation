@@ -82,6 +82,20 @@ let
     # without it they exit 127 "Could not start dynamically linked executable".
     programs.nix-ld.enable = true;
 
+    # DNS. By default a container copies the host's resolv.conf, i.e. the
+    # Hetzner resolvers 185.12.64.1/.2. Measured from devbox on 2026-10-08,
+    # those dropped about half of all queries (dig: ~5/10 timeouts on each)
+    # while 1.1.1.1 and 9.9.9.9 answered 10/10. glibc then waits its 5 s
+    # retry timeout, and Erlang/Mix give up first: `mix deps.get` / hex
+    # install failed with `{inet6,[inet6],nxdomain}` (httpc reports the
+    # IPv6 error after the IPv4 fallback also failed). Bead
+    # eternal-machinery-0oycj.11. CI makes many uncached lookups (nsncd does
+    # not cache), so it also stops adding to the host's own resolver load.
+    # The egress fence allows public destinations, so no fence change.
+    networking.useHostResolvConf = false;
+    networking.nameservers = [ "1.1.1.1" "9.9.9.9" "185.12.64.1" ];
+    networking.resolvconf.extraOptions = [ "timeout:2" "attempts:3" "rotate" ];
+
     users.groups.em-ci.gid = ciUid;
     users.users.em-ci = {
       isSystemUser = true;
