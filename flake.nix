@@ -2520,6 +2520,7 @@
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
         ./hosts/devbox/em-ci.nix
+        ./hosts/devbox/em-ci-monitor.nix
       ];
     };
 
