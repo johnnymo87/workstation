@@ -91,10 +91,12 @@ let
     # IPv6 error after the IPv4 fallback also failed). Bead
     # eternal-machinery-0oycj.11. CI makes many uncached lookups (nsncd does
     # not cache), so it also stops adding to the host's own resolver load.
-    # The egress fence allows public destinations, so no fence change.
+    # Hetzner is left out entirely: as a third server with `rotate` it still
+    # cost a 2 s timeout on about a third of lookups. The egress fence allows
+    # public destinations, so no fence change.
     networking.useHostResolvConf = false;
-    networking.nameservers = [ "1.1.1.1" "9.9.9.9" "185.12.64.1" ];
-    networking.resolvconf.extraOptions = [ "timeout:2" "attempts:3" "rotate" ];
+    networking.nameservers = [ "1.1.1.1" "9.9.9.9" "1.0.0.1" ];
+    networking.resolvconf.extraOptions = [ "timeout:2" "attempts:3" ];
 
     users.groups.em-ci.gid = ciUid;
     users.users.em-ci = {
