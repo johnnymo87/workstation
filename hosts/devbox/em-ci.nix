@@ -185,50 +185,6 @@ in
     externalInterface = "enp1s0";
   };
 
-  # EGRESS FENCE. NAT alone lets a container reach anything the host can
-  # route to, and devbox has more than loopback: Docker publishes ports on
-  # 0.0.0.0 (e.g. the BoldCo Supabase stack on 54321-54327) and DNATs traffic
-  # for ANY local address -- including this veth's host side -- into its
-  # bridges via FORWARD, never touching the INPUT firewall. Tailscale's
-  # ts-forward chain also ACCEPTs toward the tailnet ahead of everything.
-  #
-  # So drop, in mangle PREROUTING (before Docker's nat DNAT and before any
-  # FORWARD chain): every packet from a runner container addressed to the
-  # host itself (any local address) or to a private/CGNAT/link-local range.
-  # Public internet egress is all CI needs: GitHub, caches, the Hetzner
-  # resolvers. Fails CLOSED like the rules in configuration.nix: if the chain
-  # cannot be built, a blanket DROP cuts container egress entirely.
-  #
-  # Verify after any edit:
-  #   sudo iptables -t mangle -S PREROUTING | grep em-ci-egress
-  #   sudo nixos-container run em-ci-1 -- curl -sm3 http://10.233.71.1:54321; echo $?   # 28 (dropped)
-  #   sudo nixos-container run em-ci-1 -- curl -sIm5 https://api.github.com | head -1     # HTTP/2 200
-  networking.firewall.extraCommands = ''
-    { iptables -w -t mangle -N em-ci-egress 2>/dev/null || true; } \
-      && iptables -w -t mangle -F em-ci-egress \
-      && iptables -w -t mangle -A em-ci-egress -m addrtype --dst-type LOCAL -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 10.0.0.0/8 -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 172.16.0.0/12 -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 192.168.0.0/16 -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 100.64.0.0/10 -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 169.254.0.0/16 -j DROP \
-      && iptables -w -t mangle -A em-ci-egress -d 127.0.0.0/8 -j DROP \
-      && { iptables -w -t mangle -C PREROUTING -i ve-em-ci-+ -j em-ci-egress 2>/dev/null \
-           || iptables -w -t mangle -I PREROUTING 1 -i ve-em-ci-+ -j em-ci-egress; } \
-      || {
-        echo "WARNING: em-ci egress fence failed to apply; cutting em-ci container egress" >&2 || true
-        iptables -w -t mangle -C PREROUTING -i ve-em-ci-+ -j DROP 2>/dev/null \
-          || iptables -w -t mangle -I PREROUTING 1 -i ve-em-ci-+ -j DROP \
-          || echo "CRITICAL: em-ci egress fence AND fallback failed; runner containers can reach host and Docker services" >&2 || true
-      }
-  '';
-  networking.firewall.extraStopCommands = ''
-    iptables -w -t mangle -D PREROUTING -i ve-em-ci-+ -j em-ci-egress 2>/dev/null || true
-    iptables -w -t mangle -D PREROUTING -i ve-em-ci-+ -j DROP 2>/dev/null || true
-    iptables -w -t mangle -F em-ci-egress 2>/dev/null || true
-    iptables -w -t mangle -X em-ci-egress 2>/dev/null || true
-  '';
-
   containers = lib.mapAttrs (name: r: {
     autoStart = true;
     privateNetwork = true;
@@ -242,6 +198,8 @@ in
 
   systemd.services = (lib.mapAttrs' (name: _: lib.nameValuePair "container@${name}" {
     unitConfig.RequiresMountsFor = [ "/var/lib/nixos-containers" ];
+    requires = [ "em-ci-egress-fence.service" ];
+    after = [ "em-ci-egress-fence.service" ];
     # systemd-nspawn mounts a tmpfs on the container's /tmp by default, which
     # would charge every job's temp files to the 6G memory cap. Keep /tmp on
     # the container root, i.e. on the Volume.
@@ -253,6 +211,69 @@ in
       IOWeight = 20;
     };
   }) runners) // {
+    # EGRESS FENCE. NAT alone lets a container reach anything the host can
+    # route to, and devbox has more than loopback: Docker publishes ports on
+    # 0.0.0.0 (e.g. the BoldCo Supabase stack on 54321-54327) and DNATs traffic
+    # for ANY local address -- including this veth's host side -- into its
+    # bridges via FORWARD, never touching the INPUT firewall. Tailscale's
+    # ts-forward chain also ACCEPTs toward the tailnet ahead of everything.
+    #
+    # So drop, in mangle PREROUTING (before Docker's nat DNAT and before any
+    # FORWARD chain), every packet from a runner container addressed to the
+    # host itself (any local address) or to a private/CGNAT/link-local/loopback
+    # range. Public internet egress is all CI needs: GitHub, caches, the
+    # Hetzner resolvers. IPv4 only; the containers have no IPv6 address.
+    #
+    # A dedicated service, NOT networking.firewall.extraCommands: the NixOS
+    # firewall runs its stop commands on every reload and on a failed start,
+    # which would open a window (or leave it open). Nothing else touches this
+    # chain (the firewall manages only nixos-fw-rpfilter in mangle; Docker and
+    # Tailscale manage their own chains). The service never removes the fence.
+    #
+    # Fail-closed: a blanket DROP for the container interfaces goes in FIRST
+    # and comes out only after the fence is rebuilt, hooked and verified. Any
+    # failure leaves the blanket DROP (no egress at all) and the containers,
+    # which Require this unit, do not start.
+    #
+    # Verify after any edit:
+    #   sudo iptables -t mangle -S PREROUTING | grep em-ci
+    #   sudo nixos-container run em-ci-1 -- curl -sm3 http://10.233.71.1:54321; echo $?   # 28 (dropped)
+    #   sudo nixos-container run em-ci-1 -- curl -sIm5 https://api.github.com | head -1     # HTTP/2 200
+    em-ci-egress-fence = {
+      description = "Egress fence for em-ci runner containers";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "firewall.service" ];
+      path = [ pkgs.iptables ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -euo pipefail
+        ipt() { iptables -w -t mangle "$@"; }
+        blanket=(PREROUTING -i ve-em-ci-+ -j DROP)
+        hook=(PREROUTING -i ve-em-ci-+ -j em-ci-egress)
+
+        # 1. Close everything while we work. Position 1, ahead of the hook.
+        ipt -C "''${blanket[@]}" 2>/dev/null || ipt -I "''${blanket[@]:0:1}" 1 "''${blanket[@]:1}"
+
+        # 2. (Re)build the fence chain; harmless while the blanket is first.
+        ipt -N em-ci-egress 2>/dev/null || true
+        ipt -F em-ci-egress
+        ipt -A em-ci-egress -m addrtype --dst-type LOCAL -j DROP
+        for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 127.0.0.0/8; do
+          ipt -A em-ci-egress -d "$net" -j DROP
+        done
+        ipt -C "''${hook[@]}" 2>/dev/null || ipt -I "''${hook[@]:0:1}" 2 "''${hook[@]:1}"
+
+        # 3. Verify, then open.
+        [ "$(ipt -S em-ci-egress | grep -c -- '-j DROP')" -eq 7 ]
+        ipt -C "''${hook[@]}"
+        ipt -D "''${blanket[@]}"
+        echo "em-ci egress fence installed"
+      '';
+    };
+
     # Hard disk guard for devbox's ROOT filesystem (the Volume cannot fill
     # root, but host nix store growth for CI closures can). Stops both
     # containers, which fails their in-flight jobs; GitHub shows them failed
