@@ -127,6 +127,9 @@ let
         util-linux which file
         git gnutar gzip zstd xz curl jq
         python3
+        # test/bin/test_shutdown-all.sh runs outside devenv shell and uses
+        # real perl processes as daemon fixtures.
+        perl
       ]) ++ [ devenvPkg ];
 
       serviceOverrides = {
@@ -164,10 +167,16 @@ in
   # Runner registration PAT: fine-grained, eternal-machinery only,
   # Administration read/write, no expiry. root-only; bind-mounted read-only
   # into each container, where only the module's root ExecStartPre reads it.
+  #
+  # ROTATION. The bind mount pins the file the sops symlink pointed at when
+  # the container started, so a new value only reaches a container that is
+  # restarted (restarting just the runner service re-reads the OLD file).
+  # restartUnits does that on the next switch; it interrupts running jobs.
   sops.secrets.em_ci_runner_pat = {
     owner = "root";
     group = "root";
     mode = "0400";
+    restartUnits = map (name: "container@${name}.service") (lib.attrNames runners);
   };
 
   networking.nat = {
@@ -175,6 +184,50 @@ in
     internalInterfaces = map (name: "ve-${name}") (lib.attrNames runners);
     externalInterface = "enp1s0";
   };
+
+  # EGRESS FENCE. NAT alone lets a container reach anything the host can
+  # route to, and devbox has more than loopback: Docker publishes ports on
+  # 0.0.0.0 (e.g. the BoldCo Supabase stack on 54321-54327) and DNATs traffic
+  # for ANY local address -- including this veth's host side -- into its
+  # bridges via FORWARD, never touching the INPUT firewall. Tailscale's
+  # ts-forward chain also ACCEPTs toward the tailnet ahead of everything.
+  #
+  # So drop, in mangle PREROUTING (before Docker's nat DNAT and before any
+  # FORWARD chain): every packet from a runner container addressed to the
+  # host itself (any local address) or to a private/CGNAT/link-local range.
+  # Public internet egress is all CI needs: GitHub, caches, the Hetzner
+  # resolvers. Fails CLOSED like the rules in configuration.nix: if the chain
+  # cannot be built, a blanket DROP cuts container egress entirely.
+  #
+  # Verify after any edit:
+  #   sudo iptables -t mangle -S PREROUTING | grep em-ci-egress
+  #   sudo nixos-container run em-ci-1 -- curl -sm3 http://10.233.71.1:54321; echo $?   # 28 (dropped)
+  #   sudo nixos-container run em-ci-1 -- curl -sIm5 https://api.github.com | head -1     # HTTP/2 200
+  networking.firewall.extraCommands = ''
+    { iptables -w -t mangle -N em-ci-egress 2>/dev/null || true; } \
+      && iptables -w -t mangle -F em-ci-egress \
+      && iptables -w -t mangle -A em-ci-egress -m addrtype --dst-type LOCAL -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 10.0.0.0/8 -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 172.16.0.0/12 -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 192.168.0.0/16 -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 100.64.0.0/10 -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 169.254.0.0/16 -j DROP \
+      && iptables -w -t mangle -A em-ci-egress -d 127.0.0.0/8 -j DROP \
+      && { iptables -w -t mangle -C PREROUTING -i ve-em-ci-+ -j em-ci-egress 2>/dev/null \
+           || iptables -w -t mangle -I PREROUTING 1 -i ve-em-ci-+ -j em-ci-egress; } \
+      || {
+        echo "WARNING: em-ci egress fence failed to apply; cutting em-ci container egress" >&2 || true
+        iptables -w -t mangle -C PREROUTING -i ve-em-ci-+ -j DROP 2>/dev/null \
+          || iptables -w -t mangle -I PREROUTING 1 -i ve-em-ci-+ -j DROP \
+          || echo "CRITICAL: em-ci egress fence AND fallback failed; runner containers can reach host and Docker services" >&2 || true
+      }
+  '';
+  networking.firewall.extraStopCommands = ''
+    iptables -w -t mangle -D PREROUTING -i ve-em-ci-+ -j em-ci-egress 2>/dev/null || true
+    iptables -w -t mangle -D PREROUTING -i ve-em-ci-+ -j DROP 2>/dev/null || true
+    iptables -w -t mangle -F em-ci-egress 2>/dev/null || true
+    iptables -w -t mangle -X em-ci-egress 2>/dev/null || true
+  '';
 
   containers = lib.mapAttrs (name: r: {
     autoStart = true;
@@ -189,6 +242,10 @@ in
 
   systemd.services = (lib.mapAttrs' (name: _: lib.nameValuePair "container@${name}" {
     unitConfig.RequiresMountsFor = [ "/var/lib/nixos-containers" ];
+    # systemd-nspawn mounts a tmpfs on the container's /tmp by default, which
+    # would charge every job's temp files to the 6G memory cap. Keep /tmp on
+    # the container root, i.e. on the Volume.
+    environment.SYSTEMD_NSPAWN_TMPFS_TMP = "0";
     serviceConfig = {
       CPUQuota = "400%";
       MemoryMax = "6G";
