@@ -269,11 +269,22 @@ And lgtm keeps the first 2,000 characters, about ten rows, of a 1.8 MB answer.
 `--limit N` now walks newest-first and stops after N live sessions; see
 `search_recent`. It scans the unindexed tail top-down in growing rowid
 windows, then reads index postings in descending rowid order, then recounts
-each chosen session exactly through `part_session_idx`. It returns the same
-rows, counts and order as the unlimited search truncated to N. Ordering
-relies on `part.rowid` being monotonic in `time_created`, the same assumption
-the watermark already makes. Measured on cloudbox, with the index about 40%
-built (watermark 1.25M of 3.35M rowids):
+each chosen session exactly through `part_session_idx`.
+
+The returned rows always carry exact counts and last_match. Which N sessions
+come back follows insertion order (rowid), which is the true newest-N wherever
+rowid is monotonic in `time_created`. That holds at the head of the table,
+where lgtm reads: 248 inversions in the last 1.5M rows, the largest 41s.
+It does not hold in one historical block, rowids ~852k-955k. There, about
+100k parts from 05-31 to 06-07 were bulk-inserted on 06-07 in roughly reverse
+order. A `--limit` query whose N-th session dates from that era can return
+the wrong N: `--types tool,text cops-6234-proto --limit 20` gets 5 of 20
+wrong. The exact fix needs a running-max-time table kept by the indexer, and
+is deferred to workstation-gqt3.3.
+
+This is the first code that relies on time order; the watermark and the
+parallel scan only need append order. Measured on cloudbox, with the index
+about 40% built (watermark 1.25M of 3.35M rowids):
 
 | query | unlimited | `--limit` | `--limit --no-index` |
 |---|---|---|---|
@@ -283,11 +294,18 @@ built (watermark 1.25M of 3.35M rowids):
 A needle that never reaches N sessions reads the same rows as the unlimited
 search, in a few more passes. The cost is roughly 1.3x warm.
 
-Two small output differences are deliberate:
+Three small output differences are deliberate:
 - table column widths follow the rows shown;
 - a session whose only matching parts were deleted after indexing is
   dropped, because counts come from the live table. The unlimited indexed
-  search still reports it until workstation-gqt3.3.
+  search still reports it until workstation-gqt3.3;
+- counts can differ from the unlimited indexed search for the same reason,
+  when a part changed after indexing (e.g. a tool part indexed while running).
+  The live count is the correct one.
+
+The recounts run serially, and each costs the session's size in bytes. The
+largest session (36.5k parts, 76 MB) takes 3.5s warm. Today's lgtm top-10
+sets total 19-40 MB.
 
 There is a remaining gap that this package cannot close: lgtm swallows the
 failure and returns `""`. A packet built without session history is still

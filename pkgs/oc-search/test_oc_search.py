@@ -835,8 +835,9 @@ class LimitFastPathTest(unittest.TestCase):
         c = self.f.conn
         for s in range(30):
             add_session(c, f"ses_{s:02d}", title=f"t{s}")
-        # Interleave parts across sessions; times strictly increase with rowid,
-        # as they do in production (part.rowid is monotonic in time_created).
+        # Interleave parts across sessions; times strictly increase with rowid.
+        # Production is like this at the head of the table but NOT everywhere
+        # -- see test_bulk_inserted_block_picks_by_insertion_order.
         t = 0
         for rnd in range(12):
             for s in range(30):
@@ -959,6 +960,71 @@ class LimitFastPathTest(unittest.TestCase):
         self.f.conn.execute("DELETE FROM part WHERE data LIKE '%QQUNIQUE%'")
         self.f.commit()
         self.assertEqual(self.f.sessions("--limit", "5", "QQUNIQUE"), [])
+
+    def test_match_on_the_watermark_row_is_found_by_the_index_phase(self):
+        """Boundary: the index phase reads `ft.rowid <= floor`, inclusive."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_w")
+            add_part(f.conn, "ses_w", type="tool", text="WMARK on the watermark row")
+            f.commit()
+            f.build_index()
+            add_session(f.conn, "ses_later")
+            add_part(f.conn, "ses_later", type="tool", text="unrelated tail row")
+            f.commit()
+            rows = f.sessions("--limit", "5", "WMARK")
+            self.assertEqual([(r["id"], r["matches"]) for r in rows], [("ses_w", 1)])
+        finally:
+            f.close()
+
+    def test_match_on_the_lowest_row_is_found_without_an_index(self):
+        """Boundary: the no-index floor is min(rowid)-1, not min(rowid)."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_first")
+            add_part(f.conn, "ses_first", type="tool", text="LOWEST in row one")
+            for _ in range(10):
+                add_part(f.conn, "ses_first", type="text", text="filler")
+            f.commit()
+            rows = f.sessions("--no-index", "--limit", "5", "LOWEST")
+            self.assertEqual([(r["id"], r["matches"]) for r in rows], [("ses_first", 1)])
+        finally:
+            f.close()
+
+    def test_bulk_inserted_block_picks_by_insertion_order(self):
+        """The documented limit of the early stop, pinned so it cannot drift.
+
+        cloudbox has a ~100k-row block bulk-inserted in reverse chronological
+        order (rowids ~852k-955k, 2026-06-07). Walking by rowid meets the
+        OLDER session first there, so `--limit 1` picks it rather than the
+        session with the newest match. What must still hold: every returned
+        row is a real match with exactly the unlimited path's count and
+        last_match. When gqt3.3 adds a time-bounded stop rule, flip the first
+        assertion to `== full[:1]`.
+        """
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_newer")
+            add_session(f.conn, "ses_older")
+            add_part(f.conn, "ses_newer", type="tool", text="BLOCK newer", t=500)
+            # Far enough apart to land in different scan windows (the walk
+            # sorts by time WITHIN a window), as the real block's rows do.
+            for i in range(20):
+                add_part(f.conn, "ses_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_older", type="tool", text="BLOCK older", t=100)
+            f.commit()
+            full = f.sessions("--no-index", "BLOCK")
+            self.assertEqual([r["id"] for r in full], ["ses_newer", "ses_older"])
+            for flags in (["--no-index"], []):
+                if not flags:
+                    f.build_index()
+                got = f.sessions(*flags, "--limit", "1", "BLOCK")
+                self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
+                by_id = {r["id"]: r for r in full}
+                for r in got:
+                    self.assertEqual(r, by_id[r["id"]], flags)
+        finally:
+            f.close()
 
     def test_table_output_respects_limit(self):
         rc, out, _ = self.f.search("--types", "tool,text", "--limit", "4", "needle-common")

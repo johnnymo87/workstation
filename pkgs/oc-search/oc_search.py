@@ -157,9 +157,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=0,
         metavar="N",
         help=(
-            "Show at most N sessions: the N with the newest matches, with exact "
-            "counts. Searches newest-first and stops, so it stays fast for "
-            "common needles even without a usable index."
+            "Show at most N sessions, with exact counts. Searches newest-first "
+            "(by insertion) and stops, so it stays fast for common needles even "
+            "without a usable index. Equal to the first N rows of the unlimited "
+            "search except near bulk-imported history (see search_recent)."
         ),
     )
     p.add_argument("--db", help=f"Path to opencode.db (default: {DEFAULT_DB}).")
@@ -790,13 +791,28 @@ def search_recent(
     ten rows of that, and was timing out at 25s even with a complete index,
     because a common needle such as a repo name matches millions of postings.
 
-    WHY STOPPING EARLY IS EXACT. Results are ordered by each session's newest
-    match, and `part.rowid` is monotonic in `time_created` (module docstring;
-    re-measured 2026-10-09: 31 inversions in the last 300k rows, none over an
-    hour). So walking
-    matching rows from the highest rowid down meets sessions in result order:
-    once `limit` live sessions have been met above rowid L, every unmet session
-    has all of its matches at or below L, i.e. is older than all of them.
+    WHEN STOPPING EARLY IS EXACT, AND WHEN IT IS NOT. Results are ordered by
+    each session's newest match. Walking matching rows from the highest rowid
+    down meets sessions in INSERTION order. That equals result order wherever
+    `part.rowid` is monotonic in `time_created`: once `limit` live sessions
+    have been met above rowid L, every unmet session has all of its matches at
+    or below L, i.e. is older than all of them. Then the output is exactly the
+    unlimited output's first `limit` rows.
+
+    It is NOT monotonic everywhere. Rowids ~852,410-955,037 on cloudbox are a
+    block of ~100k parts from 668 sessions (05-31..06-07), bulk-inserted
+    2026-06-07 22:28 in roughly reverse chronological order, so times there run
+    backwards by up to 168h. A needle whose N-th newest session falls in that
+    era can get the wrong N sessions. Measured: `--types tool,text
+    cops-6234-proto --limit 20` gets 5 of 20 wrong. Elsewhere inversions are
+    under a minute: 248 in the last 1.5M rows, the largest 41s. So:
+      - the sessions returned are always real matches, with exact counts and
+        last_match from the live table, sorted by last_match;
+      - which sessions are returned follows insertion order. That is the
+        exact top N except around that block (or any future bulk insert).
+    The exact fix is a stop rule bounded by a per-bucket running max of
+    time_created kept by the indexer; it is deferred to the schema-v2 work
+    (bead workstation-gqt3.3).
 
     THE WALK, top down:
       1. (floor, src_max] -- the rows the index has not seen, or the whole
