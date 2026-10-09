@@ -567,11 +567,19 @@ class SchemaV2Test(unittest.TestCase):
 
     def test_behaviour_replace_leaves_no_ghost_posting(self):
         """Index a row, mutate source row's data at same rowid, rewrite via
-        write_rows, and assert the OLD text no longer matches via FTS."""
+        write_rows, and assert the OLD text no longer matches via FTS.
+
+        Uses an interior rowid with sentinel rows above it, and old/new texts
+        sharing no trigrams, so that plain INSERT leaves a ghost posting and
+        fails this test, whereas INSERT OR REPLACE cleanly replaces it.
+        """
         f = Fixture()
         try:
             add_session(f.conn, "ses_1")
-            pid = add_part(f.conn, "ses_1", type="tool", text="AlphaOldTextUnique")
+            pid1 = add_part(f.conn, "ses_1", type="tool", text="qqqOLDZZZ")
+            # Sentinel rows above row 1 ensure row 1 is an interior rowid
+            add_part(f.conn, "ses_1", type="tool", text="sentinel_row_2")
+            add_part(f.conn, "ses_1", type="tool", text="sentinel_row_3")
             f.commit()
             f.build_index()
 
@@ -579,31 +587,31 @@ class SchemaV2Test(unittest.TestCase):
             idx = oc_search.open_index_rw(f.index)
             try:
                 cnt_old = idx.execute(
-                    "SELECT count(*) FROM ft WHERE ft MATCH '\"AlphaOldTextUnique\"'"
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"qqqOLDZZZ\"'"
                 ).fetchone()[0]
                 self.assertEqual(cnt_old, 1)
 
-                # Mutate source row
-                rid = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid,)).fetchone()[0]
-                update_part(f.conn, rid, text="BetaNewTextUnique")
+                # Mutate interior source row: old and new text share no trigrams
+                rid1 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid1,)).fetchone()[0]
+                update_part(f.conn, rid1, text="kkkNEWWWW")
                 f.commit()
 
                 # Re-read row and write through write_rows
                 updated = f.conn.execute(
                     "SELECT rowid, id, session_id, time_created, time_updated, "
                     "json_extract(data,'$.type') AS type, data FROM part WHERE rowid=?",
-                    (rid,),
+                    (rid1,),
                 ).fetchall()
                 oc_search.write_rows(idx, updated)
                 idx.commit()
 
                 # Assert NEW text matches and OLD text does not match
                 cnt_new = idx.execute(
-                    "SELECT count(*) FROM ft WHERE ft MATCH '\"BetaNewTextUnique\"'"
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"kkkNEWWWW\"'"
                 ).fetchone()[0]
                 self.assertEqual(cnt_new, 1)
                 cnt_old_after = idx.execute(
-                    "SELECT count(*) FROM ft WHERE ft MATCH '\"AlphaOldTextUnique\"'"
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"qqqOLDZZZ\"'"
                 ).fetchone()[0]
                 self.assertEqual(cnt_old_after, 0, "old text must not leave ghost postings")
             finally:
@@ -1722,11 +1730,38 @@ class DifferentialRunner:
         self.fixture.build_index()
         self.assert_differential()
 
+    def _run_indexed(self, *argv) -> list[dict]:
+        rc, out, err = self.fixture.search("--json", *argv)
+        self.test_case.assertEqual(rc, 0, f"search failed: {err}")
+        err_lower = err.lower()
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.test_case.assertNotIn(
+                forbidden,
+                err_lower,
+                f"Indexed search unexpectedly fell back or reported unusable: {err!r}",
+            )
+        return json.loads(out)
+
     def assert_differential(self):
         """Assert indexed unlimited == --no-index, and --limit N == first N."""
+        # 1. Assert --index-info reports usable before comparing
+        info_out, info_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(info_out), contextlib.redirect_stderr(info_err):
+            info_rc = oc_search.run(
+                ["--index-info", "--db", self.fixture.db, "--index-path", self.fixture.index]
+            )
+        self.test_case.assertEqual(info_rc, 0, f"--index-info failed: {info_err.getvalue()}")
+        info = json.loads(info_out.getvalue())
+        self.test_case.assertTrue(info.get("exists"), "--index-info reports index does not exist")
+        self.test_case.assertTrue(
+            info.get("usable"),
+            f"--index-info reports index is not usable: {info.get('reason')}",
+        )
+
+        # 2. Compare indexed searches against --no-index, verifying indexed queries use the index
         for needle in self.NEEDLES:
             for type_flags in ([], ["--all"]):
-                unlimited_indexed = self.fixture.sessions(*type_flags, needle)
+                unlimited_indexed = self._run_indexed(*type_flags, needle)
                 unlimited_scanned = self.fixture.sessions("--no-index", *type_flags, needle)
                 self.test_case.assertEqual(
                     unlimited_indexed,
@@ -1734,7 +1769,7 @@ class DifferentialRunner:
                     f"Unlimited indexed vs scanned mismatch for needle={needle!r}, flags={type_flags}",
                 )
                 for n in (1, 2, 3, 4):
-                    limit_indexed = self.fixture.sessions(*type_flags, "--limit", str(n), needle)
+                    limit_indexed = self._run_indexed(*type_flags, "--limit", str(n), needle)
                     self.test_case.assertEqual(
                         limit_indexed,
                         unlimited_scanned[:n],
