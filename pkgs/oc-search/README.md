@@ -253,6 +253,42 @@ point: oc-search now ends its own run, at 25s, before the caller's 30s budget
 expires, and says why. Node's `execFile` concatenates the child's stderr into
 the error message, so the reason travels into the consumer's log by itself.
 
+### It came back: `--limit` (bead workstation-gqt3.1, 2026-10-09)
+
+The index did not stay a fix. Between 09-15 and 10-09 lgtm logged 97
+`aborted after 25s: index query` lines, several of them while the index was
+complete. Two causes:
+
+- the unlimited query aggregates every match, and a common needle like `mono`
+  has millions of postings in a ~20 GB index, cold under bazel I/O;
+- the index was frequently mid-rebuild (workstation-gqt3.3), which turns
+  most of the table into tail scan.
+
+And lgtm keeps the first 2,000 characters, about ten rows, of a 1.8 MB answer.
+
+`--limit N` now walks newest-first and stops after N live sessions; see
+`search_recent`. It scans the unindexed tail top-down in growing rowid
+windows, then reads index postings in descending rowid order, then recounts
+each chosen session exactly through `part_session_idx`. It returns the same
+rows, counts and order as the unlimited search truncated to N. Ordering
+relies on `part.rowid` being monotonic in `time_created`, the same assumption
+the watermark already makes. Measured on cloudbox, with the index about 40%
+built (watermark 1.25M of 3.35M rowids):
+
+| query | unlimited | `--limit` | `--limit --no-index` |
+|---|---|---|---|
+| `--types tool,text mono`, limit 10 | 7.2s warm | **0.26s** | **0.26s** |
+| `--all "recipe card pipeline"` (rare, 3 sessions), limit 5 | 2.2s warm | 2.9s | — |
+
+A needle that never reaches N sessions reads the same rows as the unlimited
+search, in a few more passes. The cost is roughly 1.3x warm.
+
+Two small output differences are deliberate:
+- table column widths follow the rows shown;
+- a session whose only matching parts were deleted after indexing is
+  dropped, because counts come from the live table. The unlimited indexed
+  search still reports it until workstation-gqt3.3.
+
 There is a remaining gap that this package cannot close: lgtm swallows the
 failure and returns `""`. A packet built without session history is still
 indistinguishable from one where the search legitimately found nothing. That
