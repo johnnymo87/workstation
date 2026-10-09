@@ -816,5 +816,221 @@ class SourceReadTransactionTest(unittest.TestCase):
         self.assertFalse(res["up_to_date"])
 
 
+class LimitFastPathTest(unittest.TestCase):
+    """bead workstation-gqt3.1 -- `--limit N` walks newest-first and stops.
+
+    The contract: `--limit N` returns exactly the first N rows the unlimited
+    search would, with exact `matches` and `last_match`, while reading only as
+    much of the table as it takes to find N sessions. lgtm keeps ~10 rows and
+    was paying for the whole aggregation (and timing out) to get them.
+    """
+
+    NEEDLES = ["needle", "needle-common", "needle-rare", "nothing-matches-this"]
+
+    def setUp(self):
+        self.f = Fixture()
+        self.saved_window = oc_search.RECENT_FIRST_WINDOW
+        # Tiny windows so a small fixture exercises many window steps.
+        oc_search.RECENT_FIRST_WINDOW = 3
+        c = self.f.conn
+        for s in range(30):
+            add_session(c, f"ses_{s:02d}", title=f"t{s}")
+        # Interleave parts across sessions; times strictly increase with rowid.
+        # Production is like this at the head of the table but NOT everywhere
+        # -- see test_bulk_inserted_block_picks_by_insertion_order.
+        t = 0
+        for rnd in range(12):
+            for s in range(30):
+                if (s + rnd) % 3:
+                    continue
+                t += 1
+                kind = "tool" if (s + rnd) % 2 else "text"
+                text = "needle-common filler"
+                if s % 10 == 0:
+                    text += " needle-rare"
+                add_part(c, f"ses_{s:02d}", type=kind, text=text, t=t)
+                t += 1
+                add_part(c, f"ses_{s:02d}", type="reasoning", text="no match here", t=t)
+        self.f.commit()
+
+    def tearDown(self):
+        oc_search.RECENT_FIRST_WINDOW = self.saved_window
+        self.f.close()
+
+    def assert_limit_is_a_prefix(self, *flags):
+        for needle in self.NEEDLES:
+            for types in (["--types", "tool"], ["--types", "tool,text"], ["--all"]):
+                full = self.f.sessions(*flags, *types, needle)
+                for n in (1, 2, 5, 13, 1000):
+                    got = self.f.sessions(*flags, *types, "--limit", str(n), needle)
+                    self.assertEqual(
+                        got, full[:n], f"flags={flags} types={types} n={n} {needle!r}"
+                    )
+
+    def test_prefix_without_index(self):
+        self.assert_limit_is_a_prefix("--no-index")
+
+    def test_prefix_with_full_index(self):
+        self.f.build_index()
+        self.assert_limit_is_a_prefix()
+
+    def test_prefix_with_partial_index(self):
+        # Half the table indexed: the walk must cover the tail, then the index.
+        total = self.f.conn.execute("SELECT count(*) FROM part").fetchone()[0]
+        self.f.build_index(rebuild=True, batch=total // 2)
+        self.assert_limit_is_a_prefix()
+
+    def test_prefix_with_invalid_index(self):
+        self.f.build_index()
+        self.f.conn.execute(
+            "UPDATE part SET id='prt_impostor' WHERE rowid=(SELECT MAX(rowid) FROM part)"
+        )
+        self.f.commit()
+        self.assert_limit_is_a_prefix()
+
+    def test_counts_include_matches_far_below_the_stopping_point(self):
+        """Exact counts, not window-local ones."""
+        c = self.f.conn
+        add_session(c, "ses_old_and_new")
+        for i in range(40):
+            add_part(c, "ses_x_filler", type="tool", text="filler")
+        first = add_part(c, "ses_old_and_new", type="tool", text="ZZTOP ancient", t=0)
+        for i in range(40):
+            add_part(c, "ses_x_filler", type="tool", text="filler")
+        add_part(c, "ses_old_and_new", type="tool", text="ZZTOP recent", t=100_000)
+        self.f.commit()
+        self.assertTrue(first)
+        rows = self.f.sessions("--no-index", "--limit", "1", "ZZTOP")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_old_and_new")
+        self.assertEqual(rows[0]["matches"], 2)
+        self.assertEqual(rows[0]["last_match_ms"], BASE_MS + 100_000)
+
+    def test_deleted_session_does_not_use_up_a_slot(self):
+        newest = self.f.sessions("--no-index", "--types", "tool,text", "needle-common")
+        self.f.conn.execute("DELETE FROM session WHERE id=?", (newest[0]["id"],))
+        self.f.commit()
+        for flags in (["--no-index"], []):
+            got = self.f.sessions(*flags, "--types", "tool,text", "--limit", "3", "needle-common")
+            self.assertEqual(got, newest[1:4], flags)
+
+    def _scanned_rows(self, *argv):
+        """Run a search, returning (rows, total rowid span read by scan_range)."""
+        spans = []
+        real = oc_search.scan_range
+
+        def spy(db_path, lo, hi, *a, **kw):
+            spans.append(hi - lo)
+            return real(db_path, lo, hi, *a, **kw)
+
+        oc_search.scan_range = spy
+        try:
+            rows = self.f.sessions(*argv)
+        finally:
+            oc_search.scan_range = real
+        return rows, sum(spans)
+
+    def test_common_needle_reads_only_the_top_of_the_table(self):
+        """The point of the change: an invalid/absent index must not turn
+        `--limit 2` on a common needle into a full scan."""
+        total = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        rows, scanned = self._scanned_rows(
+            "--no-index", "--jobs", "1", "--types", "tool,text", "--limit", "2", "needle-common"
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertLess(scanned, total // 4, f"read {scanned} of {total} rows")
+        # ...whereas without --limit it reads everything, which is the baseline.
+        _, full = self._scanned_rows("--no-index", "--jobs", "1", "--types", "tool,text", "needle-common")
+        self.assertGreaterEqual(full, total)
+
+    def test_full_index_is_not_rescanned(self):
+        self.f.build_index()
+        rows, scanned = self._scanned_rows("--types", "tool,text", "--limit", "5", "needle-rare")
+        self.assertEqual(len(rows), 3)  # ses_00, ses_10, ses_20
+        self.assertEqual(scanned, 0)
+
+    def test_part_deleted_after_indexing_is_not_reported(self):
+        """Recounting against the live table means a stale index posting for a
+        part that no longer exists cannot surface a session with 0 matches."""
+        add_session(self.f.conn, "ses_gone_part")
+        add_part(self.f.conn, "ses_gone_part", type="tool", text="QQUNIQUE")
+        add_part(self.f.conn, "ses_gone_part", type="tool", text="keeps the watermark row alive")
+        self.f.commit()
+        self.f.build_index()
+        self.f.conn.execute("DELETE FROM part WHERE data LIKE '%QQUNIQUE%'")
+        self.f.commit()
+        self.assertEqual(self.f.sessions("--limit", "5", "QQUNIQUE"), [])
+
+    def test_match_on_the_watermark_row_is_found_by_the_index_phase(self):
+        """Boundary: the index phase reads `ft.rowid <= floor`, inclusive."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_w")
+            add_part(f.conn, "ses_w", type="tool", text="WMARK on the watermark row")
+            f.commit()
+            f.build_index()
+            add_session(f.conn, "ses_later")
+            add_part(f.conn, "ses_later", type="tool", text="unrelated tail row")
+            f.commit()
+            rows = f.sessions("--limit", "5", "WMARK")
+            self.assertEqual([(r["id"], r["matches"]) for r in rows], [("ses_w", 1)])
+        finally:
+            f.close()
+
+    def test_match_on_the_lowest_row_is_found_without_an_index(self):
+        """Boundary: the no-index floor is min(rowid)-1, not min(rowid)."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_first")
+            add_part(f.conn, "ses_first", type="tool", text="LOWEST in row one")
+            for _ in range(10):
+                add_part(f.conn, "ses_first", type="text", text="filler")
+            f.commit()
+            rows = f.sessions("--no-index", "--limit", "5", "LOWEST")
+            self.assertEqual([(r["id"], r["matches"]) for r in rows], [("ses_first", 1)])
+        finally:
+            f.close()
+
+    def test_bulk_inserted_block_picks_by_insertion_order(self):
+        """The documented limit of the early stop, pinned so it cannot drift.
+
+        cloudbox has a ~100k-row block bulk-inserted in reverse chronological
+        order (rowids ~852k-955k, 2026-06-07). Walking by rowid meets the
+        OLDER session first there, so `--limit 1` picks it rather than the
+        session with the newest match. What must still hold: every returned
+        row is a real match with exactly the unlimited path's count and
+        last_match. When gqt3.3 adds a time-bounded stop rule, flip the first
+        assertion to `== full[:1]`.
+        """
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_newer")
+            add_session(f.conn, "ses_older")
+            add_part(f.conn, "ses_newer", type="tool", text="BLOCK newer", t=500)
+            # Far enough apart to land in different scan windows (the walk
+            # sorts by time WITHIN a window), as the real block's rows do.
+            for i in range(20):
+                add_part(f.conn, "ses_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_older", type="tool", text="BLOCK older", t=100)
+            f.commit()
+            full = f.sessions("--no-index", "BLOCK")
+            self.assertEqual([r["id"] for r in full], ["ses_newer", "ses_older"])
+            for flags in (["--no-index"], []):
+                if not flags:
+                    f.build_index()
+                got = f.sessions(*flags, "--limit", "1", "BLOCK")
+                self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
+                by_id = {r["id"]: r for r in full}
+                for r in got:
+                    self.assertEqual(r, by_id[r["id"]], flags)
+        finally:
+            f.close()
+
+    def test_table_output_respects_limit(self):
+        rc, out, _ = self.f.search("--types", "tool,text", "--limit", "4", "needle-common")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(out.splitlines()), 2 + 4)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

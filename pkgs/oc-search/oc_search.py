@@ -109,6 +109,15 @@ COMMIT_EVERY = 10_000
 # irrelevant against reading a ~4KB blob per row.
 READ_CHUNK = 2_000
 
+# `--limit` fast path (bead workstation-gqt3.1): rowids in the first window
+# scanned down from the top of the table, and the factor each further window
+# grows by. 4,096 rows is a few hours of parts on cloudbox, so a needle seen
+# several times a day stops in the first window. A needle that never reaches N
+# sessions reads exactly the rows the unlimited search reads, in more passes:
+# measured warm on cloudbox 2026-10-09, 2.9s vs 2.2s at x4 (4.1s at x2).
+RECENT_FIRST_WINDOW = 4_096
+RECENT_WINDOW_GROWTH = 4
+
 
 # --------------------------------------------------------------------------
 # CLI
@@ -143,7 +152,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--json", action="store_true", help="Machine-readable output.")
     p.add_argument(
-        "--limit", type=int, default=0, metavar="N", help="Show at most N sessions."
+        "--limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "Show at most N sessions, with exact counts. Searches newest-first "
+            "(by insertion) and stops, so it stays fast for common needles even "
+            "without a usable index. Equal to the first N rows of the unlimited "
+            "search except near bulk-imported history (see search_recent)."
+        ),
     )
     p.add_argument("--db", help=f"Path to opencode.db (default: {DEFAULT_DB}).")
     p.add_argument("--index-path", help="Path to the sidecar index db.")
@@ -754,6 +772,117 @@ def scan_parallel(
     return out
 
 
+def search_recent(
+    src: sqlite3.Connection,
+    db_path: str,
+    idx: sqlite3.Connection | None,
+    floor: int,
+    src_max: int,
+    query: str,
+    types: list[str] | None,
+    limit: int,
+    deadline: Deadline,
+    jobs: int,
+) -> dict[str, tuple[int, int]]:
+    """The newest `limit` matching sessions, without aggregating every match.
+
+    bead workstation-gqt3.1. The unlimited search aggregates every matching
+    part in the database and only then sorts and truncates. lgtm keeps about
+    ten rows of that, and was timing out at 25s even with a complete index,
+    because a common needle such as a repo name matches millions of postings.
+
+    WHEN STOPPING EARLY IS EXACT, AND WHEN IT IS NOT. Results are ordered by
+    each session's newest match. Walking matching rows from the highest rowid
+    down meets sessions in INSERTION order. That equals result order wherever
+    `part.rowid` is monotonic in `time_created`: once `limit` live sessions
+    have been met above rowid L, every unmet session has all of its matches at
+    or below L, i.e. is older than all of them. Then the output is exactly the
+    unlimited output's first `limit` rows.
+
+    It is NOT monotonic everywhere. Rowids ~852,410-955,037 on cloudbox are a
+    block of ~100k parts from 668 sessions (05-31..06-07), bulk-inserted
+    2026-06-07 22:28 in roughly reverse chronological order, so times there run
+    backwards by up to 168h. A needle whose N-th newest session falls in that
+    era can get the wrong N sessions. Measured: `--types tool,text
+    cops-6234-proto --limit 20` gets 5 of 20 wrong. Elsewhere inversions are
+    under a minute: 248 in the last 1.5M rows, the largest 41s. So:
+      - the sessions returned are always real matches, with exact counts and
+        last_match from the live table, sorted by last_match;
+      - which sessions are returned follows insertion order. That is the
+        exact top N except around that block (or any future bulk insert).
+    The exact fix is a stop rule bounded by a per-bucket running max of
+    time_created kept by the indexer; it is deferred to the schema-v2 work
+    (bead workstation-gqt3.3).
+
+    THE WALK, top down:
+      1. (floor, src_max] -- the rows the index has not seen, or the whole
+         table when there is no usable index -- in rowid windows that start at
+         RECENT_FIRST_WINDOW and double, each scanned with the same parallel
+         instr() as the fallback. A common needle stops in the first window,
+         so an absent or invalid index no longer means a full scan.
+      2. Then, with a usable index, its postings at or below `floor` in
+         descending rowid order, which FTS5 streams without sorting.
+
+    WHY THE COUNTS ARE STILL EXACT. The walk only decides WHICH sessions are
+    returned. Each one is then recounted against the live table through
+    part_session_idx, so `matches` covers matches far below where the walk
+    stopped, and a stale index posting for a part deleted since indexing
+    cannot make a session appear (a recount of 0 drops it and the walk goes
+    on). Deleted sessions are skipped the same way, so they do not use up one
+    of the `limit` slots.
+    """
+    picked: dict[str, tuple[int, int]] = {}
+    seen: set[str] = set()
+    pred, params = type_predicate(types, "json_extract(data,'$.type')")
+    recount_sql = (
+        "SELECT COUNT(*), MAX(time_created) FROM part "
+        "WHERE session_id = ? AND instr(data, ?) > 0" + pred
+    )
+
+    def consider(sid: str) -> bool:
+        """Account for one session; True once `limit` sessions are picked."""
+        if sid in seen:
+            return False
+        seen.add(sid)
+        if src.execute("SELECT 1 FROM session WHERE id=?", (sid,)).fetchone() is None:
+            return False
+        n, t = src.execute(recount_sql, [sid, query] + params).fetchone()
+        if n:
+            picked[sid] = (int(n), int(t))
+        deadline.check()
+        return len(picked) >= limit
+
+    hi = src_max
+    window = RECENT_FIRST_WINDOW
+    while hi > floor:
+        lo = max(floor, hi - window)
+        found = scan_parallel(db_path, lo, hi, query, types, deadline, jobs)
+        deadline.check()
+        # Newest match first. A session's newest match in this window is its
+        # newest overall unless it was already met higher up, in which case
+        # consider() skips it.
+        for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
+            if consider(sid):
+                return picked
+        hi = lo
+        window *= RECENT_WINDOW_GROWTH
+
+    if idx is not None and floor > 0:
+        ipred, iparams = type_predicate(types, "pm.type")
+        cur = idx.execute(
+            "SELECT pm.session_id FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
+            "WHERE ft MATCH ? AND ft.rowid <= ?" + ipred + " ORDER BY ft.rowid DESC",
+            [fts_phrase(query), floor] + iparams,
+        )
+        try:
+            for (sid,) in cur:
+                if consider(sid):
+                    break
+        finally:
+            cur.close()
+    return picked
+
+
 def decorate(
     src: sqlite3.Connection, hits: dict[str, tuple[int, int]]
 ) -> list[dict[str, Any]]:
@@ -913,17 +1042,20 @@ def run(argv: list[str]) -> int:
                 warn(f"ignoring index: FTS5 trigram unavailable ({why})")
                 idx.close()
                 idx = None
+        # With --limit an unusable index costs a newest-first walk that stops
+        # at N sessions, not a full scan, so the warnings say so.
+        fallback = "a newest-first scan" if args.limit > 0 else "a full scan"
         if idx is not None:
             usable, watermark, reason = index_validity(src, idx, db_path)
             if not usable:
-                warn(f"index unusable: {reason}. Falling back to a full scan.")
+                warn(f"index unusable: {reason}. Falling back to {fallback}.")
                 idx.close()
                 idx = None
                 watermark = 0
             elif len(query) < MIN_TRIGRAM_LEN:
                 warn(
                     f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
-                    "trigram index. Falling back to a full scan."
+                    f"trigram index. Falling back to {fallback}."
                 )
                 idx.close()
                 idx = None
@@ -931,7 +1063,13 @@ def run(argv: list[str]) -> int:
             else:
                 used_index = True
 
-        if not used_index:
+        if not used_index and args.limit > 0:
+            warn(
+                f"no usable index at {index_path}: scanning newest-first until "
+                f"{args.limit} sessions match. A rare needle can still read every "
+                "part row. Build the index once with `oc-search --index`."
+            )
+        elif not used_index:
             warn(
                 f"no usable index at {index_path}: scanning every part row "
                 f"({args.jobs}-way). This reads gigabytes and takes minutes on a "
@@ -940,7 +1078,20 @@ def run(argv: list[str]) -> int:
 
         src_min, src_max = part_rowid_bounds(src)
         deadline.check()
-        if used_index and idx is not None:
+        if args.limit > 0:
+            hits = search_recent(
+                src,
+                db_path,
+                idx if used_index else None,
+                watermark if used_index else max(src_min - 1, 0),
+                src_max,
+                query,
+                types,
+                args.limit,
+                deadline,
+                args.jobs,
+            )
+        elif used_index and idx is not None:
             hits = search_indexed(idx, query, types)
             # Everything the index has not seen yet, always, so that a stale
             # index costs time and never truth.
