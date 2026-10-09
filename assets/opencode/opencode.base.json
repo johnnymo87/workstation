@@ -33,7 +33,8 @@
   "provider": {
     "anthropic": {
       "options": {
-        "chunkTimeout": 600000
+        "chunkTimeout": 600000,
+        "headerTimeout": 300000
       },
       "models": {
         "claude-opus-5-5": {
@@ -88,12 +89,14 @@
     },
     "google-vertex": {
       "options": {
-        "chunkTimeout": 600000
+        "chunkTimeout": 600000,
+        "headerTimeout": 300000
       }
     },
     "google-vertex-anthropic": {
       "options": {
-        "chunkTimeout": 600000
+        "chunkTimeout": 600000,
+        "headerTimeout": 300000
       },
       "models": {
         "claude-opus-5-5@default": {
