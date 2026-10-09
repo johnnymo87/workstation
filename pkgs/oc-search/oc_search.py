@@ -120,6 +120,31 @@ READ_CHUNK = 2_000
 RECENT_FIRST_WINDOW = 4_096
 RECENT_WINDOW_GROWTH = 4
 
+# Reconcile bounds and sweep parameters (bead workstation-gqt3.3).
+# RECONCILE_MAX bounds changed-identity rows (renumber detector, e.g. VACUUM INTO renumber).
+# DELETE_MAX bounds deleted rows. Exceeding either forces a full rebuild from scratch.
+RECONCILE_MAX = 50_000
+DELETE_MAX = 1_000_000
+RECHECK_ROWS = 100_000
+
+IDENTITY_SWEEP_SQL = (
+    "SELECT p.rowid FROM part p INDEXED BY sqlite_autoindex_part_1 "
+    "LEFT JOIN idx.part_meta pm ON pm.rowid_ = p.rowid "
+    "WHERE p.rowid <= ? AND pm.part_id IS NOT p.id LIMIT ?"
+)
+
+DELETES_SWEEP_SQL = (
+    "SELECT rowid_ FROM idx.part_meta "
+    "WHERE rowid_ NOT IN (SELECT +rowid FROM part INDEXED BY sqlite_autoindex_part_1) "
+    "LIMIT ?"
+)
+
+RECHECK_SWEEP_SQL = (
+    "SELECT p.rowid FROM part p "
+    "JOIN idx.part_meta pm ON pm.rowid_ = p.rowid "
+    "WHERE p.rowid <= ? AND p.rowid > ? AND pm.time_updated IS NOT p.time_updated"
+)
+
 
 # --------------------------------------------------------------------------
 # CLI
@@ -601,6 +626,9 @@ def build_index(
     rebuild: bool = False,
     batch: int | None = None,
     progress: bool = False,
+    reconcile_max: int = RECONCILE_MAX,
+    delete_max: int = DELETE_MAX,
+    recheck_rows: int = RECHECK_ROWS,
 ) -> dict[str, Any]:
     _, src_max = part_rowid_bounds(src)
 
@@ -615,51 +643,194 @@ def build_index(
         quick_idx = open_index_ro(index_path)
         if quick_idx is not None:
             try:
-                usable, wm, _ = index_validity(src, quick_idx, db_path)
-                if usable:
-                    watermark = wm
-                    if watermark >= src_max:
-                        return {
-                            "mode": "noop",
-                            "indexed": 0,
-                            "watermark": watermark,
-                            "up_to_date": True,
-                        }
-                else:
+                sdb = get_meta(quick_idx, "source_db")
+                wm = get_meta(quick_idx, "watermark_rowid")
+                if sdb != os.path.realpath(db_path) or wm is None:
                     is_rebuild = True
+                else:
+                    watermark = int(wm)
             finally:
                 quick_idx.close()
+        else:
+            is_rebuild = True
 
-    # Precheck disk before deleting existing index file (so file size and part_meta can be measured)
-    check_disk_precheck(
-        src,
-        index_path,
-        watermark=watermark,
-        src_max=src_max,
-        batch=batch,
-        rebuild=is_rebuild,
-    )
-
-    if is_rebuild and not is_fresh:
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.remove(index_path + suffix)
-            except FileNotFoundError:
-                pass
-
-    idx = open_index_rw(index_path)
-    try:
-        usable, watermark, reason = index_validity(src, idx, db_path)
-        if not usable and get_meta(idx, "watermark_rowid") is not None:
-            warn(f"{reason}; rebuilding from scratch")
-            idx.close()
-            return build_index(
-                src, index_path, db_path, rebuild=True, batch=batch, progress=progress
-            )
-
+    if is_rebuild:
+        check_disk_precheck(
+            src,
+            index_path,
+            watermark=0,
+            src_max=src_max,
+            batch=batch,
+            rebuild=True,
+        )
+        if not is_fresh:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(index_path + suffix)
+                except FileNotFoundError:
+                    pass
+        idx = open_index_rw(index_path)
         set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
         set_meta(idx, "source_db", os.path.realpath(db_path))
+        set_meta(idx, "watermark_rowid", 0)
+        set_meta(idx, "watermark_part_id", "")
+        idx.commit()
+        watermark = 0
+        reconciled_changed = 0
+        reconciled_deleted = 0
+        rechecked = 0
+    else:
+        idx = open_index_rw(index_path)
+        orig_w = int(get_meta(idx, "watermark_rowid") or 0)
+        watermark = orig_w
+        orig_w_id = get_meta(idx, "watermark_part_id") or ""
+        watermark_part_id = orig_w_id
+        reconciled_changed = 0
+        reconciled_deleted = 0
+        rechecked = 0
 
+        if watermark > 0:
+            # Reconcile sweep on the SOURCE connection with the index ATTACHed read-only
+            try:
+                src.execute("DETACH idx")
+            except sqlite3.OperationalError:
+                pass
+            clean_index_path = os.path.abspath(index_path).replace("'", "''")
+            src.execute(f"ATTACH 'file:{clean_index_path}?mode=ro' AS idx")
+            try:
+                changed_rows = src.execute(
+                    IDENTITY_SWEEP_SQL, (watermark, reconcile_max + 1)
+                ).fetchall()
+                deleted_rows = src.execute(
+                    DELETES_SWEEP_SQL, (delete_max + 1,)
+                ).fetchall()
+                lo = max(0, watermark - recheck_rows)
+                recheck_rows_res = src.execute(
+                    RECHECK_SWEEP_SQL, (watermark, lo)
+                ).fetchall()
+            finally:
+                src.execute("DETACH idx")
+
+            changed_rowids = [int(r[0]) for r in changed_rows]
+            deleted_rowids = [int(r[0]) for r in deleted_rows]
+            recheck_rowids = [int(r[0]) for r in recheck_rows_res]
+
+            if len(changed_rowids) > reconcile_max:
+                warn(
+                    f"changed identity rows ({len(changed_rowids)}) exceeds "
+                    f"RECONCILE_MAX ({reconcile_max}); rebuilding from scratch"
+                )
+                idx.close()
+                return build_index(
+                    src,
+                    index_path,
+                    db_path,
+                    rebuild=True,
+                    batch=batch,
+                    progress=progress,
+                    reconcile_max=reconcile_max,
+                    delete_max=delete_max,
+                    recheck_rows=recheck_rows,
+                )
+
+            if len(deleted_rowids) > delete_max:
+                warn(
+                    f"deleted rows ({len(deleted_rowids)}) exceeds "
+                    f"DELETE_MAX ({delete_max}); rebuilding from scratch"
+                )
+                idx.close()
+                return build_index(
+                    src,
+                    index_path,
+                    db_path,
+                    rebuild=True,
+                    batch=batch,
+                    progress=progress,
+                    reconcile_max=reconcile_max,
+                    delete_max=delete_max,
+                    recheck_rows=recheck_rows,
+                )
+
+            changed_set = set(changed_rowids)
+            deleted_set = set(deleted_rowids)
+            unique_rechecked = [
+                rid for rid in recheck_rowids
+                if rid not in changed_set and rid not in deleted_set
+            ]
+
+            reconciled_changed = len(changed_rowids)
+            reconciled_deleted = len(deleted_rowids)
+            rechecked = len(unique_rechecked)
+
+            # Apply deletes
+            if deleted_rowids:
+                idx.executemany("DELETE FROM ft WHERE rowid=?", [(rid,) for rid in deleted_rowids])
+                idx.executemany("DELETE FROM part_meta WHERE rowid_=?", [(rid,) for rid in deleted_rowids])
+
+            # Apply changed and rechecked rows
+            rewrite_rowids = changed_rowids + unique_rechecked
+            if rewrite_rowids:
+                for i in range(0, len(rewrite_rowids), 500):
+                    chunk_rids = rewrite_rowids[i : i + 500]
+                    placeholders = ",".join("?" * len(chunk_rids))
+                    sql = (
+                        "SELECT rowid, id, session_id, time_created, time_updated, "
+                        "json_extract(data,'$.type') AS type, data FROM part "
+                        f"WHERE rowid IN ({placeholders})"
+                    )
+                    fetched_rows = src.execute(sql, chunk_rids).fetchall()
+                    if fetched_rows:
+                        write_rows(idx, fetched_rows)
+                    if len(fetched_rows) < len(chunk_rids):
+                        fetched_rids = {int(r["rowid"]) for r in fetched_rows}
+                        missing_rids = [rid for rid in chunk_rids if rid not in fetched_rids]
+                        idx.executemany("DELETE FROM ft WHERE rowid=?", [(rid,) for rid in missing_rids])
+                        idx.executemany("DELETE FROM part_meta WHERE rowid_=?", [(rid,) for rid in missing_rids])
+
+            # Watermark re-point (Point 5):
+            # if the W row was deleted or changed, set watermark_rowid/watermark_part_id to the highest
+            # remaining part_meta row (rowid_ and part_id) - or 0 if empty.
+            if orig_w in deleted_set or orig_w in changed_set:
+                highest = idx.execute(
+                    "SELECT rowid_, part_id FROM part_meta ORDER BY rowid_ DESC LIMIT 1"
+                ).fetchone()
+                if highest is not None:
+                    watermark = int(highest[0])
+                    watermark_part_id = str(highest[1])
+                else:
+                    watermark = 0
+                    watermark_part_id = ""
+                set_meta(idx, "watermark_rowid", watermark)
+                set_meta(idx, "watermark_part_id", watermark_part_id)
+
+            if reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0:
+                idx.commit()
+
+        if (
+            watermark >= src_max
+            and (reconciled_changed == 0 and reconciled_deleted == 0 and rechecked == 0)
+        ):
+            idx.close()
+            return {
+                "mode": "noop",
+                "indexed": 0,
+                "watermark": watermark,
+                "up_to_date": True,
+                "reconciled_changed": 0,
+                "reconciled_deleted": 0,
+                "rechecked": 0,
+            }
+
+        check_disk_precheck(
+            src,
+            index_path,
+            watermark=watermark,
+            src_max=src_max,
+            batch=batch,
+            rebuild=False,
+        )
+
+    try:
         # `type` is resolved by json_extract in SQL, exactly as the old
         # implementation filtered it: the field's position inside the blob
         # varies, so no cheaper string probe is safe.
@@ -703,9 +874,9 @@ def build_index(
         # correct, it is gone. A row updated between chunks is indexed in its
         # newer form, which is what a search index wants. Anything not yet
         # indexed is covered by the tail scan, the same mechanism that already
-        # covers an interrupted build. index_validity() separately catches the
-        # one case that does matter — a watermark row deleted out from under us
-        # — and forces a rebuild.
+        # covers an interrupted build. The sweep at the start of --index reconciles
+        # watermark deletion and rowid reuse, re-pointing the watermark instead
+        # of forcing a whole-index rebuild.
         n = 0
         last: tuple[int, str] | None = None
         cursor_rowid = watermark
@@ -742,21 +913,12 @@ def build_index(
             # in the gap between two chunk statements and new parts reuse those
             # rowids, chunk k has already indexed the OLD contents of rows that
             # now belong to somebody else, and chunk k+1 reads only past the
-            # boundary. The result is permanently wrong — wrong session_id, stale
-            # text — and index_validity() does NOT catch it, because it only
-            # checks the FINAL watermark row, which is past the damage and
-            # perfectly consistent.
-            #
-            # index_validity()'s argument silently assumed the scan saw one
-            # snapshot. That was true before this change and is not true now, so
-            # the boundary needs its own check: re-read the previous chunk's last
-            # row and confirm it is still the same part. A mismatch means rowids
-            # moved under the scan, and the only safe answer is a rebuild — the
-            # same answer index_validity gives for the equivalent whole-index
-            # case. Cost is one primary-key lookup per 2,000 rows.
+            # boundary.
             #
             # Checked AFTER the fetch, not before, so that a delete landing in
             # EITHER gap (before or after the new statement) is caught.
+            # When a boundary row changed under the scan, stop catchup without rebuilding.
+            # Commit what is indexed; the next run's sweep reconciles the boundary row.
             if last is not None:
                 still = src.execute(
                     "SELECT id FROM part WHERE rowid=?", (last[0],)
@@ -764,17 +926,26 @@ def build_index(
                 if still is None or still[0] != last[1]:
                     warn(
                         "chunk boundary row changed under the scan "
-                        "(rowid reuse after a delete); rebuilding from scratch"
+                        "(rowid reuse after a delete); stopping catchup for next run's sweep to repair"
                     )
-                    idx.close()
-                    return build_index(
-                        src,
-                        index_path,
-                        db_path,
-                        rebuild=True,
-                        batch=batch,
-                        progress=progress,
+                    set_meta(idx, "watermark_rowid", last[0])
+                    set_meta(idx, "watermark_part_id", last[1])
+                    set_meta(idx, "built_at", int(time.time()))
+                    idx.commit()
+                    chunk_mode = (
+                        "reconcile"
+                        if (reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0)
+                        else "catchup"
                     )
+                    return {
+                        "mode": chunk_mode,
+                        "indexed": n,
+                        "watermark": last[0],
+                        "up_to_date": False,
+                        "reconciled_changed": reconciled_changed,
+                        "reconciled_deleted": reconciled_deleted,
+                        "rechecked": rechecked,
+                    }
 
             write_rows(idx, rows)
             last = (int(rows[-1]["rowid"]), rows[-1]["id"])
@@ -821,12 +992,24 @@ def build_index(
             set_meta(idx, "watermark_part_id", last[1])
         set_meta(idx, "built_at", int(time.time()))
         idx.commit()
-        mode = "rebuild" if is_rebuild else "catchup"
+        final_watermark = last[0] if last else watermark
+        if is_rebuild:
+            mode = "rebuild"
+        elif reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0:
+            mode = "reconcile"
+        elif n > 0:
+            mode = "catchup"
+        else:
+            mode = "noop"
+
         return {
             "mode": mode,
             "indexed": n,
-            "watermark": last[0] if last else watermark,
-            "up_to_date": (last[0] if last else watermark) >= src_max,
+            "watermark": final_watermark,
+            "up_to_date": final_watermark >= src_max,
+            "reconciled_changed": reconciled_changed,
+            "reconciled_deleted": reconciled_deleted,
+            "rechecked": rechecked,
         }
     finally:
         try:
