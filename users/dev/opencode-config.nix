@@ -709,7 +709,13 @@ let
   # over 120s. That figure includes model think-time and so overstates the
   # header wait, but 120s leaves too little margin to be sure. 300s is also
   # upstream's own default from v1.18.33 (b04697366f), so a later roll-forward
-  # makes this a no-op rather than a change.
+  # makes this a no-op rather than a change. Worst case on a truly dead
+  # upstream is now ~31 min (6 attempts x 300s + backoff) of `retry` status,
+  # then a failed turn, versus one 10-min dead turn before. Takes effect at
+  # the next pool restart, not at switch. Rollback is not a plain revert (the
+  # merge keeps unmanaged keys): also `jq 'del(.provider[].options.headerTimeout)'`
+  # on ~/.config/opencode/opencode.json, then re-switch so openai gets its
+  # 120000 back.
   # `cost` has deliberately NO default: a new codex-lb model added without a
   # sourced price must fail at eval rather than ship silently at $0.00, which is
   # the exact failure this block is fixing.
@@ -1156,12 +1162,18 @@ in
     # stalls unbounded, which is why the two ship together.
     #
     # Deliberately narrow: only the exact retired value is dropped, so a
-    # deliberately hand-set timeout of any other value survives.
+    # deliberately hand-set timeout of any other value survives. Every type
+    # is checked before it is indexed: on a non-object `options`,
+    # `.options.timeout?` yields EMPTY rather than false, which would make
+    # map_values silently delete the whole provider.
     cleaned="$(mktemp "''${runtime}.tmp.XXXXXX")"
     ${pkgs.jq}/bin/jq '
       if (.provider | type) == "object" then
         .provider |= map_values(
-          if (.options.timeout? == 600000) then del(.options.timeout) else . end
+          if (type == "object")
+             and ((.options | type) == "object")
+             and (.options.timeout == 600000)
+          then del(.options.timeout) else . end
         )
       else . end
     ' "$tmp" > "$cleaned"
