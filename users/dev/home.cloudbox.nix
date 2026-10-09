@@ -47,6 +47,11 @@ let
   # comment in pkgs/pressure-sampler/default.nix.
   pressureSampler = pkgs.callPackage ../../pkgs/pressure-sampler { };
 
+  # goose: the SAME package goose-serve runs (hosts/cloudbox, pkgs/goose), so the
+  # interactive CLI, every unattended `goose run` and goose-serve all run one binary. Bound to its own name: `pkgs.goose` in nixpkgs is the pressly/goose
+  # database migration tool.
+  gooseCli = pkgs.callPackage ../../pkgs/goose { };
+
   # Shared alert helper (dedup by signature, exponential backoff, warning->error
   # escalation, POST to pigeon's /alert). Same package the cloudbox canaries and
   # devbox's frontdoor canary use -- do not fork it.
@@ -336,6 +341,8 @@ lib.mkIf isCloudbox {
 
   # Developer tooling (project-specific)
   home.packages = with pkgs; [
+
+    gooseCli
 
     # `bazel` on PATH is a SHIM, not bazelisk (bead workstation-mqp3). It re-execs
     # the build inside `systemd-run --user --scope --slice=bazel`, so bazel is

@@ -113,8 +113,9 @@ let
   # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
 
-  # goose: the agent CLI, pinned to the release the pigeon ACP integration was
-  # measured against (pkgs/goose). Same callPackage rationale as above.
+  # goose: the agent CLI, pinned to the patched release the pigeon ACP integration
+  # was measured against (pkgs/goose). The user's `goose` is the same package
+  # (home.cloudbox.nix). Same callPackage rationale as above.
   #
   # NAME COLLISION, and it is a silent one: `pkgs.goose` in nixpkgs is the
   # pressly/goose DATABASE MIGRATION TOOL, not this. With overlays = [] in
@@ -688,6 +689,12 @@ in
         "GOOSE_PROVIDER=gcp_vertex_ai"
         "GCP_LOCATION=global"
         "GOOGLE_APPLICATION_CREDENTIALS=/home/dev/.config/gcloud/application_default_credentials.json"
+        # Send Claude-on-Vertex through claude-failover-proxy like every other agent
+        # on this host, keyed by goose's session id so cfp's stickiness keeps a
+        # session on one backend (and therefore one prompt cache). Needs the patched
+        # goose in pkgs/goose; stock goose ignores both variables.
+        "GCP_VERTEX_HOST=http://127.0.0.1:8789"
+        "GCP_VERTEX_SESSION_HEADER=x-opencode-session"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
