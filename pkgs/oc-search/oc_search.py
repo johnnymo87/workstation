@@ -54,6 +54,7 @@ range split legitimate.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -353,7 +354,7 @@ def fts5_trigram_available() -> tuple[bool, str]:
 
 
 def open_index_rw(path: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -406,29 +407,38 @@ def write_rows(idx: sqlite3.Connection, rows: Iterable[Any]) -> None:
     not leave ghost postings on the contentless table. `tmax` tracks the
     per-bucket max(time_created) (TMAX_SHIFT=14) and is upserted as
     max(existing, new), never lowered.
+
+    Accepts exactly one row shape: the sqlite3.Row from the build's SELECT
+    (rowid, id, session_id, time_created, time_updated, type, data), or a
+    7-tuple in that exact order:
+        (rowid, id, session_id, time_created, time_updated, type, data)
+    Raises ValueError on anything else.
     """
     payload = []
     metas = []
     tmax_map: dict[int, int] = {}
     for r in rows:
-        if isinstance(r, (tuple, list)):
-            rid = int(r[0])
-            pid = str(r[1])
-            sid = str(r[2])
-            tc = int(r[3])
-            tu = int(r[4]) if len(r) > 4 and r[4] is not None else tc
-            ptype = r[5] if len(r) > 5 else None
-            data = r[6] if len(r) > 6 else r[len(r) - 1]
+        if isinstance(r, tuple):
+            if len(r) != 7:
+                raise ValueError(f"expected 7-tuple, got length {len(r)}: {r!r}")
+            rid, pid, sid, tc, tu, ptype, data = r
+        elif isinstance(r, sqlite3.Row):
+            try:
+                rid = r["rowid"]
+                pid = r["id"]
+                sid = r["session_id"]
+                tc = r["time_created"]
+                tu = r["time_updated"]
+                ptype = r["type"]
+                data = r["data"]
+            except (IndexError, KeyError) as exc:
+                raise ValueError(f"sqlite3.Row missing expected columns: {exc}") from exc
         else:
-            rid = int(r["rowid"])
-            data = r["data"]
-            pid = r["id"]
-            sid = r["session_id"]
-            tc = int(r["time_created"])
-            has_tu = "time_updated" in (r.keys() if hasattr(r, "keys") else r)
-            tu = int(r["time_updated"]) if has_tu and r["time_updated"] is not None else tc
-            ptype = r["type"]
+            raise ValueError(f"expected 7-tuple or sqlite3.Row, got {type(r).__name__}: {r!r}")
 
+        rid = int(rid)
+        tc = int(tc)
+        tu = int(tu)
         payload.append((rid, data))
         metas.append((rid, pid, sid, tc, tu, ptype))
         bucket = rid >> TMAX_SHIFT
@@ -569,10 +579,17 @@ def check_disk_precheck(
     current_index_size = os.path.getsize(index_path) if os.path.exists(index_path) else 0
     available = (free + current_index_size) if rebuild else free
     if need > available:
-        raise SystemExit(
-            f"oc-search: refusing to index: estimated ~{need/1e9:.1f} GB needed, "
-            f"{free/1e9:.1f} GB free on {index_dir}"
-        )
+        if rebuild:
+            raise SystemExit(
+                f"oc-search: refusing to index: estimated ~{need/1e9:.1f} GB needed, "
+                f"{available/1e9:.1f} GB available ({free/1e9:.1f} GB free + "
+                f"{current_index_size/1e9:.1f} GB reclaimed index) on {index_dir}"
+            )
+        else:
+            raise SystemExit(
+                f"oc-search: refusing to index: estimated ~{need/1e9:.1f} GB needed, "
+                f"{free/1e9:.1f} GB free on {index_dir}"
+            )
     return need
 
 
@@ -639,14 +656,6 @@ def build_index(
             return build_index(
                 src, index_path, db_path, rebuild=True, batch=batch, progress=progress
             )
-
-        if not is_rebuild and watermark >= src_max:
-            return {
-                "mode": "noop",
-                "indexed": 0,
-                "watermark": watermark,
-                "up_to_date": True,
-            }
 
         set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
         set_meta(idx, "source_db", os.path.realpath(db_path))
@@ -1184,19 +1193,22 @@ def run(argv: list[str]) -> int:
     if args.index:
         lock_path = index_path + ".lock"
         os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
-        lock_file = None
+        lock_file = open(lock_path, "a")
         try:
-            lock_file = open(lock_path, "w")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (BlockingIOError, OSError):
-            if lock_file is not None:
-                try:
-                    lock_file.close()
-                except Exception:
-                    pass
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) or exc.errno in (
+                errno.EAGAIN,
+                errno.EWOULDBLOCK,
+                errno.EACCES,
+            ):
+                lock_file.close()
+                src.close()
+                print(f"oc-search: index build already in progress on {index_path}")
+                return 0
+            lock_file.close()
             src.close()
-            print(f"oc-search: index build already in progress on {index_path}")
-            return 0
+            raise
         try:
             if args.if_exists and not os.path.exists(index_path):
                 # Not an error: this is the timer finding nothing to do on a host

@@ -311,6 +311,7 @@ class DiskPrecheckTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     oc_search.check_disk_precheck(f.conn, f.index, rebuild=True, src_max=10)
                 self.assertIn("refusing to index", str(ctx.exception))
+                self.assertIn("reclaimed index", str(ctx.exception))
             finally:
                 oc_search.shutil.disk_usage = real_usage
 
@@ -349,6 +350,28 @@ class IndexLockTest(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 self.assertIn("already in progress", out.getvalue())
         finally:
+            f.close()
+
+    def test_unwritable_lock_path_raises_and_is_not_reported_in_progress(self):
+        f = Fixture()
+        lock_path = None
+        try:
+            lock_path = f.index + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                lock_file.write("")
+            os.chmod(lock_path, 0o400)
+            out = io.StringIO()
+            with self.assertRaises(PermissionError):
+                with contextlib.redirect_stdout(out):
+                    oc_search.run(["--index", "--db", f.db, "--index-path", f.index])
+            self.assertNotIn("already in progress", out.getvalue())
+        finally:
+            if lock_path is not None:
+                try:
+                    os.chmod(lock_path, 0o600)
+                except Exception:
+                    pass
             f.close()
 
 
@@ -522,46 +545,39 @@ class SchemaV2Test(unittest.TestCase):
             conn = oc_search.open_index_rw(idx_path)
             try:
                 # Row in bucket 0 with time_created 500
-                r1 = {
-                    "rowid": 1,
-                    "id": "prt_1",
-                    "session_id": "ses_1",
-                    "time_created": 500,
-                    "time_updated": 500,
-                    "type": "tool",
-                    "data": json.dumps({"text": "hi"}),
-                }
+                r1 = (1, "prt_1", "ses_1", 500, 500, "tool", json.dumps({"text": "hi"}))
                 oc_search.write_rows(conn, [r1])
                 val = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
                 self.assertEqual(val, 500)
 
                 # Row in bucket 0 with LOWER time_created 300
-                r2 = {
-                    "rowid": 2,
-                    "id": "prt_2",
-                    "session_id": "ses_1",
-                    "time_created": 300,
-                    "time_updated": 300,
-                    "type": "tool",
-                    "data": json.dumps({"text": "lo"}),
-                }
+                r2 = (2, "prt_2", "ses_1", 300, 300, "tool", json.dumps({"text": "lo"}))
                 oc_search.write_rows(conn, [r2])
                 val2 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
                 self.assertEqual(val2, 500, "tmax must never be lowered")
 
                 # Row in bucket 0 with HIGHER time_created 800
-                r3 = {
-                    "rowid": 3,
-                    "id": "prt_3",
-                    "session_id": "ses_1",
-                    "time_created": 800,
-                    "time_updated": 800,
-                    "type": "tool",
-                    "data": json.dumps({"text": "up"}),
-                }
+                r3 = (3, "prt_3", "ses_1", 800, 800, "tool", json.dumps({"text": "up"}))
                 oc_search.write_rows(conn, [r3])
                 val3 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
                 self.assertEqual(val3, 800)
+            finally:
+                conn.close()
+
+    def test_write_rows_enforces_row_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # Dict is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [{"rowid": 1}])
+                # Tuple of wrong length is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [(1, "p1", "s1", 100, 100)])
+                # Non-tuple/non-Row is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [42])
             finally:
                 conn.close()
 
