@@ -695,6 +695,27 @@ let
   # Rollback is not a plain revert: the runtime merge keeps unmanaged keys, so
   # also `jq 'del(.provider.openai.options.headerTimeout)'` ~/.config/opencode/opencode.json.
   # See docs/plans/2026-10-01-reviewer-fail-fast-design.md.
+  #
+  # WHY anthropic / google-vertex / google-vertex-anthropic SET
+  # `headerTimeout = 300000`. Without it, a request whose response never starts
+  # is bounded only by the overall `timeout` -- which e42b16e retired, so once
+  # mergeOpencode strips the lingering key it is bounded by nothing -- and when
+  # that fired it surfaced as a non-retryable UnknownError, i.e. a dead turn.
+  # HeaderTimeoutError IS retryable (message-v2.ts), and the timer is cleared
+  # the moment response headers arrive (provider.ts timeoutController +
+  # `.finally(clear)`), so it can never cut off a long streaming turn. 300s,
+  # not openai's 120s: measured 2026-10-09 over 4000 sampled google-vertex-
+  # anthropic turns, time to FIRST STREAMED PART was p50 1.6s / p99 105s, 23
+  # over 120s. That figure includes model think-time and so overstates the
+  # header wait, but 120s leaves too little margin to be sure. 300s is also
+  # upstream's own default from v1.18.33 (b04697366f), so a later roll-forward
+  # makes this a no-op rather than a change. Worst case on a truly dead
+  # upstream is now ~31 min (6 attempts x 300s + backoff) of `retry` status,
+  # then a failed turn, versus one 10-min dead turn before. Takes effect at
+  # the next pool restart, not at switch. Rollback is not a plain revert (the
+  # merge keeps unmanaged keys): also `jq 'del(.provider[].options.headerTimeout)'`
+  # on ~/.config/opencode/opencode.json, then re-switch so openai gets its
+  # 120000 back.
   # `cost` has deliberately NO default: a new codex-lb model added without a
   # sourced price must fail at eval rather than ship silently at $0.00, which is
   # the exact failure this block is fixing.
@@ -1116,6 +1137,44 @@ in
       if has("instructions") then
         .instructions |= map(select(test("caveman-activate\\.md$") | not))
         | if (.instructions | length) == 0 then del(.instructions) else . end
+      else . end
+    ' "$tmp" > "$cleaned"
+    mv "$cleaned" "$tmp"
+
+    # Strip the retired per-request provider `timeout: 600000`.
+    #
+    # Same lingering-key problem as above. e42b16e (2026-07-05) removed
+    # `provider.<p>.options.timeout = 600000` from opencode.base.json because
+    # it is an AbortSignal.timeout over the WHOLE fetch, body included, so it
+    # kills any turn still streaming at 10 min. But the merge preserves
+    # runtime-only keys, so on every host that had already applied it the key
+    # survived, and the removal never took effect: on cloudbox all four
+    # providers still carried it on 2026-10-09, and five turns since the
+    # removal died at ~600.3s with `UnknownError: The operation timed out.`
+    # (three of them mid-stream, with parts already written). UnknownError is
+    # NOT retryable, so each of those was a dead turn.
+    #
+    # What bounds a stall without it: `headerTimeout` (opencode.base.json) for
+    # a request that never gets response headers -- retryable, and cleared
+    # the moment headers arrive, so it can never cut off a long-running
+    # stream -- and `chunkTimeout` for a body that goes silent. Removing this
+    # key WITHOUT a headerTimeout on the same provider would leave header
+    # stalls unbounded, which is why the two ship together.
+    #
+    # Deliberately narrow: only the exact retired value is dropped, so a
+    # deliberately hand-set timeout of any other value survives. Every type
+    # is checked before it is indexed: on a non-object `options`,
+    # `.options.timeout?` yields EMPTY rather than false, which would make
+    # map_values silently delete the whole provider.
+    cleaned="$(mktemp "''${runtime}.tmp.XXXXXX")"
+    ${pkgs.jq}/bin/jq '
+      if (.provider | type) == "object" then
+        .provider |= map_values(
+          if (type == "object")
+             and ((.options | type) == "object")
+             and (.options.timeout == 600000)
+          then del(.options.timeout) else . end
+        )
       else . end
     ' "$tmp" > "$cleaned"
     mv "$cleaned" "$tmp"
