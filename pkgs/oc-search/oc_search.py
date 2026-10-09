@@ -54,6 +54,7 @@ range split legitimate.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -67,7 +68,8 @@ DEFAULT_DB = "~/.local/share/opencode/opencode.db"
 DEFAULT_TYPES = "tool"
 
 # Bump when the sidecar layout changes; a mismatch forces a rebuild.
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
+TMAX_SHIFT = 14
 
 # Trigram FTS5 cannot represent a pattern shorter than one trigram.
 MIN_TRIGRAM_LEN = 3
@@ -81,13 +83,12 @@ DEFAULT_JOBS = 16
 # it is theirs to wait for.
 DEFAULT_NONINTERACTIVE_TIMEOUT_S = 25.0
 
-# Per --index run, how many tail rows to fold into the index. Bounds the cost
-# of the implicit catch-up so a search never turns into a rebuild.
-DEFAULT_INDEX_BATCH = 200_000
+# Per --index run, how many tail rows to fold into the index.
+# Default is None (unlimited: a full rebuild completes in one run).
+DEFAULT_INDEX_BATCH: int | None = None
 
-# Measured index size ratio (trigram, detail=full, contentless), used only to
-# refuse a build that would fill the disk.
-INDEX_SIZE_RATIO = 2.8
+# Fallback bytes per row when an existing index is absent or too small to measure.
+INDEX_BYTES_PER_ROW = 7_200
 
 # Hard floor: never let an index build take the machine's last few GB.
 MIN_FREE_BYTES = 5_000_000_000
@@ -192,15 +193,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument(
         "--index-batch",
-        # Positive only. Under the old single-cursor scan a non-positive value
-        # became SQL `LIMIT -1`, i.e. unlimited; the chunked loop reads it as
-        # `while n < 0` and indexes nothing at all, reporting up_to_date=False
-        # forever. Rejecting it is better than either reading, and better than
-        # silently changing what it means (bead workstation-o5s1.3).
         type=positive_int,
         default=DEFAULT_INDEX_BATCH,
         metavar="N",
-        help=f"Max tail rows folded in per --index run (default: {DEFAULT_INDEX_BATCH}).",
+        help="Max tail rows folded in per --index run (default: unlimited).",
     )
     p.add_argument(
         "--jobs",
@@ -301,12 +297,18 @@ def part_rowid_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
 _INDEX_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS ft
-  USING fts5(data, tokenize="trigram case_sensitive 1", content='');
+  USING fts5(data, tokenize="trigram case_sensitive 1", content='', contentless_delete=1);
 CREATE TABLE IF NOT EXISTS part_meta (
   rowid_ INTEGER PRIMARY KEY,
+  part_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   time_created INTEGER NOT NULL,
+  time_updated INTEGER NOT NULL,
   type TEXT
+);
+CREATE TABLE IF NOT EXISTS tmax (
+  bucket INTEGER PRIMARY KEY,
+  max_tc INTEGER NOT NULL
 );
 """
 
@@ -315,21 +317,32 @@ def fts5_trigram_available() -> tuple[bool, str]:
     """Can this SQLite build do what the index needs?
 
     Checked rather than assumed: the whole exactness argument rests on the
-    trigram tokenizer with detail=full, and a SQLite compiled without FTS5
-    would otherwise surface as a confusing error deep inside a build.
+    trigram tokenizer with detail=full and contentless_delete=1, and a SQLite
+    compiled without FTS5 or without contentless_delete=1 would otherwise surface
+    as a confusing error deep inside a build.
     """
     try:
         probe = sqlite3.connect(":memory:")
         probe.execute(
-            "CREATE VIRTUAL TABLE t USING fts5(x, tokenize=\"trigram case_sensitive 1\")"
+            'CREATE VIRTUAL TABLE t USING fts5('
+            'x, tokenize="trigram case_sensitive 1", content="", contentless_delete=1'
+            ')'
         )
-        probe.execute("INSERT INTO t(x) VALUES ('FbmEmployeeCutoff')")
-        n = probe.execute("SELECT count(*) FROM t WHERE t MATCH '\"Employee\"'").fetchone()[0]
+        probe.execute("INSERT OR REPLACE INTO t(rowid, x) VALUES (1, 'FbmEmployeeCutoff')")
+        probe.execute("INSERT OR REPLACE INTO t(rowid, x) VALUES (1, 'FbmEmployeeModified')")
+        n1 = probe.execute("SELECT count(*) FROM t WHERE t MATCH '\"Employee\"'").fetchone()[0]
+        n_old = probe.execute("SELECT count(*) FROM t WHERE t MATCH '\"Cutoff\"'").fetchone()[0]
+        probe.execute("DELETE FROM t WHERE rowid=1")
+        n2 = probe.execute("SELECT count(*) FROM t WHERE t MATCH '\"Employee\"'").fetchone()[0]
         probe.close()
     except sqlite3.Error as exc:
         return (False, str(exc))
-    if n != 1:
+    if n1 != 1:
         return (False, "trigram phrase match returned the wrong row count")
+    if n_old != 0:
+        return (False, "contentless_delete=1 failed to remove old trigram postings on replace")
+    if n2 != 0:
+        return (False, "delete failed to remove trigram postings")
     return (True, "")
 
 
@@ -380,6 +393,58 @@ def set_meta(conn: sqlite3.Connection, key: str, value: Any) -> None:
     )
 
 
+def write_rows(idx: sqlite3.Connection, rows: Iterable[Any]) -> None:
+    """Write parts to `ft`, `part_meta`, and `tmax`.
+
+    Every ft write is `INSERT OR REPLACE` so that re-indexed or updated rows do
+    not leave ghost postings on the contentless table. `tmax` tracks the
+    per-bucket max(time_created) (TMAX_SHIFT=14) and is upserted as
+    max(existing, new), never lowered.
+    """
+    payload = []
+    metas = []
+    tmax_map: dict[int, int] = {}
+    for r in rows:
+        if isinstance(r, (tuple, list)):
+            rid = int(r[0])
+            pid = str(r[1])
+            sid = str(r[2])
+            tc = int(r[3])
+            tu = int(r[4]) if len(r) > 4 and r[4] is not None else tc
+            ptype = r[5] if len(r) > 5 else None
+            data = r[6] if len(r) > 6 else r[len(r) - 1]
+        else:
+            rid = int(r["rowid"])
+            data = r["data"]
+            pid = r["id"]
+            sid = r["session_id"]
+            tc = int(r["time_created"])
+            has_tu = "time_updated" in (r.keys() if hasattr(r, "keys") else r)
+            tu = int(r["time_updated"]) if has_tu and r["time_updated"] is not None else tc
+            ptype = r["type"]
+
+        payload.append((rid, data))
+        metas.append((rid, pid, sid, tc, tu, ptype))
+        bucket = rid >> TMAX_SHIFT
+        if bucket not in tmax_map or tc > tmax_map[bucket]:
+            tmax_map[bucket] = tc
+
+    if payload:
+        idx.executemany("INSERT OR REPLACE INTO ft(rowid, data) VALUES (?,?)", payload)
+        idx.executemany(
+            "INSERT OR REPLACE INTO part_meta "
+            "(rowid_, part_id, session_id, time_created, time_updated, type) "
+            "VALUES (?,?,?,?,?,?)",
+            metas,
+        )
+    if tmax_map:
+        idx.executemany(
+            "INSERT INTO tmax(bucket, max_tc) VALUES (?, ?) "
+            "ON CONFLICT(bucket) DO UPDATE SET max_tc = max(tmax.max_tc, excluded.max_tc)",
+            list(tmax_map.items()),
+        )
+
+
 def index_validity(
     src: sqlite3.Connection, idx: sqlite3.Connection, db_path: str
 ) -> tuple[bool, int, str]:
@@ -415,23 +480,150 @@ def index_validity(
     return (True, watermark, "")
 
 
+def inspect_index_schema_version(path: str) -> int | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def estimate_disk_need(
+    src: sqlite3.Connection,
+    index_path: str,
+    *,
+    watermark: int = 0,
+    src_max: int = 0,
+    batch: int | None = None,
+    rebuild: bool = False,
+) -> int:
+    """Estimated disk bytes needed for an index build or catch-up.
+
+    For a rebuild, estimated from the live row count of `part` (using its
+    covering primary-key autoindex where present) times the measured bytes per
+    row of the existing index, falling back to INDEX_BYTES_PER_ROW (7.2 KB/row)
+    when the index is absent or too small to measure. Catch-up uses the pending
+    rows up to batch. Multiplied by 1.2 safety factor.
+    """
+    if rebuild:
+        try:
+            row_count = src.execute(
+                "SELECT count(*) FROM part INDEXED BY sqlite_autoindex_part_1"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            row_count = src.execute("SELECT count(*) FROM part").fetchone()[0]
+        rows = int(row_count)
+    else:
+        pending = max(0, src_max - watermark)
+        rows = pending if (batch is None or batch == 0) else min(batch, pending)
+
+    bytes_per_row = float(INDEX_BYTES_PER_ROW)
+    if os.path.exists(index_path):
+        try:
+            conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True, timeout=5.0)
+            try:
+                cnt_row = conn.execute("SELECT count(*) FROM part_meta").fetchone()
+                meta_count = int(cnt_row[0]) if cnt_row and cnt_row[0] is not None else 0
+                if meta_count >= 10_000:
+                    bytes_per_row = os.path.getsize(index_path) / meta_count
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    return int(rows * bytes_per_row * 1.2)
+
+
+def check_disk_precheck(
+    src: sqlite3.Connection,
+    index_path: str,
+    *,
+    watermark: int = 0,
+    src_max: int = 0,
+    batch: int | None = None,
+    rebuild: bool = False,
+) -> int:
+    need = estimate_disk_need(
+        src,
+        index_path,
+        watermark=watermark,
+        src_max=src_max,
+        batch=batch,
+        rebuild=rebuild,
+    )
+    index_dir = os.path.dirname(index_path) or "."
+    os.makedirs(index_dir, exist_ok=True)
+    free = shutil.disk_usage(index_dir).free
+    current_index_size = os.path.getsize(index_path) if os.path.exists(index_path) else 0
+    available = (free + current_index_size) if rebuild else free
+    if need > available:
+        raise SystemExit(
+            f"oc-search: refusing to index: estimated ~{need/1e9:.1f} GB needed, "
+            f"{free/1e9:.1f} GB free on {index_dir}"
+        )
+    return need
+
+
 def build_index(
     src: sqlite3.Connection,
     index_path: str,
     db_path: str,
     *,
-    rebuild: bool,
-    batch: int,
-    progress: bool,
+    rebuild: bool = False,
+    batch: int | None = None,
+    progress: bool = False,
 ) -> dict[str, Any]:
-    if rebuild:
+    _, src_max = part_rowid_bounds(src)
+
+    is_fresh = not os.path.exists(index_path)
+    file_schema_ver = inspect_index_schema_version(index_path) if not is_fresh else None
+    schema_mismatch = (not is_fresh) and (file_schema_ver != INDEX_SCHEMA_VERSION)
+
+    is_rebuild = rebuild or is_fresh or schema_mismatch
+
+    watermark = 0
+    if not is_rebuild:
+        quick_idx = open_index_ro(index_path)
+        if quick_idx is not None:
+            try:
+                usable, wm, _ = index_validity(src, quick_idx, db_path)
+                if usable:
+                    watermark = wm
+                    if watermark >= src_max:
+                        return {
+                            "mode": "noop",
+                            "indexed": 0,
+                            "watermark": watermark,
+                            "up_to_date": True,
+                        }
+                else:
+                    is_rebuild = True
+            finally:
+                quick_idx.close()
+
+    # Precheck disk before deleting existing index file (so file size and part_meta can be measured)
+    check_disk_precheck(
+        src,
+        index_path,
+        watermark=watermark,
+        src_max=src_max,
+        batch=batch,
+        rebuild=is_rebuild,
+    )
+
+    if is_rebuild and not is_fresh:
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(index_path + suffix)
             except FileNotFoundError:
                 pass
 
-    _, src_max = part_rowid_bounds(src)
     idx = open_index_rw(index_path)
     try:
         usable, watermark, reason = index_validity(src, idx, db_path)
@@ -442,123 +634,39 @@ def build_index(
                 src, index_path, db_path, rebuild=True, batch=batch, progress=progress
             )
 
-        if watermark >= src_max:
-            return {"indexed": 0, "watermark": watermark, "up_to_date": True}
-
-        # Refuse to fill the disk. Estimated from a bounded sample rather than
-        # SUM(length(data)) over the pending range -- that sum is itself the
-        # multi-minute full scan this whole change exists to avoid, and running
-        # it as a "cheap precheck" is how the first version of --index timed
-        # itself out.
-        sample = src.execute(
-            "SELECT AVG(len) FROM (SELECT length(data) AS len FROM part "
-            "WHERE rowid > ? ORDER BY rowid LIMIT 2000)",
-            (watermark,),
-        ).fetchone()[0]
-        pending_rows = min(batch, max(0, src_max - watermark))
-        need = int((sample or 0) * pending_rows * INDEX_SIZE_RATIO * 1.5)
-        index_dir = os.path.dirname(index_path)
-        free = shutil.disk_usage(index_dir).free
-        if need > free:
-            raise SystemExit(
-                f"oc-search: refusing to index: estimated ~{need/1e9:.1f} GB "
-                f"needed, {free/1e9:.1f} GB free on {index_dir}"
-            )
+        if not is_rebuild and watermark >= src_max:
+            return {
+                "mode": "noop",
+                "indexed": 0,
+                "watermark": watermark,
+                "up_to_date": True,
+            }
 
         set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
         set_meta(idx, "source_db", os.path.realpath(db_path))
 
-        # `type` is resolved by json_extract in SQL, exactly as the old
-        # implementation filtered it: the field's position inside the blob
-        # varies, so no cheaper string probe is safe.
-        #
-        # ONE STATEMENT PER CHUNK, NOT ONE CURSOR FETCHED IN CHUNKS.
-        # (bead workstation-o5s1.3; incident 2026-09-15, epic workstation-o5s1)
-        #
-        # This used to be a single `src.execute(... LIMIT batch)` whose cursor
-        # was drained with `fetchmany(READ_CHUNK)` inside the loop below. An
-        # un-exhausted SQLite statement keeps its READ TRANSACTION open, which
-        # pins the WAL read mark on the SOURCE database for as long as the
-        # cursor lives — and since the index writes happen inside that loop, the
-        # mark was held for the whole batch. No checkpoint can advance past a
-        # held read mark, so opencode.db's WAL grew ~9 MB/min, unbounded, for
-        # the duration of every index run.
-        #
-        # MEASURED: normally 217-246s per 200,000-row batch, which is already
-        # four minutes of blocked checkpointing every hour. On 2026-09-15, with
-        # the index writes starved of I/O by concurrent bazel builds, ONE run
-        # held it for 87 minutes (6m49s of CPU) and drove the WAL past 1 GB. The
-        # holder was visible as byte 127 of the opencode.db-shm inode in
-        # /proc/locks — byte 128 is the DMS lock every connection holds and is
-        # noise.
-        #
-        # Re-issuing the query per chunk and calling fetchall() lets each
-        # statement RUN TO COMPLETION, so the read transaction ends and the read
-        # mark is released between chunks. Checkpointing gets the gaps.
-        #
-        # THE DESTINATION CONNECTION ALREADY DID THIS, with the comment below
-        # explaining why one long transaction was wrong. The fix had been
-        # applied to the database being WRITTEN (this process's private index)
-        # and not to the one being READ — which is the one with ~15 concurrent
-        # writers and the only one where a held mark hurts anybody else.
-        #
-        # SNAPSHOT ISOLATION IS DELIBERATELY GIVEN UP. Chunks no longer see one
-        # consistent view of `part`, and that is sound here rather than merely
-        # tolerable: rows are append-mostly with increasing rowid and the
-        # watermark is monotonic, so a row inserted mid-run is picked up by the
-        # next run — which is already the normal case, since a batch that fills
-        # reports MORE REMAINS. A row deleted between chunks is skipped, which is
-        # correct, it is gone. A row updated between chunks is indexed in its
-        # newer form, which is what a search index wants. Anything not yet
-        # indexed is covered by the tail scan, the same mechanism that already
-        # covers an interrupted build. index_validity() separately catches the
-        # one case that does matter — a watermark row deleted out from under us
-        # — and forces a rebuild.
         n = 0
         last: tuple[int, str] | None = None
         cursor_rowid = watermark
         since_commit = 0
         since_disk_check = 0
         t0 = time.monotonic()
-        while n < batch:
+        index_dir = os.path.dirname(index_path) or "."
+        while batch is None or batch == 0 or n < batch:
+            chunk_limit = (
+                READ_CHUNK
+                if (batch is None or batch == 0)
+                else min(READ_CHUNK, batch - n)
+            )
             rows = src.execute(
-                "SELECT rowid, id, session_id, time_created, "
+                "SELECT rowid, id, session_id, time_created, time_updated, "
                 "json_extract(data,'$.type') AS type, data FROM part "
                 "WHERE rowid > ? ORDER BY rowid LIMIT ?",
-                (cursor_rowid, min(READ_CHUNK, batch - n)),
+                (cursor_rowid, chunk_limit),
             ).fetchall()
             if not rows:
                 break
 
-            # ROWID REUSE AT A CHUNK BOUNDARY (bead workstation-o5s1.3).
-            #
-            # This is the one hazard chunking introduces that the old
-            # single-snapshot scan could not have, and it is checked here rather
-            # than argued away. `part` has a TEXT primary key, so its rowid is
-            # implicit and SQLite REUSES rowids below the maximum after deletes.
-            # On cloudbox that is not hypothetical: max(rowid) exceeds count by
-            # ~466,000, and session deletion cascades to parts routinely.
-            #
-            # The index normally sits at the head of the table, so the boundary
-            # between two chunks is the live max rowid. If a session is deleted
-            # in the gap between two chunk statements and new parts reuse those
-            # rowids, chunk k has already indexed the OLD contents of rows that
-            # now belong to somebody else, and chunk k+1 reads only past the
-            # boundary. The result is permanently wrong — wrong session_id, stale
-            # text — and index_validity() does NOT catch it, because it only
-            # checks the FINAL watermark row, which is past the damage and
-            # perfectly consistent.
-            #
-            # index_validity()'s argument silently assumed the scan saw one
-            # snapshot. That was true before this change and is not true now, so
-            # the boundary needs its own check: re-read the previous chunk's last
-            # row and confirm it is still the same part. A mismatch means rowids
-            # moved under the scan, and the only safe answer is a rebuild — the
-            # same answer index_validity gives for the equivalent whole-index
-            # case. Cost is one primary-key lookup per 2,000 rows.
-            #
-            # Checked AFTER the fetch, not before, so that a delete landing in
-            # EITHER gap (before or after the new statement) is caught.
             if last is not None:
                 still = src.execute(
                     "SELECT id FROM part WHERE rowid=?", (last[0],)
@@ -578,47 +686,19 @@ def build_index(
                         progress=progress,
                     )
 
+            write_rows(idx, rows)
+            last = (int(rows[-1]["rowid"]), rows[-1]["id"])
             cursor_rowid = int(rows[-1]["rowid"])
-            payload = []
-            metas = []
-            for r in rows:
-                payload.append((r["rowid"], r["data"]))
-                metas.append(
-                    (r["rowid"], r["session_id"], r["time_created"], r["type"])
-                )
-                last = (int(r["rowid"]), r["id"])
-            idx.executemany("INSERT INTO ft(rowid, data) VALUES (?,?)", payload)
-            idx.executemany(
-                "INSERT OR REPLACE INTO part_meta "
-                "(rowid_, session_id, time_created, type) VALUES (?,?,?,?)",
-                metas,
-            )
             n += len(rows)
             since_commit += len(rows)
             since_disk_check += len(rows)
-            # THRESHOLD CROSSING, NOT `n % COMMIT_EVERY == 0` (bead
-            # workstation-o5s1.3). The modulo form was safe only because
-            # fetchmany() on one snapshot returned a short batch exactly once, at
-            # the true end. Chunks can now be short mid-run — the scan catches
-            # the head of the table and rows land between two statements — after
-            # which `n` is permanently off-multiple and the periodic commit, the
-            # 5 GB disk guard and the progress line all go silent for the rest of
-            # the run. Silently losing the disk guard is the part that matters.
             if last is not None and since_commit >= COMMIT_EVERY:
                 since_commit = 0
-                # Commit the watermark WITH the rows it describes, periodically.
-                # One transaction around the whole build would grow a WAL the
-                # size of the finished index (observed passing 900 MB inside two
-                # minutes), and would throw away every row on an interruption.
-                # Committing in step means an interrupted build is simply a
-                # smaller index, which the tail scan already covers.
                 set_meta(idx, "watermark_rowid", last[0])
                 set_meta(idx, "watermark_part_id", last[1])
                 idx.commit()
             if since_disk_check >= 20_000:
                 since_disk_check = 0
-                # The estimate above is an estimate. Bail out with a readable
-                # message rather than wedging the machine on a full disk.
                 if shutil.disk_usage(index_dir).free < MIN_FREE_BYTES:
                     idx.commit()
                     raise SystemExit(
@@ -635,7 +715,9 @@ def build_index(
             set_meta(idx, "watermark_part_id", last[1])
         set_meta(idx, "built_at", int(time.time()))
         idx.commit()
+        mode = "rebuild" if is_rebuild else "catchup"
         return {
+            "mode": mode,
             "indexed": n,
             "watermark": last[0] if last else watermark,
             "up_to_date": (last[0] if last else watermark) >= src_max,
@@ -997,34 +1079,59 @@ def run(argv: list[str]) -> int:
                 bytes=os.path.getsize(index_path),
                 built_at=get_meta(idx, "built_at"),
             )
+            idx.close()
+        src.close()
         print(json.dumps(info, indent=2))
         return 0
 
     if args.index:
-        if args.if_exists and not os.path.exists(index_path):
-            # Not an error: this is the timer finding nothing to do on a host
-            # where nobody has opted into the index yet.
-            print(f"no index at {index_path}; nothing to refresh")
+        lock_path = index_path + ".lock"
+        os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+        lock_file = None
+        try:
+            lock_file = open(lock_path, "w")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            if lock_file is not None:
+                try:
+                    lock_file.close()
+                except Exception:
+                    pass
+            src.close()
+            print(f"oc-search: index build already in progress on {index_path}")
             return 0
-        ok, why = fts5_trigram_available()
-        if not ok:
-            warn(f"this SQLite cannot build the index (FTS5 trigram: {why})")
-            return 1
-        t0 = time.monotonic()
-        res = build_index(
-            src,
-            index_path,
-            db_path,
-            rebuild=args.rebuild,
-            batch=args.index_batch,
-            progress=sys.stderr.isatty(),
-        )
-        dt = time.monotonic() - t0
-        print(
-            f"indexed {res['indexed']:,} rows in {dt:.1f}s; watermark "
-            f"{res['watermark']}; {'up to date' if res['up_to_date'] else 'MORE REMAINS -- run again'}"
-        )
-        return 0 if res["up_to_date"] else 3
+        try:
+            if args.if_exists and not os.path.exists(index_path):
+                # Not an error: this is the timer finding nothing to do on a host
+                # where nobody has opted into the index yet.
+                print(f"no index at {index_path}; nothing to refresh")
+                return 0
+            ok, why = fts5_trigram_available()
+            if not ok:
+                warn(f"this SQLite cannot build the index (FTS5 trigram: {why})")
+                return 1
+            t0 = time.monotonic()
+            res = build_index(
+                src,
+                index_path,
+                db_path,
+                rebuild=args.rebuild,
+                batch=args.index_batch,
+                progress=sys.stderr.isatty(),
+            )
+            dt = time.monotonic() - t0
+            print(
+                f"indexed {res['indexed']:,} rows in {dt:.1f}s; watermark "
+                f"{res['watermark']}; {'up to date' if res['up_to_date'] else 'MORE REMAINS -- run again'}"
+            )
+            return 0 if res["up_to_date"] else 3
+        finally:
+            src.close()
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+            except Exception:
+                pass
 
     query = args.query or ""
     types = resolve_types(args)

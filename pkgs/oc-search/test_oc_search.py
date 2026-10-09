@@ -18,6 +18,7 @@ import contextlib
 import io
 import json
 import os
+import random
 import sqlite3
 import sys
 import tempfile
@@ -50,6 +51,8 @@ def make_db(path: str) -> sqlite3.Connection:
           time_updated integer NOT NULL,
           data text NOT NULL
         );
+        CREATE INDEX part_session_idx ON part(session_id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
         """
     )
     return conn
@@ -65,16 +68,49 @@ def add_session(conn, sid, *, title="a title", directory="/tmp/proj"):
 _SEQ = [0]
 
 
-def add_part(conn, sid, *, type="tool", text="", t=None):
+def add_part(conn, sid, *, type="tool", text="", t=None, time_updated=None):
     _SEQ[0] += 1
     n = _SEQ[0]
     data = json.dumps({"type": type, "text": text, "id": f"prt_{n}"})
+    tc = BASE_MS + (t if t is not None else n)
+    tu = BASE_MS if time_updated is None else time_updated
     conn.execute(
         "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)"
         " VALUES (?,?,?,?,?,?)",
-        (f"prt_{n}", f"msg_{n}", sid, BASE_MS + (t if t is not None else n), BASE_MS, data),
+        (f"prt_{n}", f"msg_{n}", sid, tc, tu, data),
     )
     return f"prt_{n}"
+
+
+def update_part(
+    conn: sqlite3.Connection,
+    rowid: int,
+    *,
+    text: str | None = None,
+    type: str | None = None,
+    bump: int = 1_000,
+) -> None:
+    row = conn.execute(
+        "SELECT id, time_created, time_updated, data FROM part WHERE rowid=?", (rowid,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"part rowid {rowid} not found")
+    _pid, _tc, tu, raw_data = row[0], row[1], row[2], row[3]
+    d = json.loads(raw_data)
+    if text is not None:
+        d["text"] = text
+    if type is not None:
+        d["type"] = type
+    new_data = json.dumps(d)
+    new_tu = tu + bump
+    conn.execute(
+        "UPDATE part SET data=?, time_updated=? WHERE rowid=?",
+        (new_data, new_tu, rowid),
+    )
+
+
+def delete_part(conn: sqlite3.Connection, rowid: int) -> None:
+    conn.execute("DELETE FROM part WHERE rowid=?", (rowid,))
 
 
 class Fixture:
@@ -127,6 +163,544 @@ class Fixture:
         rc, out, _ = self.search("--json", *argv)
         assert rc == 0, rc
         return json.loads(out)
+
+
+class BatchCapTest(unittest.TestCase):
+    def test_default_batch_is_unlimited(self):
+        args = oc_search.parse_args(["hello"])
+        self.assertIsNone(args.index_batch)
+
+    def test_explicit_batch_must_be_positive_int(self):
+        args = oc_search.parse_args(["--index-batch", "42", "hello"])
+        self.assertEqual(args.index_batch, 42)
+
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                oc_search.parse_args(["--index-batch", "0", "hello"])
+
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                oc_search.parse_args(["--index-batch", "-5", "hello"])
+
+    def test_unlimited_batch_completes_in_one_run(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(15):
+                add_part(f.conn, "ses_1", text=f"text_{i}")
+            f.commit()
+            saved = oc_search.READ_CHUNK
+            oc_search.READ_CHUNK = 2
+            try:
+                # With batch=None (default unlimited), all 15 rows are indexed
+                res = f.build_index(batch=None)
+                self.assertEqual(res["indexed"], 15)
+                self.assertTrue(res["up_to_date"])
+            finally:
+                oc_search.READ_CHUNK = saved
+        finally:
+            f.close()
+
+
+class DiskPrecheckTest(unittest.TestCase):
+    def test_estimate_rebuild_without_existing_index(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # 10 rows * 7200 bytes * 1.2 = 86400
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_rebuild_with_small_existing_index_uses_constant(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+            f.build_index()
+
+            # Existing index has 10 rows (< 10_000), so constant 7200 is used
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_rebuild_with_large_existing_index_uses_measured_ratio(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Create mock index with >= 10,000 rows in part_meta
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            conn = oc_search.open_index_rw(f.index)
+            # Insert 10,000 dummy rows into part_meta
+            metas = [(i, f"p_{i}", "s_1", 1000, 1000, "tool") for i in range(1, 10001)]
+            conn.executemany(
+                "INSERT INTO part_meta (rowid_, part_id, session_id, time_created, time_updated, type) "
+                "VALUES (?,?,?,?,?,?)",
+                metas,
+            )
+            conn.commit()
+            conn.close()
+
+            file_size = os.path.getsize(f.index)
+            expected_bytes_per_row = file_size / 10_000
+            expected_need = int(50 * expected_bytes_per_row * 1.2)
+
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=50
+            )
+            self.assertEqual(need, expected_need)
+        finally:
+            f.close()
+
+    def test_estimate_catchup_uses_pending_rows(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(25):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Catch up from watermark 5 to src_max 25 with batch 10 -> 10 rows
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=5, src_max=25, batch=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+
+            # Catch up from watermark 5 to src_max 25 with batch None -> 20 rows
+            need_unlimited = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=5, src_max=25, batch=None
+            )
+            self.assertEqual(need_unlimited, int(20 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_disk_precheck_refusal_and_replacement_credit(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            need = oc_search.estimate_disk_need(f.conn, f.index, rebuild=True, src_max=10)
+
+            # Case 1: Rebuild where need > free + current_index_size -> refuse
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+
+            # Mock free space to be 1000 bytes (far less than need ~86400)
+            oc_search.shutil.disk_usage = lambda d: Usage(10**12, 10**12 - 1000, 1000)
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    oc_search.check_disk_precheck(f.conn, f.index, rebuild=True, src_max=10)
+                self.assertIn("refusing to index", str(ctx.exception))
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+
+            # Case 2: Rebuild where free < need, BUT free + current_index_size >= need -> succeeds!
+            # Create a file of size 100_000 at f.index
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            with open(f.index, "wb") as idx_file:
+                idx_file.write(b"x" * 100_000)
+
+            # Free is only 1,000, but with current_index_size 100,000, available is 101,000 > need (86400)
+            oc_search.shutil.disk_usage = lambda d: Usage(10**12, 10**12 - 1000, 1000)
+            try:
+                # Should not raise SystemExit
+                checked_need = oc_search.check_disk_precheck(
+                    f.conn, f.index, rebuild=True, src_max=10
+                )
+                self.assertEqual(checked_need, need)
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+        finally:
+            f.close()
+
+
+class IndexLockTest(unittest.TestCase):
+    def test_held_lock_prints_message_and_exits_zero(self):
+        import fcntl
+        f = Fixture()
+        try:
+            lock_path = f.index + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = oc_search.run(["--index", "--db", f.db, "--index-path", f.index])
+                self.assertEqual(rc, 0)
+                self.assertIn("already in progress", out.getvalue())
+        finally:
+            f.close()
+
+
+class BuildModeTest(unittest.TestCase):
+    def test_build_returns_mode(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="item 1")
+            f.commit()
+
+            # Fresh build is a rebuild
+            res1 = f.build_index()
+            self.assertEqual(res1["mode"], "rebuild")
+            self.assertEqual(res1["indexed"], 1)
+
+            # Nothing to do is noop
+            res2 = f.build_index()
+            self.assertEqual(res2["mode"], "noop")
+            self.assertEqual(res2["indexed"], 0)
+
+            # New part added is catchup
+            add_part(f.conn, "ses_1", text="item 2")
+            f.commit()
+            res3 = f.build_index()
+            self.assertEqual(res3["mode"], "catchup")
+            self.assertEqual(res3["indexed"], 1)
+
+            # Explicit rebuild is rebuild
+            res4 = f.build_index(rebuild=True)
+            self.assertEqual(res4["mode"], "rebuild")
+            self.assertEqual(res4["indexed"], 2)
+        finally:
+            f.close()
+
+
+class V1MigrationTest(unittest.TestCase):
+    def test_v1_index_recreated_as_v2_exactly_once(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", type="tool", text="hello world", t=10)
+            f.commit()
+
+            # Create a v1-shaped index manually
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            v1_conn = sqlite3.connect(f.index)
+            v1_conn.executescript(
+                """
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                CREATE VIRTUAL TABLE ft USING fts5(data, tokenize="trigram case_sensitive 1", content='');
+                CREATE TABLE part_meta (
+                  rowid_ INTEGER PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  time_created INTEGER NOT NULL,
+                  type TEXT
+                );
+                """
+            )
+            v1_conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+            v1_conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('source_db', ?)",
+                (os.path.realpath(f.db),),
+            )
+            v1_conn.execute("INSERT INTO meta (key, value) VALUES ('watermark_rowid', '0')")
+            v1_conn.commit()
+            v1_conn.close()
+
+            # Run build_index
+            res1 = f.build_index()
+            self.assertEqual(res1.get("mode"), "rebuild")
+
+            # Check that index is now v2
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            try:
+                self.assertEqual(oc_search.get_meta(idx, "schema_version"), "2")
+                cols = {r[1] for r in idx.execute("PRAGMA table_info(part_meta)").fetchall()}
+                self.assertIn("part_id", cols)
+                self.assertIn("time_updated", cols)
+                tmax_exists = idx.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='tmax'"
+                ).fetchone()[0]
+                self.assertEqual(tmax_exists, 1)
+                sql = idx.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='ft'"
+                ).fetchone()[0]
+                self.assertIn("contentless_delete=1", sql)
+            finally:
+                idx.close()
+
+            # Second build does NOT rebuild again
+            res2 = f.build_index()
+            self.assertEqual(res2.get("mode"), "noop")
+            self.assertEqual(res2["indexed"], 0)
+            self.assertTrue(res2["up_to_date"])
+        finally:
+            f.close()
+
+
+class SchemaV2Test(unittest.TestCase):
+    def test_index_schema_version_is_two(self):
+        self.assertEqual(oc_search.INDEX_SCHEMA_VERSION, 2)
+        self.assertEqual(oc_search.TMAX_SHIFT, 14)
+
+    def test_v2_schema_tables_and_columns(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # ft sql has contentless_delete=1
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='ft'"
+                ).fetchone()[0]
+                self.assertIn("contentless_delete=1", sql)
+
+                # part_meta columns
+                cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(part_meta)").fetchall()
+                }
+                self.assertEqual(
+                    cols,
+                    {"rowid_", "part_id", "session_id", "time_created", "time_updated", "type"},
+                )
+
+                # tmax table
+                tmax_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(tmax)").fetchall()
+                }
+                self.assertEqual(tmax_cols, {"bucket", "max_tc"})
+            finally:
+                conn.close()
+
+    def test_build_populates_part_meta_and_tmax(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid1 = add_part(f.conn, "ses_1", type="tool", text="one", t=100, time_updated=BASE_MS + 150)
+            pid2 = add_part(f.conn, "ses_1", type="text", text="two", t=200, time_updated=BASE_MS + 250)
+            f.commit()
+            f.build_index()
+
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            try:
+                pm_rows = idx.execute(
+                    "SELECT rowid_, part_id, session_id, time_created, time_updated, type "
+                    "FROM part_meta ORDER BY rowid_"
+                ).fetchall()
+                self.assertEqual(len(pm_rows), 2)
+                self.assertEqual(pm_rows[0]["part_id"], pid1)
+                self.assertEqual(pm_rows[0]["time_created"], BASE_MS + 100)
+                self.assertEqual(pm_rows[0]["time_updated"], BASE_MS + 150)
+                self.assertEqual(pm_rows[1]["part_id"], pid2)
+                self.assertEqual(pm_rows[1]["time_created"], BASE_MS + 200)
+                self.assertEqual(pm_rows[1]["time_updated"], BASE_MS + 250)
+
+                # Check tmax
+                tmax_rows = idx.execute("SELECT bucket, max_tc FROM tmax").fetchall()
+                self.assertTrue(len(tmax_rows) >= 1)
+                for tr in tmax_rows:
+                    self.assertEqual(tr["max_tc"], BASE_MS + 200)
+            finally:
+                idx.close()
+        finally:
+            f.close()
+
+    def test_tmax_never_lowered(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # Row in bucket 0 with time_created 500
+                r1 = {
+                    "rowid": 1,
+                    "id": "prt_1",
+                    "session_id": "ses_1",
+                    "time_created": 500,
+                    "time_updated": 500,
+                    "type": "tool",
+                    "data": json.dumps({"text": "hi"}),
+                }
+                oc_search.write_rows(conn, [r1])
+                val = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val, 500)
+
+                # Row in bucket 0 with LOWER time_created 300
+                r2 = {
+                    "rowid": 2,
+                    "id": "prt_2",
+                    "session_id": "ses_1",
+                    "time_created": 300,
+                    "time_updated": 300,
+                    "type": "tool",
+                    "data": json.dumps({"text": "lo"}),
+                }
+                oc_search.write_rows(conn, [r2])
+                val2 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val2, 500, "tmax must never be lowered")
+
+                # Row in bucket 0 with HIGHER time_created 800
+                r3 = {
+                    "rowid": 3,
+                    "id": "prt_3",
+                    "session_id": "ses_1",
+                    "time_created": 800,
+                    "time_updated": 800,
+                    "type": "tool",
+                    "data": json.dumps({"text": "up"}),
+                }
+                oc_search.write_rows(conn, [r3])
+                val3 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val3, 800)
+            finally:
+                conn.close()
+
+    def test_behaviour_replace_leaves_no_ghost_posting(self):
+        """Index a row, mutate source row's data at same rowid, rewrite via
+        write_rows, and assert the OLD text no longer matches via FTS."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", type="tool", text="AlphaOldTextUnique")
+            f.commit()
+            f.build_index()
+
+            # Verify original matches
+            idx = oc_search.open_index_rw(f.index)
+            try:
+                cnt_old = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"AlphaOldTextUnique\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_old, 1)
+
+                # Mutate source row
+                rid = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid,)).fetchone()[0]
+                update_part(f.conn, rid, text="BetaNewTextUnique")
+                f.commit()
+
+                # Re-read row and write through write_rows
+                updated = f.conn.execute(
+                    "SELECT rowid, id, session_id, time_created, time_updated, "
+                    "json_extract(data,'$.type') AS type, data FROM part WHERE rowid=?",
+                    (rid,),
+                ).fetchall()
+                oc_search.write_rows(idx, updated)
+                idx.commit()
+
+                # Assert NEW text matches and OLD text does not match
+                cnt_new = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"BetaNewTextUnique\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_new, 1)
+                cnt_old_after = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"AlphaOldTextUnique\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_old_after, 0, "old text must not leave ghost postings")
+            finally:
+                idx.close()
+        finally:
+            f.close()
+
+    def test_source_grep_no_plain_insert_into_ft(self):
+        """Assert oc_search.py contains no INSERT INTO ft that is not INSERT OR REPLACE,
+        and no INSERT INTO ft(ft."""
+        source_path = Path(oc_search.__file__).resolve()
+        content = source_path.read_text(encoding="utf-8")
+
+        import re
+        # Find all occurrences of INSERT INTO ft (ignoring leading 'OR REPLACE' if any)
+        pattern = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+ft\b", re.IGNORECASE)
+        matches = [m.group(0) for m in pattern.finditer(content)]
+        self.assertTrue(len(matches) > 0, "must find at least one ft write in oc_search.py")
+        for m in matches:
+            normalized = " ".join(m.upper().split())
+            self.assertEqual(
+                normalized,
+                "INSERT OR REPLACE INTO FT",
+                f"Forbidden ft insert form: {m!r} in {source_path}",
+            )
+
+        # Control command form INSERT INTO ft(ft is also forbidden
+        control_pattern = re.compile(r"INSERT\s+INTO\s+ft\s*\(\s*ft\b", re.IGNORECASE)
+        self.assertFalse(
+            control_pattern.search(content),
+            "FTS control-command INSERT INTO ft(ft is forbidden",
+        )
+
+
+class FixtureHelpersTest(unittest.TestCase):
+    def test_make_db_has_production_indexes(self):
+        f = Fixture()
+        try:
+            indexes = {
+                r[0]
+                for r in f.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            self.assertIn("part_session_idx", indexes)
+            self.assertIn("part_message_id_id_idx", indexes)
+        finally:
+            f.close()
+
+    def test_add_part_supports_time_updated(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", time_updated=BASE_MS + 9999)
+            row = f.conn.execute(
+                "SELECT time_created, time_updated FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            self.assertEqual(row[1], BASE_MS + 9999)
+        finally:
+            f.close()
+
+    def test_update_part_helper(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", type="tool", text="original")
+            row = f.conn.execute(
+                "SELECT rowid, time_created, time_updated, data FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            rid, tc, tu, data = row[0], row[1], row[2], json.loads(row[3])
+            self.assertEqual(data["text"], "original")
+            self.assertEqual(data["type"], "tool")
+
+            update_part(f.conn, rid, text="updated text", type="text", bump=5000)
+            updated_row = f.conn.execute(
+                "SELECT time_created, time_updated, data FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            up_tc, up_tu, up_data = updated_row[0], updated_row[1], json.loads(updated_row[2])
+            self.assertEqual(up_tc, tc, "time_created must not change")
+            self.assertEqual(up_tu, tu + 5000, "time_updated must bump")
+            self.assertEqual(up_data["text"], "updated text")
+            self.assertEqual(up_data["type"], "text")
+            self.assertEqual(up_data["id"], pid, "part id must be preserved")
+        finally:
+            f.close()
+
+    def test_delete_part_helper(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", text="to delete")
+            rid = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid,)).fetchone()[0]
+            delete_part(f.conn, rid)
+            count = f.conn.execute("SELECT count(*) FROM part WHERE rowid=?", (rid,)).fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            f.close()
 
 
 class ParseArgsTest(unittest.TestCase):
@@ -560,6 +1134,31 @@ class Fts5CapabilityTest(unittest.TestCase):
         """
         ok, why = oc_search.fts5_trigram_available()
         self.assertTrue(ok, why)
+
+    def test_fails_loudly_when_contentless_delete_fails(self):
+        """Simulate an SQLite where contentless_delete=1 is ignored or unsupported."""
+        real_connect = sqlite3.connect
+
+        class FakeConn:
+            def __init__(self, *a, **kw):
+                self._c = real_connect(":memory:")
+
+            def execute(self, sql, *args):
+                # Strip contentless_delete=1 to simulate older SQLite
+                if "contentless_delete=1" in sql:
+                    raise sqlite3.OperationalError("unknown option: contentless_delete")
+                return self._c.execute(sql, *args)
+
+            def close(self):
+                self._c.close()
+
+        oc_search.sqlite3.connect = FakeConn
+        try:
+            ok, why = oc_search.fts5_trigram_available()
+            self.assertFalse(ok)
+            self.assertIn("contentless_delete", why)
+        finally:
+            oc_search.sqlite3.connect = real_connect
 
 
 class MissingDatabaseTest(unittest.TestCase):
@@ -1030,6 +1629,148 @@ class LimitFastPathTest(unittest.TestCase):
         rc, out, _ = self.f.search("--types", "tool,text", "--limit", "4", "needle-common")
         self.assertEqual(rc, 0)
         self.assertEqual(len(out.splitlines()), 2 + 4)
+
+
+class DifferentialRunner:
+    """Seeded generator executing random DB and index operations.
+
+    Structured so later tasks can add ops (update, interior delete,
+    session delete, top reuse, interrupted build) by adding entries to
+    OP_WEIGHTS and implementing the corresponding op_ method.
+    """
+
+    OP_WEIGHTS = {
+        "insert_new": 4,
+        "insert_existing": 4,
+        "build": 2,
+    }
+
+    NEEDLES = [
+        "cat",
+        "dog",
+        "common",
+        "xyz_absent",
+    ]
+
+    VOCAB = [
+        "cat",
+        "dog",
+        "common",
+        "alpha",
+        "beta",
+        "gamma",
+        "quick",
+        "brown",
+        "fox",
+    ]
+
+    TYPES = ["tool", "text", "reasoning"]
+
+    def __init__(self, seed: int, test_case: unittest.TestCase):
+        self.rng = random.Random(seed)
+        self.test_case = test_case
+        self.fixture = Fixture()
+        self.sessions: list[str] = []
+        # IMPORTANT: Task 1 assigns strictly distinct time_created values
+        # to avoid ties flaking --limit equality. Task 4 will add ties.
+        self.time_counter = 0
+
+    def close(self):
+        self.fixture.close()
+
+    def next_time(self) -> int:
+        self.time_counter += 1
+        return self.time_counter
+
+    def random_text(self) -> str:
+        k = self.rng.randint(1, 3)
+        words = self.rng.sample(self.VOCAB, k)
+        return " ".join(words)
+
+    def op_insert_new(self):
+        sid = f"ses_{len(self.sessions):03d}"
+        add_session(self.fixture.conn, sid, title=f"title_{sid}")
+        self.sessions.append(sid)
+        for _ in range(self.rng.randint(1, 2)):
+            t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_insert_existing(self):
+        if not self.sessions:
+            self.op_insert_new()
+            return
+        sid = self.rng.choice(self.sessions)
+        for _ in range(self.rng.randint(1, 2)):
+            t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_build(self):
+        self.fixture.build_index()
+        self.assert_differential()
+
+    def assert_differential(self):
+        """Assert indexed unlimited == --no-index, and --limit N == first N."""
+        for needle in self.NEEDLES:
+            for type_flags in ([], ["--all"]):
+                unlimited_indexed = self.fixture.sessions(*type_flags, needle)
+                unlimited_scanned = self.fixture.sessions("--no-index", *type_flags, needle)
+                self.test_case.assertEqual(
+                    unlimited_indexed,
+                    unlimited_scanned,
+                    f"Unlimited indexed vs scanned mismatch for needle={needle!r}, flags={type_flags}",
+                )
+                for n in (1, 2, 3, 4):
+                    limit_indexed = self.fixture.sessions(*type_flags, "--limit", str(n), needle)
+                    self.test_case.assertEqual(
+                        limit_indexed,
+                        unlimited_scanned[:n],
+                        f"--limit {n} mismatch for needle={needle!r}, flags={type_flags}",
+                    )
+
+    def run_steps(self, n_steps: int):
+        ops = list(self.OP_WEIGHTS.keys())
+        weights = list(self.OP_WEIGHTS.values())
+        for _ in range(n_steps):
+            chosen = self.rng.choices(ops, weights=weights, k=1)[0]
+            handler = getattr(self, f"op_{chosen}")
+            handler()
+        # Always end with a build and assert
+        self.op_build()
+
+
+class DifferentialTest(unittest.TestCase):
+    """Differential test harness comparing indexed results to --no-index.
+
+    Seeded pseudo-random operations generate realistic data mutations. After
+    each build, assertions verify that:
+    1. Indexed unlimited results == --no-index results (exact equivalence)
+    2. --limit N (N in 1..4) results == first N of --no-index unlimited results
+    """
+
+    SEEDS = [42, 1337, 2026]
+
+    def test_seeded_differential_runs(self):
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                runner = DifferentialRunner(seed, self)
+                try:
+                    runner.run_steps(10)
+                finally:
+                    runner.close()
 
 
 if __name__ == "__main__":
