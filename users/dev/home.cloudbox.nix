@@ -520,6 +520,18 @@ lib.mkIf isCloudbox {
   # Both client_secret.json (OAuth client config, needed for re-auth)
   # and credentials.json (authorized_user tokens) are assembled from
   # the same sops secrets to avoid committing secrets to git.
+  # One goose on this host (see gooseCli above). Login and interactive shells put
+  # ~/.local/bin AHEAD of the profile, so a hand-installed copy there (upstream's
+  # download_cli.sh puts it there by default) would silently win for humans and
+  # split the binaries again over a shared sessions.db. Say so on every switch.
+  home.activation.warnStrayGoose = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    for f in "$HOME"/.local/bin/goose "$HOME"/.local/bin/goose-*; do
+      if [ -e "$f" ]; then
+        echo "WARNING: $f exists; every goose on this host should be the profile's (pkgs/goose). Remove it." >&2
+      fi
+    done
+  '';
+
   home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
     set -euo pipefail
 

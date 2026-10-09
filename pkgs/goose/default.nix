@@ -16,7 +16,10 @@
 #      host was hard-coded to Google's endpoints. These point it at a local proxy
 #      speaking the Vertex paths (claude-failover-proxy) and name the session
 #      header that proxy keys stickiness on.
-# Both are inert unless their variables are set.
+#   3. GCP_AUTH_SCOPES: the scopes goose requests when refreshing gcloud ADC
+#      credentials (upstream: cloud-platform only). A gateway that attributes
+#      requests by identity needs userinfo.email too.
+# All are inert unless their variables are set.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -38,8 +41,8 @@
 }:
 
 let
-  version = "1.54.0-patched.1";
-  tag = "patched-1.54.0.1";
+  version = "1.54.0-patched.2";
+  tag = "patched-1.54.0.2";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -51,11 +54,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-JMzmhBKPE515Temdpd/0+3tooUmb4VhtT2A5vUdZV+g=";
+      hash = "sha256-BxLs1VyTQF//IZQZzMAcUXvMVZp3JdFh/l2E3kzpySk=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-rRrhn6JTU4eBvsjvA1l/s8sNsRhQlSPQCYFfUvswC8Y=";
+      hash = "sha256-X+OhF/FxRrMSExxDsX+V0rSVqhHvmRh87z1DlIOpXJ4=";
     };
   };
 
