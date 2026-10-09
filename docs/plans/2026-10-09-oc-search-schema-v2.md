@@ -120,3 +120,72 @@ Merge, then `pull-workstation`. The next timer run sees v1, rebuilds in place un
    - Seeded random sequences of insert, update, interior delete, session delete, top reuse, build, and search. After each build, indexed results must equal `--no-index` exactly, for both unlimited and `--limit` search.
    - Between builds, the same holds except for the documented interior-delete over-count. That op is excluded in the no-build variant.
    - `SuccessExitStatus=3`, README, and module docstring.
+
+## Revisions after oracle consult (ses_edd3bb088fferJx9mx1S0bw2nY) — these override the sections above
+
+1. **Disk precheck.**
+   - Estimate a rebuild from the live row count (`count(*)` via `sqlite_autoindex_part_1`, 0.15s) times the bytes per row of the existing index. Use the measured 7.2 KB/row when there is no index to measure.
+   - Today's estimate (sample of the oldest rows × rowid span × 2.8 × 1.5 = 42G) would refuse the rebuild every hour.
+   - The incremental `MIN_FREE_BYTES` guard stays.
+   - **Rollout gate:** deploy only when free space is at least ~35G, or after workstation-qpb7. It was 21.5G at 18:40.
+2. **Sweep shape (WAL pin).**
+   - Never ATTACH the source to the index's read-write connection. A source read inside an open index write transaction pins the source WAL; the oracle verified this.
+   - Instead, ATTACH the index **read-only** onto the source connection and run the sweep there as plain SELECTs with `LIMIT bound+1`.
+   - All writes go through the index connection.
+   - The checkpoint test is extended to cover the sweep and reconcile phases.
+3. **Pinned plans.** Two queries, each with a test asserting its plan via EXPLAIN QUERY PLAN:
+   - Identity: `FROM part p INDEXED BY sqlite_autoindex_part_1 LEFT JOIN idx.part_meta pm ON pm.rowid_=p.rowid WHERE p.rowid<=? AND pm.part_id IS NOT p.id` (asserts `COVERING INDEX`).
+   - Deletes: `rowid_ NOT IN (SELECT +rowid FROM part INDEXED BY sqlite_autoindex_part_1)` (asserts `LIST SUBQUERY`).
+4. **Reconcile bounds and mode.**
+   - `RECONCILE_MAX` counts only rows whose identity changed. That is the renumber detector.
+   - Deletes get their own, much higher bound (`DELETE_MAX = 1_000_000`).
+   - Bounds are injectable.
+   - `build_index` returns `mode: "noop"|"reconcile"|"rebuild"`, and the tests assert it.
+5. **`--limit` stop.**
+   - Dirty rows at or below W fold their live `(rowid>>14, time_created)` into the prefix, the same way the tail does.
+   - Total order is `(last_match desc, id desc)`, in both `decorate` and `search_recent`.
+   - Stop only when the N-th picked time is **strictly greater** than the bound.
+   - The window `(lo,hi]` uses `bucket(lo)`.
+6. **Query path.**
+   - All index-side reads run inside one `BEGIN … COMMIT` read transaction on the read-only index connection.
+   - **The anchor walk is replaced by a window diff.** Over the top `RECHECK_ROWS` at or below W, in one statement, the dirty set is:
+     - rows whose `part_id` or `time_updated` differs from part_meta;
+     - part_meta rows missing from the source;
+     - source rows missing from part_meta.
+   - At least one identity-matching row in the window means everything below it is clean. If none match, the index is unusable.
+   - The dirty set goes in a temp table on the index connection. Never put it on the source connection: that connection is `query_only`.
+   - Docs: an interior delete can also produce an extra session row with a wrong `last_match` in unlimited search, not only an over-count.
+   - If the sweep deletes the W row, re-point the watermark to the highest remaining part_meta row.
+7. **No cap on `--index` at all.** `--index-batch` stays as an option, defaulting to unlimited. Without that, an interrupted rebuild would resume capped.
+8. **`fcntl.flock` on `index.db.lock`.** A second concurrent `--index` exits 0 with a message.
+   - Query code catches `sqlite3.DatabaseError` around index use and falls back.
+   - Expected downtime after deploy: unlimited searches use tail scans for ~1-3h. `--limit` is unaffected.
+9. **No `'merge'` command**, because automerge and deletemerge already cover it. Still no `optimize`.
+   - The no-plain-INSERT rule is pinned both by a source-grep test and by a behaviour test.
+   - v1 → v2 recreates the file.
+10. **SDD and tests.**
+    - A minimal differential harness (indexed vs `--no-index`) lands in Task 1. Each later task grows its op generator: ties, reverse-ordered block, top reuse, small `READ_CHUNK`/`COMMIT_EVERY`, interrupted build.
+    - The fixture gains `part_session_idx`.
+    - Tests that flip:
+      - `test_watermark_row_replaced_invalidates_the_index`
+      - `test_rowid_reuse_between_chunks_forces_a_rebuild`
+      - `test_bulk_inserted_block_picks_by_insertion_order`
+    - New tests: W deleted gives a re-pointed watermark; plan assertions; checkpoint not busy during the sweep; flock; an interrupted rebuild finishes in the next run.
+
+### Revised task list
+
+1. **Schema, build, and harness.**
+   - v2 schema; `contentless_delete`; REPLACE-only writes, with both the grep test and the behaviour test; tmax.
+   - Capability probe; v1 recreated as v2.
+   - No cap; new disk estimate; flock; `mode` in the result.
+   - Fixture indexes; `update_part`/`delete_part` helpers.
+   - Differential harness: insert-only ops plus build.
+2. **Indexer reconcile.**
+   - Pinned-plan sweep on the source connection with the index ATTACHed read-only.
+   - Identity bound vs delete bound; `time_updated` recheck; watermark re-point.
+   - Chunk-boundary mismatch becomes MORE REMAINS.
+   - Flip the two invalidation tests. Extend the checkpoint test.
+   - Harness ops: update, interior delete, session delete, top reuse, interrupted build.
+3. **Query path.** Single read transaction; window-diff dirty set; the temp table excluded from FTS and rescanned live; DatabaseError fallback. Harness: queries between builds.
+4. **Exact `--limit`.** tmax prefix plus tail and dirty folding; total order; strict stop; TAIL_EXACT_MAX heuristic; flip the bulk test. Harness: ties, reverse block, `--limit` equal to the unlimited `[:N]`.
+5. **Unit and docs.** `SuccessExitStatus=3`, README, docstring, home.base.nix comment.
