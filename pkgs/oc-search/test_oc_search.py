@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1241,11 +1242,12 @@ class IndexTest(unittest.TestCase):
         self.f.build_index(rebuild=True, batch=1)
         src = oc_search.open_source(self.f.db)
         idx = oc_search.open_index_ro(self.f.index)
-        usable, watermark, reason = oc_search.index_validity(src, idx, self.f.db)
+        assert idx is not None
+        val = oc_search.index_validity(src, idx, self.f.db)
         idx.close()
         src.close()
-        self.assertTrue(usable, reason)
-        self.assertGreater(watermark, 0)
+        self.assertTrue(val.usable, val.reason)
+        self.assertGreater(val.watermark, 0)
         rows = self.f.sessions("FbmEmployeeCutoffRepublish")
         self.assertEqual({r["id"] for r in rows}, {"ses_a", "ses_b"})
 
@@ -1295,6 +1297,215 @@ class IndexTest(unittest.TestCase):
         _, out, err = self.f.search("--no-index", "FbmEmployeeCutoffRepublish")
         self.assertIn("no usable index", err)
         self.assertIn("ses_a", out)
+
+
+class QueryDirtySetTest(unittest.TestCase):
+    """Query path uses the index read-only with a dirty set (Task 3)."""
+
+    def setUp(self):
+        self.f = Fixture()
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_head_delete_before_reindex_uses_index_and_matches_no_index(self):
+        """Head (W) delete then query before reindexing: index is still used
+        (no fallback warning on stderr), results equal --no-index.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="CommonNeedle row1")
+        add_part(self.f.conn, "ses_b", type="tool", text="CommonNeedle row2")
+        add_part(self.f.conn, "ses_b", type="tool", text="CommonNeedle and HeadNeedleOnly")
+        self.f.commit()
+
+        self.f.build_index()
+        w_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+
+        # Delete the watermark row in the live database, but do NOT re-index.
+        delete_part(self.f.conn, w_rowid)
+        self.f.commit()
+
+        # Query for CommonNeedle: index should still be used (no fallback warning)
+        rc, out, err = self.f.search("CommonNeedle")
+        self.assertEqual(rc, 0)
+        err_lower = err.lower()
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err_lower, f"Unexpected fallback: {err}")
+
+        # Results must equal --no-index
+        got_indexed = self.f.sessions("CommonNeedle")
+        got_scanned = self.f.sessions("--no-index", "CommonNeedle")
+        self.assertEqual(got_indexed, got_scanned)
+        self.assertEqual({r["id"] for r in got_indexed}, {"ses_a", "ses_b"})
+        # ses_b should only have 1 match now, not 2
+        matches_by_id = {r["id"]: r["matches"] for r in got_indexed}
+        self.assertEqual(matches_by_id, {"ses_a": 1, "ses_b": 1})
+
+        # Query for HeadNeedleOnly: deleted row was the only match, so nothing should be found
+        self.assertEqual(self.f.sessions("HeadNeedleOnly"), [])
+
+    def test_top_reuse_before_reindex(self):
+        """Top-of-table reuse then query before reindex: old text not found,
+        new text found, index still used.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="AlphaNeedle preserved")
+        add_part(self.f.conn, "ses_b", type="tool", text="OldTopText to be replaced")
+        self.f.commit()
+        self.f.build_index()
+
+        w_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        delete_part(self.f.conn, w_rowid)
+        self.f.commit()
+
+        add_session(self.f.conn, "ses_c")
+        add_part(self.f.conn, "ses_c", type="tool", text="NewTopText freshly inserted")
+        self.f.commit()
+        new_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        self.assertEqual(new_rowid, w_rowid, "Top-of-table must reuse the rowid")
+
+        # Query for old text: must NOT be found (unlimited and --limit)
+        self.assertEqual(self.f.sessions("OldTopText"), [])
+        self.assertEqual(self.f.sessions("--limit", "1", "OldTopText"), [])
+
+        # Query for new text: must be found, and index must still be used
+        rc, out, err = self.f.search("NewTopText")
+        self.assertEqual(rc, 0)
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err.lower(), f"Unexpected fallback: {err}")
+
+        rows = self.f.sessions("NewTopText")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_c")
+
+        # Also with --limit
+        limit_rows = self.f.sessions("--limit", "1", "NewTopText")
+        self.assertEqual(len(limit_rows), 1)
+        self.assertEqual(limit_rows[0]["id"], "ses_c")
+
+    def test_update_part_on_indexed_row_before_reindex(self):
+        """update_part on an indexed row then query before reindex: new text found,
+        old text not found (unlimited and --limit).
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="BackgroundPart preserved")
+        add_part(self.f.conn, "ses_b", type="tool", text="BeforeMutationText waiting for update")
+        add_part(self.f.conn, "ses_b", type="tool", text="TopWatermarkRow keeping ceiling")
+        self.f.commit()
+        self.f.build_index()
+
+        target_rowid = self.f.conn.execute(
+            "SELECT rowid FROM part WHERE instr(data, 'BeforeMutationText') > 0"
+        ).fetchone()[0]
+
+        update_part(self.f.conn, target_rowid, text="AfterMutationText now updated")
+        self.f.commit()
+
+        # Query old text: neither unlimited nor --limit finds it
+        self.assertEqual(self.f.sessions("BeforeMutationText"), [])
+        self.assertEqual(self.f.sessions("--limit", "1", "BeforeMutationText"), [])
+
+        # Query new text: both unlimited and --limit find it, index is used
+        rc, out, err = self.f.search("AfterMutationText")
+        self.assertEqual(rc, 0)
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err.lower(), f"Unexpected fallback: {err}")
+
+        rows = self.f.sessions("AfterMutationText")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_b")
+
+        limit_rows = self.f.sessions("--limit", "1", "AfterMutationText")
+        self.assertEqual(len(limit_rows), 1)
+        self.assertEqual(limit_rows[0]["id"], "ses_b")
+
+    def test_window_no_identity_match_falls_back_with_warning(self):
+        """A window where no row matches identity (e.g. renumber the whole table)
+        falls back with a warning, results still correct.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="RenumberedNeedle here")
+        self.f.commit()
+        self.f.build_index()
+
+        # Renumber all parts in the table so zero rows match identity
+        self.f.conn.execute("UPDATE part SET id = 'prt_alien_' || rowid")
+        self.f.commit()
+
+        rc, out, err = self.f.search("RenumberedNeedle")
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            "index unusable" in err.lower() or "falling back" in err.lower(),
+            f"Expected fallback warning, got: {err}",
+        )
+        got_fallback = self.f.sessions("RenumberedNeedle")
+        got_scanned = self.f.sessions("--no-index", "RenumberedNeedle")
+        self.assertEqual(got_fallback, got_scanned)
+        self.assertEqual(len(got_fallback), 1)
+        self.assertEqual(got_fallback[0]["id"], "ses_a")
+
+    def test_index_side_snapshot_prevents_double_counting(self):
+        """Simulate an indexer commit between meta read and FTS query:
+        Snapshot isolation on open_index_ro prevents double-counting rows (W1, W2].
+        """
+        add_session(self.f.conn, "ses_a")
+        for i in range(5):
+            add_part(self.f.conn, "ses_a", type="tool", text=f"SnapshotNeedle initial {i}")
+        self.f.commit()
+        self.f.build_index()
+
+        # Add 5 more parts to the source table
+        for i in range(5):
+            add_part(self.f.conn, "ses_a", type="tool", text=f"SnapshotNeedle added {i}")
+        self.f.commit()
+
+        original_search_indexed = oc_search.search_indexed
+
+        def hooked_search_indexed(idx, query, types):
+            # Another writer connection updates the index up to the new source max!
+            writer = oc_search.open_index_rw(self.f.index)
+            src_conn = oc_search.open_source(self.f.db)
+            w1 = int(oc_search.get_meta(writer, "watermark_rowid") or 0)
+            new_rows = src_conn.execute(
+                "SELECT rowid, id, session_id, time_created, time_updated, json_extract(data, '$.type') AS type, data "
+                "FROM part WHERE rowid > ? ORDER BY rowid",
+                (w1,),
+            ).fetchall()
+            oc_search.write_rows(writer, new_rows)
+            writer.commit()
+            writer.close()
+            src_conn.close()
+            return original_search_indexed(idx, query, types)
+
+        with mock.patch("oc_search.search_indexed", side_effect=hooked_search_indexed):
+            rows = self.f.sessions("SnapshotNeedle")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                rows[0]["matches"],
+                10,
+                f"Expected exactly 10 matches without double counting, got {rows[0]['matches']}",
+            )
+
+    def test_database_error_on_index_falls_back_with_warning(self):
+        """A DatabaseError on the index falls back with a warning and correct results."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="ResilientNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        def broken_validity(*args, **kwargs):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        with mock.patch("oc_search.index_validity", side_effect=broken_validity):
+            rc, out, err = self.f.search("ResilientNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("falling back", err.lower())
+            rows = json.loads(self.f.search("--json", "ResilientNeedle")[1])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
 
 
 class EquivalenceTest(unittest.TestCase):
@@ -1465,6 +1676,28 @@ class IndexInfoTest(unittest.TestCase):
         info = json.loads(out.getvalue())
         self.assertTrue(info["usable"])
         self.assertGreaterEqual(info["unindexed_rows_estimate"], 1)
+        f.close()
+
+    def test_reports_usable_with_dirty_count_after_w_delete(self):
+        f = Fixture()
+        add_session(f.conn, "ses_a")
+        add_part(f.conn, "ses_a", type="tool", text="first part")
+        add_part(f.conn, "ses_a", type="tool", text="second part")
+        f.commit()
+        f.build_index()
+
+        w_rowid = f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        delete_part(f.conn, w_rowid)
+        f.commit()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = oc_search.run(["--index-info", "--db", f.db, "--index-path", f.index])
+        self.assertEqual(rc, 0)
+        info = json.loads(out.getvalue())
+        self.assertTrue(info["usable"])
+        self.assertEqual(info["watermark"], w_rowid)
+        self.assertEqual(info["dirty_count"], 1)
         f.close()
 
 
@@ -1867,10 +2100,18 @@ class LimitFastPathTest(unittest.TestCase):
         self.f.build_index(rebuild=True, batch=total // 2)
         self.assert_limit_is_a_prefix()
 
-    def test_prefix_with_invalid_index(self):
+    def test_prefix_with_dirty_watermark_row(self):
         self.f.build_index()
         self.f.conn.execute(
             "UPDATE part SET id='prt_impostor' WHERE rowid=(SELECT MAX(rowid) FROM part)"
+        )
+        self.f.commit()
+        self.assert_limit_is_a_prefix()
+
+    def test_prefix_with_invalid_index(self):
+        self.f.build_index()
+        self.f.conn.execute(
+            "UPDATE part SET id='prt_impostor_' || rowid"
         )
         self.f.commit()
         self.assert_limit_is_a_prefix()
@@ -2071,6 +2312,11 @@ class DifferentialRunner:
         self.build_modes: list[str] = []
         self.applied_ops: set[str] = set()
 
+        # RECHECK_ROWS is made explicitly large relative to the fixture so
+        # normal ops land inside the dirty window and are exactly comparable.
+        self.recheck_patcher = mock.patch("oc_search.RECHECK_ROWS", 100_000)
+        self.recheck_patcher.start()
+
         # Seed initial data and create the initial index so operations in run_steps
         # exercise incremental catchup and reconcile on an existing index.
         for _ in range(3):
@@ -2083,6 +2329,7 @@ class DifferentialRunner:
         return res
 
     def close(self):
+        self.recheck_patcher.stop()
         self.fixture.close()
 
     def next_time(self) -> int:
@@ -2181,14 +2428,10 @@ class DifferentialRunner:
         self.fixture.commit()
 
     def op_interrupted_build(self):
-        res = self.build_index(batch=1)
-        if res.get("up_to_date"):
-            self.assert_differential()
+        self.build_index(batch=1)
 
     def op_build(self):
-        res = self.build_index()
-        if res.get("up_to_date"):
-            self.assert_differential()
+        self.build_index()
 
     def _run_indexed(self, *argv) -> list[dict]:
         rc, out, err = self.fixture.search("--json", *argv)
@@ -2244,6 +2487,7 @@ class DifferentialRunner:
             self.applied_ops.add(chosen)
             handler = getattr(self, f"op_{chosen}")
             handler()
+            self.assert_differential()
         # Always end with a completed build and assert
         while True:
             res = self.build_index()
@@ -2291,6 +2535,47 @@ class DifferentialTest(unittest.TestCase):
             expected_ops,
             f"Missing op types across seeded runs: {expected_ops - all_ops}",
         )
+
+    def test_below_window_interior_delete_staleness(self):
+        """Documented staleness: an interior delete strictly below the dirty window
+        can over-count in unlimited search, while --limit stays exact (it recounts live).
+        """
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_target")
+            add_session(f.conn, "ses_filler")
+            p1 = add_part(f.conn, "ses_target", type="tool", text="StaleBelowNeedle", t=100)
+            for i in range(10):
+                add_part(f.conn, "ses_filler", type="tool", text=f"filler {i}", t=200 + i)
+            f.commit()
+            f.build_index()
+
+            rid1 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p1,)).fetchone()[0]
+            w_rowid = f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+            self.assertEqual(rid1, 1)
+            self.assertEqual(w_rowid, 11)
+
+            # Interior delete of row 1
+            delete_part(f.conn, rid1)
+            f.commit()
+
+            # With RECHECK_ROWS=3, window covers rowids 9..11. Row 1 is strictly below window.
+            with mock.patch("oc_search.RECHECK_ROWS", 3):
+                # Unlimited search: stale FTS posting returns ses_target with 1 match
+                unlimited = f.sessions("StaleBelowNeedle")
+                self.assertEqual(len(unlimited), 1)
+                self.assertEqual(unlimited[0]["id"], "ses_target")
+                self.assertEqual(unlimited[0]["matches"], 1)
+
+                # --no-index: live scan shows 0 matches
+                scanned = f.sessions("--no-index", "StaleBelowNeedle")
+                self.assertEqual(scanned, [])
+
+                # --limit 1: recounts live against part table, drops 0-match session, returns empty
+                limit_got = f.sessions("--limit", "1", "StaleBelowNeedle")
+                self.assertEqual(limit_got, [])
+        finally:
+            f.close()
 
 
 if __name__ == "__main__":

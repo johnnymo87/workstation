@@ -36,8 +36,11 @@ THE THREE THINGS THIS DOES ABOUT IT
    false positives, no false negatives. Queries drop to milliseconds.
 
 2. Correctness does not depend on the index being fresh. The index carries a
-   watermark rowid; everything above it is always resolved by a bounded scan
-   of the tail. A stale index makes oc-search slower, never wrong.
+   watermark rowid; a window diff over the top rows at or below the watermark
+   computes a dirty set, and everything above the watermark plus any dirty rows
+   are resolved live from the source. A stale index makes oc-search slower,
+   never wrong (modulo documented staleness of interior deletes strictly below
+   the recheck window in unlimited search).
 
 3. When there is no usable index, the fallback scan is run in parallel across
    rowid ranges (the scan is I/O-latency bound, not bandwidth bound: the same
@@ -54,6 +57,7 @@ range split legitimate.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import errno
 import fcntl
 import json
@@ -404,14 +408,15 @@ def open_index_ro(path: str, deadline: Deadline | None = None) -> sqlite3.Connec
         return None
     try:
         conn = sqlite3.connect(file_ro_uri(path), uri=True, timeout=5.0)
+        conn.isolation_level = None
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=2000")
+        conn.execute("PRAGMA cache_size=-65536")
+        if deadline is not None:
+            deadline.arm(conn)
+        return conn
     except sqlite3.Error:
         return None
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=2000")
-    conn.execute("PRAGMA cache_size=-65536")
-    if deadline is not None:
-        deadline.arm(conn)
-    return conn
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
@@ -491,39 +496,125 @@ def write_rows(idx: sqlite3.Connection, rows: Iterable[Any]) -> None:
         )
 
 
+@dataclass(frozen=True)
+class IndexValidity:
+    usable: bool
+    watermark: int
+    dirty: set[int] = field(default_factory=set)
+    reason: str = ""
+    dirty_live: set[int] = field(default_factory=set)
+
+    def __iter__(self):
+        return iter((self.usable, self.watermark, self.reason))
+
+
 def index_validity(
-    src: sqlite3.Connection, idx: sqlite3.Connection, db_path: str
-) -> tuple[bool, int, str]:
+    src: sqlite3.Connection,
+    idx: sqlite3.Connection,
+    db_path: str,
+    *,
+    recheck_rows: int | None = None,
+) -> IndexValidity:
     """Is this index usable, and up to which source rowid?
 
-    Returns (usable, watermark, reason-if-not).
+    Returns an IndexValidity dataclass with (usable, watermark, dirty, reason, dirty_live).
 
-    The watermark row's identity is re-checked against the live database on
-    every run. That is what makes rowid reuse safe: SQLite only ever hands out
-    a recycled rowid at the TOP of the table, so if anything was deleted and
-    re-inserted under our watermark, the watermark row itself changed and we
-    notice here instead of silently missing matches.
+    Computes a dirty set over the top RECHECK_ROWS rowids at or below the
+    watermark W (rowid > W - RECHECK_ROWS AND rowid <= W). If at least one row
+    in the window matches by identity, rows below the window are trusted; if no
+    row matches identity in a non-empty window, the index is declared unusable.
     """
+    if recheck_rows is None:
+        recheck_rows = RECHECK_ROWS
     if get_meta(idx, "schema_version") != str(INDEX_SCHEMA_VERSION):
-        return (False, 0, "index schema version mismatch")
+        return IndexValidity(False, 0, set(), "index schema version mismatch")
     if get_meta(idx, "source_db") != os.path.realpath(db_path):
-        return (False, 0, "index was built against a different opencode.db")
+        return IndexValidity(False, 0, set(), "index was built against a different opencode.db")
     raw = get_meta(idx, "watermark_rowid")
     if raw is None:
-        return (False, 0, "index has no watermark")
+        return IndexValidity(False, 0, set(), "index has no watermark")
     watermark = int(raw)
     if watermark == 0:
-        return (True, 0, "")
-    want_id = get_meta(idx, "watermark_part_id")
-    row = src.execute("SELECT id FROM part WHERE rowid=?", (watermark,)).fetchone()
-    if row is None or row[0] != want_id:
-        return (
+        return IndexValidity(True, 0, set(), "")
+
+    if not idx.in_transaction:
+        idx.execute("BEGIN")
+
+    window_lo = max(0, watermark - recheck_rows)
+    live_rows = src.execute(
+        "SELECT rowid, id, time_updated FROM part WHERE rowid > ? AND rowid <= ?",
+        (window_lo, watermark),
+    ).fetchall()
+
+    idx.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS live_window ("
+        "rowid_ INTEGER PRIMARY KEY, "
+        "part_id TEXT NOT NULL, "
+        "time_updated INTEGER NOT NULL)"
+    )
+    idx.execute("DELETE FROM temp.live_window")
+    if live_rows:
+        idx.executemany(
+            "INSERT INTO temp.live_window (rowid_, part_id, time_updated) VALUES (?, ?, ?)",
+            live_rows,
+        )
+
+    idx.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS dirty ("
+        "rowid INTEGER PRIMARY KEY)"
+    )
+    idx.execute("DELETE FROM temp.dirty")
+
+    pm_count_row = idx.execute(
+        "SELECT count(*) FROM part_meta WHERE rowid_ > ? AND rowid_ <= ?",
+        (window_lo, watermark),
+    ).fetchone()
+    pm_count = int(pm_count_row[0]) if pm_count_row else 0
+
+    match_count_row = idx.execute(
+        "SELECT count(*) FROM part_meta pm "
+        "JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
+        "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? AND pm.part_id = lw.part_id",
+        (window_lo, watermark),
+    ).fetchone()
+    match_count = int(match_count_row[0]) if match_count_row else 0
+
+    if pm_count > 0 and match_count == 0:
+        return IndexValidity(
             False,
             0,
-            "watermark row no longer matches the live database "
-            "(sessions were deleted); index must be rebuilt",
+            set(),
+            "no rows in recheck window match live database; index must be rebuilt",
         )
-    return (True, watermark, "")
+
+    diff_sql = (
+        "INSERT OR IGNORE INTO temp.dirty (rowid) "
+        "SELECT pm.rowid_ FROM part_meta pm "
+        "LEFT JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
+        "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? "
+        "  AND (lw.rowid_ IS NULL OR lw.part_id != pm.part_id OR lw.time_updated != pm.time_updated) "
+        "UNION "
+        "SELECT lw.rowid_ FROM temp.live_window lw "
+        "LEFT JOIN part_meta pm ON pm.rowid_ = lw.rowid_ "
+        "WHERE pm.rowid_ IS NULL"
+    )
+    idx.execute(diff_sql, (window_lo, watermark))
+
+    dirty = {int(r[0]) for r in idx.execute("SELECT rowid FROM temp.dirty").fetchall()}
+    dirty_live = {
+        int(r[0])
+        for r in idx.execute(
+            "SELECT d.rowid FROM temp.dirty d JOIN temp.live_window lw ON lw.rowid_ = d.rowid"
+        ).fetchall()
+    }
+
+    return IndexValidity(
+        True,
+        watermark,
+        dirty,
+        "",
+        dirty_live=dirty_live,
+    )
 
 
 def inspect_index_schema_version(path: str) -> int | None:
@@ -1058,11 +1149,14 @@ def type_predicate(types: list[str] | None, column: str) -> tuple[str, list[Any]
 def search_indexed(
     idx: sqlite3.Connection, query: str, types: list[str] | None
 ) -> dict[str, tuple[int, int]]:
+    idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
     pred, params = type_predicate(types, "pm.type")
     sql = (
         "SELECT pm.session_id AS sid, COUNT(*) AS n, MAX(pm.time_created) AS t "
         "FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
-        "WHERE ft MATCH ?" + pred + " GROUP BY pm.session_id"
+        "WHERE ft MATCH ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
+        + pred
+        + " GROUP BY pm.session_id"
     )
     out: dict[str, tuple[int, int]] = {}
     for r in idx.execute(sql, [fts_phrase(query)] + params):
@@ -1097,6 +1191,50 @@ def scan_range(
             out[sid] = (int(n), int(t))
     finally:
         conn.close()
+    return out
+
+
+def scan_rowids(
+    db_or_conn: str | sqlite3.Connection,
+    rowids: Iterable[int],
+    query: str,
+    types: list[str] | None,
+    deadline: Deadline,
+) -> dict[str, tuple[int, int]]:
+    """Scan specific live part rows by PK for query matches.
+
+    Uses the same instr() and json_extract() predicates as scan_range, chunking
+    `rowid IN (...)` queries to stay well within SQLite variable limits.
+    """
+    rowid_list = sorted(set(rowids))
+    if not rowid_list:
+        return {}
+    pred, params = type_predicate(types, "json_extract(data,'$.type')")
+    out: dict[str, tuple[int, int]] = {}
+    close_conn = False
+    if isinstance(db_or_conn, str):
+        conn = open_source(db_or_conn, deadline)
+        close_conn = True
+    else:
+        conn = db_or_conn
+
+    try:
+        CHUNK = 400
+        for i in range(0, len(rowid_list), CHUNK):
+            chunk = rowid_list[i : i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (
+                f"SELECT session_id, COUNT(*), MAX(time_created) FROM part "
+                f"WHERE rowid IN ({placeholders}) AND instr(data, ?) > 0{pred} "
+                f"GROUP BY session_id"
+            )
+            for sid, n, t in conn.execute(sql, list(chunk) + [query] + params):
+                pn, pt = out.get(sid, (0, 0))
+                out[sid] = (pn + int(n), max(pt, int(t)))
+            deadline.check()
+    finally:
+        if close_conn:
+            conn.close()
     return out
 
 
@@ -1168,6 +1306,7 @@ def search_recent(
     limit: int,
     deadline: Deadline,
     jobs: int,
+    dirty_rowids: Iterable[int] | None = None,
 ) -> dict[str, tuple[int, int]]:
     """The newest `limit` matching sessions, without aggregating every match.
 
@@ -1205,7 +1344,8 @@ def search_recent(
          RECENT_FIRST_WINDOW and double, each scanned with the same parallel
          instr() as the fallback. A common needle stops in the first window,
          so an absent or invalid index no longer means a full scan.
-      2. Then, with a usable index, its postings at or below `floor` in
+      2. Then dirty live rowids (if any) are scanned live, and index postings
+         at or below `floor` (excluding dirty rowids) are walked in
          descending rowid order, which FTS5 streams without sorting.
 
     WHY THE COUNTS ARE STILL EXACT. The walk only decides WHICH sessions are
@@ -1252,19 +1392,49 @@ def search_recent(
         hi = lo
         window *= RECENT_WINDOW_GROWTH
 
+    if dirty_rowids:
+        dirty_found = scan_rowids(src, dirty_rowids, query, types, deadline)
+        deadline.check()
+        for sid in sorted(dirty_found, key=lambda s: dirty_found[s][1], reverse=True):
+            if consider(sid):
+                return picked
+
     if idx is not None and floor > 0:
+        idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
         ipred, iparams = type_predicate(types, "pm.type")
-        cur = idx.execute(
+        sql = (
             "SELECT pm.session_id FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
-            "WHERE ft MATCH ? AND ft.rowid <= ?" + ipred + " ORDER BY ft.rowid DESC",
-            [fts_phrase(query), floor] + iparams,
+            "WHERE ft MATCH ? AND ft.rowid <= ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
+            + ipred
+            + " ORDER BY ft.rowid DESC"
         )
         try:
-            for (sid,) in cur:
-                if consider(sid):
-                    break
-        finally:
-            cur.close()
+            cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
+            try:
+                for (sid,) in cur:
+                    if consider(sid):
+                        break
+            finally:
+                cur.close()
+                try:
+                    if idx.in_transaction:
+                        idx.execute("COMMIT")
+                except Exception:
+                    pass
+        except sqlite3.DatabaseError as exc:
+            if deadline.tripped.is_set():
+                raise
+            warn(f"index error: {exc}. Falling back to a newest-first scan.")
+            hi = floor
+            while hi > 0:
+                lo = max(0, hi - window)
+                found = scan_parallel(db_path, lo, hi, query, types, deadline, jobs)
+                deadline.check()
+                for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
+                    if consider(sid):
+                        return picked
+                hi = lo
+                window *= RECENT_WINDOW_GROWTH
     return picked
 
 
@@ -1371,18 +1541,28 @@ def run(argv: list[str]) -> int:
         idx = open_index_ro(index_path)
         info: dict[str, Any] = {"index_path": index_path, "exists": idx is not None}
         if idx is not None:
-            usable, watermark, reason = index_validity(src, idx, db_path)
-            _, src_max = part_rowid_bounds(src)
-            info.update(
-                usable=usable,
-                reason=reason,
-                watermark=watermark,
-                source_max_rowid=src_max,
-                unindexed_rows_estimate=max(0, src_max - watermark),
-                bytes=os.path.getsize(index_path),
-                built_at=get_meta(idx, "built_at"),
-            )
-            idx.close()
+            try:
+                val = index_validity(src, idx, db_path)
+                _, src_max = part_rowid_bounds(src)
+                info.update(
+                    usable=val.usable,
+                    reason=val.reason,
+                    watermark=val.watermark,
+                    dirty_count=len(val.dirty),
+                    source_max_rowid=src_max,
+                    unindexed_rows_estimate=max(0, src_max - val.watermark),
+                    bytes=os.path.getsize(index_path),
+                    built_at=get_meta(idx, "built_at"),
+                )
+            except sqlite3.DatabaseError as exc:
+                info.update(
+                    usable=False,
+                    reason=f"index error: {exc}",
+                    watermark=0,
+                    dirty_count=0,
+                )
+            finally:
+                idx.close()
         src.close()
         print(json.dumps(info, indent=2))
         return 0
@@ -1443,7 +1623,7 @@ def run(argv: list[str]) -> int:
     types = resolve_types(args)
 
     idx = None
-    watermark = 0
+    val = IndexValidity(usable=False, watermark=0)
     used_index = False
     hits: dict[str, tuple[int, int]] = {}
     rows: list[dict[str, Any]] = []
@@ -1459,22 +1639,31 @@ def run(argv: list[str]) -> int:
         # at N sessions, not a full scan, so the warnings say so.
         fallback = "a newest-first scan" if args.limit > 0 else "a full scan"
         if idx is not None:
-            usable, watermark, reason = index_validity(src, idx, db_path)
-            if not usable:
-                warn(f"index unusable: {reason}. Falling back to {fallback}.")
-                idx.close()
+            try:
+                val = index_validity(src, idx, db_path)
+                if not val.usable:
+                    warn(f"index unusable: {val.reason}. Falling back to {fallback}.")
+                    idx.close()
+                    idx = None
+                elif len(query) < MIN_TRIGRAM_LEN:
+                    warn(
+                        f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
+                        f"trigram index. Falling back to {fallback}."
+                    )
+                    idx.close()
+                    idx = None
+                else:
+                    used_index = True
+            except sqlite3.DatabaseError as exc:
+                if deadline.tripped.is_set():
+                    raise
+                warn(f"index unusable: {exc}. Falling back to {fallback}.")
+                try:
+                    idx.close()
+                except Exception:
+                    pass
                 idx = None
-                watermark = 0
-            elif len(query) < MIN_TRIGRAM_LEN:
-                warn(
-                    f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
-                    f"trigram index. Falling back to {fallback}."
-                )
-                idx.close()
-                idx = None
-                watermark = 0
-            else:
-                used_index = True
+                val = IndexValidity(usable=False, watermark=0)
 
         if not used_index and args.limit > 0:
             warn(
@@ -1496,33 +1685,55 @@ def run(argv: list[str]) -> int:
                 src,
                 db_path,
                 idx if used_index else None,
-                watermark if used_index else max(src_min - 1, 0),
+                val.watermark if used_index else max(src_min - 1, 0),
                 src_max,
                 query,
                 types,
                 args.limit,
                 deadline,
                 args.jobs,
+                dirty_rowids=val.dirty_live if used_index else None,
             )
         elif used_index and idx is not None:
-            hits = search_indexed(idx, query, types)
-            # Everything the index has not seen yet, always, so that a stale
-            # index costs time and never truth.
-            if src_max > watermark:
-                merge(
-                    hits,
-                    scan_parallel(
-                        db_path, watermark, src_max, query, types, deadline, args.jobs
-                    ),
+            try:
+                hits = search_indexed(idx, query, types)
+            except sqlite3.DatabaseError as exc:
+                if deadline.tripped.is_set():
+                    raise
+                warn(f"index error: {exc}. Falling back to a full scan.")
+                try:
+                    idx.close()
+                except Exception:
+                    pass
+                idx = None
+                used_index = False
+                lo = max(src_min - 1, 0)
+                hits = scan_parallel(
+                    db_path, lo, src_max, query, types, deadline, args.jobs
                 )
-            deadline.check()
+            if used_index and idx is not None:
+                try:
+                    if idx.in_transaction:
+                        idx.execute("COMMIT")
+                except Exception:
+                    pass
+                if val.dirty_live:
+                    merge(hits, scan_rowids(src, val.dirty_live, query, types, deadline))
+                if src_max > val.watermark:
+                    merge(
+                        hits,
+                        scan_parallel(
+                            db_path, val.watermark, src_max, query, types, deadline, args.jobs
+                        ),
+                    )
+                deadline.check()
         else:
             lo = max(src_min - 1, 0)
             hits = scan_parallel(
                 db_path, lo, src_max, query, types, deadline, args.jobs
             )
             deadline.check()
-    except (sqlite3.OperationalError, TimedOut) as exc:
+    except (sqlite3.DatabaseError, TimedOut) as exc:
         if deadline.tripped.is_set() or isinstance(exc, TimedOut):
             warn(
                 f"aborted after {budget:g}s: {'index query' if used_index else 'full scan'} "
@@ -1537,6 +1748,11 @@ def run(argv: list[str]) -> int:
         raise
     finally:
         if idx is not None:
+            try:
+                if idx.in_transaction:
+                    idx.execute("COMMIT")
+            except Exception:
+                pass
             idx.close()
 
     rows = decorate(src, hits)
