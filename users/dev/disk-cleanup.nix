@@ -1451,17 +1451,19 @@ lib.mkMerge [
             [ -d "$wt_dir" ] || continue
             wt_name=$(basename "$wt_dir")
 
-            # lgtm pr-N worktrees are detached-HEAD checkouts of refs/pull/N/head.
+            # lgtm review worktrees are detached-HEAD checkouts of refs/pull/N/head.
             # The generic merged/aged checks below can't catch them: there's no
             # local branch (so `branch=HEAD`), the PR head SHA is rarely on
             # origin/main directly (squash merges), and `last_commit_epoch` is
             # the PR commit time which keeps moving. So they accumulated
             # forever -- one ~14 GB pile across mono/internal-frontends/culops.
-            # Source: lgtm/src/worktree.ts createWorktree (named pr-<N>).
+            # Source of the name: lgtm/src/worktree.ts LGTM_WT_PREFIX "lgtm-pr-";
+            # worked under old name pr-N until lgtm renamed it 2026-09-16.
             # Fix: ask GitHub for state and prune if MERGED or CLOSED.
-            if [[ "$wt_name" =~ ^pr-([0-9]+)$ ]] && [ -n "$repo_slug" ]; then
-              pr_num="''${BASH_REMATCH[1]}"
-              pr_state=$(gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
+            if [[ "$wt_name" =~ ^(lgtm-)?pr-([0-9]+)$ ]] && [ -n "$repo_slug" ]; then
+              pr_num="''${BASH_REMATCH[2]}"
+              gh_timeout="''${DISK_CLEANUP_GH_TIMEOUT:-30}"
+              pr_state=$(timeout "$gh_timeout" gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
                 | jq -r '.state // empty' 2>/dev/null || echo "")
               if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
                 remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
