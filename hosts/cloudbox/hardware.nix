@@ -36,6 +36,10 @@
   fileSystems."/" = lib.mkForce {
     device = "/dev/disk/by-partlabel/disk-main-root";
     fsType = "ext4";
+    # mkForce replaces the GCE module's whole attrset, which silently dropped
+    # its autoResize = true: after a disk resize, growpart.service grew the
+    # partition at boot but nothing grew ext4. Keep it here explicitly.
+    autoResize = true;
   };
 
   nixpkgs.hostPlatform = lib.mkDefault "aarch64-linux";
