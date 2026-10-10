@@ -1449,7 +1449,10 @@ class QueryDirtySetTest(unittest.TestCase):
 
     def test_index_side_snapshot_prevents_double_counting(self):
         """Simulate an indexer commit between meta read and FTS query:
-        Snapshot isolation on open_index_ro prevents double-counting rows (W1, W2].
+        Wrapping get_meta so the first watermark_rowid read triggers an indexer
+        commit via a separate rw connection. With snapshot isolation beginning
+        at the very entry of index_validity (and ft.rowid <= watermark), the query
+        does not see the newly committed rows in the index, preventing double-counting.
         """
         add_session(self.f.conn, "ses_a")
         for i in range(5):
@@ -1462,26 +1465,33 @@ class QueryDirtySetTest(unittest.TestCase):
             add_part(self.f.conn, "ses_a", type="tool", text=f"SnapshotNeedle added {i}")
         self.f.commit()
 
-        original_search_indexed = oc_search.search_indexed
+        orig_get_meta = oc_search.get_meta
+        fired = False
 
-        def hooked_search_indexed(idx, query, types):
-            # Another writer connection updates the index up to the new source max!
-            writer = oc_search.open_index_rw(self.f.index)
-            src_conn = oc_search.open_source(self.f.db)
-            w1 = int(oc_search.get_meta(writer, "watermark_rowid") or 0)
-            new_rows = src_conn.execute(
-                "SELECT rowid, id, session_id, time_created, time_updated, json_extract(data, '$.type') AS type, data "
-                "FROM part WHERE rowid > ? ORDER BY rowid",
-                (w1,),
-            ).fetchall()
-            oc_search.write_rows(writer, new_rows)
-            writer.commit()
-            writer.close()
-            src_conn.close()
-            return original_search_indexed(idx, query, types)
+        def hooked_get_meta(conn, key):
+            res = orig_get_meta(conn, key)
+            nonlocal fired
+            if key == "watermark_rowid" and not fired:
+                fired = True
+                # Separate writer connection commits rows 6..10 to index
+                writer = oc_search.open_index_rw(self.f.index)
+                src_conn = oc_search.open_source(self.f.db)
+                new_rows = src_conn.execute(
+                    "SELECT rowid, id, session_id, time_created, time_updated, json_extract(data, '$.type') AS type, data "
+                    "FROM part WHERE rowid > 5 ORDER BY rowid"
+                ).fetchall()
+                oc_search.write_rows(writer, new_rows)
+                oc_search.set_meta(writer, "watermark_rowid", 10)
+                oc_search.set_meta(writer, "watermark_part_id", new_rows[-1]["id"])
+                writer.commit()
+                writer.close()
+                src_conn.close()
+            return res
 
-        with mock.patch("oc_search.search_indexed", side_effect=hooked_search_indexed):
+        with mock.patch("oc_search.get_meta", side_effect=hooked_get_meta):
             rows = self.f.sessions("SnapshotNeedle")
+            scanned = self.f.sessions("--no-index", "SnapshotNeedle")
+            self.assertEqual(rows, scanned)
             self.assertEqual(len(rows), 1)
             self.assertEqual(
                 rows[0]["matches"],
@@ -1504,6 +1514,59 @@ class QueryDirtySetTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("falling back", err.lower())
             rows = json.loads(self.f.search("--json", "ResilientNeedle")[1])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
+
+    def test_database_error_during_search_recent_abandons_idx_and_falls_back(self):
+        """DatabaseError during search_recent FTS query ends txn, closes idx, and falls back."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="RecentErrorNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        orig_open_index_ro = oc_search.open_index_ro
+
+        class FaultyConn:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, *args):
+                if "FROM ft" in sql:
+                    raise sqlite3.DatabaseError("index disk I/O error")
+                return self._real.execute(sql, *args)
+
+        def faulty_open_index_ro(path, deadline=None):
+            real = orig_open_index_ro(path, deadline)
+            return FaultyConn(real) if real is not None else None
+
+        with mock.patch("oc_search.open_index_ro", side_effect=faulty_open_index_ro):
+            rc, out, err = self.f.search("--limit", "1", "RecentErrorNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("index error: index disk I/O error", err)
+            self.assertIn("falling back to a newest-first scan", err.lower())
+            rows = self.f.sessions("--limit", "1", "RecentErrorNeedle")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
+
+    def test_database_error_during_search_indexed_abandons_idx_and_falls_back(self):
+        """DatabaseError during search_indexed ends txn, closes idx, and falls back."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="IndexedErrorNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        def broken_search_indexed(*args, **kwargs):
+            raise sqlite3.DatabaseError("corrupt index table")
+
+        with mock.patch("oc_search.search_indexed", side_effect=broken_search_indexed):
+            rc, out, err = self.f.search("IndexedErrorNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("index error: corrupt index table", err)
+            self.assertIn("falling back to a full scan", err.lower())
+            rows = self.f.sessions("IndexedErrorNeedle")
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["id"], "ses_a")
 

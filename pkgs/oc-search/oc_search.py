@@ -419,6 +419,20 @@ def open_index_ro(path: str, deadline: Deadline | None = None) -> sqlite3.Connec
         return None
 
 
+def end_txn(conn: sqlite3.Connection | None, *, commit: bool = True) -> None:
+    if conn is None:
+        return
+    try:
+        if conn.in_transaction:
+            conn.execute("COMMIT" if commit else "ROLLBACK")
+    except Exception:
+        try:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+        except Exception:
+            pass
+
+
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     try:
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -524,97 +538,106 @@ def index_validity(
     in the window matches by identity, rows below the window are trusted; if no
     row matches identity in a non-empty window, the index is declared unusable.
     """
-    if recheck_rows is None:
-        recheck_rows = RECHECK_ROWS
-    if get_meta(idx, "schema_version") != str(INDEX_SCHEMA_VERSION):
-        return IndexValidity(False, 0, set(), "index schema version mismatch")
-    if get_meta(idx, "source_db") != os.path.realpath(db_path):
-        return IndexValidity(False, 0, set(), "index was built against a different opencode.db")
-    raw = get_meta(idx, "watermark_rowid")
-    if raw is None:
-        return IndexValidity(False, 0, set(), "index has no watermark")
-    watermark = int(raw)
-    if watermark == 0:
-        return IndexValidity(True, 0, set(), "")
-
     if not idx.in_transaction:
         idx.execute("BEGIN")
 
-    window_lo = max(0, watermark - recheck_rows)
-    live_rows = src.execute(
-        "SELECT rowid, id, time_updated FROM part WHERE rowid > ? AND rowid <= ?",
-        (window_lo, watermark),
-    ).fetchall()
+    try:
+        if recheck_rows is None:
+            recheck_rows = RECHECK_ROWS
+        if get_meta(idx, "schema_version") != str(INDEX_SCHEMA_VERSION):
+            end_txn(idx, commit=False)
+            return IndexValidity(False, 0, set(), "index schema version mismatch")
+        if get_meta(idx, "source_db") != os.path.realpath(db_path):
+            end_txn(idx, commit=False)
+            return IndexValidity(False, 0, set(), "index was built against a different opencode.db")
+        raw = get_meta(idx, "watermark_rowid")
+        if raw is None:
+            end_txn(idx, commit=False)
+            return IndexValidity(False, 0, set(), "index has no watermark")
+        watermark = int(raw)
+        if watermark == 0:
+            end_txn(idx, commit=False)
+            return IndexValidity(True, 0, set(), "")
 
-    idx.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS live_window ("
-        "rowid_ INTEGER PRIMARY KEY, "
-        "part_id TEXT NOT NULL, "
-        "time_updated INTEGER NOT NULL)"
-    )
-    idx.execute("DELETE FROM temp.live_window")
-    if live_rows:
-        idx.executemany(
-            "INSERT INTO temp.live_window (rowid_, part_id, time_updated) VALUES (?, ?, ?)",
-            live_rows,
-        )
-
-    idx.execute(
-        "CREATE TEMP TABLE IF NOT EXISTS dirty ("
-        "rowid INTEGER PRIMARY KEY)"
-    )
-    idx.execute("DELETE FROM temp.dirty")
-
-    pm_count_row = idx.execute(
-        "SELECT count(*) FROM part_meta WHERE rowid_ > ? AND rowid_ <= ?",
-        (window_lo, watermark),
-    ).fetchone()
-    pm_count = int(pm_count_row[0]) if pm_count_row else 0
-
-    match_count_row = idx.execute(
-        "SELECT count(*) FROM part_meta pm "
-        "JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
-        "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? AND pm.part_id = lw.part_id",
-        (window_lo, watermark),
-    ).fetchone()
-    match_count = int(match_count_row[0]) if match_count_row else 0
-
-    if pm_count > 0 and match_count == 0:
-        return IndexValidity(
-            False,
-            0,
-            set(),
-            "no rows in recheck window match live database; index must be rebuilt",
-        )
-
-    diff_sql = (
-        "INSERT OR IGNORE INTO temp.dirty (rowid) "
-        "SELECT pm.rowid_ FROM part_meta pm "
-        "LEFT JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
-        "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? "
-        "  AND (lw.rowid_ IS NULL OR lw.part_id != pm.part_id OR lw.time_updated != pm.time_updated) "
-        "UNION "
-        "SELECT lw.rowid_ FROM temp.live_window lw "
-        "LEFT JOIN part_meta pm ON pm.rowid_ = lw.rowid_ "
-        "WHERE pm.rowid_ IS NULL"
-    )
-    idx.execute(diff_sql, (window_lo, watermark))
-
-    dirty = {int(r[0]) for r in idx.execute("SELECT rowid FROM temp.dirty").fetchall()}
-    dirty_live = {
-        int(r[0])
-        for r in idx.execute(
-            "SELECT d.rowid FROM temp.dirty d JOIN temp.live_window lw ON lw.rowid_ = d.rowid"
+        window_lo = max(0, watermark - recheck_rows)
+        live_rows = src.execute(
+            "SELECT rowid, id, time_updated FROM part WHERE rowid > ? AND rowid <= ?",
+            (window_lo, watermark),
         ).fetchall()
-    }
 
-    return IndexValidity(
-        True,
-        watermark,
-        dirty,
-        "",
-        dirty_live=dirty_live,
-    )
+        idx.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS live_window ("
+            "rowid_ INTEGER PRIMARY KEY, "
+            "part_id TEXT NOT NULL, "
+            "time_updated INTEGER NOT NULL)"
+        )
+        idx.execute("DELETE FROM temp.live_window")
+        if live_rows:
+            idx.executemany(
+                "INSERT INTO temp.live_window (rowid_, part_id, time_updated) VALUES (?, ?, ?)",
+                live_rows,
+            )
+
+        idx.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS dirty ("
+            "rowid INTEGER PRIMARY KEY)"
+        )
+        idx.execute("DELETE FROM temp.dirty")
+
+        pm_count_row = idx.execute(
+            "SELECT count(*) FROM part_meta WHERE rowid_ > ? AND rowid_ <= ?",
+            (window_lo, watermark),
+        ).fetchone()
+        pm_count = int(pm_count_row[0]) if pm_count_row else 0
+
+        match_count_row = idx.execute(
+            "SELECT count(*) FROM part_meta pm "
+            "JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
+            "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? AND pm.part_id = lw.part_id",
+            (window_lo, watermark),
+        ).fetchone()
+        match_count = int(match_count_row[0]) if match_count_row else 0
+
+        if pm_count > 0 and match_count == 0:
+            end_txn(idx, commit=False)
+            return IndexValidity(
+                False,
+                0,
+                set(),
+                "no rows in recheck window match live database; index must be rebuilt",
+            )
+
+        diff_sql = (
+            "INSERT OR IGNORE INTO temp.dirty (rowid) "
+            "SELECT pm.rowid_ FROM part_meta pm "
+            "LEFT JOIN temp.live_window lw ON lw.rowid_ = pm.rowid_ "
+            "WHERE pm.rowid_ > ? AND pm.rowid_ <= ? "
+            "  AND (lw.rowid_ IS NULL OR lw.part_id != pm.part_id OR lw.time_updated != pm.time_updated) "
+            "UNION "
+            "SELECT lw.rowid_ FROM temp.live_window lw "
+            "LEFT JOIN part_meta pm ON pm.rowid_ = lw.rowid_ "
+            "WHERE pm.rowid_ IS NULL"
+        )
+        idx.execute(diff_sql, (window_lo, watermark))
+
+        dirty = {int(r[0]) for r in idx.execute("SELECT rowid FROM temp.dirty").fetchall()}
+        dirty_live = {
+            int(r[0])
+            for r in idx.execute(
+                "SELECT d.rowid FROM temp.dirty d JOIN temp.live_window lw ON lw.rowid_ = d.rowid"
+            ).fetchall()
+        }
+
+        return IndexValidity(
+            True,
+            watermark,
+            dirty,
+            "",
+            dirty_live=dirty_live,
+        )
+    except Exception:
+        end_txn(idx, commit=False)
+        raise
 
 
 def inspect_index_schema_version(path: str) -> int | None:
@@ -1147,19 +1170,29 @@ def type_predicate(types: list[str] | None, column: str) -> tuple[str, list[Any]
 
 
 def search_indexed(
-    idx: sqlite3.Connection, query: str, types: list[str] | None
+    idx: sqlite3.Connection,
+    query: str,
+    types: list[str] | None,
+    watermark: int | None = None,
 ) -> dict[str, tuple[int, int]]:
     idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
     pred, params = type_predicate(types, "pm.type")
+    wm_pred = ""
+    wm_params = []
+    if watermark is not None:
+        wm_pred = " AND ft.rowid <= ?"
+        wm_params = [watermark]
     sql = (
         "SELECT pm.session_id AS sid, COUNT(*) AS n, MAX(pm.time_created) AS t "
         "FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
-        "WHERE ft MATCH ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
+        "WHERE ft MATCH ?"
+        + wm_pred
+        + " AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
         + pred
         + " GROUP BY pm.session_id"
     )
     out: dict[str, tuple[int, int]] = {}
-    for r in idx.execute(sql, [fts_phrase(query)] + params):
+    for r in idx.execute(sql, [fts_phrase(query)] + wm_params + params):
         out[r["sid"]] = (int(r["n"]), int(r["t"]))
     return out
 
@@ -1400,15 +1433,16 @@ def search_recent(
                 return picked
 
     if idx is not None and floor > 0:
-        idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
-        ipred, iparams = type_predicate(types, "pm.type")
-        sql = (
-            "SELECT pm.session_id FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
-            "WHERE ft MATCH ? AND ft.rowid <= ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
-            + ipred
-            + " ORDER BY ft.rowid DESC"
-        )
+        index_failed = False
         try:
+            idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
+            ipred, iparams = type_predicate(types, "pm.type")
+            sql = (
+                "SELECT pm.session_id FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
+                "WHERE ft MATCH ? AND ft.rowid <= ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
+                + ipred
+                + " ORDER BY ft.rowid DESC"
+            )
             cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
             try:
                 for (sid,) in cur:
@@ -1416,15 +1450,23 @@ def search_recent(
                         break
             finally:
                 cur.close()
-                try:
-                    if idx.in_transaction:
-                        idx.execute("COMMIT")
-                except Exception:
-                    pass
+            end_txn(idx, commit=True)
         except sqlite3.DatabaseError as exc:
             if deadline.tripped.is_set():
+                end_txn(idx, commit=False)
                 raise
+            index_failed = True
+            end_txn(idx, commit=False)
+            try:
+                idx.close()
+            except Exception:
+                pass
             warn(f"index error: {exc}. Falling back to a newest-first scan.")
+        except Exception:
+            end_txn(idx, commit=False)
+            raise
+
+        if index_failed:
             hi = floor
             while hi > 0:
                 lo = max(0, hi - window)
@@ -1554,7 +1596,9 @@ def run(argv: list[str]) -> int:
                     bytes=os.path.getsize(index_path),
                     built_at=get_meta(idx, "built_at"),
                 )
+                end_txn(idx, commit=True)
             except sqlite3.DatabaseError as exc:
+                end_txn(idx, commit=False)
                 info.update(
                     usable=False,
                     reason=f"index error: {exc}",
@@ -1562,6 +1606,7 @@ def run(argv: list[str]) -> int:
                     dirty_count=0,
                 )
             finally:
+                end_txn(idx, commit=False)
                 idx.close()
         src.close()
         print(json.dumps(info, indent=2))
@@ -1642,10 +1687,12 @@ def run(argv: list[str]) -> int:
             try:
                 val = index_validity(src, idx, db_path)
                 if not val.usable:
+                    end_txn(idx, commit=False)
                     warn(f"index unusable: {val.reason}. Falling back to {fallback}.")
                     idx.close()
                     idx = None
                 elif len(query) < MIN_TRIGRAM_LEN:
+                    end_txn(idx, commit=False)
                     warn(
                         f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
                         f"trigram index. Falling back to {fallback}."
@@ -1655,6 +1702,7 @@ def run(argv: list[str]) -> int:
                 else:
                     used_index = True
             except sqlite3.DatabaseError as exc:
+                end_txn(idx, commit=False)
                 if deadline.tripped.is_set():
                     raise
                 warn(f"index unusable: {exc}. Falling back to {fallback}.")
@@ -1696,8 +1744,10 @@ def run(argv: list[str]) -> int:
             )
         elif used_index and idx is not None:
             try:
-                hits = search_indexed(idx, query, types)
+                hits = search_indexed(idx, query, types, watermark=val.watermark)
+                end_txn(idx, commit=True)
             except sqlite3.DatabaseError as exc:
+                end_txn(idx, commit=False)
                 if deadline.tripped.is_set():
                     raise
                 warn(f"index error: {exc}. Falling back to a full scan.")
@@ -1712,11 +1762,6 @@ def run(argv: list[str]) -> int:
                     db_path, lo, src_max, query, types, deadline, args.jobs
                 )
             if used_index and idx is not None:
-                try:
-                    if idx.in_transaction:
-                        idx.execute("COMMIT")
-                except Exception:
-                    pass
                 if val.dirty_live:
                     merge(hits, scan_rowids(src, val.dirty_live, query, types, deadline))
                 if src_max > val.watermark:
@@ -1748,11 +1793,7 @@ def run(argv: list[str]) -> int:
         raise
     finally:
         if idx is not None:
-            try:
-                if idx.in_transaction:
-                    idx.execute("COMMIT")
-            except Exception:
-                pass
+            end_txn(idx, commit=False)
             idx.close()
 
     rows = decorate(src, hits)
