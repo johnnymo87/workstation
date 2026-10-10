@@ -18,10 +18,12 @@ import contextlib
 import io
 import json
 import os
+import random
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,6 +52,8 @@ def make_db(path: str) -> sqlite3.Connection:
           time_updated integer NOT NULL,
           data text NOT NULL
         );
+        CREATE INDEX part_session_idx ON part(session_id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
         """
     )
     return conn
@@ -65,16 +69,49 @@ def add_session(conn, sid, *, title="a title", directory="/tmp/proj"):
 _SEQ = [0]
 
 
-def add_part(conn, sid, *, type="tool", text="", t=None):
+def add_part(conn, sid, *, type="tool", text="", t=None, time_updated=None):
     _SEQ[0] += 1
     n = _SEQ[0]
     data = json.dumps({"type": type, "text": text, "id": f"prt_{n}"})
+    tc = BASE_MS + (t if t is not None else n)
+    tu = BASE_MS if time_updated is None else time_updated
     conn.execute(
         "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)"
         " VALUES (?,?,?,?,?,?)",
-        (f"prt_{n}", f"msg_{n}", sid, BASE_MS + (t if t is not None else n), BASE_MS, data),
+        (f"prt_{n}", f"msg_{n}", sid, tc, tu, data),
     )
     return f"prt_{n}"
+
+
+def update_part(
+    conn: sqlite3.Connection,
+    rowid: int,
+    *,
+    text: str | None = None,
+    type: str | None = None,
+    bump: int = 1_000,
+) -> None:
+    row = conn.execute(
+        "SELECT id, time_created, time_updated, data FROM part WHERE rowid=?", (rowid,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"part rowid {rowid} not found")
+    _pid, _tc, tu, raw_data = row[0], row[1], row[2], row[3]
+    d = json.loads(raw_data)
+    if text is not None:
+        d["text"] = text
+    if type is not None:
+        d["type"] = type
+    new_data = json.dumps(d)
+    new_tu = tu + bump
+    conn.execute(
+        "UPDATE part SET data=?, time_updated=? WHERE rowid=?",
+        (new_data, new_tu, rowid),
+    )
+
+
+def delete_part(conn: sqlite3.Connection, rowid: int) -> None:
+    conn.execute("DELETE FROM part WHERE rowid=?", (rowid,))
 
 
 class Fixture:
@@ -96,18 +133,19 @@ class Fixture:
     def build_index(self, **kw):
         src = oc_search.open_source(self.db)
         try:
+            kw.setdefault("rebuild", False)
+            kw.setdefault("batch", 1_000_000)
+            kw.setdefault("progress", False)
             return oc_search.build_index(
                 src,
                 self.index,
                 self.db,
-                rebuild=kw.get("rebuild", False),
-                batch=kw.get("batch", 1_000_000),
-                progress=False,
+                **kw,
             )
         finally:
             src.close()
 
-    def search(self, *argv) -> tuple[int, str, str]:
+    def search(self, *argv, stats=None) -> tuple[int, str, str]:
         """Run oc-search against this fixture. Last argument is the query.
 
         The query goes after `--` so that a needle beginning with a dash is
@@ -119,14 +157,1159 @@ class Fixture:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = oc_search.run(
                 flags
-                + ["--db", self.db, "--index-path", self.index, "--timeout", "0", "--", query]
+                + ["--db", self.db, "--index-path", self.index, "--timeout", "0", "--", query],
+                stats=stats,
             )
         return rc, out.getvalue(), err.getvalue()
 
-    def sessions(self, *argv) -> list[dict]:
-        rc, out, _ = self.search("--json", *argv)
+    def sessions(self, *argv, stats=None) -> list[dict]:
+        rc, out, _ = self.search("--json", *argv, stats=stats)
         assert rc == 0, rc
         return json.loads(out)
+
+
+class BatchCapTest(unittest.TestCase):
+    def test_default_batch_is_unlimited(self):
+        args = oc_search.parse_args(["hello"])
+        self.assertIsNone(args.index_batch)
+
+    def test_explicit_batch_must_be_positive_int(self):
+        args = oc_search.parse_args(["--index-batch", "42", "hello"])
+        self.assertEqual(args.index_batch, 42)
+
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                oc_search.parse_args(["--index-batch", "0", "hello"])
+
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                oc_search.parse_args(["--index-batch", "-5", "hello"])
+
+    def test_unlimited_batch_completes_in_one_run(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(15):
+                add_part(f.conn, "ses_1", text=f"text_{i}")
+            f.commit()
+            saved = oc_search.READ_CHUNK
+            oc_search.READ_CHUNK = 2
+            try:
+                # With batch=None (default unlimited), all 15 rows are indexed
+                res = f.build_index(batch=None)
+                self.assertEqual(res["indexed"], 15)
+                self.assertTrue(res["up_to_date"])
+            finally:
+                oc_search.READ_CHUNK = saved
+        finally:
+            f.close()
+
+
+class DiskPrecheckTest(unittest.TestCase):
+    def test_estimate_rebuild_without_existing_index(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # 10 rows * 7200 bytes * 1.2 = 86400
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_rebuild_with_small_existing_index_uses_constant(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+            f.build_index()
+
+            # Existing index has 10 rows (< 10_000), so constant 7200 is used
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_rebuild_with_large_existing_index_uses_measured_ratio(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Create mock index with >= 10,000 rows in part_meta
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            conn = oc_search.open_index_rw(f.index)
+            # Insert 10,000 dummy rows into part_meta
+            metas = [(i, f"p_{i}", "s_1", 1000, 1000, "tool") for i in range(1, 10001)]
+            conn.executemany(
+                "INSERT INTO part_meta (rowid_, part_id, session_id, time_created, time_updated, type) "
+                "VALUES (?,?,?,?,?,?)",
+                metas,
+            )
+            conn.commit()
+            conn.close()
+
+            file_size = os.path.getsize(f.index)
+            expected_bytes_per_row = file_size / 10_000
+            expected_need = int(50 * expected_bytes_per_row * 1.2)
+
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, watermark=0, src_max=50
+            )
+            self.assertEqual(need, expected_need)
+        finally:
+            f.close()
+
+    def test_estimate_catchup_uses_pending_rows(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(25):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Catch up from watermark 5 to src_max 25 with batch 10 -> 10 rows
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=5, src_max=25, batch=10
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+
+            # Catch up from watermark 5 to src_max 25 with batch None -> 20 rows
+            need_unlimited = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=5, src_max=25, batch=None
+            )
+            self.assertEqual(need_unlimited, int(20 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_rebuild_capped_by_batch(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Rebuild with 50 rows in part, but batch=10: should cap at 10 rows
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, batch=10, src_max=50
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_catchup_with_rowid_holes_uses_live_count_minus_meta(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(100):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Build index for first 50 rows
+            f.build_index(batch=50)
+
+            # Delete 30 rows in the tail (e.g. items 50..79)
+            # live rows total = 70. meta count = 50.
+            # src_max = 100, watermark = 50. Rowid span = 50.
+            # Live count minus meta = 70 - 50 = 20.
+            f.conn.execute("DELETE FROM part WHERE rowid > 50 AND rowid <= 80")
+            f.commit()
+
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=50, src_max=100, batch=None
+            )
+            # Should estimate 20 rows, not 50
+            self.assertEqual(need, int(20 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_disk_precheck_refusal_and_replacement_credit(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(10):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            need = oc_search.estimate_disk_need(f.conn, f.index, rebuild=True, src_max=10)
+
+            # Case 1: Rebuild where need > free + current_index_size -> refuse
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+
+            # Mock free space to be 1000 bytes (far less than need ~86400)
+            oc_search.shutil.disk_usage = lambda d: Usage(10**12, 10**12 - 1000, 1000)
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    oc_search.check_disk_precheck(f.conn, f.index, rebuild=True, src_max=10)
+                self.assertIn("refusing to index", str(ctx.exception))
+                self.assertIn("reclaimed index", str(ctx.exception))
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+
+            # Case 2: Rebuild where free < need, BUT free + current_index_size >= need -> succeeds!
+            # Create a file of size 100_000 at f.index
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            with open(f.index, "wb") as idx_file:
+                idx_file.write(b"x" * 100_000)
+
+            # Free is only 1,000, but with current_index_size 100,000, available is 101,000 > need (86400)
+            oc_search.shutil.disk_usage = lambda d: Usage(10**12, 10**12 - 1000, 1000)
+            try:
+                # Should not raise SystemExit
+                checked_need = oc_search.check_disk_precheck(
+                    f.conn, f.index, rebuild=True, src_max=10
+                )
+                self.assertEqual(checked_need, need)
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+        finally:
+            f.close()
+
+
+class IndexLockTest(unittest.TestCase):
+    def test_held_lock_prints_message_and_exits_zero(self):
+        import fcntl
+        f = Fixture()
+        try:
+            lock_path = f.index + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = oc_search.run(["--index", "--db", f.db, "--index-path", f.index])
+                self.assertEqual(rc, 0)
+                self.assertIn("already in progress", out.getvalue())
+        finally:
+            f.close()
+
+    def test_unwritable_lock_path_raises_and_is_not_reported_in_progress(self):
+        f = Fixture()
+        lock_path = None
+        try:
+            lock_path = f.index + ".lock"
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            with open(lock_path, "w") as lock_file:
+                lock_file.write("")
+            os.chmod(lock_path, 0o400)
+            out = io.StringIO()
+            with self.assertRaises(PermissionError):
+                with contextlib.redirect_stdout(out):
+                    oc_search.run(["--index", "--db", f.db, "--index-path", f.index])
+            self.assertNotIn("already in progress", out.getvalue())
+        finally:
+            if lock_path is not None:
+                try:
+                    os.chmod(lock_path, 0o600)
+                except Exception:
+                    pass
+            f.close()
+
+
+class BuildModeTest(unittest.TestCase):
+    def test_build_returns_mode(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="item 1")
+            f.commit()
+
+            # Fresh build is a rebuild
+            res1 = f.build_index()
+            self.assertEqual(res1["mode"], "rebuild")
+            self.assertEqual(res1["indexed"], 1)
+
+            # Nothing to do is noop
+            res2 = f.build_index()
+            self.assertEqual(res2["mode"], "noop")
+            self.assertEqual(res2["indexed"], 0)
+
+            # New part added is catchup
+            add_part(f.conn, "ses_1", text="item 2")
+            f.commit()
+            res3 = f.build_index()
+            self.assertEqual(res3["mode"], "catchup")
+            self.assertEqual(res3["indexed"], 1)
+
+            # Explicit rebuild is rebuild
+            res4 = f.build_index(rebuild=True)
+            self.assertEqual(res4["mode"], "rebuild")
+            self.assertEqual(res4["indexed"], 2)
+        finally:
+            f.close()
+
+
+class V1MigrationTest(unittest.TestCase):
+    def test_v1_index_recreated_as_v2_exactly_once(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", type="tool", text="hello world", t=10)
+            f.commit()
+
+            # Create a v1-shaped index manually
+            os.makedirs(os.path.dirname(f.index), exist_ok=True)
+            v1_conn = sqlite3.connect(f.index)
+            v1_conn.executescript(
+                """
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                CREATE VIRTUAL TABLE ft USING fts5(data, tokenize="trigram case_sensitive 1", content='');
+                CREATE TABLE part_meta (
+                  rowid_ INTEGER PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  time_created INTEGER NOT NULL,
+                  type TEXT
+                );
+                """
+            )
+            v1_conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+            v1_conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('source_db', ?)",
+                (os.path.realpath(f.db),),
+            )
+            v1_conn.execute("INSERT INTO meta (key, value) VALUES ('watermark_rowid', '0')")
+            v1_conn.commit()
+            v1_conn.close()
+
+            # Run build_index
+            res1 = f.build_index()
+            self.assertEqual(res1.get("mode"), "rebuild")
+
+            # Check that index is now v2
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            try:
+                self.assertEqual(oc_search.get_meta(idx, "schema_version"), "2")
+                cols = {r[1] for r in idx.execute("PRAGMA table_info(part_meta)").fetchall()}
+                self.assertIn("part_id", cols)
+                self.assertIn("time_updated", cols)
+                tmax_exists = idx.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='tmax'"
+                ).fetchone()[0]
+                self.assertEqual(tmax_exists, 1)
+                sql = idx.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='ft'"
+                ).fetchone()[0]
+                self.assertIn("contentless_delete=1", sql)
+            finally:
+                idx.close()
+
+            # Second build does NOT rebuild again
+            res2 = f.build_index()
+            self.assertEqual(res2.get("mode"), "noop")
+            self.assertEqual(res2["indexed"], 0)
+            self.assertTrue(res2["up_to_date"])
+        finally:
+            f.close()
+
+
+class SchemaV2Test(unittest.TestCase):
+    def test_index_schema_version_is_two(self):
+        self.assertEqual(oc_search.INDEX_SCHEMA_VERSION, 2)
+        self.assertEqual(oc_search.TMAX_SHIFT, 12)
+
+    def test_v2_schema_tables_and_columns(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # ft sql has contentless_delete=1
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='ft'"
+                ).fetchone()[0]
+                self.assertIn("contentless_delete=1", sql)
+
+                # part_meta columns
+                cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(part_meta)").fetchall()
+                }
+                self.assertEqual(
+                    cols,
+                    {"rowid_", "part_id", "session_id", "time_created", "time_updated", "type"},
+                )
+
+                # tmax table
+                tmax_cols = {
+                    r[1] for r in conn.execute("PRAGMA table_info(tmax)").fetchall()
+                }
+                self.assertEqual(tmax_cols, {"bucket", "max_tc"})
+            finally:
+                conn.close()
+
+    def test_build_populates_part_meta_and_tmax(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid1 = add_part(f.conn, "ses_1", type="tool", text="one", t=100, time_updated=BASE_MS + 150)
+            pid2 = add_part(f.conn, "ses_1", type="text", text="two", t=200, time_updated=BASE_MS + 250)
+            f.commit()
+            f.build_index()
+
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            try:
+                pm_rows = idx.execute(
+                    "SELECT rowid_, part_id, session_id, time_created, time_updated, type "
+                    "FROM part_meta ORDER BY rowid_"
+                ).fetchall()
+                self.assertEqual(len(pm_rows), 2)
+                self.assertEqual(pm_rows[0]["part_id"], pid1)
+                self.assertEqual(pm_rows[0]["time_created"], BASE_MS + 100)
+                self.assertEqual(pm_rows[0]["time_updated"], BASE_MS + 150)
+                self.assertEqual(pm_rows[1]["part_id"], pid2)
+                self.assertEqual(pm_rows[1]["time_created"], BASE_MS + 200)
+                self.assertEqual(pm_rows[1]["time_updated"], BASE_MS + 250)
+
+                # Check tmax
+                tmax_rows = idx.execute("SELECT bucket, max_tc FROM tmax").fetchall()
+                self.assertTrue(len(tmax_rows) >= 1)
+                for tr in tmax_rows:
+                    self.assertEqual(tr["max_tc"], BASE_MS + 200)
+
+                # Check tmax_shift recorded in metadata
+                self.assertEqual(oc_search.get_meta(idx, "tmax_shift"), str(oc_search.TMAX_SHIFT))
+            finally:
+                idx.close()
+        finally:
+            f.close()
+
+    def test_tmax_never_lowered(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # Row in bucket 0 with time_created 500
+                r1 = (1, "prt_1", "ses_1", 500, 500, "tool", json.dumps({"text": "hi"}))
+                oc_search.write_rows(conn, [r1])
+                val = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val, 500)
+
+                # Row in bucket 0 with LOWER time_created 300
+                r2 = (2, "prt_2", "ses_1", 300, 300, "tool", json.dumps({"text": "lo"}))
+                oc_search.write_rows(conn, [r2])
+                val2 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val2, 500, "tmax must never be lowered")
+
+                # Row in bucket 0 with HIGHER time_created 800
+                r3 = (3, "prt_3", "ses_1", 800, 800, "tool", json.dumps({"text": "up"}))
+                oc_search.write_rows(conn, [r3])
+                val3 = conn.execute("SELECT max_tc FROM tmax WHERE bucket=0").fetchone()[0]
+                self.assertEqual(val3, 800)
+            finally:
+                conn.close()
+
+    def test_write_rows_enforces_row_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            idx_path = os.path.join(td, "index.db")
+            conn = oc_search.open_index_rw(idx_path)
+            try:
+                # Dict is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [{"rowid": 1}])
+                # Tuple of wrong length is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [(1, "p1", "s1", 100, 100)])
+                # Non-tuple/non-Row is rejected
+                with self.assertRaises(ValueError):
+                    oc_search.write_rows(conn, [42])
+            finally:
+                conn.close()
+
+    def test_behaviour_replace_leaves_no_ghost_posting(self):
+        """Index a row, mutate source row's data at same rowid, rewrite via
+        write_rows, and assert the OLD text no longer matches via FTS.
+
+        Uses an interior rowid with sentinel rows above it, and old/new texts
+        sharing no trigrams, so that plain INSERT leaves a ghost posting and
+        fails this test, whereas INSERT OR REPLACE cleanly replaces it.
+        """
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid1 = add_part(f.conn, "ses_1", type="tool", text="qqqOLDZZZ")
+            # Sentinel rows above row 1 ensure row 1 is an interior rowid
+            add_part(f.conn, "ses_1", type="tool", text="sentinel_row_2")
+            add_part(f.conn, "ses_1", type="tool", text="sentinel_row_3")
+            f.commit()
+            f.build_index()
+
+            # Verify original matches
+            idx = oc_search.open_index_rw(f.index)
+            try:
+                cnt_old = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"qqqOLDZZZ\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_old, 1)
+
+                # Mutate interior source row: old and new text share no trigrams
+                rid1 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid1,)).fetchone()[0]
+                update_part(f.conn, rid1, text="kkkNEWWWW")
+                f.commit()
+
+                # Re-read row and write through write_rows
+                updated = f.conn.execute(
+                    "SELECT rowid, id, session_id, time_created, time_updated, "
+                    "json_extract(data,'$.type') AS type, data FROM part WHERE rowid=?",
+                    (rid1,),
+                ).fetchall()
+                oc_search.write_rows(idx, updated)
+                idx.commit()
+
+                # Assert NEW text matches and OLD text does not match
+                cnt_new = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"kkkNEWWWW\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_new, 1)
+                cnt_old_after = idx.execute(
+                    "SELECT count(*) FROM ft WHERE ft MATCH '\"qqqOLDZZZ\"'"
+                ).fetchone()[0]
+                self.assertEqual(cnt_old_after, 0, "old text must not leave ghost postings")
+            finally:
+                idx.close()
+        finally:
+            f.close()
+
+    def test_source_grep_no_plain_insert_into_ft(self):
+        """Assert oc_search.py contains no INSERT INTO ft that is not INSERT OR REPLACE,
+        and no INSERT INTO ft(ft."""
+        source_path = Path(oc_search.__file__).resolve()
+        content = source_path.read_text(encoding="utf-8")
+
+        import re
+        # Find all occurrences of INSERT INTO ft (ignoring leading 'OR REPLACE' if any)
+        pattern = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+ft\b", re.IGNORECASE)
+        matches = [m.group(0) for m in pattern.finditer(content)]
+        self.assertTrue(len(matches) > 0, "must find at least one ft write in oc_search.py")
+        for m in matches:
+            normalized = " ".join(m.upper().split())
+            self.assertEqual(
+                normalized,
+                "INSERT OR REPLACE INTO FT",
+                f"Forbidden ft insert form: {m!r} in {source_path}",
+            )
+
+        # Control command form INSERT INTO ft(ft is also forbidden
+        control_pattern = re.compile(r"INSERT\s+INTO\s+ft\s*\(\s*ft\b", re.IGNORECASE)
+        self.assertFalse(
+            control_pattern.search(content),
+            "FTS control-command INSERT INTO ft(ft is forbidden",
+        )
+
+
+class ReconcilePlanTest(unittest.TestCase):
+    def test_identity_sweep_plan_uses_covering_index(self):
+        f = Fixture()
+        try:
+            f.build_index()
+            src = oc_search.open_source(f.db)
+            try:
+                clean_idx = f.index.replace("'", "''")
+                src.execute(f"ATTACH 'file:{clean_idx}?mode=ro' AS idx")
+                try:
+                    plan_rows = src.execute(
+                        f"EXPLAIN QUERY PLAN {oc_search.IDENTITY_SWEEP_SQL}",
+                        (10, 100),
+                    ).fetchall()
+                    plan_text = " ".join(str(r[3]) for r in plan_rows)
+                    self.assertIn("COVERING INDEX", plan_text)
+                finally:
+                    src.execute("DETACH idx")
+            finally:
+                src.close()
+        finally:
+            f.close()
+
+    def test_deletes_sweep_plan_uses_list_subquery(self):
+        f = Fixture()
+        try:
+            f.build_index()
+            src = oc_search.open_source(f.db)
+            try:
+                clean_idx = f.index.replace("'", "''")
+                src.execute(f"ATTACH 'file:{clean_idx}?mode=ro' AS idx")
+                try:
+                    plan_rows = src.execute(
+                        f"EXPLAIN QUERY PLAN {oc_search.DELETES_SWEEP_SQL}",
+                        (100,),
+                    ).fetchall()
+                    plan_text = " ".join(str(r[3]) for r in plan_rows)
+                    self.assertIn("LIST SUBQUERY", plan_text)
+                finally:
+                    src.execute("DETACH idx")
+            finally:
+                src.close()
+        finally:
+            f.close()
+
+
+class ReconcileTest(unittest.TestCase):
+    def test_head_row_delete_with_live_rows_above_it_reconciles_and_repoints_watermark(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="head text alpha", t=10)
+            p2 = add_part(f.conn, "ses_1", text="head text beta", t=20)
+            p3 = add_part(f.conn, "ses_1", text="head text gamma", t=30)
+            f.commit()
+            res1 = f.build_index()
+            self.assertEqual(res1["mode"], "rebuild")
+            self.assertTrue(res1["up_to_date"])
+
+            # Delete the head row p3 (which is watermark W)
+            rid3 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p3,)).fetchone()[0]
+            delete_part(f.conn, rid3)
+            # Add live rows above it (explicit rowid 4 and 5 so rowid 3 is not recycled)
+            f.conn.execute(
+                "INSERT INTO part (rowid, id, message_id, session_id, time_created, time_updated, data) "
+                "VALUES (4, 'prt_head_4', 'msg_head_4', 'ses_1', 40, 40, ?)",
+                (json.dumps({"type": "tool", "text": "head text delta", "id": "prt_head_4"}),),
+            )
+            f.conn.execute(
+                "INSERT INTO part (rowid, id, message_id, session_id, time_created, time_updated, data) "
+                "VALUES (5, 'prt_head_5', 'msg_head_5', 'ses_1', 50, 50, ?)",
+                (json.dumps({"type": "tool", "text": "head text epsilon", "id": "prt_head_5"}),),
+            )
+            f.commit()
+
+            res2 = f.build_index()
+            self.assertEqual(res2["mode"], "reconcile")
+            self.assertEqual(res2["reconciled_deleted"], 1)
+            self.assertTrue(res2["up_to_date"])
+
+            # Verify p3 is gone and p4, p5 are indexed
+            self.assertEqual(len(f.sessions("gamma")), 0)
+            self.assertEqual(len(f.sessions("delta")), 1)
+            self.assertEqual(len(f.sessions("epsilon")), 1)
+        finally:
+            f.close()
+
+    def test_true_top_of_table_reuse_reconciles_and_replaces_postings(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="item one oldtext", t=10)
+            p2 = add_part(f.conn, "ses_1", text="item two oldtext", t=20)
+            f.commit()
+            res1 = f.build_index()
+            self.assertEqual(res1["mode"], "rebuild")
+
+            # Delete top row p2
+            rid2 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p2,)).fetchone()[0]
+            delete_part(f.conn, rid2)
+            # Insert a new part which reuses p2's rowid
+            f.conn.execute(
+                "INSERT INTO part (rowid, id, message_id, session_id, time_created, time_updated, data) "
+                "VALUES (?, 'prt_new2', 'msg_new2', 'ses_1', 30, 30, ?)",
+                (rid2, json.dumps({"type": "tool", "text": "item two newtext", "id": "prt_new2"})),
+            )
+            f.commit()
+
+            res2 = f.build_index()
+            self.assertEqual(res2["mode"], "reconcile")
+            self.assertGreaterEqual(res2["reconciled_changed"], 1)
+
+            # Old text gone for row 2, new text found
+            self.assertEqual(len(f.sessions("oldtext")), 1)
+            self.assertEqual(len(f.sessions("newtext")), 1)
+        finally:
+            f.close()
+
+    def test_update_after_indexing_recheck_reindexes(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", text="running tool start", t=10, time_updated=BASE_MS)
+            f.commit()
+            res1 = f.build_index()
+            self.assertEqual(res1["mode"], "rebuild")
+
+            # Update part in place (same rowid, bumped time_updated, new text)
+            rid = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid,)).fetchone()[0]
+            update_part(f.conn, rid, text="running tool finished", bump=5000)
+            f.commit()
+
+            res2 = f.build_index()
+            self.assertEqual(res2["mode"], "reconcile")
+            self.assertEqual(res2["rechecked"], 1)
+
+            # Old text gone, new text indexed
+            self.assertEqual(len(f.sessions("running tool start")), 0)
+            self.assertEqual(len(f.sessions("running tool finished")), 1)
+        finally:
+            f.close()
+
+    def test_mid_session_part_delete_removes_posting(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="common part one", t=10)
+            p2 = add_part(f.conn, "ses_1", text="unique needle to delete", t=20)
+            p3 = add_part(f.conn, "ses_1", text="common part three", t=30)
+            f.commit()
+            f.build_index()
+
+            # Delete mid-session part p2
+            rid2 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p2,)).fetchone()[0]
+            delete_part(f.conn, rid2)
+            f.commit()
+
+            res = f.build_index()
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertEqual(res["reconciled_deleted"], 1)
+
+            # Unlimited search count equals --no-index
+            indexed_matches = f.sessions("unique needle to delete")
+            scanned_matches = f.sessions("--no-index", "unique needle to delete")
+            self.assertEqual(indexed_matches, scanned_matches)
+            self.assertEqual(len(indexed_matches), 0)
+        finally:
+            f.close()
+
+    def test_renumber_exceeding_reconcile_max_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="item 1", t=10)
+            p2 = add_part(f.conn, "ses_1", text="item 2", t=20)
+            p3 = add_part(f.conn, "ses_1", text="item 3", t=30)
+            f.commit()
+            f.build_index()
+
+            # Change ids of rows
+            f.conn.execute("UPDATE part SET id=id || '_renumbered'")
+            f.commit()
+
+            # Reconcile with reconcile_max=2 (3 changed > 2) forces rebuild
+            res = f.build_index(reconcile_max=2)
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_deletes_exceeding_delete_max_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="item 1", t=10)
+            p2 = add_part(f.conn, "ses_1", text="item 2", t=20)
+            p3 = add_part(f.conn, "ses_1", text="item 3", t=30)
+            f.commit()
+            f.build_index()
+
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            delete_part(f.conn, rids[0])
+            delete_part(f.conn, rids[1])
+            f.commit()
+
+            # delete_max=1 (2 deleted > 1) forces rebuild
+            res = f.build_index(delete_max=1)
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_delete_fraction_max_constant(self):
+        self.assertEqual(oc_search.DELETE_FRACTION_MAX, 0.10)
+
+    def test_reconcile_commit_every_constant(self):
+        self.assertEqual(oc_search.RECONCILE_COMMIT_EVERY, 5_000)
+
+    def test_deletes_exceeding_delete_fraction_max_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 10 parts (20% > default DELETE_FRACTION_MAX 10%)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:10]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            # Default delete_fraction_max=0.10 forces rebuild
+            res = f.build_index()
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_injected_delete_fraction_max_allows_reconcile(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 10 parts (20%)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:10]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            # Injected delete_fraction_max=0.30 (20% <= 30%) allows reconcile
+            res = f.build_index(delete_fraction_max=0.30)
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertEqual(res["reconciled_deleted"], 10)
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_reconcile_disk_guard_stops_when_free_space_low(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(20):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 6 parts
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:6]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+            # Return low disk (< 5 GB) during reconcile chunk check
+            calls = [0]
+            def fake_usage(d):
+                calls[0] += 1
+                # First call is precheck (give plenty of space), subsequent calls return 1 GB
+                if calls[0] <= 1:
+                    return Usage(10**12, 10**11, 10**11)
+                return Usage(10**12, 10**12 - 10**9, 10**9)
+
+            oc_search.shutil.disk_usage = fake_usage
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    f.build_index(reconcile_commit_every=2, delete_fraction_max=1.0)
+                self.assertIn("stopping index reconcile: less than 5 GB free", str(ctx.exception))
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+        finally:
+            f.close()
+
+    def test_interrupted_reconcile_is_safe_for_queries_and_next_run(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(30):
+                add_part(f.conn, "ses_1", text=f"part_content_{i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Verify initial watermark is 30
+            init_idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(init_idx)
+            init_w = int(oc_search.get_meta(init_idx, "watermark_rowid"))
+            init_idx.close()
+            self.assertEqual(init_w, 30)
+
+            # Delete the watermark row (30) and rows 25..29 (6 rows total)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[24:]:  # rowids 25..30
+                delete_part(f.conn, r)
+            # Also add parts 31, 32
+            add_part(f.conn, "ses_1", text="new_part_content_31", t=50)
+            add_part(f.conn, "ses_1", text="new_part_content_32", t=51)
+            f.commit()
+
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+            # Stop reconcile after first commit of deletes (commit_every=2)
+            calls = [0]
+            def fake_usage(d):
+                calls[0] += 1
+                if calls[0] <= 1:
+                    return Usage(10**12, 10**11, 10**11)
+                return Usage(10**12, 10**12 - 10**9, 10**9)
+
+            oc_search.shutil.disk_usage = fake_usage
+            try:
+                with self.assertRaises(SystemExit):
+                    f.build_index(reconcile_commit_every=2, delete_fraction_max=1.0)
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+
+            # 1. Inspect the partial index: watermark must NOT point to a nonexistent row in part_meta
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            partial_w = int(oc_search.get_meta(idx, "watermark_rowid"))
+            # Watermark must exist in part_meta (or be 0)
+            if partial_w > 0:
+                row_in_pm = idx.execute("SELECT 1 FROM part_meta WHERE rowid_ = ?", (partial_w,)).fetchone()
+                self.assertIsNotNone(row_in_pm, f"watermark {partial_w} points to a row that was deleted from part_meta")
+            idx.close()
+
+            # 2. Queries on partial index return exact same results as --no-index
+            res_indexed = f.sessions("part_content")
+            res_scanned = f.sessions("--no-index", "part_content")
+            self.assertEqual(res_indexed, res_scanned)
+
+            new_indexed = f.sessions("new_part_content")
+            new_scanned = f.sessions("--no-index", "new_part_content")
+            self.assertEqual(new_indexed, new_scanned)
+            self.assertEqual(len(new_indexed), 1)
+
+            # 3. Next index run finishes successfully and brings index up to date
+            next_res = f.build_index(delete_fraction_max=1.0)
+            self.assertTrue(next_res["up_to_date"])
+
+            # 4. Searches after completion match --no-index exactly
+            res_indexed_final = f.sessions("part_content")
+            res_scanned_final = f.sessions("--no-index", "part_content")
+            self.assertEqual(res_indexed_final, res_scanned_final)
+        finally:
+            f.close()
+
+    def test_mass_deletes_under_delete_max_reconciles_not_rebuilds(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            parts = [add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i) for i in range(10)]
+            f.commit()
+            f.build_index()
+
+            # Delete 5 parts
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:5]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            # delete_max=10 (5 <= 10) reconciles, not rebuilds (with delete_fraction_max=1.0)
+            res = f.build_index(delete_max=10, delete_fraction_max=1.0)
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertEqual(res["reconciled_deleted"], 5)
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_concurrent_delete_between_sweep_and_reread_repoints_watermark(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="item 1", t=10)
+            p2 = add_part(f.conn, "ses_1", text="item 2", t=20)
+            p3 = add_part(f.conn, "ses_1", text="item 3", t=30)
+            f.commit()
+            f.build_index()
+
+            # Update p3 so it will be in changed identity / recheck
+            rid3 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p3,)).fetchone()[0]
+            update_part(f.conn, rid3, text="item 3 updated", bump=1000)
+            f.commit()
+
+            # A probe that intercepts the source connection:
+            # right after DETACH idx, delete the watermark row (p3) from the source DB
+            class ConcurrentDeleteWrapper:
+                def __init__(self, conn, fixture):
+                    self._conn = conn
+                    self._fixture = fixture
+
+                def __getattr__(self, name):
+                    return getattr(self._conn, name)
+
+                def execute(self, sql, *args, **kw):
+                    res = self._conn.execute(sql, *args, **kw)
+                    if "DETACH idx" in sql:
+                        # Sweep just finished; delete p3 before chunked re-read
+                        self._fixture.conn.execute("DELETE FROM part WHERE rowid=?", (rid3,))
+                        self._fixture.conn.commit()
+                    return res
+
+            src = ConcurrentDeleteWrapper(oc_search.open_source(f.db), f)
+            try:
+                res = oc_search.build_index(
+                    src, f.index, f.db, rebuild=False, progress=False
+                )
+            finally:
+                src.close()
+
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertGreaterEqual(res["reconciled_deleted"], 1)
+            # Watermark must have been re-pointed to row 2
+            self.assertEqual(res["watermark"], 2)
+
+            # Confirm in index meta as well
+            idx = oc_search.open_index_ro(f.index)
+            self.assertEqual(int(oc_search.get_meta(idx, "watermark_rowid")), 2)
+            idx.close()
+        finally:
+            f.close()
+
+    def test_attach_uri_with_special_characters_in_index_path(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="special path text", t=10)
+            f.commit()
+
+            special_dir = os.path.join(f.dir.name, "special ?#% dir with spaces")
+            os.makedirs(special_dir, exist_ok=True)
+            special_idx = os.path.join(special_dir, "my?#% index file.db")
+
+            src1 = oc_search.open_source(f.db)
+            try:
+                res1 = oc_search.build_index(
+                    src1, special_idx, f.db, rebuild=True, progress=False
+                )
+            finally:
+                src1.close()
+            self.assertEqual(res1["mode"], "rebuild")
+
+            # Add another part and run reconcile/catchup
+            add_part(f.conn, "ses_1", text="more special path text", t=20)
+            f.commit()
+
+            res2 = oc_search.build_index(
+                oc_search.open_source(f.db), special_idx, f.db, rebuild=False, progress=False
+            )
+            self.assertIn(res2["mode"], ("catchup", "noop", "reconcile"))
+            self.assertTrue(res2["up_to_date"])
+        finally:
+            f.close()
+
+    def test_tmax_shift_mismatch_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="item 1")
+            f.commit()
+            f.build_index()
+
+            idx = oc_search.open_index_rw(f.index)
+            try:
+                oc_search.set_meta(idx, "tmax_shift", 999)
+                idx.commit()
+            finally:
+                idx.close()
+
+            res = f.build_index()
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_chunk_boundary_mismatch_during_rebuild_reports_mode_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(6):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+
+            state = {"fired": False}
+
+            class BoundaryProbe(_CheckpointProbe):
+                def probe(self):
+                    if not state["fired"]:
+                        state["fired"] = True
+                        # Alter a boundary row under the scan
+                        f.conn.execute("UPDATE part SET id='prt_mismatch' WHERE rowid=2")
+                        f.conn.commit()
+
+            probe = BoundaryProbe(oc_search.open_source(f.db), f.db)
+            saved = oc_search.READ_CHUNK
+            oc_search.READ_CHUNK = 2
+            try:
+                res = oc_search.build_index(
+                    probe, f.index, f.db, rebuild=True, progress=False
+                )
+            finally:
+                oc_search.READ_CHUNK = saved
+                probe.close()
+
+            self.assertFalse(res["up_to_date"])
+            self.assertEqual(res["mode"], "rebuild")
+        finally:
+            f.close()
+
+
+class FixtureHelpersTest(unittest.TestCase):
+    def test_make_db_has_production_indexes(self):
+        f = Fixture()
+        try:
+            indexes = {
+                r[0]
+                for r in f.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            self.assertIn("part_session_idx", indexes)
+            self.assertIn("part_message_id_id_idx", indexes)
+        finally:
+            f.close()
+
+    def test_add_part_supports_time_updated(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", time_updated=BASE_MS + 9999)
+            row = f.conn.execute(
+                "SELECT time_created, time_updated FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            self.assertEqual(row[1], BASE_MS + 9999)
+        finally:
+            f.close()
+
+    def test_update_part_helper(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", type="tool", text="original")
+            row = f.conn.execute(
+                "SELECT rowid, time_created, time_updated, data FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            rid, tc, tu, data = row[0], row[1], row[2], json.loads(row[3])
+            self.assertEqual(data["text"], "original")
+            self.assertEqual(data["type"], "tool")
+
+            update_part(f.conn, rid, text="updated text", type="text", bump=5000)
+            updated_row = f.conn.execute(
+                "SELECT time_created, time_updated, data FROM part WHERE id=?", (pid,)
+            ).fetchone()
+            up_tc, up_tu, up_data = updated_row[0], updated_row[1], json.loads(updated_row[2])
+            self.assertEqual(up_tc, tc, "time_created must not change")
+            self.assertEqual(up_tu, tu + 5000, "time_updated must bump")
+            self.assertEqual(up_data["text"], "updated text")
+            self.assertEqual(up_data["type"], "text")
+            self.assertEqual(up_data["id"], pid, "part id must be preserved")
+        finally:
+            f.close()
+
+    def test_delete_part_helper(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            pid = add_part(f.conn, "ses_1", text="to delete")
+            rid = f.conn.execute("SELECT rowid FROM part WHERE id=?", (pid,)).fetchone()[0]
+            delete_part(f.conn, rid)
+            count = f.conn.execute("SELECT count(*) FROM part WHERE rowid=?", (rid,)).fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            f.close()
 
 
 class ParseArgsTest(unittest.TestCase):
@@ -288,11 +1471,12 @@ class IndexTest(unittest.TestCase):
         self.f.build_index(rebuild=True, batch=1)
         src = oc_search.open_source(self.f.db)
         idx = oc_search.open_index_ro(self.f.index)
-        usable, watermark, reason = oc_search.index_validity(src, idx, self.f.db)
+        assert idx is not None
+        val = oc_search.index_validity(src, idx, self.f.db)
         idx.close()
         src.close()
-        self.assertTrue(usable, reason)
-        self.assertGreater(watermark, 0)
+        self.assertTrue(val.usable, val.reason)
+        self.assertGreater(val.watermark, 0)
         rows = self.f.sessions("FbmEmployeeCutoffRepublish")
         self.assertEqual({r["id"] for r in rows}, {"ses_a", "ses_b"})
 
@@ -317,21 +1501,20 @@ class IndexTest(unittest.TestCase):
         self.assertIn("different opencode.db", err)
         self.assertIn("ses_a", out)  # still correct, via the fallback scan
 
-    def test_watermark_row_replaced_invalidates_the_index(self):
-        """Guards the one way rowid reuse could hide a match.
-
-        SQLite only recycles a rowid at the top of the table, so a deletion
-        that could shadow indexed content necessarily changes the watermark
-        row. Rewriting it here stands in for "the newest sessions were deleted
-        and new parts took their rowids".
+    def test_watermark_row_replaced_reconciles_the_index(self):
+        """When the watermark row is replaced, build_index reconciles rather
+        than rebuilding from scratch, and results are correct.
         """
         self.f.build_index()
         self.f.conn.execute(
             "UPDATE part SET id='prt_impostor' WHERE rowid=(SELECT MAX(rowid) FROM part)"
         )
         self.f.commit()
-        _, _, err = self.f.search("FbmEmployeeCutoffRepublish")
-        self.assertIn("must be rebuilt", err)
+        res = self.f.build_index()
+        self.assertEqual(res["mode"], "reconcile")
+        self.assertEqual(res["reconciled_changed"], 1)
+        rows = self.f.sessions("FbmEmployeeCutoffRepublish")
+        self.assertEqual({r["id"]: r["matches"] for r in rows}, {"ses_a": 1, "ses_b": 1})
 
     def test_short_query_falls_back_and_says_why(self):
         self.f.build_index()
@@ -343,6 +1526,314 @@ class IndexTest(unittest.TestCase):
         _, out, err = self.f.search("--no-index", "FbmEmployeeCutoffRepublish")
         self.assertIn("no usable index", err)
         self.assertIn("ses_a", out)
+
+
+class QueryDirtySetTest(unittest.TestCase):
+    """Query path uses the index read-only with a dirty set (Task 3)."""
+
+    def setUp(self):
+        self.f = Fixture()
+
+    def tearDown(self):
+        self.f.close()
+
+    def test_head_delete_before_reindex_uses_index_and_matches_no_index(self):
+        """Head (W) delete then query before reindexing: index is still used
+        (no fallback warning on stderr), results equal --no-index.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="CommonNeedle row1")
+        add_part(self.f.conn, "ses_b", type="tool", text="CommonNeedle row2")
+        add_part(self.f.conn, "ses_b", type="tool", text="CommonNeedle and HeadNeedleOnly")
+        self.f.commit()
+
+        self.f.build_index()
+        w_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+
+        # Delete the watermark row in the live database, but do NOT re-index.
+        delete_part(self.f.conn, w_rowid)
+        self.f.commit()
+
+        # Query for CommonNeedle: index should still be used (no fallback warning)
+        rc, out, err = self.f.search("CommonNeedle")
+        self.assertEqual(rc, 0)
+        err_lower = err.lower()
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err_lower, f"Unexpected fallback: {err}")
+
+        # Results must equal --no-index
+        got_indexed = self.f.sessions("CommonNeedle")
+        got_scanned = self.f.sessions("--no-index", "CommonNeedle")
+        self.assertEqual(got_indexed, got_scanned)
+        self.assertEqual({r["id"] for r in got_indexed}, {"ses_a", "ses_b"})
+        # ses_b should only have 1 match now, not 2
+        matches_by_id = {r["id"]: r["matches"] for r in got_indexed}
+        self.assertEqual(matches_by_id, {"ses_a": 1, "ses_b": 1})
+
+        # Query for HeadNeedleOnly: deleted row was the only match, so nothing should be found
+        self.assertEqual(self.f.sessions("HeadNeedleOnly"), [])
+
+    def test_top_reuse_before_reindex(self):
+        """Top-of-table reuse then query before reindex: old text not found,
+        new text found, index still used.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="AlphaNeedle preserved")
+        add_part(self.f.conn, "ses_b", type="tool", text="OldTopText to be replaced")
+        self.f.commit()
+        self.f.build_index()
+
+        w_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        delete_part(self.f.conn, w_rowid)
+        self.f.commit()
+
+        add_session(self.f.conn, "ses_c")
+        add_part(self.f.conn, "ses_c", type="tool", text="NewTopText freshly inserted")
+        self.f.commit()
+        new_rowid = self.f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        self.assertEqual(new_rowid, w_rowid, "Top-of-table must reuse the rowid")
+
+        # Query for old text: must NOT be found (unlimited and --limit)
+        self.assertEqual(self.f.sessions("OldTopText"), [])
+        self.assertEqual(self.f.sessions("--limit", "1", "OldTopText"), [])
+
+        # Query for new text: must be found, and index must still be used
+        rc, out, err = self.f.search("NewTopText")
+        self.assertEqual(rc, 0)
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err.lower(), f"Unexpected fallback: {err}")
+
+        rows = self.f.sessions("NewTopText")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_c")
+
+        # Also with --limit
+        limit_rows = self.f.sessions("--limit", "1", "NewTopText")
+        self.assertEqual(len(limit_rows), 1)
+        self.assertEqual(limit_rows[0]["id"], "ses_c")
+
+    def test_update_part_on_indexed_row_before_reindex(self):
+        """update_part on an indexed row then query before reindex: new text found,
+        old text not found (unlimited and --limit).
+        """
+        add_session(self.f.conn, "ses_a")
+        add_session(self.f.conn, "ses_b")
+        add_part(self.f.conn, "ses_a", type="tool", text="BackgroundPart preserved")
+        add_part(self.f.conn, "ses_b", type="tool", text="BeforeMutationText waiting for update")
+        add_part(self.f.conn, "ses_b", type="tool", text="TopWatermarkRow keeping ceiling")
+        self.f.commit()
+        self.f.build_index()
+
+        target_rowid = self.f.conn.execute(
+            "SELECT rowid FROM part WHERE instr(data, 'BeforeMutationText') > 0"
+        ).fetchone()[0]
+
+        update_part(self.f.conn, target_rowid, text="AfterMutationText now updated")
+        self.f.commit()
+
+        # Query old text: neither unlimited nor --limit finds it
+        self.assertEqual(self.f.sessions("BeforeMutationText"), [])
+        self.assertEqual(self.f.sessions("--limit", "1", "BeforeMutationText"), [])
+
+        # Query new text: both unlimited and --limit find it, index is used
+        rc, out, err = self.f.search("AfterMutationText")
+        self.assertEqual(rc, 0)
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.assertNotIn(forbidden, err.lower(), f"Unexpected fallback: {err}")
+
+        rows = self.f.sessions("AfterMutationText")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "ses_b")
+
+        limit_rows = self.f.sessions("--limit", "1", "AfterMutationText")
+        self.assertEqual(len(limit_rows), 1)
+        self.assertEqual(limit_rows[0]["id"], "ses_b")
+
+    def test_window_no_identity_match_falls_back_with_warning(self):
+        """A window where no row matches identity (e.g. renumber the whole table)
+        falls back with a warning, results still correct.
+        """
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="RenumberedNeedle here")
+        self.f.commit()
+        self.f.build_index()
+
+        # Renumber all parts in the table so zero rows match identity
+        self.f.conn.execute("UPDATE part SET id = 'prt_alien_' || rowid")
+        self.f.commit()
+
+        rc, out, err = self.f.search("RenumberedNeedle")
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            "index unusable" in err.lower() or "falling back" in err.lower(),
+            f"Expected fallback warning, got: {err}",
+        )
+        got_fallback = self.f.sessions("RenumberedNeedle")
+        got_scanned = self.f.sessions("--no-index", "RenumberedNeedle")
+        self.assertEqual(got_fallback, got_scanned)
+        self.assertEqual(len(got_fallback), 1)
+        self.assertEqual(got_fallback[0]["id"], "ses_a")
+
+    def test_index_side_snapshot_prevents_double_counting(self):
+        """Simulate an indexer commit between meta read and FTS query:
+        Wrapping get_meta so the first watermark_rowid read triggers an indexer
+        commit via a separate rw connection. With snapshot isolation beginning
+        at the very entry of index_validity (and ft.rowid <= watermark), the query
+        does not see the newly committed rows in the index, preventing double-counting.
+        """
+        add_session(self.f.conn, "ses_a")
+        for i in range(5):
+            add_part(self.f.conn, "ses_a", type="tool", text=f"SnapshotNeedle initial {i}")
+        self.f.commit()
+        self.f.build_index()
+
+        # Add 5 more parts to the source table
+        for i in range(5):
+            add_part(self.f.conn, "ses_a", type="tool", text=f"SnapshotNeedle added {i}")
+        self.f.commit()
+
+        orig_get_meta = oc_search.get_meta
+        fired = False
+
+        def hooked_get_meta(conn, key):
+            res = orig_get_meta(conn, key)
+            nonlocal fired
+            if key == "watermark_rowid" and not fired:
+                fired = True
+                # Separate writer connection commits rows 6..10 to index
+                writer = oc_search.open_index_rw(self.f.index)
+                src_conn = oc_search.open_source(self.f.db)
+                new_rows = src_conn.execute(
+                    "SELECT rowid, id, session_id, time_created, time_updated, json_extract(data, '$.type') AS type, data "
+                    "FROM part WHERE rowid > 5 ORDER BY rowid"
+                ).fetchall()
+                oc_search.write_rows(writer, new_rows)
+                oc_search.set_meta(writer, "watermark_rowid", 10)
+                oc_search.set_meta(writer, "watermark_part_id", new_rows[-1]["id"])
+                writer.commit()
+                writer.close()
+                src_conn.close()
+            return res
+
+        with mock.patch("oc_search.get_meta", side_effect=hooked_get_meta):
+            rows = self.f.sessions("SnapshotNeedle")
+            scanned = self.f.sessions("--no-index", "SnapshotNeedle")
+            self.assertEqual(rows, scanned)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(
+                rows[0]["matches"],
+                10,
+                f"Expected exactly 10 matches without double counting, got {rows[0]['matches']}",
+            )
+
+    def test_database_error_on_index_falls_back_with_warning(self):
+        """A DatabaseError on the index falls back with a warning and correct results."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="ResilientNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        def broken_validity(*args, **kwargs):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        with mock.patch("oc_search.index_validity", side_effect=broken_validity):
+            rc, out, err = self.f.search("ResilientNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("falling back", err.lower())
+            rows = json.loads(self.f.search("--json", "ResilientNeedle")[1])
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
+
+    def test_database_error_during_search_recent_abandons_idx_and_falls_back(self):
+        """DatabaseError during search_recent FTS query ends txn, closes idx, and falls back."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="RecentErrorNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        orig_open_index_ro = oc_search.open_index_ro
+
+        class FaultyConn:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def execute(self, sql, *args):
+                if "FROM ft" in sql:
+                    raise sqlite3.DatabaseError("index disk I/O error")
+                return self._real.execute(sql, *args)
+
+        def faulty_open_index_ro(path, deadline=None):
+            real = orig_open_index_ro(path, deadline)
+            return FaultyConn(real) if real is not None else None
+
+        with mock.patch("oc_search.open_index_ro", side_effect=faulty_open_index_ro):
+            rc, out, err = self.f.search("--limit", "1", "RecentErrorNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("index error: index disk I/O error", err)
+            self.assertIn("falling back to a newest-first scan", err.lower())
+            rows = self.f.sessions("--limit", "1", "RecentErrorNeedle")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
+
+    def test_database_error_during_search_indexed_abandons_idx_and_falls_back(self):
+        """DatabaseError during search_indexed ends txn, closes idx, and falls back."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="IndexedErrorNeedle content")
+        self.f.commit()
+        self.f.build_index()
+
+        def broken_search_indexed(*args, **kwargs):
+            raise sqlite3.DatabaseError("corrupt index table")
+
+        with mock.patch("oc_search.search_indexed", side_effect=broken_search_indexed):
+            rc, out, err = self.f.search("IndexedErrorNeedle")
+            self.assertEqual(rc, 0)
+            self.assertIn("index error: corrupt index table", err)
+            self.assertIn("falling back to a full scan", err.lower())
+            rows = self.f.sessions("IndexedErrorNeedle")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "ses_a")
+
+    def test_short_query_does_not_call_index_validity(self):
+        """Short query (< MIN_TRIGRAM_LEN) falls back without reading window in index_validity."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="Fb is short")
+        self.f.commit()
+        self.f.build_index()
+
+        with mock.patch("oc_search.index_validity") as mock_validity:
+            rc, out, err = self.f.search("Fb")
+            self.assertEqual(rc, 0)
+            self.assertIn("trigram index", err)
+            mock_validity.assert_not_called()
+
+    def test_tmax_shift_mismatch_in_index_validity_reports_unusable(self):
+        add_session(self.f.conn, "ses_1")
+        add_part(self.f.conn, "ses_1", text="hello")
+        self.f.commit()
+        self.f.build_index()
+
+        idx = oc_search.open_index_rw(self.f.index)
+        try:
+            oc_search.set_meta(idx, "tmax_shift", 999)
+            idx.commit()
+        finally:
+            idx.close()
+
+        idx_ro = oc_search.open_index_ro(self.f.index)
+        self.assertIsNotNone(idx_ro)
+        assert idx_ro is not None
+        try:
+            val = oc_search.index_validity(self.f.conn, idx_ro, self.f.db)
+            self.assertFalse(val.usable)
+            self.assertEqual(val.reason, "tmax_shift mismatch")
+        finally:
+            idx_ro.close()
 
 
 class EquivalenceTest(unittest.TestCase):
@@ -515,6 +2006,28 @@ class IndexInfoTest(unittest.TestCase):
         self.assertGreaterEqual(info["unindexed_rows_estimate"], 1)
         f.close()
 
+    def test_reports_usable_with_dirty_count_after_w_delete(self):
+        f = Fixture()
+        add_session(f.conn, "ses_a")
+        add_part(f.conn, "ses_a", type="tool", text="first part")
+        add_part(f.conn, "ses_a", type="tool", text="second part")
+        f.commit()
+        f.build_index()
+
+        w_rowid = f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+        delete_part(f.conn, w_rowid)
+        f.commit()
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = oc_search.run(["--index-info", "--db", f.db, "--index-path", f.index])
+        self.assertEqual(rc, 0)
+        info = json.loads(out.getvalue())
+        self.assertTrue(info["usable"])
+        self.assertEqual(info["watermark"], w_rowid)
+        self.assertEqual(info["dirty_count"], 1)
+        f.close()
+
 
 class IfExistsTest(unittest.TestCase):
     """The timer must never create an 11 GB index nobody asked for."""
@@ -560,6 +2073,31 @@ class Fts5CapabilityTest(unittest.TestCase):
         """
         ok, why = oc_search.fts5_trigram_available()
         self.assertTrue(ok, why)
+
+    def test_fails_loudly_when_contentless_delete_fails(self):
+        """Simulate an SQLite where contentless_delete=1 is ignored or unsupported."""
+        real_connect = sqlite3.connect
+
+        class FakeConn:
+            def __init__(self, *a, **kw):
+                self._c = real_connect(":memory:")
+
+            def execute(self, sql, *args):
+                # Strip contentless_delete=1 to simulate older SQLite
+                if "contentless_delete=1" in sql:
+                    raise sqlite3.OperationalError("unknown option: contentless_delete")
+                return self._c.execute(sql, *args)
+
+            def close(self):
+                self._c.close()
+
+        oc_search.sqlite3.connect = FakeConn
+        try:
+            ok, why = oc_search.fts5_trigram_available()
+            self.assertFalse(ok)
+            self.assertIn("contentless_delete", why)
+        finally:
+            oc_search.sqlite3.connect = real_connect
 
 
 class MissingDatabaseTest(unittest.TestCase):
@@ -716,33 +2254,41 @@ class SourceReadTransactionTest(unittest.TestCase):
         rows = self.f.sessions("FbmEmployeeCutoffRepublish")
         self.assertEqual({r["id"]: r["matches"] for r in rows}, {"ses_a": 12})
 
-    def test_rowid_reuse_between_chunks_forces_a_rebuild(self):
-        """The hazard chunking introduces, and the reason it is checked rather
-        than argued away.
+    def test_checkpoint_can_run_during_sweep_and_reconcile(self):
+        self.f.build_index()
+        # Mutate parts: update one, delete one, add one
+        pids = [r[0] for r in self.f.conn.execute("SELECT id FROM part").fetchall()]
+        rid1 = self.f.conn.execute("SELECT rowid FROM part WHERE id=?", (pids[0],)).fetchone()[0]
+        update_part(self.f.conn, rid1, text="updated text", bump=5000)
+        rid2 = self.f.conn.execute("SELECT rowid FROM part WHERE id=?", (pids[1],)).fetchone()[0]
+        delete_part(self.f.conn, rid2)
+        add_part(self.f.conn, "ses_a", text="brand new tail part")
+        self.f.commit()
 
-        `part` has a TEXT primary key, so its rowid is implicit and SQLite
-        reuses rowids below the maximum after deletes. On cloudbox max(rowid)
-        exceeds count(*) by ~466,000 and session deletes cascade routinely, so
-        this is a live condition, not a thought experiment.
+        probe = _CheckpointProbe(oc_search.open_source(self.f.db), self.f.db)
+        try:
+            res = oc_search.build_index(
+                probe, self.f.index, self.f.db,
+                rebuild=False, batch=1_000_000, progress=False,
+            )
+        finally:
+            probe.close()
 
-        The index normally sits at the head of the table, so a chunk boundary IS
-        the live max rowid. Delete the head rows between two chunk statements and
-        let new parts reuse those rowids, and chunk k has already indexed the OLD
-        contents of rows that now belong to somebody else while chunk k+1 reads
-        only past the boundary. index_validity() cannot see it: it checks the
-        FINAL watermark row, which is past the damage and perfectly consistent.
+        self.assertEqual(res["mode"], "reconcile")
+        self.assertGreater(len(probe.busy_results), 0, "probe never fired during sweep")
+        self.assertEqual(
+            [b for b in probe.busy_results if b != 0], [],
+            "wal_checkpoint(TRUNCATE) reported busy during sweep/reconcile -- read transaction still open",
+        )
 
-        The old single-snapshot scan was immune, so this is a regression this
-        change had to pay for. The interleaving is injected through the probe, at
-        the one instant it matters -- between a chunk's fetch and the next.
+    def test_rowid_reuse_between_chunks_stops_and_repairs_on_next_run(self):
+        """The hazard chunking introduces: rowid reuse at a chunk boundary.
+
+        When a boundary row changes under the scan, build_index stops and reports
+        MORE REMAINS (up_to_date=False) with the last valid chunk committed as
+        watermark. The next run's sweep reconciles the changed/deleted boundary
+        rows and catches up to the head of the table.
         """
-        # 12 rows at READ_CHUNK=2 = 6 chunks. Fire after the LAST of them, so
-        # the victim rows are already in the index when they are recycled. An
-        # earlier version of this test fired at chunk 3, before those rows had
-        # been read at all -- the next chunk then simply picked up the new
-        # contents, no damage occurred, and the test passed with or without the
-        # boundary check. A regression test that cannot fail is worse than none,
-        # because it certifies the thing it never examined.
         victim_rowids = [
             r[0] for r in self.f.conn.execute(
                 "SELECT rowid FROM part ORDER BY rowid DESC LIMIT 4"
@@ -772,8 +2318,7 @@ class SourceReadTransactionTest(unittest.TestCase):
                                      "id": f"prt_reused_{rid}"})),
                     )
                 # ...and append past the boundary, so the scan keeps going and
-                # finishes on a watermark row that is perfectly consistent. That
-                # is what makes the corruption invisible to index_validity().
+                # finishes on a watermark row that is perfectly consistent.
                 for k in (1, 2):
                     add_part(c, "ses_a", type="tool", text=f"tail{k} NEWCONTENT")
                 c.commit()
@@ -782,7 +2327,7 @@ class SourceReadTransactionTest(unittest.TestCase):
         saved = oc_search.READ_CHUNK
         oc_search.READ_CHUNK = 2
         try:
-            oc_search.build_index(
+            res1 = oc_search.build_index(
                 probe, self.f.index, self.f.db,
                 rebuild=True, batch=1_000_000, progress=False,
             )
@@ -791,10 +2336,13 @@ class SourceReadTransactionTest(unittest.TestCase):
             probe.close()
 
         self.assertTrue(state["fired"], "the interleaving never happened")
-        # The index must agree with the database, not with what the database
-        # used to say. Without the boundary check the recycled rowids keep their
-        # pre-delete contents forever, and the tail scan cannot help because the
-        # watermark has already advanced past them.
+        self.assertFalse(res1["up_to_date"], "chunk boundary mismatch must report MORE REMAINS (up_to_date=False)")
+
+        # Next run repairs the index via sweep/reconcile and catches up to date
+        res2 = self.f.build_index()
+        self.assertTrue(res2["up_to_date"], "next run must complete and be up to date")
+        self.assertEqual(res2["mode"], "reconcile")
+
         truth = self.f.conn.execute(
             "SELECT count(*) FROM part WHERE data LIKE '%NEWCONTENT%'"
         ).fetchone()[0]
@@ -880,10 +2428,18 @@ class LimitFastPathTest(unittest.TestCase):
         self.f.build_index(rebuild=True, batch=total // 2)
         self.assert_limit_is_a_prefix()
 
-    def test_prefix_with_invalid_index(self):
+    def test_prefix_with_dirty_watermark_row(self):
         self.f.build_index()
         self.f.conn.execute(
             "UPDATE part SET id='prt_impostor' WHERE rowid=(SELECT MAX(rowid) FROM part)"
+        )
+        self.f.commit()
+        self.assert_limit_is_a_prefix()
+
+    def test_prefix_with_invalid_index(self):
+        self.f.build_index()
+        self.f.conn.execute(
+            "UPDATE part SET id='prt_impostor_' || rowid"
         )
         self.f.commit()
         self.assert_limit_is_a_prefix()
@@ -992,15 +2548,14 @@ class LimitFastPathTest(unittest.TestCase):
             f.close()
 
     def test_bulk_inserted_block_picks_by_insertion_order(self):
-        """The documented limit of the early stop, pinned so it cannot drift.
+        """With a usable index, --limit picks the exact newest sessions.
 
         cloudbox has a ~100k-row block bulk-inserted in reverse chronological
         order (rowids ~852k-955k, 2026-06-07). Walking by rowid meets the
-        OLDER session first there, so `--limit 1` picks it rather than the
-        session with the newest match. What must still hold: every returned
-        row is a real match with exactly the unlimited path's count and
-        last_match. When gqt3.3 adds a time-bounded stop rule, flip the first
-        assertion to `== full[:1]`.
+        OLDER session first there. With a usable index, the tmax stop rule
+        guarantees --limit 1 returns the true newest session (ses_newer).
+        Without an index (--no-index), it keeps today's documented insertion-order
+        behavior and picks ses_older.
         """
         f = Fixture()
         try:
@@ -1019,10 +2574,271 @@ class LimitFastPathTest(unittest.TestCase):
                 if not flags:
                     f.build_index()
                 got = f.sessions(*flags, "--limit", "1", "BLOCK")
-                self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
+                if not flags:
+                    self.assertEqual([r["id"] for r in got], ["ses_newer"], flags)
+                    self.assertEqual(got, full[:1], flags)
+                else:
+                    self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
                 by_id = {r["id"]: r for r in full}
                 for r in got:
                     self.assertEqual(r, by_id[r["id"]], flags)
+        finally:
+            f.close()
+
+    def test_reverse_ordered_block_inside_tail(self):
+        """A reverse-ordered block INSIDE the tail (unindexed) with a usable index: exact."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_base")
+            add_part(f.conn, "ses_base", type="tool", text="base part", t=50)
+            f.commit()
+            f.build_index()
+
+            # Now add reverse-ordered block in the tail above watermark
+            add_session(f.conn, "ses_tail_newer")
+            add_session(f.conn, "ses_tail_older")
+            add_part(f.conn, "ses_tail_newer", type="tool", text="TAILBLOCK newer", t=500)
+            for i in range(20):
+                add_part(f.conn, "ses_tail_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_tail_older", type="tool", text="TAILBLOCK older", t=100)
+            f.commit()
+
+            full = f.sessions("--no-index", "TAILBLOCK")
+            self.assertEqual([r["id"] for r in full], ["ses_tail_newer", "ses_tail_older"])
+
+            got = f.sessions("--limit", "1", "TAILBLOCK")
+            self.assertEqual([r["id"] for r in got], ["ses_tail_newer"])
+            self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_tail_larger_than_tail_exact_max_uses_heuristic(self):
+        """When the tail exceeds TAIL_EXACT_MAX, search_recent falls back to heuristic stop."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_base")
+            add_part(f.conn, "ses_base", type="tool", text="base part", t=50)
+            f.commit()
+            f.build_index()
+
+            add_session(f.conn, "ses_tail_newer")
+            add_session(f.conn, "ses_tail_older")
+            add_part(f.conn, "ses_tail_newer", type="tool", text="TAILBLOCK newer", t=500)
+            for i in range(20):
+                add_part(f.conn, "ses_tail_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_tail_older", type="tool", text="TAILBLOCK older", t=100)
+            f.commit()
+
+            # Normal TAIL_EXACT_MAX: exact path runs, returns ses_tail_newer
+            stats_exact: dict = {}
+            got_exact = f.sessions("--limit", "1", "TAILBLOCK", stats=stats_exact)
+            self.assertEqual([r["id"] for r in got_exact], ["ses_tail_newer"])
+            self.assertEqual(stats_exact.get("mode"), "exact")
+
+            # Monkeypatch TAIL_EXACT_MAX small so tail exceeds it: heuristic path runs, returns ses_tail_older
+            stats_heuristic: dict = {}
+            with mock.patch("oc_search.TAIL_EXACT_MAX", 2):
+                got_heuristic = f.sessions("--limit", "1", "TAILBLOCK", stats=stats_heuristic)
+                self.assertEqual([r["id"] for r in got_heuristic], ["ses_tail_older"])
+                self.assertEqual(stats_heuristic.get("mode"), "heuristic")
+        finally:
+            f.close()
+
+    def test_search_recent_resume_heuristic_with_excess_picked_returns_top_limit(self):
+        """When resuming in heuristic mode with len(picked) >= limit, returns top limit by total order immediately."""
+        c = self.f.conn
+        for i in range(5):
+            add_session(c, f"ses_{i}")
+            add_part(c, f"ses_{i}", type="tool", text="RESUME needle", t=100 + i * 10)
+        self.f.commit()
+
+        # Suppose picked has 4 sessions from previous exact walk before IndexQueryError:
+        picked = {
+            "ses_0": (1, BASE_MS + 100),
+            "ses_1": (1, BASE_MS + 110),
+            "ses_2": (1, BASE_MS + 120),
+            "ses_3": (1, BASE_MS + 130),
+        }
+        seen = {"ses_0", "ses_1", "ses_2", "ses_3"}
+        stats: dict = {}
+        got = oc_search.search_recent(
+            c,
+            self.f.db,
+            None,  # No index -> heuristic mode
+            floor=0,
+            src_max=100,
+            query="RESUME",
+            types=["tool"],
+            limit=2,
+            deadline=oc_search.Deadline(10.0),
+            jobs=1,
+            seen=seen,
+            picked=picked,
+            resume_hi=0,
+            stats=stats,
+        )
+        self.assertEqual(len(got), 2)
+        self.assertEqual(list(got.keys()), ["ses_3", "ses_2"])
+        self.assertEqual(stats.get("mode"), "heuristic")
+
+    def test_build_prefix_bound(self):
+        """Direct unit test for build_prefix_bound."""
+        f = Fixture()
+        try:
+            with mock.patch("oc_search.TMAX_SHIFT", 2):
+                add_session(f.conn, "ses_1")
+                # Bucket 0 (rids 1, 2)
+                add_part(f.conn, "ses_1", text="p1", t=100)
+                add_part(f.conn, "ses_1", text="p2", t=200)
+                # Bucket 1 (rids 3, 4)
+                add_part(f.conn, "ses_1", text="p3", t=150)
+                add_part(f.conn, "ses_1", text="p4", t=300)
+                f.commit()
+                f.build_index()
+
+                # Tail: rowids 5, 9
+                add_part(f.conn, "ses_1", text="p5", t=400)
+                for _ in range(3):
+                    add_part(f.conn, "ses_1", text="filler", t=50)
+                add_part(f.conn, "ses_1", text="p9", t=250)
+                f.commit()
+
+                # Mutate rid 1 in Bucket 0 to be dirty with t=500
+                update_part(f.conn, 1, text="dirty p1", bump=1000)
+                f.conn.execute("UPDATE part SET time_created = ? WHERE rowid = 1", (BASE_MS + 500,))
+                f.commit()
+
+                idx = oc_search.open_index_ro(f.index)
+                self.assertIsNotNone(idx)
+                assert idx is not None
+                try:
+                    bound = oc_search.build_prefix_bound(f.conn, idx, floor=4, src_max=9, dirty_rowids=[1])
+                    # b < 0 -> -1
+                    self.assertEqual(bound(-1), -1)
+                    # Bucket 0: dirty row 1 folded tc=500 -> prefix[0] is 500
+                    self.assertEqual(bound(0), BASE_MS + 500)
+                    # Bucket 1: tail has p5 at tc=400, prefix[1] = max(500, 400) = 500
+                    self.assertEqual(bound(1), BASE_MS + 500)
+                    # Bucket 2: tail has p9 at tc=250, prefix[2] = max(500, 250) = 500
+                    self.assertEqual(bound(2), BASE_MS + 500)
+                    # Beyond len -> max prefix
+                    self.assertEqual(bound(100), BASE_MS + 500)
+                finally:
+                    idx.close()
+        finally:
+            f.close()
+
+    def test_ties_total_order(self):
+        """Ties on last_match are broken by id desc; --limit N == unlimited[:N] for all N."""
+        f = Fixture()
+        try:
+            # 4 sessions with exact same timestamp
+            for sid in ("ses_a", "ses_b", "ses_c", "ses_d"):
+                add_session(f.conn, sid)
+                add_part(f.conn, sid, type="tool", text="TIE needle", t=1000)
+            f.commit()
+            f.build_index()
+
+            full = f.sessions("TIE")
+            # In total order (last_match_ms desc, id desc):
+            # timestamps are equal (1000), so ids must be strictly descending:
+            self.assertEqual([r["id"] for r in full], ["ses_d", "ses_c", "ses_b", "ses_a"])
+
+            for n in (1, 2, 3, 4, 5):
+                got = f.sessions("--limit", str(n), "TIE")
+                self.assertEqual(got, full[:n], f"failed for N={n}")
+        finally:
+            f.close()
+
+    def test_dirty_row_with_newer_time_created(self):
+        """Dirty row with newer time_created at low rowid is folded into prefix bound."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_early")
+            p1 = add_part(f.conn, "ses_early", type="tool", text="DIRTY needle", t=100)
+            f.commit()
+            f.build_index()
+
+            # Mutate rowid 1 (p1) to have a newer time_created (1000) and updated text/time
+            update_part(f.conn, 1, text="DIRTY needle updated", bump=1000)
+            f.conn.execute("UPDATE part SET time_created = ? WHERE rowid = 1", (BASE_MS + 1000,))
+
+            # Add ses_late in the tail (above watermark) with lower timestamp (200)
+            add_session(f.conn, "ses_late")
+            for i in range(20):
+                add_part(f.conn, "ses_late", type="text", text="filler", t=150 + i)
+            p2 = add_part(f.conn, "ses_late", type="tool", text="DIRTY needle", t=200)
+            f.commit()
+
+            # Full scan confirms ses_early (t=1000) is newer than ses_late (t=200)
+            full = f.sessions("--no-index", "DIRTY")
+            self.assertEqual([r["id"] for r in full], ["ses_early", "ses_late"])
+
+            # Query with limit 1 and index: dirty folding ensures ses_early is picked
+            got = f.sessions("--limit", "1", "DIRTY")
+            self.assertEqual([r["id"] for r in got], ["ses_early"])
+            self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_bucket_boundary_straddling(self):
+        """Rows straddling a bucket edge do not trigger premature stop."""
+        f = Fixture()
+        try:
+            # Monkeypatch TMAX_SHIFT=2 so bucket size is 4 (rowids 0..3 bucket 0, 4..7 bucket 1)
+            with mock.patch("oc_search.TMAX_SHIFT", 2):
+                add_session(f.conn, "ses_bucket0")
+                add_session(f.conn, "ses_bucket1")
+                # Put ses_bucket0 at rowids 1..3 with t=2000
+                add_part(f.conn, "ses_bucket0", type="tool", text="STRADDLE needle", t=2000)
+                add_part(f.conn, "ses_bucket0", type="text", text="filler", t=2001)
+                add_part(f.conn, "ses_bucket0", type="text", text="filler", t=2002)
+                # Put ses_bucket1 at rowids 4..5 with lower t=1000
+                add_part(f.conn, "ses_bucket1", type="tool", text="STRADDLE needle", t=1000)
+                add_part(f.conn, "ses_bucket1", type="text", text="filler", t=1001)
+                f.commit()
+                f.build_index()
+
+                full = f.sessions("STRADDLE")
+                self.assertEqual([r["id"] for r in full], ["ses_bucket0", "ses_bucket1"])
+
+                got = f.sessions("--limit", "1", "STRADDLE")
+                self.assertEqual([r["id"] for r in got], ["ses_bucket0"])
+                self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_common_needle_stops_in_first_window(self):
+        """A common needle yields N sessions in the first window and stops without reading deeper."""
+        f = Fixture()
+        try:
+            with mock.patch("oc_search.TMAX_SHIFT", 3), mock.patch("oc_search.RECENT_FIRST_WINDOW", 8):
+                # Build index with older rows in lower buckets (rowids 1..16 -> buckets 0..1)
+                for s in range(16):
+                    sid = f"ses_old_{s}"
+                    add_session(f.conn, sid)
+                    add_part(f.conn, sid, type="tool", text="OLD filler", t=100 + s)
+                f.commit()
+                f.build_index()
+
+                # Add tail with common needle in higher bucket with newer timestamps
+                for s in range(4):
+                    sid = f"ses_new_{s}"
+                    add_session(f.conn, sid)
+                    add_part(f.conn, sid, type="tool", text="COMMON needle", t=10_000 + s)
+                f.commit()
+
+                calls = []
+                real_scan = oc_search.scan_parallel
+
+                def spy(*args, **kwargs):
+                    calls.append(args)
+                    return real_scan(*args, **kwargs)
+
+                with mock.patch("oc_search.scan_parallel", side_effect=spy):
+                    got = f.sessions("--limit", "2", "COMMON")
+                    self.assertEqual(len(got), 2)
+                    self.assertEqual(len(calls), 1, f"Expected 1 scan_parallel call, got {len(calls)}")
         finally:
             f.close()
 
@@ -1030,6 +2846,391 @@ class LimitFastPathTest(unittest.TestCase):
         rc, out, _ = self.f.search("--types", "tool,text", "--limit", "4", "needle-common")
         self.assertEqual(rc, 0)
         self.assertEqual(len(out.splitlines()), 2 + 4)
+
+
+class DifferentialRunner:
+    """Seeded generator executing random DB and index operations.
+
+    Structured so later tasks can add ops (update, interior delete,
+    session delete, top reuse, interrupted build) by adding entries to
+    OP_WEIGHTS and implementing the corresponding op_ method.
+    """
+
+    OP_WEIGHTS = {
+        "insert_new": 2,
+        "insert_existing": 2,
+        "update_part": 2,
+        "interior_delete": 2,
+        "delete_session": 2,
+        "top_reuse": 2,
+        "reverse_bulk_insert": 2,
+        "boundary_tie": 2,
+        "interrupted_build": 2,
+        "build": 2,
+    }
+
+    NEEDLES = [
+        "cat",
+        "dog",
+        "common",
+        "xyz_absent",
+    ]
+
+    VOCAB = [
+        "cat",
+        "dog",
+        "common",
+        "alpha",
+        "beta",
+        "gamma",
+        "quick",
+        "brown",
+        "fox",
+    ]
+
+    TYPES = ["tool", "text", "reasoning"]
+
+    def __init__(self, seed: int, test_case: unittest.TestCase):
+        self.rng = random.Random(seed)
+        self.test_case = test_case
+        self.fixture = Fixture()
+        self.sessions: list[str] = []
+        # IMPORTANT: Task 1 assigns strictly distinct time_created values
+        # to avoid ties flaking --limit equality. Task 4 will add ties.
+        self.time_counter = 0
+        self.session_counter = 0
+        self.build_modes: list[str] = []
+        self.applied_ops: set[str] = set()
+        self.boundary_ties_seen = 0
+
+        # RECHECK_ROWS is made explicitly large relative to the fixture so
+        # normal ops land inside the dirty window and are exactly comparable.
+        self.recheck_patcher = mock.patch("oc_search.RECHECK_ROWS", 100_000)
+        self.recheck_patcher.start()
+
+        # Seed initial data and create the initial index so operations in run_steps
+        # exercise incremental catchup and reconcile on an existing index.
+        for _ in range(3):
+            self.op_insert_new()
+        self.fixture.build_index(delete_fraction_max=1.0)
+
+    def build_index(self, **kw):
+        # DELETE_FRACTION_MAX is made large so small-fixture session deletions
+        # do not trip the mass-purge rebuild detector during differential ops.
+        kw.setdefault("delete_fraction_max", 1.0)
+        res = self.fixture.build_index(**kw)
+        self.build_modes.append(res["mode"])
+        return res
+
+    def close(self):
+        self.recheck_patcher.stop()
+        self.fixture.close()
+
+    def next_time(self) -> int:
+        if self.rng.random() < 0.25 and self.time_counter > 0:
+            return self.time_counter
+        self.time_counter += 1
+        return self.time_counter
+
+    def random_text(self) -> str:
+        k = self.rng.randint(1, 3)
+        words = self.rng.sample(self.VOCAB, k)
+        return " ".join(words)
+
+    def op_insert_new(self):
+        self.session_counter += 1
+        sid = f"ses_{self.session_counter:03d}"
+        add_session(self.fixture.conn, sid, title=f"title_{sid}")
+        self.sessions.append(sid)
+        for _ in range(self.rng.randint(1, 2)):
+            t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_insert_existing(self):
+        if not self.sessions:
+            self.op_insert_new()
+            return
+        sid = self.rng.choice(self.sessions)
+        for _ in range(self.rng.randint(1, 2)):
+            t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_update_part(self):
+        rows = self.fixture.conn.execute("SELECT rowid FROM part").fetchall()
+        if not rows:
+            return
+        rid = self.rng.choice(rows)[0]
+        update_part(
+            self.fixture.conn,
+            rid,
+            text=self.random_text(),
+            type=self.rng.choice(self.TYPES),
+            bump=self.rng.randint(1000, 10000),
+        )
+        self.fixture.commit()
+
+    def op_interior_delete(self):
+        rows = self.fixture.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()
+        if len(rows) < 3:
+            return
+        interior = rows[1:-1]
+        rid = self.rng.choice(interior)[0]
+        delete_part(self.fixture.conn, rid)
+        self.fixture.commit()
+
+    def op_delete_session(self):
+        if not self.sessions:
+            return
+        sid = self.rng.choice(self.sessions)
+        self.sessions.remove(sid)
+        self.fixture.conn.execute("DELETE FROM part WHERE session_id=?", (sid,))
+        self.fixture.conn.execute("DELETE FROM session WHERE id=?", (sid,))
+        self.fixture.commit()
+
+    def op_top_reuse(self):
+        rows = self.fixture.conn.execute("SELECT rowid FROM part ORDER BY rowid DESC").fetchall()
+        if len(rows) < 2:
+            return
+        k = min(len(rows) - 1, self.rng.randint(1, 3))
+        top_rids = [r[0] for r in rows[:k]]
+        for rid in top_rids:
+            delete_part(self.fixture.conn, rid)
+        if not self.sessions:
+            self.op_insert_new()
+        sid = self.rng.choice(self.sessions)
+        for _ in range(k):
+            t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_reverse_bulk_insert(self):
+        k = self.rng.randint(2, 3)
+        base_t = self.time_counter + k * 10
+        self.time_counter = base_t
+        for i in range(k):
+            self.session_counter += 1
+            sid = f"ses_bulk_{self.session_counter:03d}"
+            add_session(self.fixture.conn, sid, title=f"bulk_{sid}")
+            self.sessions.append(sid)
+            t = base_t - (i * 10)
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_boundary_tie(self):
+        needle = self.rng.choice(self.NEEDLES[:3])
+        matching = self.fixture.sessions("--no-index", needle)
+        if not matching:
+            if not self.sessions:
+                self.op_insert_new()
+            sid = self.rng.choice(self.sessions)
+            t = self.next_time()
+            add_part(self.fixture.conn, sid, type="tool", text=f"prefix {needle} suffix", t=t)
+            self.fixture.commit()
+            matching = self.fixture.sessions("--no-index", needle)
+        target = self.rng.choice(matching[:min(len(matching), 4)])
+        target_t = target["last_match_ms"] - BASE_MS
+        self.session_counter += 1
+        other_sid = f"ses_tie_{self.session_counter:03d}"
+        add_session(self.fixture.conn, other_sid, title=f"tie_{other_sid}")
+        self.sessions.append(other_sid)
+        add_part(
+            self.fixture.conn,
+            other_sid,
+            type=self.rng.choice(self.TYPES),
+            text=f"{needle} tie match",
+            t=target_t,
+        )
+        self.fixture.commit()
+
+    def op_interrupted_build(self):
+        self.build_index(batch=1)
+
+    def op_build(self):
+        self.build_index()
+
+    def _run_indexed(self, *argv) -> list[dict]:
+        rc, out, err = self.fixture.search("--json", *argv)
+        self.test_case.assertEqual(rc, 0, f"search failed: {err}")
+        err_lower = err.lower()
+        for forbidden in ("fallback", "index unusable", "no usable index"):
+            self.test_case.assertNotIn(
+                forbidden,
+                err_lower,
+                f"Indexed search unexpectedly fell back or reported unusable: {err!r}",
+            )
+        return json.loads(out)
+
+    def assert_differential(self):
+        """Assert indexed unlimited == --no-index, and --limit N == first N."""
+        # 1. Assert --index-info reports usable before comparing
+        info_out, info_err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(info_out), contextlib.redirect_stderr(info_err):
+            info_rc = oc_search.run(
+                ["--index-info", "--db", self.fixture.db, "--index-path", self.fixture.index]
+            )
+        self.test_case.assertEqual(info_rc, 0, f"--index-info failed: {info_err.getvalue()}")
+        info = json.loads(info_out.getvalue())
+        self.test_case.assertTrue(info.get("exists"), "--index-info reports index does not exist")
+        self.test_case.assertTrue(
+            info.get("usable"),
+            f"--index-info reports index is not usable: {info.get('reason')}",
+        )
+
+        # 2. Compare indexed searches against --no-index, verifying indexed queries use the index
+        for needle in self.NEEDLES:
+            for type_flags in ([], ["--all"]):
+                unlimited_indexed = self._run_indexed(*type_flags, needle)
+                unlimited_scanned = self.fixture.sessions("--no-index", *type_flags, needle)
+                self.test_case.assertEqual(
+                    unlimited_indexed,
+                    unlimited_scanned,
+                    f"Unlimited indexed vs scanned mismatch for needle={needle!r}, flags={type_flags}",
+                )
+                for n in (1, 2, 3, 4):
+                    if len(unlimited_scanned) > n:
+                        if (
+                            unlimited_scanned[n - 1]["last_match_ms"]
+                            == unlimited_scanned[n]["last_match_ms"]
+                        ):
+                            self.boundary_ties_seen += 1
+                    limit_indexed = self._run_indexed(*type_flags, "--limit", str(n), needle)
+                    self.test_case.assertEqual(
+                        limit_indexed,
+                        unlimited_scanned[:n],
+                        f"--limit {n} mismatch for needle={needle!r}, flags={type_flags}",
+                    )
+
+    def run_steps(self, n_steps: int):
+        ops = list(self.OP_WEIGHTS.keys())
+        weights = list(self.OP_WEIGHTS.values())
+        for _ in range(n_steps):
+            chosen = self.rng.choices(ops, weights=weights, k=1)[0]
+            self.applied_ops.add(chosen)
+            handler = getattr(self, f"op_{chosen}")
+            handler()
+            self.assert_differential()
+        # Always end with a completed build and assert
+        while True:
+            res = self.build_index()
+            if res.get("up_to_date"):
+                break
+        self.assert_differential()
+
+
+class DifferentialTest(unittest.TestCase):
+    """Differential test harness comparing indexed results to --no-index.
+
+    Seeded pseudo-random operations generate realistic data mutations. After
+    each build, assertions verify that:
+    1. Indexed unlimited results == --no-index results (exact equivalence)
+    2. --limit N (N in 1..4) results == first N of --no-index unlimited results
+    3. Reconcile mode was exercised across the seeded runs
+    4. Rebuild was NOT observed during operations (mutations are reconciled without full rebuild)
+    5. Each op type was applied at least once across the seeds
+    """
+
+    SEEDS = [42, 1337, 2026]
+
+    def test_seeded_differential_runs(self):
+        all_modes: list[str] = []
+        all_ops: set[str] = set()
+        total_boundary_ties = 0
+
+        for seed in self.SEEDS:
+            with self.subTest(seed=seed):
+                runner = DifferentialRunner(seed, self)
+                try:
+                    runner.run_steps(12)
+                    all_modes.extend(runner.build_modes)
+                    all_ops.update(runner.applied_ops)
+                    total_boundary_ties += runner.boundary_ties_seen
+                finally:
+                    runner.close()
+
+        # Assert reconcile was observed at least once across the seeded runs
+        self.assertIn("reconcile", all_modes, "reconcile mode must be exercised across the runs")
+        # Assert rebuild was NOT observed during operational runs
+        self.assertNotIn("rebuild", all_modes, "rebuild should not occur during incremental mutations")
+        # Assert each op type was applied at least once across the seeds
+        expected_ops = set(DifferentialRunner.OP_WEIGHTS.keys())
+        self.assertEqual(
+            all_ops,
+            expected_ops,
+            f"Missing op types across seeded runs: {expected_ops - all_ops}",
+        )
+        # Assert at least one boundary tie was tested
+        self.assertGreater(
+            total_boundary_ties,
+            0,
+            "Expected at least one --limit comparison to have a tie at its N-th boundary across seeded runs",
+        )
+
+    def test_below_window_interior_delete_staleness(self):
+        """Documented staleness: an interior delete strictly below the dirty window
+        can over-count in unlimited search, while --limit stays exact (it recounts live).
+        """
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_target")
+            add_session(f.conn, "ses_filler")
+            p1 = add_part(f.conn, "ses_target", type="tool", text="StaleBelowNeedle", t=100)
+            for i in range(10):
+                add_part(f.conn, "ses_filler", type="tool", text=f"filler {i}", t=200 + i)
+            f.commit()
+            f.build_index()
+
+            rid1 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p1,)).fetchone()[0]
+            w_rowid = f.conn.execute("SELECT max(rowid) FROM part").fetchone()[0]
+            self.assertEqual(rid1, 1)
+            self.assertEqual(w_rowid, 11)
+
+            # Interior delete of row 1
+            delete_part(f.conn, rid1)
+            f.commit()
+
+            # With RECHECK_ROWS=3, window covers rowids 9..11. Row 1 is strictly below window.
+            with mock.patch("oc_search.RECHECK_ROWS", 3):
+                # Unlimited search: stale FTS posting returns ses_target with 1 match
+                unlimited = f.sessions("StaleBelowNeedle")
+                self.assertEqual(len(unlimited), 1)
+                self.assertEqual(unlimited[0]["id"], "ses_target")
+                self.assertEqual(unlimited[0]["matches"], 1)
+
+                # --no-index: live scan shows 0 matches
+                scanned = f.sessions("--no-index", "StaleBelowNeedle")
+                self.assertEqual(scanned, [])
+
+                # --limit 1: recounts live against part table, drops 0-match session, returns empty
+                limit_got = f.sessions("--limit", "1", "StaleBelowNeedle")
+                self.assertEqual(limit_got, [])
+        finally:
+            f.close()
 
 
 if __name__ == "__main__":

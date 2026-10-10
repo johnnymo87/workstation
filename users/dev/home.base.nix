@@ -1353,16 +1353,24 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
   #
   # Keeping the trigram index caught up. Searches stay CORRECT without this
   # (anything past the index watermark is resolved by a bounded tail scan);
-  # the timer only keeps that tail short enough that they also stay FAST. An
-  # hour of transcript is ~1k parts, so each run is a second of work.
+  # the timer only keeps that tail short enough that they also stay FAST.
+  #
+  # Each run first reconciles (identity sweep + time_updated recheck) in
+  # seconds. Catching up new rows is uncapped (the timer is no longer capped
+  # at 200k rows per run), so a rebuild (first build, schema change) completes
+  # in one run. An hour of transcript is ~1k parts, so hourly runs are brief.
   systemd.user.services.oc-search-index = lib.mkIf (!isDarwin) {
     Unit.Description = "Refresh the oc-search trigram index";
     Service = {
       Type = "oneshot";
       # --if-exists: refresh an index somebody opted into, never create one.
-      # The first build is ~11 GB and ~80 minutes; a timer must not decide that
+      # The first build is ~20 GB and ~1.5-2.5h; a timer must not decide that
       # on a host's behalf. `oc-search --index` by hand is the opt-in.
       ExecStart = "${localPkgs.oc-search}/bin/oc-search --index --if-exists";
+      # Exit 3 = MORE REMAINS (e.g. a chunk-boundary rowid change or an
+      # explicit --index-batch). It is not a failure and must not mark the
+      # unit failed, which degrades home-manager activation.
+      SuccessExitStatus = 3;
       # This walks the same disk opencode is actively writing to; never win a
       # priority contest against the thing whose data we are indexing.
       Nice = 19;
