@@ -189,3 +189,20 @@ Merge, then `pull-workstation`. The next timer run sees v1, rebuilds in place un
 3. **Query path.** Single read transaction; window-diff dirty set; the temp table excluded from FTS and rescanned live; DatabaseError fallback. Harness: queries between builds.
 4. **Exact `--limit`.** tmax prefix plus tail and dirty folding; total order; strict stop; TAIL_EXACT_MAX heuristic; flip the bulk test. Harness: ties, reverse block, `--limit` equal to the unlimited `[:N]`.
 5. **Unit and docs.** `SuccessExitStatus=3`, README, docstring, home.base.nix comment.
+
+## Revisions after adversarial review
+
+1. **TAIL_EXACT_MAX 200k → 50k:**
+   Cold-cache measurement on the real database: a 200k-row tail GROUP BY took ~18s against a 25s total budget. Reduced to 50k to ensure fast tail aggregation before fallback to heuristic stop.
+2. **TMAX_SHIFT 14 → 12:**
+   16k-rowid buckets (TMAX_SHIFT=14) spanned ≈ 7.7h of data, causing exact mode to recount 17-46 sessions vs 10. 4k buckets (TMAX_SHIFT=12) span ≈ 2h, making exact stopping significantly tighter.
+3. **Reconcile delete disk amplification guard & chunked commits:**
+   - Fractional delete bound: `DELETE_FRACTION_MAX = 0.10` of `part_meta`'s row count (in addition to `DELETE_MAX`). Exceeding it forces a clean rebuild (which unlinks the file first, reclaiming disk space instead of exploding the WAL).
+   - Deletes and rewrites are applied in committed chunks (`RECONCILE_COMMIT_EVERY = 5_000` rows), with an active disk check between chunks (`shutil.disk_usage(index_dir).free < MIN_FREE_BYTES`).
+   - Safe watermark re-pointing ensures `watermark_rowid` in `meta` never points to a row deleted from `part_meta` after a partial or interrupted run. An interrupted reconcile leaves the index query-safe and resumes cleanly on the next run.
+4. **Disk precheck estimates:**
+   - When an explicit `--index-batch` is passed, rows estimate is capped at the batch for both rebuild and catch-up.
+   - For catch-up, pending rows are estimated cheaply via `min(rowid span, max(0, live count via sqlite_autoindex_part_1 - part_meta count))`, avoiding expensive table page scans.
+5. **Documented limits:**
+   - (i) A part updated more than `RECHECK_ROWS` (~47h at ~51k rowids/day) after creation is never re-indexed now that rebuilds are rare (v1's daily rebuild used to mask this; opencode's compaction prune, `compaction.ts`, rewrites old tool parts and is disabled on cloudbox via `"prune": false` — enabling it would make old parts stale).
+   - (ii) `tmax` is never lowered, so a bogus future `time_created` would disable early stopping until `oc-search --index --rebuild`.

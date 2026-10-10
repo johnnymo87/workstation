@@ -80,7 +80,7 @@ DEFAULT_TYPES = "tool"
 
 # Bump when the sidecar layout changes; a mismatch forces a rebuild.
 INDEX_SCHEMA_VERSION = 2
-TMAX_SHIFT = 14
+TMAX_SHIFT = 12
 
 # Trigram FTS5 cannot represent a pattern shorter than one trigram.
 MIN_TRIGRAM_LEN = 3
@@ -133,8 +133,11 @@ RECENT_WINDOW_GROWTH = 4
 # Reconcile bounds and sweep parameters (bead workstation-gqt3.3).
 # RECONCILE_MAX bounds changed-identity rows (renumber detector, e.g. VACUUM INTO renumber).
 # DELETE_MAX bounds deleted rows. Exceeding either forces a full rebuild from scratch.
+# DELETE_FRACTION_MAX bounds deleted rows as a fraction of part_meta count.
 RECONCILE_MAX = 50_000
 DELETE_MAX = 1_000_000
+DELETE_FRACTION_MAX = 0.10
+RECONCILE_COMMIT_EVERY = 5_000
 RECHECK_ROWS = 100_000
 # TAIL_EXACT_MAX: 50k rows. Measured: tail GROUP BY over 200k rows took ~18s
 # on a cold cache on the real DB, vs a 25s budget.
@@ -463,7 +466,7 @@ def write_rows(idx: sqlite3.Connection, rows: Iterable[Any]) -> None:
 
     Every ft write is `INSERT OR REPLACE` so that re-indexed or updated rows do
     not leave ghost postings on the contentless table. `tmax` tracks the
-    per-bucket max(time_created) (TMAX_SHIFT=14) and is upserted as
+    per-bucket max(time_created) (TMAX_SHIFT=12) and is upserted as
     max(existing, new), never lowered.
 
     Accepts exactly one row shape: the sqlite3.Row from the build's SELECT
@@ -680,18 +683,16 @@ def estimate_disk_need(
     when the index is absent or too small to measure. Catch-up uses the pending
     rows up to batch. Multiplied by 1.2 safety factor.
     """
-    if rebuild:
-        try:
-            row_count = src.execute(
+    try:
+        live_total = int(
+            src.execute(
                 "SELECT count(*) FROM part INDEXED BY sqlite_autoindex_part_1"
             ).fetchone()[0]
-        except sqlite3.OperationalError:
-            row_count = src.execute("SELECT count(*) FROM part").fetchone()[0]
-        rows = int(row_count)
-    else:
-        pending = max(0, src_max - watermark)
-        rows = pending if (batch is None or batch == 0) else min(batch, pending)
+        )
+    except sqlite3.OperationalError:
+        live_total = int(src.execute("SELECT count(*) FROM part").fetchone()[0])
 
+    meta_count = 0
     bytes_per_row = float(INDEX_BYTES_PER_ROW)
     if os.path.exists(index_path):
         try:
@@ -705,6 +706,23 @@ def estimate_disk_need(
                 conn.close()
         except Exception:
             pass
+
+    if rebuild:
+        rows = live_total if (batch is None or batch == 0) else min(batch, live_total)
+    else:
+        # For catch-up: estimate pending rows cheaply.
+        # `SELECT count(*) FROM part WHERE rowid > ?` is NOT cheap for big tails
+        # because it must read table pages. Instead, we use:
+        # min(rowid span, live count via sqlite_autoindex_part_1 minus part_meta count).
+        # This is cheap (index B-tree leaf count only) and conservative without being
+        # absurd when rowid space has large holes/gaps from deletions.
+        rowid_span = max(0, src_max - watermark)
+        if meta_count > 0:
+            pending_live = max(0, live_total - meta_count)
+            pending = min(rowid_span, pending_live)
+        else:
+            pending = min(rowid_span, live_total)
+        rows = pending if (batch is None or batch == 0) else min(batch, pending)
 
     return int(rows * bytes_per_row * 1.2)
 
@@ -756,6 +774,8 @@ def build_index(
     progress: bool = False,
     reconcile_max: int = RECONCILE_MAX,
     delete_max: int = DELETE_MAX,
+    delete_fraction_max: float = DELETE_FRACTION_MAX,
+    reconcile_commit_every: int = RECONCILE_COMMIT_EVERY,
     recheck_rows: int = RECHECK_ROWS,
 ) -> dict[str, Any]:
     _, src_max = part_rowid_bounds(src)
@@ -822,6 +842,15 @@ def build_index(
             rechecked = 0
 
             if watermark > 0:
+                index_dir = os.path.dirname(index_path) or "."
+                cnt_row = idx.execute("SELECT count(*) FROM part_meta").fetchone()
+                meta_count = int(cnt_row[0]) if cnt_row and cnt_row[0] is not None else 0
+                if delete_fraction_max > 0:
+                    fractional_delete_max = max(1, int(meta_count * delete_fraction_max))
+                else:
+                    fractional_delete_max = 0
+                effective_delete_limit = min(delete_max, fractional_delete_max) if meta_count > 0 else delete_max
+
                 # Reconcile sweep on the SOURCE connection with the index ATTACHed read-only
                 try:
                     src.execute("DETACH idx")
@@ -835,7 +864,7 @@ def build_index(
                         IDENTITY_SWEEP_SQL, (watermark, reconcile_max + 1)
                     ).fetchall()
                     deleted_rows = src.execute(
-                        DELETES_SWEEP_SQL, (delete_max + 1,)
+                        DELETES_SWEEP_SQL, (effective_delete_limit + 1,)
                     ).fetchall()
                     lo = max(0, watermark - recheck_rows)
                     recheck_rows_res = src.execute(
@@ -866,6 +895,8 @@ def build_index(
                         progress=progress,
                         reconcile_max=reconcile_max,
                         delete_max=delete_max,
+                        delete_fraction_max=delete_fraction_max,
+                        reconcile_commit_every=reconcile_commit_every,
                         recheck_rows=recheck_rows,
                     )
 
@@ -884,6 +915,28 @@ def build_index(
                         progress=progress,
                         reconcile_max=reconcile_max,
                         delete_max=delete_max,
+                        delete_fraction_max=delete_fraction_max,
+                        reconcile_commit_every=reconcile_commit_every,
+                        recheck_rows=recheck_rows,
+                    )
+
+                if meta_count > 0 and len(deleted_rowids) > fractional_delete_max:
+                    warn(
+                        f"deleted rows ({len(deleted_rowids)}) exceeds "
+                        f"DELETE_FRACTION_MAX ({delete_fraction_max:.2f} of {meta_count} = {fractional_delete_max}); rebuilding from scratch"
+                    )
+                    idx.close()
+                    return build_index(
+                        src,
+                        index_path,
+                        db_path,
+                        rebuild=True,
+                        batch=batch,
+                        progress=progress,
+                        reconcile_max=reconcile_max,
+                        delete_max=delete_max,
+                        delete_fraction_max=delete_fraction_max,
+                        reconcile_commit_every=reconcile_commit_every,
                         recheck_rows=recheck_rows,
                     )
 
@@ -898,15 +951,48 @@ def build_index(
                 reconciled_deleted = len(deleted_rowids)
                 rechecked = len(unique_rechecked)
 
-                # Apply deletes (build tuples once)
+                def repoint_watermark_if_needed(force: bool = False) -> None:
+                    nonlocal watermark, watermark_part_id
+                    need = force
+                    if not need and watermark > 0:
+                        row = idx.execute(
+                            "SELECT 1 FROM part_meta WHERE rowid_ = ?", (watermark,)
+                        ).fetchone()
+                        if row is None:
+                            need = True
+                    if need:
+                        highest = idx.execute(
+                            "SELECT rowid_, part_id FROM part_meta ORDER BY rowid_ DESC LIMIT 1"
+                        ).fetchone()
+                        if highest is not None:
+                            watermark = int(highest[0])
+                            watermark_part_id = str(highest[1])
+                        else:
+                            watermark = 0
+                            watermark_part_id = ""
+                        set_meta(idx, "watermark_rowid", watermark)
+                        set_meta(idx, "watermark_part_id", watermark_part_id)
+
+                # Apply deletes in committed chunks (RECONCILE_COMMIT_EVERY)
                 if deleted_rowids:
-                    del_tuples = [(rid,) for rid in deleted_rowids]
-                    idx.executemany("DELETE FROM ft WHERE rowid=?", del_tuples)
-                    idx.executemany("DELETE FROM part_meta WHERE rowid_=?", del_tuples)
+                    for i in range(0, len(deleted_rowids), reconcile_commit_every):
+                        chunk_del = deleted_rowids[i : i + reconcile_commit_every]
+                        del_tuples = [(rid,) for rid in chunk_del]
+                        idx.executemany("DELETE FROM ft WHERE rowid=?", del_tuples)
+                        idx.executemany("DELETE FROM part_meta WHERE rowid_=?", del_tuples)
+                        repoint_watermark_if_needed()
+                        idx.commit()
+                        if shutil.disk_usage(index_dir).free < MIN_FREE_BYTES:
+                            raise SystemExit(
+                                f"oc-search: stopping index reconcile: less "
+                                f"than {MIN_FREE_BYTES/1e9:.0f} GB free on {index_dir}. "
+                                "Partial index kept; searches stay correct via the tail scan."
+                            )
 
                 # Apply changed and rechecked rows
                 rewrite_rowids = changed_rowids + unique_rechecked
                 if rewrite_rowids:
+                    since_commit = 0
                     for i in range(0, len(rewrite_rowids), 500):
                         chunk_rids = rewrite_rowids[i : i + 500]
                         placeholders = ",".join("?" * len(chunk_rids))
@@ -928,21 +1014,29 @@ def build_index(
                                 deleted_set.update(missing_rids)
                                 reconciled_deleted += len(missing_rids)
 
+                        since_commit += len(chunk_rids)
+                        if since_commit >= reconcile_commit_every:
+                            repoint_watermark_if_needed()
+                            idx.commit()
+                            since_commit = 0
+                            if shutil.disk_usage(index_dir).free < MIN_FREE_BYTES:
+                                raise SystemExit(
+                                    f"oc-search: stopping index reconcile: less "
+                                    f"than {MIN_FREE_BYTES/1e9:.0f} GB free on {index_dir}. "
+                                    "Partial index kept; searches stay correct via the tail scan."
+                                )
+
+                    if since_commit > 0:
+                        repoint_watermark_if_needed()
+                        idx.commit()
+
                 # Watermark re-point (Point 5):
                 # if the W row was deleted or changed, set watermark_rowid/watermark_part_id to the highest
                 # remaining part_meta row (rowid_ and part_id) - or 0 if empty.
                 if orig_w in deleted_set or orig_w in changed_set:
-                    highest = idx.execute(
-                        "SELECT rowid_, part_id FROM part_meta ORDER BY rowid_ DESC LIMIT 1"
-                    ).fetchone()
-                    if highest is not None:
-                        watermark = int(highest[0])
-                        watermark_part_id = str(highest[1])
-                    else:
-                        watermark = 0
-                        watermark_part_id = ""
-                    set_meta(idx, "watermark_rowid", watermark)
-                    set_meta(idx, "watermark_part_id", watermark_part_id)
+                    repoint_watermark_if_needed(force=True)
+                else:
+                    repoint_watermark_if_needed()
 
                 if reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0:
                     idx.commit()
@@ -1454,7 +1548,7 @@ def search_recent(
     When an index is usable and the unindexed tail does not exceed
     TAIL_EXACT_MAX (50,000 rows), early stopping is exact:
       - Any unmet session's newest match is bounded by the prefix maximum of
-        per-bucket running maxima of time_created (tmax table, bucket = rowid >> 14).
+        per-bucket running maxima of time_created (tmax table, bucket = rowid >> 12).
       - Unindexed tail rows (watermark, src_max] and dirty live rows are folded
         into the per-bucket maxima before computing prefix bounds.
       - The walk stops only when >= limit candidates have been collected AND

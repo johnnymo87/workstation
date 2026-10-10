@@ -1364,7 +1364,7 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
     Service = {
       Type = "oneshot";
       # --if-exists: refresh an index somebody opted into, never create one.
-      # The first build is ~11 GB and ~80 minutes; a timer must not decide that
+      # The first build is ~20 GB and ~1.5-2.5h; a timer must not decide that
       # on a host's behalf. `oc-search --index` by hand is the opt-in.
       ExecStart = "${localPkgs.oc-search}/bin/oc-search --index --if-exists";
       # Exit 3 = MORE REMAINS (e.g. a chunk-boundary rowid change or an

@@ -293,6 +293,48 @@ class DiskPrecheckTest(unittest.TestCase):
         finally:
             f.close()
 
+    def test_estimate_rebuild_capped_by_batch(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Rebuild with 50 rows in part, but batch=10: should cap at 10 rows
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=True, batch=10, src_max=50
+            )
+            self.assertEqual(need, int(10 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
+    def test_estimate_catchup_with_rowid_holes_uses_live_count_minus_meta(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(100):
+                add_part(f.conn, "ses_1", text=f"item_{i}")
+            f.commit()
+
+            # Build index for first 50 rows
+            f.build_index(batch=50)
+
+            # Delete 30 rows in the tail (e.g. items 50..79)
+            # live rows total = 70. meta count = 50.
+            # src_max = 100, watermark = 50. Rowid span = 50.
+            # Live count minus meta = 70 - 50 = 20.
+            f.conn.execute("DELETE FROM part WHERE rowid > 50 AND rowid <= 80")
+            f.commit()
+
+            need = oc_search.estimate_disk_need(
+                f.conn, f.index, rebuild=False, watermark=50, src_max=100, batch=None
+            )
+            # Should estimate 20 rows, not 50
+            self.assertEqual(need, int(20 * oc_search.INDEX_BYTES_PER_ROW * 1.2))
+        finally:
+            f.close()
+
     def test_disk_precheck_refusal_and_replacement_credit(self):
         f = Fixture()
         try:
@@ -478,7 +520,7 @@ class V1MigrationTest(unittest.TestCase):
 class SchemaV2Test(unittest.TestCase):
     def test_index_schema_version_is_two(self):
         self.assertEqual(oc_search.INDEX_SCHEMA_VERSION, 2)
-        self.assertEqual(oc_search.TMAX_SHIFT, 14)
+        self.assertEqual(oc_search.TMAX_SHIFT, 12)
 
     def test_v2_schema_tables_and_columns(self):
         with tempfile.TemporaryDirectory() as td:
@@ -880,6 +922,168 @@ class ReconcileTest(unittest.TestCase):
         finally:
             f.close()
 
+    def test_delete_fraction_max_constant(self):
+        self.assertEqual(oc_search.DELETE_FRACTION_MAX, 0.10)
+
+    def test_reconcile_commit_every_constant(self):
+        self.assertEqual(oc_search.RECONCILE_COMMIT_EVERY, 5_000)
+
+    def test_deletes_exceeding_delete_fraction_max_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 10 parts (20% > default DELETE_FRACTION_MAX 10%)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:10]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            # Default delete_fraction_max=0.10 forces rebuild
+            res = f.build_index()
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_injected_delete_fraction_max_allows_reconcile(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(50):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 10 parts (20%)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:10]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            # Injected delete_fraction_max=0.30 (20% <= 30%) allows reconcile
+            res = f.build_index(delete_fraction_max=0.30)
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertEqual(res["reconciled_deleted"], 10)
+            self.assertTrue(res["up_to_date"])
+        finally:
+            f.close()
+
+    def test_reconcile_disk_guard_stops_when_free_space_low(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(20):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Delete 6 parts
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[:6]:
+                delete_part(f.conn, r)
+            f.commit()
+
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+            # Return low disk (< 5 GB) during reconcile chunk check
+            calls = [0]
+            def fake_usage(d):
+                calls[0] += 1
+                # First call is precheck (give plenty of space), subsequent calls return 1 GB
+                if calls[0] <= 1:
+                    return Usage(10**12, 10**11, 10**11)
+                return Usage(10**12, 10**12 - 10**9, 10**9)
+
+            oc_search.shutil.disk_usage = fake_usage
+            try:
+                with self.assertRaises(SystemExit) as ctx:
+                    f.build_index(reconcile_commit_every=2, delete_fraction_max=1.0)
+                self.assertIn("stopping index reconcile: less than 5 GB free", str(ctx.exception))
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+        finally:
+            f.close()
+
+    def test_interrupted_reconcile_is_safe_for_queries_and_next_run(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(30):
+                add_part(f.conn, "ses_1", text=f"part_content_{i}", t=10 + i)
+            f.commit()
+            f.build_index()
+
+            # Verify initial watermark is 30
+            init_idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(init_idx)
+            init_w = int(oc_search.get_meta(init_idx, "watermark_rowid"))
+            init_idx.close()
+            self.assertEqual(init_w, 30)
+
+            # Delete the watermark row (30) and rows 25..29 (6 rows total)
+            rids = [r[0] for r in f.conn.execute("SELECT rowid FROM part ORDER BY rowid").fetchall()]
+            for r in rids[24:]:  # rowids 25..30
+                delete_part(f.conn, r)
+            # Also add parts 31, 32
+            add_part(f.conn, "ses_1", text="new_part_content_31", t=50)
+            add_part(f.conn, "ses_1", text="new_part_content_32", t=51)
+            f.commit()
+
+            real_usage = oc_search.shutil.disk_usage
+            from collections import namedtuple
+            Usage = namedtuple("Usage", ["total", "used", "free"])
+            # Stop reconcile after first commit of deletes (commit_every=2)
+            calls = [0]
+            def fake_usage(d):
+                calls[0] += 1
+                if calls[0] <= 1:
+                    return Usage(10**12, 10**11, 10**11)
+                return Usage(10**12, 10**12 - 10**9, 10**9)
+
+            oc_search.shutil.disk_usage = fake_usage
+            try:
+                with self.assertRaises(SystemExit):
+                    f.build_index(reconcile_commit_every=2, delete_fraction_max=1.0)
+            finally:
+                oc_search.shutil.disk_usage = real_usage
+
+            # 1. Inspect the partial index: watermark must NOT point to a nonexistent row in part_meta
+            idx = oc_search.open_index_ro(f.index)
+            self.assertIsNotNone(idx)
+            partial_w = int(oc_search.get_meta(idx, "watermark_rowid"))
+            # Watermark must exist in part_meta (or be 0)
+            if partial_w > 0:
+                row_in_pm = idx.execute("SELECT 1 FROM part_meta WHERE rowid_ = ?", (partial_w,)).fetchone()
+                self.assertIsNotNone(row_in_pm, f"watermark {partial_w} points to a row that was deleted from part_meta")
+            idx.close()
+
+            # 2. Queries on partial index return exact same results as --no-index
+            res_indexed = f.sessions("part_content")
+            res_scanned = f.sessions("--no-index", "part_content")
+            self.assertEqual(res_indexed, res_scanned)
+
+            new_indexed = f.sessions("new_part_content")
+            new_scanned = f.sessions("--no-index", "new_part_content")
+            self.assertEqual(new_indexed, new_scanned)
+            self.assertEqual(len(new_indexed), 1)
+
+            # 3. Next index run finishes successfully and brings index up to date
+            next_res = f.build_index(delete_fraction_max=1.0)
+            self.assertTrue(next_res["up_to_date"])
+
+            # 4. Searches after completion match --no-index exactly
+            res_indexed_final = f.sessions("part_content")
+            res_scanned_final = f.sessions("--no-index", "part_content")
+            self.assertEqual(res_indexed_final, res_scanned_final)
+        finally:
+            f.close()
+
     def test_mass_deletes_under_delete_max_reconciles_not_rebuilds(self):
         f = Fixture()
         try:
@@ -894,8 +1098,8 @@ class ReconcileTest(unittest.TestCase):
                 delete_part(f.conn, r)
             f.commit()
 
-            # delete_max=10 (5 <= 10) reconciles, not rebuilds
-            res = f.build_index(delete_max=10)
+            # delete_max=10 (5 <= 10) reconciles, not rebuilds (with delete_fraction_max=1.0)
+            res = f.build_index(delete_max=10, delete_fraction_max=1.0)
             self.assertEqual(res["mode"], "reconcile")
             self.assertEqual(res["reconciled_deleted"], 5)
             self.assertTrue(res["up_to_date"])
@@ -2708,9 +2912,12 @@ class DifferentialRunner:
         # exercise incremental catchup and reconcile on an existing index.
         for _ in range(3):
             self.op_insert_new()
-        self.fixture.build_index()
+        self.fixture.build_index(delete_fraction_max=1.0)
 
     def build_index(self, **kw):
+        # DELETE_FRACTION_MAX is made large so small-fixture session deletions
+        # do not trip the mass-purge rebuild detector during differential ops.
+        kw.setdefault("delete_fraction_max", 1.0)
         res = self.fixture.build_index(**kw)
         self.build_modes.append(res["mode"])
         return res

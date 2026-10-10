@@ -85,7 +85,7 @@ Per-type breakdown, for anyone tempted to shrink the corpus:
 `~/.cache/oc-search/index.db` holds a schema v2 sidecar index:
 - `ft`: virtual table using `fts5(data, tokenize="trigram case_sensitive 1", content='', contentless_delete=1)`.
 - `part_meta`: `rowid_ INTEGER PRIMARY KEY, part_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, type TEXT`.
-- `tmax`: `bucket INTEGER PRIMARY KEY, max_tc INTEGER NOT NULL`, with `bucket = rowid >> 14` (`TMAX_SHIFT = 14`), tracking the per-bucket maximum `time_created`, never lowered.
+- `tmax`: `bucket INTEGER PRIMARY KEY, max_tc INTEGER NOT NULL`, with `bucket = rowid >> 12` (`TMAX_SHIFT = 12`, 4k-rowid buckets ≈ 2h of data), tracking the per-bucket maximum `time_created`, never lowered.
 
 `opencode.db` is never written to. It is opened `mode=ro` with
 `PRAGMA query_only=ON`, exactly as before.
@@ -137,11 +137,17 @@ Each run executes under `fcntl.flock` on `~/.cache/oc-search/index.db.lock`
      replaced or renumbered rows.
    - Deletes check: finds `part_meta` rows no longer in `part INDEXED BY sqlite_autoindex_part_1`
      via a list subquery.
-   - Bounds: `RECONCILE_MAX = 50_000` changed-identity rows (renumber detector;
-     exceeding forces a clean rebuild); `DELETE_MAX = 1_000_000` deleted rows
-     (exceeding forces rebuild).
-   - Watermark re-point: if row W was deleted during the sweep, W is re-pointed
-     to `MAX(rowid_)` of the remaining `part_meta` rows.
+    - Bounds: `RECONCILE_MAX = 50_000` changed-identity rows (renumber detector;
+      exceeding forces a clean rebuild); `DELETE_MAX = 1_000_000` deleted rows
+      and `DELETE_FRACTION_MAX = 0.10` (10% of `part_meta` row count, exceeding
+      forces a clean rebuild, deleting the old file to free disk space instead of
+      amplifying the WAL).
+    - Chunked commits: deletes and rewrites are applied in committed chunks of
+      `RECONCILE_COMMIT_EVERY = 5_000` rows, checking `shutil.disk_usage.free < MIN_FREE_BYTES`
+      between chunks to stop safely if disk runs low.
+    - Watermark re-point: if row W was deleted or changed, W is re-pointed
+      safely to `MAX(rowid_)` of the remaining `part_meta` rows (ensuring it never
+      points to a row deleted from `part_meta` after a partial or interrupted run).
 
 2. **`time_updated` recheck:** walks the top `RECHECK_ROWS = 100_000` rowids
    at or below W. Any row whose live `time_updated` differs from `part_meta`
@@ -160,9 +166,11 @@ Each run executes under `fcntl.flock` on `~/.cache/oc-search/index.db.lock`
 
 4. **Disk precheck:** estimates space from live row count (`count(*)` via
    index, ~0.15s) times measured bytes/row of existing index (or 7.2 KB/row
-   fallback), crediting the existing index on a rebuild. It aborts before starting
-   if free disk does not cover the estimate plus `MIN_FREE_BYTES` (5 GB), and
-   aborts mid-run if free space drops below 5 GB.
+   fallback), crediting the existing index on a rebuild. When an explicit `--index-batch`
+   is provided, rows are capped at the batch for both rebuild and catch-up. For catch-up,
+   pending rows are estimated cheaply via `min(rowid span, max(0, live count via sqlite_autoindex_part_1 - part_meta count))`.
+   It aborts before starting if free disk does not cover the estimate plus `MIN_FREE_BYTES` (5 GB),
+   and aborts mid-run if free space drops below 5 GB.
 
 ### 2. A stale index costs time, never truth
 
@@ -320,7 +328,7 @@ Walking down at rowid position p, any session not yet encountered has all its
 matching parts at or below p. Its `last_match` timestamp is therefore bounded
 by the maximum `time_created` of all rows at or below p:
 - For indexed rows (`rowid <= W`), prefix maximums are retrieved from the `tmax`
-  table (`bucket = rowid >> 14`).
+  table (`bucket = rowid >> 12`, `TMAX_SHIFT = 12`).
 - For the unindexed tail (`rowid > W`), a single query computes per-bucket
   `MAX(time_created)` and folds it into the prefix bound.
 - Any dirty rows at or below W fold their live `time_created` into the bound.
@@ -372,12 +380,23 @@ failure and returns `""`. A packet built without session history is still
 indistinguishable from one where the search legitimately found nothing. That
 belongs in the lgtm repo, not here.
 
+### Documented limits
+
+1. **Parts updated past `RECHECK_ROWS`:** A part updated more than `RECHECK_ROWS`
+   (~47h at ~51k rowids/day) after creation is never re-indexed now that rebuilds
+   are rare. (v1's daily rebuild used to mask this; opencode's compaction prune,
+   `compaction.ts`, rewrites old tool parts and is disabled on cloudbox via
+   `"prune": false` — enabling it would make old parts stale).
+2. **`tmax` is monotonic:** `tmax` is never lowered, so a bogus future
+   `time_created` would disable early stopping until `oc-search --index --rebuild`.
+
 ## Rollout and upgrade to v2
 
 A v1 index is recognized by schema version (`INDEX_SCHEMA_VERSION = 2`) and
 recreated as v2 by the next timer run, in place, in one uncapped run.
+- After deploy, start the unit immediately (`systemctl --user start oc-search-index`) rather than waiting up to an hour.
 - Building the ~3.35M row index takes ~1.5–2.5h at idle I/O (`Nice=19`, `IOSchedulingClass=idle`).
-- Disk requirement: needs ~20 GB free beyond the old file being deleted (the precheck credits the existing index size).
+- Disk requirement: the precheck needs roughly 23 GB available (free + the v1 file being replaced) or the unit refuses with exit 1 and the v1 index stays unusable to v2 (unlimited searches full-scan, `--limit` heuristic) until disk frees.
 - During the rebuild, unlimited searches scan a shrinking tail; `--limit` stays fast throughout.
 
 ## Tests
