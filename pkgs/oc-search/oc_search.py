@@ -518,9 +518,6 @@ class IndexValidity:
     reason: str = ""
     dirty_live: set[int] = field(default_factory=set)
 
-    def __iter__(self):
-        return iter((self.usable, self.watermark, self.reason))
-
 
 def index_validity(
     src: sqlite3.Connection,
@@ -1328,6 +1325,23 @@ def scan_parallel(
     return out
 
 
+class IndexQueryError(Exception):
+    """Internal signal that querying the index connection failed with a DatabaseError."""
+
+    def __init__(
+        self,
+        cause: sqlite3.DatabaseError,
+        picked: dict[str, tuple[int, int]],
+        seen: set[str],
+        floor: int,
+    ):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.picked = picked
+        self.seen = seen
+        self.floor = floor
+
+
 def search_recent(
     src: sqlite3.Connection,
     db_path: str,
@@ -1340,6 +1354,10 @@ def search_recent(
     deadline: Deadline,
     jobs: int,
     dirty_rowids: Iterable[int] | None = None,
+    *,
+    seen: set[str] | None = None,
+    picked: dict[str, tuple[int, int]] | None = None,
+    resume_hi: int | None = None,
 ) -> dict[str, tuple[int, int]]:
     """The newest `limit` matching sessions, without aggregating every match.
 
@@ -1389,8 +1407,10 @@ def search_recent(
     on). Deleted sessions are skipped the same way, so they do not use up one
     of the `limit` slots.
     """
-    picked: dict[str, tuple[int, int]] = {}
-    seen: set[str] = set()
+    if picked is None:
+        picked = {}
+    if seen is None:
+        seen = set()
     pred, params = type_predicate(types, "json_extract(data,'$.type')")
     recount_sql = (
         "SELECT COUNT(*), MAX(time_created) FROM part "
@@ -1410,31 +1430,30 @@ def search_recent(
         deadline.check()
         return len(picked) >= limit
 
-    hi = src_max
-    window = RECENT_FIRST_WINDOW
-    while hi > floor:
-        lo = max(floor, hi - window)
-        found = scan_parallel(db_path, lo, hi, query, types, deadline, jobs)
-        deadline.check()
-        # Newest match first. A session's newest match in this window is its
-        # newest overall unless it was already met higher up, in which case
-        # consider() skips it.
-        for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
-            if consider(sid):
-                return picked
-        hi = lo
-        window *= RECENT_WINDOW_GROWTH
+    try:
+        hi = resume_hi if resume_hi is not None else src_max
+        window = RECENT_FIRST_WINDOW
+        while hi > floor:
+            lo = max(floor, hi - window)
+            found = scan_parallel(db_path, lo, hi, query, types, deadline, jobs)
+            deadline.check()
+            # Newest match first. A session's newest match in this window is its
+            # newest overall unless it was already met higher up, in which case
+            # consider() skips it.
+            for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
+                if consider(sid):
+                    return picked
+            hi = lo
+            window *= RECENT_WINDOW_GROWTH
 
-    if dirty_rowids:
-        dirty_found = scan_rowids(src, dirty_rowids, query, types, deadline)
-        deadline.check()
-        for sid in sorted(dirty_found, key=lambda s: dirty_found[s][1], reverse=True):
-            if consider(sid):
-                return picked
+        if dirty_rowids:
+            dirty_found = scan_rowids(src, dirty_rowids, query, types, deadline)
+            deadline.check()
+            for sid in sorted(dirty_found, key=lambda s: dirty_found[s][1], reverse=True):
+                if consider(sid):
+                    return picked
 
-    if idx is not None and floor > 0:
-        index_failed = False
-        try:
+        if idx is not None and floor > 0:
             idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
             ipred, iparams = type_predicate(types, "pm.type")
             sql = (
@@ -1443,41 +1462,22 @@ def search_recent(
                 + ipred
                 + " ORDER BY ft.rowid DESC"
             )
-            cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
             try:
-                for (sid,) in cur:
-                    if consider(sid):
-                        break
-            finally:
-                cur.close()
-            end_txn(idx, commit=True)
-        except sqlite3.DatabaseError as exc:
-            if deadline.tripped.is_set():
-                end_txn(idx, commit=False)
-                raise
-            index_failed = True
-            end_txn(idx, commit=False)
-            try:
-                idx.close()
-            except Exception:
-                pass
-            warn(f"index error: {exc}. Falling back to a newest-first scan.")
-        except Exception:
-            end_txn(idx, commit=False)
-            raise
-
-        if index_failed:
-            hi = floor
-            while hi > 0:
-                lo = max(0, hi - window)
-                found = scan_parallel(db_path, lo, hi, query, types, deadline, jobs)
-                deadline.check()
-                for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
-                    if consider(sid):
-                        return picked
-                hi = lo
-                window *= RECENT_WINDOW_GROWTH
-    return picked
+                cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
+                try:
+                    for (sid,) in cur:
+                        if consider(sid):
+                            break
+                finally:
+                    cur.close()
+            except sqlite3.DatabaseError as exc:
+                if deadline.tripped.is_set():
+                    raise
+                raise IndexQueryError(exc, picked, seen, floor) from exc
+        return picked
+    finally:
+        if idx is not None:
+            end_txn(idx, commit=sys.exception() is None)
 
 
 def decorate(
@@ -1684,34 +1684,34 @@ def run(argv: list[str]) -> int:
         # at N sessions, not a full scan, so the warnings say so.
         fallback = "a newest-first scan" if args.limit > 0 else "a full scan"
         if idx is not None:
-            try:
-                val = index_validity(src, idx, db_path)
-                if not val.usable:
-                    end_txn(idx, commit=False)
-                    warn(f"index unusable: {val.reason}. Falling back to {fallback}.")
-                    idx.close()
-                    idx = None
-                elif len(query) < MIN_TRIGRAM_LEN:
-                    end_txn(idx, commit=False)
-                    warn(
-                        f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
-                        f"trigram index. Falling back to {fallback}."
-                    )
-                    idx.close()
-                    idx = None
-                else:
-                    used_index = True
-            except sqlite3.DatabaseError as exc:
-                end_txn(idx, commit=False)
-                if deadline.tripped.is_set():
-                    raise
-                warn(f"index unusable: {exc}. Falling back to {fallback}.")
-                try:
-                    idx.close()
-                except Exception:
-                    pass
+            if len(query) < MIN_TRIGRAM_LEN:
+                warn(
+                    f"query shorter than {MIN_TRIGRAM_LEN} characters cannot use the "
+                    f"trigram index. Falling back to {fallback}."
+                )
+                idx.close()
                 idx = None
-                val = IndexValidity(usable=False, watermark=0)
+            else:
+                try:
+                    val = index_validity(src, idx, db_path)
+                    if not val.usable:
+                        end_txn(idx, commit=False)
+                        warn(f"index unusable: {val.reason}. Falling back to {fallback}.")
+                        idx.close()
+                        idx = None
+                    else:
+                        used_index = True
+                except sqlite3.DatabaseError as exc:
+                    end_txn(idx, commit=False)
+                    if deadline.tripped.is_set():
+                        raise
+                    warn(f"index unusable: {exc}. Falling back to {fallback}.")
+                    try:
+                        idx.close()
+                    except Exception:
+                        pass
+                    idx = None
+                    val = IndexValidity(usable=False, watermark=0)
 
         if not used_index and args.limit > 0:
             warn(
@@ -1729,19 +1729,44 @@ def run(argv: list[str]) -> int:
         src_min, src_max = part_rowid_bounds(src)
         deadline.check()
         if args.limit > 0:
-            hits = search_recent(
-                src,
-                db_path,
-                idx if used_index else None,
-                val.watermark if used_index else max(src_min - 1, 0),
-                src_max,
-                query,
-                types,
-                args.limit,
-                deadline,
-                args.jobs,
-                dirty_rowids=val.dirty_live if used_index else None,
-            )
+            try:
+                hits = search_recent(
+                    src,
+                    db_path,
+                    idx if used_index else None,
+                    val.watermark if used_index else max(src_min - 1, 0),
+                    src_max,
+                    query,
+                    types,
+                    args.limit,
+                    deadline,
+                    args.jobs,
+                    dirty_rowids=val.dirty_live if used_index else None,
+                )
+            except IndexQueryError as err:
+                warn(f"index error: {err.cause}. Falling back to a newest-first scan.")
+                if idx is not None:
+                    try:
+                        idx.close()
+                    except Exception:
+                        pass
+                idx = None
+                used_index = False
+                hits = search_recent(
+                    src,
+                    db_path,
+                    None,
+                    max(src_min - 1, 0),
+                    src_max,
+                    query,
+                    types,
+                    args.limit,
+                    deadline,
+                    args.jobs,
+                    seen=err.seen,
+                    picked=err.picked,
+                    resume_hi=err.floor,
+                )
         elif used_index and idx is not None:
             try:
                 hits = search_indexed(idx, query, types, watermark=val.watermark)

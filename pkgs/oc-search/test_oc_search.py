@@ -1570,6 +1570,19 @@ class QueryDirtySetTest(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["id"], "ses_a")
 
+    def test_short_query_does_not_call_index_validity(self):
+        """Short query (< MIN_TRIGRAM_LEN) falls back without reading window in index_validity."""
+        add_session(self.f.conn, "ses_a")
+        add_part(self.f.conn, "ses_a", type="tool", text="Fb is short")
+        self.f.commit()
+        self.f.build_index()
+
+        with mock.patch("oc_search.index_validity") as mock_validity:
+            rc, out, err = self.f.search("Fb")
+            self.assertEqual(rc, 0)
+            self.assertIn("trigram index", err)
+            mock_validity.assert_not_called()
+
 
 class EquivalenceTest(unittest.TestCase):
     """Indexed results == scanned results == raw instr(), for every substring.
