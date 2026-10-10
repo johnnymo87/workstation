@@ -131,6 +131,7 @@ RECENT_WINDOW_GROWTH = 4
 RECONCILE_MAX = 50_000
 DELETE_MAX = 1_000_000
 RECHECK_ROWS = 100_000
+TAIL_EXACT_MAX = 200_000
 
 IDENTITY_SWEEP_SQL = (
     "SELECT p.rowid FROM part p INDEXED BY sqlite_autoindex_part_1 "
@@ -1361,33 +1362,32 @@ def search_recent(
 ) -> dict[str, tuple[int, int]]:
     """The newest `limit` matching sessions, without aggregating every match.
 
-    bead workstation-gqt3.1. The unlimited search aggregates every matching
-    part in the database and only then sorts and truncates. lgtm keeps about
-    ten rows of that, and was timing out at 25s even with a complete index,
+    bead workstation-gqt3.1, gqt3.3. The unlimited search aggregates every
+    matching part in the database and only then sorts and truncates. lgtm keeps
+    about ten rows of that, and was timing out at 25s even with a complete index,
     because a common needle such as a repo name matches millions of postings.
 
     WHEN STOPPING EARLY IS EXACT, AND WHEN IT IS NOT. Results are ordered by
-    each session's newest match. Walking matching rows from the highest rowid
-    down meets sessions in INSERTION order. That equals result order wherever
-    `part.rowid` is monotonic in `time_created`: once `limit` live sessions
-    have been met above rowid L, every unmet session has all of its matches at
-    or below L, i.e. is older than all of them. Then the output is exactly the
-    unlimited output's first `limit` rows.
+    each session's newest match in total order: (last_match_ms desc, id desc).
+    When an index is usable and the unindexed tail does not exceed
+    TAIL_EXACT_MAX (200,000 rows), early stopping is exact:
+      - Any unmet session's newest match is bounded by the prefix maximum of
+        per-bucket running maxima of time_created (tmax table, bucket = rowid >> 14).
+      - Unindexed tail rows (watermark, src_max] and dirty live rows are folded
+        into the per-bucket maxima before computing prefix bounds.
+      - The walk stops only when >= limit candidates have been collected AND
+        the limit-th best candidate's newest match is strictly greater than
+        the prefix bound for all unexamined rows.
+      - In this mode, --limit N equals the unlimited search's first N rows
+        exactly, including ties.
 
-    It is NOT monotonic everywhere. Rowids ~852,410-955,037 on cloudbox are a
-    block of ~100k parts from 668 sessions (05-31..06-07), bulk-inserted
-    2026-06-07 22:28 in roughly reverse chronological order, so times there run
-    backwards by up to 168h. A needle whose N-th newest session falls in that
-    era can get the wrong N sessions. Measured: `--types tool,text
-    cops-6234-proto --limit 20` gets 5 of 20 wrong. Elsewhere inversions are
-    under a minute: 248 in the last 1.5M rows, the largest 41s. So:
-      - the sessions returned are always real matches, with exact counts and
-        last_match from the live table, sorted by last_match;
-      - which sessions are returned follows insertion order. That is the
-        exact top N except around that block (or any future bulk insert).
-    The exact fix is a stop rule bounded by a per-bucket running max of
-    time_created kept by the indexer; it is deferred to the schema-v2 work
-    (bead workstation-gqt3.3).
+    WITHOUT A USABLE INDEX (or when the tail exceeds TAIL_EXACT_MAX):
+      - Early stopping falls back to insertion order, stopping once limit
+        sessions have been met walking down by rowid.
+      - That equals result order wherever part.rowid is monotonic in time_created.
+      - Across bulk inserts where rowid is not monotonic (e.g. cloudbox rowids
+        ~852k-955k where times run backwards), insertion order can pick older
+        sessions before newer ones.
 
     THE WALK, top down:
       1. (floor, src_max] -- the rows the index has not seen, or the whole
@@ -1417,8 +1417,73 @@ def search_recent(
         "WHERE session_id = ? AND instr(data, ?) > 0" + pred
     )
 
+    exact = (
+        idx is not None
+        and floor > 0
+        and (src_max - floor) <= TAIL_EXACT_MAX
+    )
+    setattr(search_recent, "last_mode", "exact" if exact else "heuristic")
+
+    bucket_max: dict[int, int] = {}
+    prefix: list[int] = []
+
+    if exact and idx is not None:
+        for b, m in idx.execute("SELECT bucket, max_tc FROM tmax"):
+            bucket_max[int(b)] = int(m)
+        if src_max > floor:
+            for b, m in src.execute(
+                "SELECT rowid >> ?, MAX(time_created) FROM part WHERE rowid > ? GROUP BY 1",
+                (TMAX_SHIFT, floor),
+            ):
+                b_int = int(b)
+                bucket_max[b_int] = max(bucket_max.get(b_int, 0), int(m))
+        dirty_list = list(dirty_rowids) if dirty_rowids else []
+        if dirty_list:
+            CHUNK = 400
+            for i in range(0, len(dirty_list), CHUNK):
+                chunk = dirty_list[i : i + CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                for rid, tc in src.execute(
+                    f"SELECT rowid, time_created FROM part WHERE rowid IN ({placeholders})",
+                    chunk,
+                ):
+                    b = int(rid) >> TMAX_SHIFT
+                    bucket_max[b] = max(bucket_max.get(b, 0), int(tc))
+
+        if bucket_max:
+            max_b = max(bucket_max.keys())
+            prefix = [0] * (max_b + 1)
+            cur = 0
+            for b in range(max_b + 1):
+                m = bucket_max.get(b, 0)
+                if m > cur:
+                    cur = m
+                prefix[b] = cur
+
+    def prefix_bound(b: int) -> int:
+        if b < 0 or not prefix:
+            return -1
+        if b >= len(prefix):
+            return prefix[-1]
+        return prefix[b]
+
+    def top_limit_candidates() -> dict[str, tuple[int, int]]:
+        candidates = sorted(
+            picked.items(), key=lambda item: (item[1][1], item[0]), reverse=True
+        )
+        return dict(candidates[:limit])
+
+    def can_stop(p: int) -> bool:
+        if len(picked) < limit:
+            return False
+        bound = prefix_bound(p >> TMAX_SHIFT) if p > 0 else -1
+        candidates = sorted(
+            picked.items(), key=lambda item: (item[1][1], item[0]), reverse=True
+        )
+        return candidates[limit - 1][1][1] > bound
+
     def consider(sid: str) -> bool:
-        """Account for one session; True once `limit` sessions are picked."""
+        """Account for one session; returns True if newly added to picked."""
         if sid in seen:
             return False
         seen.add(sid)
@@ -1427,8 +1492,10 @@ def search_recent(
         n, t = src.execute(recount_sql, [sid, query] + params).fetchone()
         if n:
             picked[sid] = (int(n), int(t))
+            deadline.check()
+            return True
         deadline.check()
-        return len(picked) >= limit
+        return False
 
     try:
         hi = resume_hi if resume_hi is not None else src_max
@@ -1441,8 +1508,11 @@ def search_recent(
             # newest overall unless it was already met higher up, in which case
             # consider() skips it.
             for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
-                if consider(sid):
+                consider(sid)
+                if not exact and len(picked) >= limit:
                     return picked
+            if exact and can_stop(lo):
+                return top_limit_candidates()
             hi = lo
             window *= RECENT_WINDOW_GROWTH
 
@@ -1450,14 +1520,17 @@ def search_recent(
             dirty_found = scan_rowids(src, dirty_rowids, query, types, deadline)
             deadline.check()
             for sid in sorted(dirty_found, key=lambda s: dirty_found[s][1], reverse=True):
-                if consider(sid):
+                consider(sid)
+                if not exact and len(picked) >= limit:
                     return picked
+            if exact and can_stop(floor):
+                return top_limit_candidates()
 
         if idx is not None and floor > 0:
             idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
             ipred, iparams = type_predicate(types, "pm.type")
             sql = (
-                "SELECT pm.session_id FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
+                "SELECT pm.session_id, ft.rowid FROM ft JOIN part_meta pm ON pm.rowid_ = ft.rowid "
                 "WHERE ft MATCH ? AND ft.rowid <= ? AND ft.rowid NOT IN (SELECT rowid FROM temp.dirty)"
                 + ipred
                 + " ORDER BY ft.rowid DESC"
@@ -1465,15 +1538,37 @@ def search_recent(
             try:
                 cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
                 try:
-                    for (sid,) in cur:
-                        if consider(sid):
-                            break
+                    last_bucket = None
+                    last_t_limit = None
+                    for sid, r in cur:
+                        added = consider(sid)
+                        if not exact:
+                            if len(picked) >= limit:
+                                return picked
+                        else:
+                            b = r >> TMAX_SHIFT
+                            if added:
+                                last_t_limit = None
+                            if b != last_bucket or last_t_limit is None:
+                                last_bucket = b
+                                bound = prefix_bound(b)
+                                if len(picked) >= limit:
+                                    candidates = sorted(
+                                        picked.items(),
+                                        key=lambda item: (item[1][1], item[0]),
+                                        reverse=True,
+                                    )
+                                    last_t_limit = candidates[limit - 1][1][1]
+                                    if last_t_limit > bound:
+                                        return dict(candidates[:limit])
                 finally:
                     cur.close()
             except sqlite3.DatabaseError as exc:
                 if deadline.tripped.is_set():
                     raise
                 raise IndexQueryError(exc, picked, seen, floor) from exc
+        if exact:
+            return top_limit_candidates()
         return picked
     finally:
         if idx is not None:
@@ -1509,7 +1604,7 @@ def decorate(
                     "matches": n,
                 }
             )
-    rows.sort(key=lambda r: r["last_match_ms"], reverse=True)
+    rows.sort(key=lambda r: (r["last_match_ms"], r["id"]), reverse=True)
     return rows
 
 

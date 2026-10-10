@@ -2296,15 +2296,14 @@ class LimitFastPathTest(unittest.TestCase):
             f.close()
 
     def test_bulk_inserted_block_picks_by_insertion_order(self):
-        """The documented limit of the early stop, pinned so it cannot drift.
+        """With a usable index, --limit picks the exact newest sessions.
 
         cloudbox has a ~100k-row block bulk-inserted in reverse chronological
         order (rowids ~852k-955k, 2026-06-07). Walking by rowid meets the
-        OLDER session first there, so `--limit 1` picks it rather than the
-        session with the newest match. What must still hold: every returned
-        row is a real match with exactly the unlimited path's count and
-        last_match. When gqt3.3 adds a time-bounded stop rule, flip the first
-        assertion to `== full[:1]`.
+        OLDER session first there. With a usable index, the tmax stop rule
+        guarantees --limit 1 returns the true newest session (ses_newer).
+        Without an index (--no-index), it keeps today's documented insertion-order
+        behavior and picks ses_older.
         """
         f = Fixture()
         try:
@@ -2323,10 +2322,185 @@ class LimitFastPathTest(unittest.TestCase):
                 if not flags:
                     f.build_index()
                 got = f.sessions(*flags, "--limit", "1", "BLOCK")
-                self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
+                if not flags:
+                    self.assertEqual([r["id"] for r in got], ["ses_newer"], flags)
+                    self.assertEqual(got, full[:1], flags)
+                else:
+                    self.assertEqual([r["id"] for r in got], ["ses_older"], flags)
                 by_id = {r["id"]: r for r in full}
                 for r in got:
                     self.assertEqual(r, by_id[r["id"]], flags)
+        finally:
+            f.close()
+
+    def test_reverse_ordered_block_inside_tail(self):
+        """A reverse-ordered block INSIDE the tail (unindexed) with a usable index: exact."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_base")
+            add_part(f.conn, "ses_base", type="tool", text="base part", t=50)
+            f.commit()
+            f.build_index()
+
+            # Now add reverse-ordered block in the tail above watermark
+            add_session(f.conn, "ses_tail_newer")
+            add_session(f.conn, "ses_tail_older")
+            add_part(f.conn, "ses_tail_newer", type="tool", text="TAILBLOCK newer", t=500)
+            for i in range(20):
+                add_part(f.conn, "ses_tail_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_tail_older", type="tool", text="TAILBLOCK older", t=100)
+            f.commit()
+
+            full = f.sessions("--no-index", "TAILBLOCK")
+            self.assertEqual([r["id"] for r in full], ["ses_tail_newer", "ses_tail_older"])
+
+            got = f.sessions("--limit", "1", "TAILBLOCK")
+            self.assertEqual([r["id"] for r in got], ["ses_tail_newer"])
+            self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_tail_larger_than_tail_exact_max_uses_heuristic(self):
+        """When the tail exceeds TAIL_EXACT_MAX, search_recent falls back to heuristic stop."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_base")
+            add_part(f.conn, "ses_base", type="tool", text="base part", t=50)
+            f.commit()
+            f.build_index()
+
+            add_session(f.conn, "ses_tail_newer")
+            add_session(f.conn, "ses_tail_older")
+            add_part(f.conn, "ses_tail_newer", type="tool", text="TAILBLOCK newer", t=500)
+            for i in range(20):
+                add_part(f.conn, "ses_tail_newer", type="text", text="filler", t=500 + i)
+            add_part(f.conn, "ses_tail_older", type="tool", text="TAILBLOCK older", t=100)
+            f.commit()
+
+            # Normal TAIL_EXACT_MAX: exact path runs, returns ses_tail_newer
+            got_exact = f.sessions("--limit", "1", "TAILBLOCK")
+            self.assertEqual([r["id"] for r in got_exact], ["ses_tail_newer"])
+            self.assertEqual(getattr(oc_search.search_recent, "last_mode", None), "exact")
+
+            # Monkeypatch TAIL_EXACT_MAX small so tail exceeds it: heuristic path runs, returns ses_tail_older
+            with mock.patch("oc_search.TAIL_EXACT_MAX", 2):
+                got_heuristic = f.sessions("--limit", "1", "TAILBLOCK")
+                self.assertEqual([r["id"] for r in got_heuristic], ["ses_tail_older"])
+                self.assertEqual(getattr(oc_search.search_recent, "last_mode", None), "heuristic")
+        finally:
+            f.close()
+
+    def test_ties_total_order(self):
+        """Ties on last_match are broken by id desc; --limit N == unlimited[:N] for all N."""
+        f = Fixture()
+        try:
+            # 4 sessions with exact same timestamp
+            for sid in ("ses_a", "ses_b", "ses_c", "ses_d"):
+                add_session(f.conn, sid)
+                add_part(f.conn, sid, type="tool", text="TIE needle", t=1000)
+            f.commit()
+            f.build_index()
+
+            full = f.sessions("TIE")
+            # In total order (last_match_ms desc, id desc):
+            # timestamps are equal (1000), so ids must be strictly descending:
+            self.assertEqual([r["id"] for r in full], ["ses_d", "ses_c", "ses_b", "ses_a"])
+
+            for n in (1, 2, 3, 4, 5):
+                got = f.sessions("--limit", str(n), "TIE")
+                self.assertEqual(got, full[:n], f"failed for N={n}")
+        finally:
+            f.close()
+
+    def test_dirty_row_with_newer_time_created(self):
+        """Dirty row with newer time_created at low rowid is folded into prefix bound."""
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_early")
+            p1 = add_part(f.conn, "ses_early", type="tool", text="DIRTY needle", t=100)
+            f.commit()
+            f.build_index()
+
+            # Mutate rowid 1 (p1) to have a newer time_created (1000) and updated text/time
+            update_part(f.conn, 1, text="DIRTY needle updated", bump=1000)
+            f.conn.execute("UPDATE part SET time_created = ? WHERE rowid = 1", (BASE_MS + 1000,))
+
+            # Add ses_late in the tail (above watermark) with lower timestamp (200)
+            add_session(f.conn, "ses_late")
+            for i in range(20):
+                add_part(f.conn, "ses_late", type="text", text="filler", t=150 + i)
+            p2 = add_part(f.conn, "ses_late", type="tool", text="DIRTY needle", t=200)
+            f.commit()
+
+            # Full scan confirms ses_early (t=1000) is newer than ses_late (t=200)
+            full = f.sessions("--no-index", "DIRTY")
+            self.assertEqual([r["id"] for r in full], ["ses_early", "ses_late"])
+
+            # Query with limit 1 and index: dirty folding ensures ses_early is picked
+            got = f.sessions("--limit", "1", "DIRTY")
+            self.assertEqual([r["id"] for r in got], ["ses_early"])
+            self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_bucket_boundary_straddling(self):
+        """Rows straddling a bucket edge do not trigger premature stop."""
+        f = Fixture()
+        try:
+            # Monkeypatch TMAX_SHIFT=2 so bucket size is 4 (rowids 0..3 bucket 0, 4..7 bucket 1)
+            with mock.patch("oc_search.TMAX_SHIFT", 2):
+                add_session(f.conn, "ses_bucket0")
+                add_session(f.conn, "ses_bucket1")
+                # Put ses_bucket0 at rowids 1..3 with t=2000
+                add_part(f.conn, "ses_bucket0", type="tool", text="STRADDLE needle", t=2000)
+                add_part(f.conn, "ses_bucket0", type="text", text="filler", t=2001)
+                add_part(f.conn, "ses_bucket0", type="text", text="filler", t=2002)
+                # Put ses_bucket1 at rowids 4..5 with lower t=1000
+                add_part(f.conn, "ses_bucket1", type="tool", text="STRADDLE needle", t=1000)
+                add_part(f.conn, "ses_bucket1", type="text", text="filler", t=1001)
+                f.commit()
+                f.build_index()
+
+                full = f.sessions("STRADDLE")
+                self.assertEqual([r["id"] for r in full], ["ses_bucket0", "ses_bucket1"])
+
+                got = f.sessions("--limit", "1", "STRADDLE")
+                self.assertEqual([r["id"] for r in got], ["ses_bucket0"])
+                self.assertEqual(got, full[:1])
+        finally:
+            f.close()
+
+    def test_common_needle_stops_in_first_window(self):
+        """A common needle yields N sessions in the first window and stops without reading deeper."""
+        f = Fixture()
+        try:
+            with mock.patch("oc_search.TMAX_SHIFT", 3), mock.patch("oc_search.RECENT_FIRST_WINDOW", 8):
+                # Build index with older rows in lower buckets (rowids 1..16 -> buckets 0..1)
+                for s in range(16):
+                    sid = f"ses_old_{s}"
+                    add_session(f.conn, sid)
+                    add_part(f.conn, sid, type="tool", text="OLD filler", t=100 + s)
+                f.commit()
+                f.build_index()
+
+                # Add tail with common needle in higher bucket with newer timestamps
+                for s in range(4):
+                    sid = f"ses_new_{s}"
+                    add_session(f.conn, sid)
+                    add_part(f.conn, sid, type="tool", text="COMMON needle", t=10_000 + s)
+                f.commit()
+
+                calls = []
+                real_scan = oc_search.scan_parallel
+
+                def spy(*args, **kwargs):
+                    calls.append(args)
+                    return real_scan(*args, **kwargs)
+
+                with mock.patch("oc_search.scan_parallel", side_effect=spy):
+                    got = f.sessions("--limit", "2", "COMMON")
+                    self.assertEqual(len(got), 2)
+                    self.assertEqual(len(calls), 1, f"Expected 1 scan_parallel call, got {len(calls)}")
         finally:
             f.close()
 
@@ -2351,6 +2525,7 @@ class DifferentialRunner:
         "interior_delete": 2,
         "delete_session": 1,
         "top_reuse": 2,
+        "reverse_bulk_insert": 2,
         "interrupted_build": 1,
         "build": 3,
     }
@@ -2409,6 +2584,8 @@ class DifferentialRunner:
         self.fixture.close()
 
     def next_time(self) -> int:
+        if self.rng.random() < 0.25 and self.time_counter > 0:
+            return self.time_counter
         self.time_counter += 1
         return self.time_counter
 
@@ -2494,6 +2671,25 @@ class DifferentialRunner:
         sid = self.rng.choice(self.sessions)
         for _ in range(k):
             t = self.next_time()
+            add_part(
+                self.fixture.conn,
+                sid,
+                type=self.rng.choice(self.TYPES),
+                text=self.random_text(),
+                t=t,
+            )
+        self.fixture.commit()
+
+    def op_reverse_bulk_insert(self):
+        k = self.rng.randint(2, 3)
+        base_t = self.time_counter + k * 10
+        self.time_counter = base_t
+        for i in range(k):
+            self.session_counter += 1
+            sid = f"ses_bulk_{self.session_counter:03d}"
+            add_session(self.fixture.conn, sid, title=f"bulk_{sid}")
+            self.sessions.append(sid)
+            t = base_t - (i * 10)
             add_part(
                 self.fixture.conn,
                 sid,
