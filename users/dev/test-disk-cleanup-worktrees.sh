@@ -305,6 +305,10 @@ mkdir -p "$fakebin"
 printf '#!%s\n' "$(command -v bash)" > "$fakebin/git"
 cat >> "$fakebin/git" <<'SH'
 set -euo pipefail
+if [ -n "${FAKE_GITHUB_ORIGIN:-}" ] && [ "$#" -ge 5 ] && [ "$1" = "-C" ] && [ "$3" = "remote" ] && [ "$4" = "get-url" ] && [ "$5" = "origin" ]; then
+  echo "$FAKE_GITHUB_ORIGIN"
+  exit 0
+fi
 if [ "$#" -ge 5 ] && [ "$1" = "-C" ] && [ "$3" = "worktree" ] && [ "$4" = "remove" ]; then
   target="$5"
   if [ -d "$target" ]; then
@@ -320,20 +324,37 @@ chmod +x "$fakebin/git"
 # GitHub stand-in: 101 and 104 are open, 102 merged, 103 unanswerable,
 # 105 a PR number that does not exist, example/gone a repo GitHub will not
 # resolve (deleted -- or invisible to this token, which looks the same).
+# When called with -q, emits raw state (python caller); when called with
+# --json state (bash caller), emits JSON.
 printf '#!%s\n' "$(command -v bash)" > "$fakebin/gh"
 cat >> "$fakebin/gh" <<'SH'
 set -euo pipefail
 [ "$1" = "pr" ] && [ "$2" = "view" ] || { echo "fake gh: unexpected $*" >&2; exit 2; }
-if [ "$5" = "example/gone" ]; then
-  echo "GraphQL: Could not resolve to a Repository with the name 'example/gone'. (repository)" >&2; exit 1
-fi
+for arg in "$@"; do
+  if [ "$arg" = "example/gone" ]; then
+    echo "GraphQL: Could not resolve to a Repository with the name 'example/gone'. (repository)" >&2; exit 1
+  fi
+done
+has_q=false
+for arg in "$@"; do
+  if [ "$arg" = "-q" ]; then
+    has_q=true
+  fi
+done
+emit_state() {
+  local state="$1"
+  if [ "$has_q" = "true" ]; then
+    echo "$state"
+  else
+    printf '{"state":"%s"}\n' "$state"
+  fi
+}
 case "$3" in
-  101|104|111) echo OPEN ;;
-  112|113) echo MERGED ;;
+  101|104|111|202) emit_state OPEN ;;
+  112|113|102|201|203|204) emit_state MERGED ;;
   # Hangs past the harness's DISK_CLEANUP_GH_TIMEOUT: the exception path.
-  106)     sleep 10; echo OPEN ;;
+  106)     sleep 10; emit_state OPEN ;;
   105)     echo "GraphQL: Could not resolve to a PullRequest with the number of 105. (repository.pullRequest)" >&2; exit 1 ;;
-  102)     echo MERGED ;;
   *)       echo "fake gh: HTTP 502" >&2; exit 1 ;;
 esac
 SH
@@ -419,6 +440,54 @@ if cat "$tmpdir/harness-v2.out" "$tmpdir/harness-v2.err" | grep -q "unrecognised
 else
   fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v2.err")"
 fi
+
+# --- PR worktrees: lgtm-pr-<N> (lgtm) and pr-<N> (maven-renovate lane) ---
+lgtm_home="$tmpdir/lgtm_home"
+lgtm_repo="$lgtm_home/projects/lgtmrepo"
+mkdir -p "$lgtm_home/projects"
+
+git clone "$origin" "$lgtm_repo" >/dev/null
+git -C "$lgtm_repo" config user.email test@example.com
+git -C "$lgtm_repo" config user.name 'Disk Cleanup Test'
+mkdir -p "$lgtm_repo/.worktrees"
+
+lgtm_pr_201_wt="$lgtm_repo/.worktrees/lgtm-pr-201"
+lgtm_pr_202_wt="$lgtm_repo/.worktrees/lgtm-pr-202"
+lane_pr_203_wt="$lgtm_repo/.worktrees/pr-203"
+dirty_lgtm_pr_wt="$lgtm_repo/.worktrees/lgtm-pr-204"
+
+for wt in "$lgtm_pr_201_wt" "$lgtm_pr_202_wt" "$lane_pr_203_wt" "$dirty_lgtm_pr_wt"; do
+  git -C "$lgtm_repo" worktree add --detach "$wt" origin/main >/dev/null
+  echo "pr commit" > "$wt/pr.txt"
+  git -C "$wt" add pr.txt
+  git -C "$wt" commit -m "pr commit" >/dev/null
+  find "$wt" -exec touch -d '20 days ago' {} +
+done
+
+# Fresh uncommitted changes on dirty_lgtm_pr_wt to trigger the dirty guard
+printf 'uncommitted changes\n' >> "$dirty_lgtm_pr_wt/pr.txt"
+
+: > "$remove_log"
+set +e
+HOME="$lgtm_home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" \
+  FAKE_GITHUB_ORIGIN="https://github.com/example/lgtmrepo.git" "$harness" \
+  > "$tmpdir/harness-lgtm.out" 2> "$tmpdir/harness-lgtm.err"
+harness_lgtm_rc=$?
+set -e
+if [ "$harness_lgtm_rc" -ne 0 ]; then
+  fail "cleanup_worktrees harness (lgtm) exited $harness_lgtm_rc" \
+    "stdout: $(tr '\n' ' ' < "$tmpdir/harness-lgtm.out")" \
+    "stderr: $(tr '\n' ' ' < "$tmpdir/harness-lgtm.err")"
+fi
+
+assert_remove_logged "$lgtm_pr_201_wt" \
+  "lgtm-pr worktree whose PR is MERGED is selected for removal"
+assert_remove_not_logged "$lgtm_pr_202_wt" \
+  "lgtm-pr worktree whose PR is OPEN is not selected for removal"
+assert_remove_logged "$lane_pr_203_wt" \
+  "lane pr-N worktree whose PR is MERGED is still selected for removal (unchanged)"
+assert_remove_not_logged "$dirty_lgtm_pr_wt" \
+  "dirty lgtm-pr worktree whose PR is MERGED is not selected for removal"
 
 # Fail-safe: when the liveness probe cannot run at all, NOTHING is removed.
 # An empty answer from a probe that never ran is indistinguishable from
