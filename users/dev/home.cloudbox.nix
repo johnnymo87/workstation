@@ -47,6 +47,11 @@ let
   # comment in pkgs/pressure-sampler/default.nix.
   pressureSampler = pkgs.callPackage ../../pkgs/pressure-sampler { };
 
+  # goose: the SAME package goose-serve runs (hosts/cloudbox, pkgs/goose), so the
+  # interactive CLI, every unattended `goose run` and goose-serve all run one binary. Bound to its own name: `pkgs.goose` in nixpkgs is the pressly/goose
+  # database migration tool.
+  gooseCli = pkgs.callPackage ../../pkgs/goose { };
+
   # Shared alert helper (dedup by signature, exponential backoff, warning->error
   # escalation, POST to pigeon's /alert). Same package the cloudbox canaries and
   # devbox's frontdoor canary use -- do not fork it.
@@ -337,6 +342,8 @@ lib.mkIf isCloudbox {
   # Developer tooling (project-specific)
   home.packages = with pkgs; [
 
+    gooseCli
+
     # `bazel` on PATH is a SHIM, not bazelisk (bead workstation-mqp3). It re-execs
     # the build inside `systemd-run --user --scope --slice=bazel`, so bazel is
     # charged to bazel.slice (declared below) instead of to the cgroup of whatever
@@ -513,6 +520,18 @@ lib.mkIf isCloudbox {
   # Both client_secret.json (OAuth client config, needed for re-auth)
   # and credentials.json (authorized_user tokens) are assembled from
   # the same sops secrets to avoid committing secrets to git.
+  # One goose on this host (see gooseCli above). Login and interactive shells put
+  # ~/.local/bin AHEAD of the profile, so a hand-installed copy there (upstream's
+  # download_cli.sh puts it there by default) would silently win for humans and
+  # split the binaries again over a shared sessions.db. Say so on every switch.
+  home.activation.warnStrayGoose = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    for f in "$HOME"/.local/bin/goose "$HOME"/.local/bin/goose-*; do
+      if [ -e "$f" ]; then
+        echo "WARNING: $f exists; every goose on this host should be the profile's (pkgs/goose). Remove it." >&2
+      fi
+    done
+  '';
+
   home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
     set -euo pipefail
 

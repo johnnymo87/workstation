@@ -1,43 +1,39 @@
-# goose CLI, pinned to the exact upstream release binary that this repo's goose
-# integration was measured against.
+# goose CLI, pinned to a release of the johnnymo87/goose fork: an upstream goose
+# release plus a few local patches, built by upstream's own Linux CLI workflow
+# (.github/workflows/patched-release.yml on the fork's patched/<version> branch).
+# Every goose on cloudbox runs THIS binary: the goose-serve unit below in
+# hosts/cloudbox, and the user's `goose` via home.cloudbox.nix. One binary,
+# because the serve and the CLI share ~/.local/share/goose/sessions/sessions.db,
+# and a version gap between two writers of that DB is how a stale-schema panic
+# starts.
 #
-# WHY PACKAGE IT AT ALL. The first cut of the goose-serve units (#567) ran
-# /home/dev/.local/bin/goose -- a hand-installed 296 MB file in $HOME. That
-# works, but it makes a declarative unit depend on something no rebuild can
-# reproduce, and it leans on nix-ld to supply the loader for a gnu-linked
-# binary. Neither dependency is visible to `nix eval`, so a deleted or swapped
-# binary surfaces at runtime, not at build time.
+# THE PATCHES (fork branch patched/v1.54.0, on top of tag v1.54.0):
+#   1. GOOSE_HEADLESS_CACHE_TTL (5m|1h): lets a headless `goose run` opt out of
+#      upstream's clamp of the prompt-cache TTL to 5m. Upstream clamps because
+#      burst-only runs cannot idle; a standing session resumed by a timer every
+#      15+ minutes is the opposite case, and a 5m cache is always cold for it.
+#   2. GCP_VERTEX_HOST / GCP_VERTEX_SESSION_HEADER: the gcp_vertex_ai provider's
+#      host was hard-coded to Google's endpoints. These point it at a local proxy
+#      speaking the Vertex paths (claude-failover-proxy) and name the session
+#      header that proxy keys stickiness on.
+#   3. GCP_AUTH_SCOPES: the scopes goose requests when refreshing gcloud ADC
+#      credentials (upstream: cloud-platform only). A gateway that attributes
+#      requests by identity needs userinfo.email too.
+# All are inert unless their variables are set.
 #
-# WHY IT IS SAFE TO SWITCH. The upstream asset is BYTE-IDENTICAL to the
-# hand-installed binary it replaces -- both sha256
-# a261d5b7e0bf34abf2f4ad8e446bc69339c687e9ca2bac7f0221fa6fbb940830, verified on
-# cloudbox 2026-09-21. So this is a provenance change, not a behaviour change:
-# every measurement taken against the hand-installed 1.48.0 still holds.
+# WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
+# measured facts about the ACP server: the /acp path, ?token= auth, the
+# YYYYMMDD_N session-id format, extensionResults, run ids and steer. They were
+# measured at 1.48.0 and RE-MEASURED at 1.54.0 + patches on 2026-10-09: a
+# throwaway serve passed pigeon's goose-launch, goose-runner and goose-id-split
+# probes. Bumping is a deploy action: back up sessions.db, bump, restart
+# goose-serve in a window, re-run those probes. Session DB schema is 16 at both
+# 1.48.0 and 1.54.0, so this particular bump needs no migration.
 #
-# WHY THERE IS NO AUTO-BUMP WORKFLOW, unlike opencode-patched. Two reasons, and
-# the second is the sharp one:
-#   1. The version is pinned to MEASURED behaviour. The ACP endpoint path, the
-#      query-parameter auth, and the session-id format are all facts about
-#      1.48.0 that the pigeon side depends on; a silent bump would invalidate
-#      them without anything failing loudly.
-#   2. goose keeps session state in a sqlite DB at
-#      ~/.local/share/goose/sessions/sessions.db. A version jump can panic on a
-#      stale schema -- and since goose-serve runs Restart=always, that turns
-#      into a crash loop rather than a clean stop. There is already a
-#      sessions.pre-1.46-backup-* directory beside it from exactly such a
-#      migration. Bumping is therefore a deploy action: back the DB up first,
-#      then bump, then watch the unit.
-# Treat this file as the place a human decides to move, deliberately.
-#
-# KNOWN GAP, deliberately not closed here. The hand-installed
-# /home/dev/.local/bin/goose still exists and is what a human gets
-# interactively, and it shares ~/.local/share/goose/sessions/sessions.db with
-# the serve. So packaging pins the SERVE's provenance while a second,
-# unmanaged copy keeps write access to the same state -- and the first version
-# drift between them is precisely the stale-schema panic described above.
-# Closing it means installing this package for the user and removing the
-# hand-installed binary, which is a deploy action on every host rather than a
-# nix change; tracked separately.
+# Release assets are byte-for-byte what upstream's workflow produces for the
+# patched source (gnu, default features), so measurements of upstream behaviour
+# still hold outside the patched lines.
+
 { lib
 , stdenv
 , fetchurl
@@ -45,7 +41,8 @@
 }:
 
 let
-  version = "1.48.0";
+  version = "1.54.0-patched.2";
+  tag = "patched-1.54.0.2";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -57,11 +54,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-tlBuc+wVY3rHzY08Cd+X9e7/VACUap6PDUyPWQXlPzs=";
+      hash = "sha256-BxLs1VyTQF//IZQZzMAcUXvMVZp3JdFh/l2E3kzpySk=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-PDjHkHI/3kUyNX81NGtxkL1w0ZjmvlWfn/6sTPfJgVI=";
+      hash = "sha256-X+OhF/FxRrMSExxDsX+V0rSVqhHvmRh87z1DlIOpXJ4=";
     };
   };
 
@@ -74,7 +71,7 @@ stdenv.mkDerivation {
   inherit version;
 
   src = fetchurl {
-    url = "https://github.com/block/goose/releases/download/v${version}/${platformInfo.asset}";
+    url = "https://github.com/johnnymo87/goose/releases/download/${tag}/${platformInfo.asset}";
     inherit (platformInfo) hash;
   };
 
@@ -111,8 +108,8 @@ stdenv.mkDerivation {
   '';
 
   meta = {
-    description = "goose CLI, pinned to the release measured by the pigeon ACP integration";
-    homepage = "https://github.com/block/goose";
+    description = "goose CLI: upstream release plus local patches, pinned to what the pigeon ACP integration was measured against";
+    homepage = "https://github.com/johnnymo87/goose";
     mainProgram = "goose";
     platforms = lib.attrNames platforms;
   };

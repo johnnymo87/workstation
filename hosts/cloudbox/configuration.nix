@@ -113,8 +113,9 @@ let
   # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
 
-  # goose: the agent CLI, pinned to the release the pigeon ACP integration was
-  # measured against (pkgs/goose). Same callPackage rationale as above.
+  # goose: the agent CLI, pinned to the patched release the pigeon ACP integration
+  # was measured against (pkgs/goose). The user's `goose` is the same package
+  # (home.cloudbox.nix). Same callPackage rationale as above.
   #
   # NAME COLLISION, and it is a silent one: `pkgs.goose` in nixpkgs is the
   # pressly/goose DATABASE MIGRATION TOOL, not this. With overlays = [] in
@@ -688,6 +689,19 @@ in
         "GOOSE_PROVIDER=gcp_vertex_ai"
         "GCP_LOCATION=global"
         "GOOGLE_APPLICATION_CREDENTIALS=/home/dev/.config/gcloud/application_default_credentials.json"
+        # Send Claude-on-Vertex through claude-failover-proxy like every other agent
+        # on this host, keyed by goose's session id so cfp's stickiness keeps a
+        # session on one backend (and therefore one prompt cache). Needs the patched
+        # goose in pkgs/goose; stock goose ignores both variables.
+        # A cfp restart (it has no restartIfChanged=false) drops any goose turn with a
+        # model request in flight, as it does for opencode; goose does not retry a
+        # refused or cut connection. Accepted: same exposure as every other agent here.
+        "GCP_VERTEX_HOST=http://127.0.0.1:8789"
+        "GCP_VERTEX_SESSION_HEADER=x-opencode-session"
+        # cfp's Vertex leg goes through a gateway that attributes each request by the
+        # caller's identity, so goose's token must carry the email scope as gcloud's
+        # does; with cloud-platform alone the gateway answers 503.
+        "GCP_AUTH_SCOPES=https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
