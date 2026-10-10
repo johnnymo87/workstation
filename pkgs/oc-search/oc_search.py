@@ -198,9 +198,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         metavar="N",
         help=(
             "Show at most N sessions, with exact counts. Searches newest-first "
-            "(by insertion) and stops, so it stays fast for common needles even "
-            "without a usable index. Equal to the first N rows of the unlimited "
-            "search except near bulk-imported history (see search_recent)."
+            "and stops early, so it stays fast for common needles. With a usable "
+            "index (and a short unindexed tail) it equals the first N rows of the "
+            "unlimited search; without one it stops by insertion order, which can "
+            "differ near bulk-imported history (see search_recent)."
         ),
     )
     p.add_argument("--db", help=f"Path to opencode.db (default: {DEFAULT_DB}).")
@@ -1473,7 +1474,7 @@ def search_recent(
     THE WALK, top down:
       1. (floor, src_max] -- the rows the index has not seen, or the whole
          table when there is no usable index -- in rowid windows that start at
-         RECENT_FIRST_WINDOW and double, each scanned with the same parallel
+         RECENT_FIRST_WINDOW and grow by RECENT_WINDOW_GROWTH, each scanned with the same parallel
          instr() as the fallback. A common needle stops in the first window,
          so an absent or invalid index no longer means a full scan.
       2. Then dirty live rowids (if any) are scanned live, and index postings
