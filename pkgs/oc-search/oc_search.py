@@ -68,7 +68,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 DEFAULT_DB = "~/.local/share/opencode/opencode.db"
 DEFAULT_TYPES = "tool"
@@ -131,7 +131,9 @@ RECENT_WINDOW_GROWTH = 4
 RECONCILE_MAX = 50_000
 DELETE_MAX = 1_000_000
 RECHECK_ROWS = 100_000
-TAIL_EXACT_MAX = 200_000
+# TAIL_EXACT_MAX: 50k rows. Measured: tail GROUP BY over 200k rows took ~18s
+# on a cold cache on the real DB, vs a 25s budget.
+TAIL_EXACT_MAX = 50_000
 
 IDENTITY_SWEEP_SQL = (
     "SELECT p.rowid FROM part p INDEXED BY sqlite_autoindex_part_1 "
@@ -545,6 +547,9 @@ def index_validity(
         if get_meta(idx, "schema_version") != str(INDEX_SCHEMA_VERSION):
             end_txn(idx, commit=False)
             return IndexValidity(False, 0, set(), "index schema version mismatch")
+        if get_meta(idx, "tmax_shift") != str(TMAX_SHIFT):
+            end_txn(idx, commit=False)
+            return IndexValidity(False, 0, set(), "tmax_shift mismatch")
         if get_meta(idx, "source_db") != os.path.realpath(db_path):
             end_txn(idx, commit=False)
             return IndexValidity(False, 0, set(), "index was built against a different opencode.db")
@@ -762,7 +767,8 @@ def build_index(
             try:
                 sdb = get_meta(quick_idx, "source_db")
                 wm = get_meta(quick_idx, "watermark_rowid")
-                if sdb != os.path.realpath(db_path) or wm is None:
+                tshift = get_meta(quick_idx, "tmax_shift")
+                if sdb != os.path.realpath(db_path) or wm is None or tshift != str(TMAX_SHIFT):
                     is_rebuild = True
                 else:
                     watermark = int(wm)
@@ -792,6 +798,7 @@ def build_index(
         if is_rebuild:
             set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
             set_meta(idx, "source_db", os.path.realpath(db_path))
+            set_meta(idx, "tmax_shift", TMAX_SHIFT)
             set_meta(idx, "watermark_rowid", 0)
             set_meta(idx, "watermark_part_id", "")
             idx.commit()
@@ -1343,6 +1350,74 @@ class IndexQueryError(Exception):
         self.floor = floor
 
 
+def build_prefix_bound(
+    src: sqlite3.Connection,
+    idx: sqlite3.Connection,
+    floor: int,
+    src_max: int,
+    dirty_rowids: Iterable[int] | None = None,
+) -> Callable[[int], int]:
+    """Build the prefix maximum bound over per-bucket time_created maxima.
+
+    Combines the index `tmax` table with live unindexed tail rows (floor, src_max]
+    and dirty live rows folded into bucket maxima (bucket = rowid >> TMAX_SHIFT).
+    Returns a callable B(p) giving the upper bound on time_created for rows <= p.
+    """
+    bucket_max: dict[int, int] = {}
+    for b, m in idx.execute("SELECT bucket, max_tc FROM tmax"):
+        bucket_max[int(b)] = int(m)
+    if src_max > floor:
+        for b, m in src.execute(
+            "SELECT rowid >> ?, MAX(time_created) FROM part WHERE rowid > ? GROUP BY 1",
+            (TMAX_SHIFT, floor),
+        ):
+            b_int = int(b)
+            bucket_max[b_int] = max(bucket_max.get(b_int, 0), int(m))
+    dirty_list = list(dirty_rowids) if dirty_rowids else []
+    if dirty_list:
+        CHUNK = 400
+        for i in range(0, len(dirty_list), CHUNK):
+            chunk = dirty_list[i : i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            for rid, tc in src.execute(
+                f"SELECT rowid, time_created FROM part WHERE rowid IN ({placeholders})",
+                chunk,
+            ):
+                b = int(rid) >> TMAX_SHIFT
+                bucket_max[b] = max(bucket_max.get(b, 0), int(tc))
+
+    if bucket_max:
+        max_b = max(bucket_max.keys())
+        prefix = [0] * (max_b + 1)
+        cur = 0
+        for b in range(max_b + 1):
+            m = bucket_max.get(b, 0)
+            if m > cur:
+                cur = m
+            prefix[b] = cur
+    else:
+        prefix = []
+
+    def prefix_bound(b: int) -> int:
+        if b < 0 or not prefix:
+            return -1
+        if b >= len(prefix):
+            return prefix[-1]
+        return prefix[b]
+
+    return prefix_bound
+
+
+def top_limit(
+    picked: dict[str, tuple[int, int]], limit: int
+) -> dict[str, tuple[int, int]]:
+    """Return the top `limit` sessions by total order (last_match_ms desc, id desc)."""
+    candidates = sorted(
+        picked.items(), key=lambda item: (item[1][1], item[0]), reverse=True
+    )
+    return dict(candidates[:limit])
+
+
 def search_recent(
     src: sqlite3.Connection,
     db_path: str,
@@ -1359,6 +1434,7 @@ def search_recent(
     seen: set[str] | None = None,
     picked: dict[str, tuple[int, int]] | None = None,
     resume_hi: int | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> dict[str, tuple[int, int]]:
     """The newest `limit` matching sessions, without aggregating every match.
 
@@ -1370,7 +1446,7 @@ def search_recent(
     WHEN STOPPING EARLY IS EXACT, AND WHEN IT IS NOT. Results are ordered by
     each session's newest match in total order: (last_match_ms desc, id desc).
     When an index is usable and the unindexed tail does not exceed
-    TAIL_EXACT_MAX (200,000 rows), early stopping is exact:
+    TAIL_EXACT_MAX (50,000 rows), early stopping is exact:
       - Any unmet session's newest match is bounded by the prefix maximum of
         per-bucket running maxima of time_created (tmax table, bucket = rowid >> 14).
       - Unindexed tail rows (watermark, src_max] and dirty live rows are folded
@@ -1422,65 +1498,27 @@ def search_recent(
         and floor > 0
         and (src_max - floor) <= TAIL_EXACT_MAX
     )
-    setattr(search_recent, "last_mode", "exact" if exact else "heuristic")
+    if stats is not None:
+        stats["mode"] = "exact" if exact else "heuristic"
 
-    bucket_max: dict[int, int] = {}
-    prefix: list[int] = []
+    if not exact and len(picked) >= limit:
+        return top_limit(picked, limit)
 
-    if exact and idx is not None:
-        for b, m in idx.execute("SELECT bucket, max_tc FROM tmax"):
-            bucket_max[int(b)] = int(m)
-        if src_max > floor:
-            for b, m in src.execute(
-                "SELECT rowid >> ?, MAX(time_created) FROM part WHERE rowid > ? GROUP BY 1",
-                (TMAX_SHIFT, floor),
-            ):
-                b_int = int(b)
-                bucket_max[b_int] = max(bucket_max.get(b_int, 0), int(m))
-        dirty_list = list(dirty_rowids) if dirty_rowids else []
-        if dirty_list:
-            CHUNK = 400
-            for i in range(0, len(dirty_list), CHUNK):
-                chunk = dirty_list[i : i + CHUNK]
-                placeholders = ",".join("?" * len(chunk))
-                for rid, tc in src.execute(
-                    f"SELECT rowid, time_created FROM part WHERE rowid IN ({placeholders})",
-                    chunk,
-                ):
-                    b = int(rid) >> TMAX_SHIFT
-                    bucket_max[b] = max(bucket_max.get(b, 0), int(tc))
+    prefix_bound = (
+        build_prefix_bound(src, idx, floor, src_max, dirty_rowids)
+        if (exact and idx is not None)
+        else None
+    )
 
-        if bucket_max:
-            max_b = max(bucket_max.keys())
-            prefix = [0] * (max_b + 1)
-            cur = 0
-            for b in range(max_b + 1):
-                m = bucket_max.get(b, 0)
-                if m > cur:
-                    cur = m
-                prefix[b] = cur
-
-    def prefix_bound(b: int) -> int:
-        if b < 0 or not prefix:
-            return -1
-        if b >= len(prefix):
-            return prefix[-1]
-        return prefix[b]
-
-    def top_limit_candidates() -> dict[str, tuple[int, int]]:
-        candidates = sorted(
-            picked.items(), key=lambda item: (item[1][1], item[0]), reverse=True
-        )
-        return dict(candidates[:limit])
-
-    def can_stop(p: int) -> bool:
+    def try_stop(bound: int) -> dict[str, tuple[int, int]] | None:
         if len(picked) < limit:
-            return False
-        bound = prefix_bound(p >> TMAX_SHIFT) if p > 0 else -1
+            return None
         candidates = sorted(
             picked.items(), key=lambda item: (item[1][1], item[0]), reverse=True
         )
-        return candidates[limit - 1][1][1] > bound
+        if candidates[limit - 1][1][1] > bound:
+            return dict(candidates[:limit])
+        return None
 
     def consider(sid: str) -> bool:
         """Account for one session; returns True if newly added to picked."""
@@ -1510,9 +1548,11 @@ def search_recent(
             for sid in sorted(found, key=lambda s: found[s][1], reverse=True):
                 consider(sid)
                 if not exact and len(picked) >= limit:
-                    return picked
-            if exact and can_stop(lo):
-                return top_limit_candidates()
+                    return top_limit(picked, limit)
+            if exact and prefix_bound is not None:
+                stopped = try_stop(prefix_bound(lo >> TMAX_SHIFT) if lo > 0 else -1)
+                if stopped is not None:
+                    return stopped
             hi = lo
             window *= RECENT_WINDOW_GROWTH
 
@@ -1522,9 +1562,11 @@ def search_recent(
             for sid in sorted(dirty_found, key=lambda s: dirty_found[s][1], reverse=True):
                 consider(sid)
                 if not exact and len(picked) >= limit:
-                    return picked
-            if exact and can_stop(floor):
-                return top_limit_candidates()
+                    return top_limit(picked, limit)
+            if exact and prefix_bound is not None:
+                stopped = try_stop(prefix_bound(floor >> TMAX_SHIFT) if floor > 0 else -1)
+                if stopped is not None:
+                    return stopped
 
         if idx is not None and floor > 0:
             idx.execute("CREATE TEMP TABLE IF NOT EXISTS dirty (rowid INTEGER PRIMARY KEY)")
@@ -1539,37 +1581,39 @@ def search_recent(
                 cur = idx.execute(sql, [fts_phrase(query), floor] + iparams)
                 try:
                     last_bucket = None
-                    last_t_limit = None
+                    cached_t_limit = None
                     for sid, r in cur:
                         added = consider(sid)
                         if not exact:
                             if len(picked) >= limit:
-                                return picked
-                        else:
+                                return top_limit(picked, limit)
+                        elif prefix_bound is not None:
                             b = r >> TMAX_SHIFT
                             if added:
-                                last_t_limit = None
-                            if b != last_bucket or last_t_limit is None:
+                                cached_t_limit = None
+                            if b != last_bucket or cached_t_limit is None:
                                 last_bucket = b
                                 bound = prefix_bound(b)
                                 if len(picked) >= limit:
-                                    candidates = sorted(
-                                        picked.items(),
-                                        key=lambda item: (item[1][1], item[0]),
-                                        reverse=True,
-                                    )
-                                    last_t_limit = candidates[limit - 1][1][1]
-                                    if last_t_limit > bound:
-                                        return dict(candidates[:limit])
+                                    if cached_t_limit is None:
+                                        candidates = sorted(
+                                            picked.items(),
+                                            key=lambda item: (item[1][1], item[0]),
+                                            reverse=True,
+                                        )
+                                        cached_t_limit = candidates[limit - 1][1][1]
+                                        if cached_t_limit > bound:
+                                            return dict(candidates[:limit])
+                                    else:
+                                        if cached_t_limit > bound:
+                                            return top_limit(picked, limit)
                 finally:
                     cur.close()
             except sqlite3.DatabaseError as exc:
                 if deadline.tripped.is_set():
                     raise
                 raise IndexQueryError(exc, picked, seen, floor) from exc
-        if exact:
-            return top_limit_candidates()
-        return picked
+        return top_limit(picked, limit)
     finally:
         if idx is not None:
             end_txn(idx, commit=sys.exception() is None)
@@ -1655,7 +1699,7 @@ def resolve_types(args: argparse.Namespace) -> list[str] | None:
     return types or None
 
 
-def run(argv: list[str]) -> int:
+def run(argv: list[str], *, stats: dict[str, Any] | None = None) -> int:
     args = parse_args(argv)
     db_path = os.path.expanduser(args.db or DEFAULT_DB)
     if not os.path.exists(db_path):
@@ -1837,6 +1881,7 @@ def run(argv: list[str]) -> int:
                     deadline,
                     args.jobs,
                     dirty_rowids=val.dirty_live if used_index else None,
+                    stats=stats,
                 )
             except IndexQueryError as err:
                 warn(f"index error: {err.cause}. Falling back to a newest-first scan.")
@@ -1861,6 +1906,7 @@ def run(argv: list[str]) -> int:
                     seen=err.seen,
                     picked=err.picked,
                     resume_hi=err.floor,
+                    stats=stats,
                 )
         elif used_index and idx is not None:
             try:

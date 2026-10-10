@@ -145,7 +145,7 @@ class Fixture:
         finally:
             src.close()
 
-    def search(self, *argv) -> tuple[int, str, str]:
+    def search(self, *argv, stats=None) -> tuple[int, str, str]:
         """Run oc-search against this fixture. Last argument is the query.
 
         The query goes after `--` so that a needle beginning with a dash is
@@ -157,12 +157,13 @@ class Fixture:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = oc_search.run(
                 flags
-                + ["--db", self.db, "--index-path", self.index, "--timeout", "0", "--", query]
+                + ["--db", self.db, "--index-path", self.index, "--timeout", "0", "--", query],
+                stats=stats,
             )
         return rc, out.getvalue(), err.getvalue()
 
-    def sessions(self, *argv) -> list[dict]:
-        rc, out, _ = self.search("--json", *argv)
+    def sessions(self, *argv, stats=None) -> list[dict]:
+        rc, out, _ = self.search("--json", *argv, stats=stats)
         assert rc == 0, rc
         return json.loads(out)
 
@@ -536,6 +537,9 @@ class SchemaV2Test(unittest.TestCase):
                 self.assertTrue(len(tmax_rows) >= 1)
                 for tr in tmax_rows:
                     self.assertEqual(tr["max_tc"], BASE_MS + 200)
+
+                # Check tmax_shift recorded in metadata
+                self.assertEqual(oc_search.get_meta(idx, "tmax_shift"), str(oc_search.TMAX_SHIFT))
             finally:
                 idx.close()
         finally:
@@ -980,6 +984,27 @@ class ReconcileTest(unittest.TestCase):
             )
             self.assertIn(res2["mode"], ("catchup", "noop", "reconcile"))
             self.assertTrue(res2["up_to_date"])
+        finally:
+            f.close()
+
+    def test_tmax_shift_mismatch_forces_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="item 1")
+            f.commit()
+            f.build_index()
+
+            idx = oc_search.open_index_rw(f.index)
+            try:
+                oc_search.set_meta(idx, "tmax_shift", 999)
+                idx.commit()
+            finally:
+                idx.close()
+
+            res = f.build_index()
+            self.assertEqual(res["mode"], "rebuild")
+            self.assertTrue(res["up_to_date"])
         finally:
             f.close()
 
@@ -1582,6 +1607,29 @@ class QueryDirtySetTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("trigram index", err)
             mock_validity.assert_not_called()
+
+    def test_tmax_shift_mismatch_in_index_validity_reports_unusable(self):
+        add_session(self.f.conn, "ses_1")
+        add_part(self.f.conn, "ses_1", text="hello")
+        self.f.commit()
+        self.f.build_index()
+
+        idx = oc_search.open_index_rw(self.f.index)
+        try:
+            oc_search.set_meta(idx, "tmax_shift", 999)
+            idx.commit()
+        finally:
+            idx.close()
+
+        idx_ro = oc_search.open_index_ro(self.f.index)
+        self.assertIsNotNone(idx_ro)
+        assert idx_ro is not None
+        try:
+            val = oc_search.index_validity(self.f.conn, idx_ro, self.f.db)
+            self.assertFalse(val.usable)
+            self.assertEqual(val.reason, "tmax_shift mismatch")
+        finally:
+            idx_ro.close()
 
 
 class EquivalenceTest(unittest.TestCase):
@@ -2378,15 +2426,101 @@ class LimitFastPathTest(unittest.TestCase):
             f.commit()
 
             # Normal TAIL_EXACT_MAX: exact path runs, returns ses_tail_newer
-            got_exact = f.sessions("--limit", "1", "TAILBLOCK")
+            stats_exact: dict = {}
+            got_exact = f.sessions("--limit", "1", "TAILBLOCK", stats=stats_exact)
             self.assertEqual([r["id"] for r in got_exact], ["ses_tail_newer"])
-            self.assertEqual(getattr(oc_search.search_recent, "last_mode", None), "exact")
+            self.assertEqual(stats_exact.get("mode"), "exact")
 
             # Monkeypatch TAIL_EXACT_MAX small so tail exceeds it: heuristic path runs, returns ses_tail_older
+            stats_heuristic: dict = {}
             with mock.patch("oc_search.TAIL_EXACT_MAX", 2):
-                got_heuristic = f.sessions("--limit", "1", "TAILBLOCK")
+                got_heuristic = f.sessions("--limit", "1", "TAILBLOCK", stats=stats_heuristic)
                 self.assertEqual([r["id"] for r in got_heuristic], ["ses_tail_older"])
-                self.assertEqual(getattr(oc_search.search_recent, "last_mode", None), "heuristic")
+                self.assertEqual(stats_heuristic.get("mode"), "heuristic")
+        finally:
+            f.close()
+
+    def test_search_recent_resume_heuristic_with_excess_picked_returns_top_limit(self):
+        """When resuming in heuristic mode with len(picked) >= limit, returns top limit by total order immediately."""
+        c = self.f.conn
+        for i in range(5):
+            add_session(c, f"ses_{i}")
+            add_part(c, f"ses_{i}", type="tool", text="RESUME needle", t=100 + i * 10)
+        self.f.commit()
+
+        # Suppose picked has 4 sessions from previous exact walk before IndexQueryError:
+        picked = {
+            "ses_0": (1, BASE_MS + 100),
+            "ses_1": (1, BASE_MS + 110),
+            "ses_2": (1, BASE_MS + 120),
+            "ses_3": (1, BASE_MS + 130),
+        }
+        seen = {"ses_0", "ses_1", "ses_2", "ses_3"}
+        stats: dict = {}
+        got = oc_search.search_recent(
+            c,
+            self.f.db,
+            None,  # No index -> heuristic mode
+            floor=0,
+            src_max=100,
+            query="RESUME",
+            types=["tool"],
+            limit=2,
+            deadline=oc_search.Deadline(10.0),
+            jobs=1,
+            seen=seen,
+            picked=picked,
+            resume_hi=0,
+            stats=stats,
+        )
+        self.assertEqual(len(got), 2)
+        self.assertEqual(list(got.keys()), ["ses_3", "ses_2"])
+        self.assertEqual(stats.get("mode"), "heuristic")
+
+    def test_build_prefix_bound(self):
+        """Direct unit test for build_prefix_bound."""
+        f = Fixture()
+        try:
+            with mock.patch("oc_search.TMAX_SHIFT", 2):
+                add_session(f.conn, "ses_1")
+                # Bucket 0 (rids 1, 2)
+                add_part(f.conn, "ses_1", text="p1", t=100)
+                add_part(f.conn, "ses_1", text="p2", t=200)
+                # Bucket 1 (rids 3, 4)
+                add_part(f.conn, "ses_1", text="p3", t=150)
+                add_part(f.conn, "ses_1", text="p4", t=300)
+                f.commit()
+                f.build_index()
+
+                # Tail: rowids 5, 9
+                add_part(f.conn, "ses_1", text="p5", t=400)
+                for _ in range(3):
+                    add_part(f.conn, "ses_1", text="filler", t=50)
+                add_part(f.conn, "ses_1", text="p9", t=250)
+                f.commit()
+
+                # Mutate rid 1 in Bucket 0 to be dirty with t=500
+                update_part(f.conn, 1, text="dirty p1", bump=1000)
+                f.conn.execute("UPDATE part SET time_created = ? WHERE rowid = 1", (BASE_MS + 500,))
+                f.commit()
+
+                idx = oc_search.open_index_ro(f.index)
+                self.assertIsNotNone(idx)
+                assert idx is not None
+                try:
+                    bound = oc_search.build_prefix_bound(f.conn, idx, floor=4, src_max=9, dirty_rowids=[1])
+                    # b < 0 -> -1
+                    self.assertEqual(bound(-1), -1)
+                    # Bucket 0: dirty row 1 folded tc=500 -> prefix[0] is 500
+                    self.assertEqual(bound(0), BASE_MS + 500)
+                    # Bucket 1: tail has p5 at tc=400, prefix[1] = max(500, 400) = 500
+                    self.assertEqual(bound(1), BASE_MS + 500)
+                    # Bucket 2: tail has p9 at tc=250, prefix[2] = max(500, 250) = 500
+                    self.assertEqual(bound(2), BASE_MS + 500)
+                    # Beyond len -> max prefix
+                    self.assertEqual(bound(100), BASE_MS + 500)
+                finally:
+                    idx.close()
         finally:
             f.close()
 
@@ -2519,15 +2653,16 @@ class DifferentialRunner:
     """
 
     OP_WEIGHTS = {
-        "insert_new": 3,
-        "insert_existing": 3,
+        "insert_new": 2,
+        "insert_existing": 2,
         "update_part": 2,
         "interior_delete": 2,
-        "delete_session": 1,
+        "delete_session": 2,
         "top_reuse": 2,
         "reverse_bulk_insert": 2,
-        "interrupted_build": 1,
-        "build": 3,
+        "boundary_tie": 2,
+        "interrupted_build": 2,
+        "build": 2,
     }
 
     NEEDLES = [
@@ -2562,6 +2697,7 @@ class DifferentialRunner:
         self.session_counter = 0
         self.build_modes: list[str] = []
         self.applied_ops: set[str] = set()
+        self.boundary_ties_seen = 0
 
         # RECHECK_ROWS is made explicitly large relative to the fixture so
         # normal ops land inside the dirty window and are exactly comparable.
@@ -2660,9 +2796,9 @@ class DifferentialRunner:
 
     def op_top_reuse(self):
         rows = self.fixture.conn.execute("SELECT rowid FROM part ORDER BY rowid DESC").fetchall()
-        if not rows:
+        if len(rows) < 2:
             return
-        k = min(len(rows), self.rng.randint(1, 3))
+        k = min(len(rows) - 1, self.rng.randint(1, 3))
         top_rids = [r[0] for r in rows[:k]]
         for rid in top_rids:
             delete_part(self.fixture.conn, rid)
@@ -2697,6 +2833,32 @@ class DifferentialRunner:
                 text=self.random_text(),
                 t=t,
             )
+        self.fixture.commit()
+
+    def op_boundary_tie(self):
+        needle = self.rng.choice(self.NEEDLES[:3])
+        matching = self.fixture.sessions("--no-index", needle)
+        if not matching:
+            if not self.sessions:
+                self.op_insert_new()
+            sid = self.rng.choice(self.sessions)
+            t = self.next_time()
+            add_part(self.fixture.conn, sid, type="tool", text=f"prefix {needle} suffix", t=t)
+            self.fixture.commit()
+            matching = self.fixture.sessions("--no-index", needle)
+        target = self.rng.choice(matching[:min(len(matching), 4)])
+        target_t = target["last_match_ms"] - BASE_MS
+        self.session_counter += 1
+        other_sid = f"ses_tie_{self.session_counter:03d}"
+        add_session(self.fixture.conn, other_sid, title=f"tie_{other_sid}")
+        self.sessions.append(other_sid)
+        add_part(
+            self.fixture.conn,
+            other_sid,
+            type=self.rng.choice(self.TYPES),
+            text=f"{needle} tie match",
+            t=target_t,
+        )
         self.fixture.commit()
 
     def op_interrupted_build(self):
@@ -2744,6 +2906,12 @@ class DifferentialRunner:
                     f"Unlimited indexed vs scanned mismatch for needle={needle!r}, flags={type_flags}",
                 )
                 for n in (1, 2, 3, 4):
+                    if len(unlimited_scanned) > n:
+                        if (
+                            unlimited_scanned[n - 1]["last_match_ms"]
+                            == unlimited_scanned[n]["last_match_ms"]
+                        ):
+                            self.boundary_ties_seen += 1
                     limit_indexed = self._run_indexed(*type_flags, "--limit", str(n), needle)
                     self.test_case.assertEqual(
                         limit_indexed,
@@ -2785,14 +2953,16 @@ class DifferentialTest(unittest.TestCase):
     def test_seeded_differential_runs(self):
         all_modes: list[str] = []
         all_ops: set[str] = set()
+        total_boundary_ties = 0
 
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
                 runner = DifferentialRunner(seed, self)
                 try:
-                    runner.run_steps(10)
+                    runner.run_steps(12)
                     all_modes.extend(runner.build_modes)
                     all_ops.update(runner.applied_ops)
+                    total_boundary_ties += runner.boundary_ties_seen
                 finally:
                     runner.close()
 
@@ -2806,6 +2976,12 @@ class DifferentialTest(unittest.TestCase):
             all_ops,
             expected_ops,
             f"Missing op types across seeded runs: {expected_ops - all_ops}",
+        )
+        # Assert at least one boundary tie was tested
+        self.assertGreater(
+            total_boundary_ties,
+            0,
+            "Expected at least one --limit comparison to have a tie at its N-th boundary across seeded runs",
         )
 
     def test_below_window_interior_delete_staleness(self):
