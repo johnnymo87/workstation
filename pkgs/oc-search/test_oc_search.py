@@ -1949,6 +1949,19 @@ class DifferentialRunner:
         # to avoid ties flaking --limit equality. Task 4 will add ties.
         self.time_counter = 0
         self.session_counter = 0
+        self.build_modes: list[str] = []
+        self.applied_ops: set[str] = set()
+
+        # Seed initial data and create the initial index so operations in run_steps
+        # exercise incremental catchup and reconcile on an existing index.
+        for _ in range(3):
+            self.op_insert_new()
+        self.fixture.build_index()
+
+    def build_index(self, **kw):
+        res = self.fixture.build_index(**kw)
+        self.build_modes.append(res["mode"])
+        return res
 
     def close(self):
         self.fixture.close()
@@ -2049,12 +2062,12 @@ class DifferentialRunner:
         self.fixture.commit()
 
     def op_interrupted_build(self):
-        res = self.fixture.build_index(batch=1)
+        res = self.build_index(batch=1)
         if res.get("up_to_date"):
             self.assert_differential()
 
     def op_build(self):
-        res = self.fixture.build_index()
+        res = self.build_index()
         if res.get("up_to_date"):
             self.assert_differential()
 
@@ -2109,11 +2122,12 @@ class DifferentialRunner:
         weights = list(self.OP_WEIGHTS.values())
         for _ in range(n_steps):
             chosen = self.rng.choices(ops, weights=weights, k=1)[0]
+            self.applied_ops.add(chosen)
             handler = getattr(self, f"op_{chosen}")
             handler()
         # Always end with a completed build and assert
         while True:
-            res = self.fixture.build_index()
+            res = self.build_index()
             if res.get("up_to_date"):
                 break
         self.assert_differential()
@@ -2126,18 +2140,38 @@ class DifferentialTest(unittest.TestCase):
     each build, assertions verify that:
     1. Indexed unlimited results == --no-index results (exact equivalence)
     2. --limit N (N in 1..4) results == first N of --no-index unlimited results
+    3. Reconcile mode was exercised across the seeded runs
+    4. Rebuild was NOT observed during operations (mutations are reconciled without full rebuild)
+    5. Each op type was applied at least once across the seeds
     """
 
     SEEDS = [42, 1337, 2026]
 
     def test_seeded_differential_runs(self):
+        all_modes: list[str] = []
+        all_ops: set[str] = set()
+
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
                 runner = DifferentialRunner(seed, self)
                 try:
                     runner.run_steps(10)
+                    all_modes.extend(runner.build_modes)
+                    all_ops.update(runner.applied_ops)
                 finally:
                     runner.close()
+
+        # Assert reconcile was observed at least once across the seeded runs
+        self.assertIn("reconcile", all_modes, "reconcile mode must be exercised across the runs")
+        # Assert rebuild was NOT observed during operational runs
+        self.assertNotIn("rebuild", all_modes, "rebuild should not occur during incremental mutations")
+        # Assert each op type was applied at least once across the seeds
+        expected_ops = set(DifferentialRunner.OP_WEIGHTS.keys())
+        self.assertEqual(
+            all_ops,
+            expected_ops,
+            f"Missing op types across seeded runs: {expected_ops - all_ops}",
+        )
 
 
 if __name__ == "__main__":
