@@ -63,6 +63,7 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
 from typing import Any, Iterable
 
 DEFAULT_DB = "~/.local/share/opencode/opencode.db"
@@ -298,8 +299,12 @@ def default_index_path(db_path: str) -> str:
     return os.path.join(cache, "oc-search", "index.db")
 
 
+def file_ro_uri(path: str) -> str:
+    return "file:" + urllib.parse.quote(os.path.abspath(os.path.expanduser(path))) + "?mode=ro"
+
+
 def open_source(path: str, deadline: Deadline | None = None) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+    conn = sqlite3.connect(file_ro_uri(path), uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
     conn.execute("PRAGMA busy_timeout=2000")
@@ -398,7 +403,7 @@ def open_index_ro(path: str, deadline: Deadline | None = None) -> sqlite3.Connec
     if not os.path.exists(path):
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        conn = sqlite3.connect(file_ro_uri(path), uri=True, timeout=5.0)
     except sqlite3.Error:
         return None
     conn.row_factory = sqlite3.Row
@@ -525,7 +530,7 @@ def inspect_index_schema_version(path: str) -> int | None:
     if not os.path.exists(path):
         return None
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        conn = sqlite3.connect(file_ro_uri(path), uri=True, timeout=5.0)
         try:
             row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             return int(row[0]) if row and row[0] is not None else None
@@ -567,7 +572,7 @@ def estimate_disk_need(
     bytes_per_row = float(INDEX_BYTES_PER_ROW)
     if os.path.exists(index_path):
         try:
-            conn = sqlite3.connect(f"file:{index_path}?mode=ro", uri=True, timeout=5.0)
+            conn = sqlite3.connect(file_ro_uri(index_path), uri=True, timeout=5.0)
             try:
                 cnt_row = conn.execute("SELECT count(*) FROM part_meta").fetchone()
                 meta_count = int(cnt_row[0]) if cnt_row and cnt_row[0] is not None else 0
@@ -669,168 +674,176 @@ def build_index(
                     os.remove(index_path + suffix)
                 except FileNotFoundError:
                     pass
-        idx = open_index_rw(index_path)
-        set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
-        set_meta(idx, "source_db", os.path.realpath(db_path))
-        set_meta(idx, "watermark_rowid", 0)
-        set_meta(idx, "watermark_part_id", "")
-        idx.commit()
-        watermark = 0
-        reconciled_changed = 0
-        reconciled_deleted = 0
-        rechecked = 0
-    else:
-        idx = open_index_rw(index_path)
-        orig_w = int(get_meta(idx, "watermark_rowid") or 0)
-        watermark = orig_w
-        orig_w_id = get_meta(idx, "watermark_part_id") or ""
-        watermark_part_id = orig_w_id
-        reconciled_changed = 0
-        reconciled_deleted = 0
-        rechecked = 0
 
-        if watermark > 0:
-            # Reconcile sweep on the SOURCE connection with the index ATTACHed read-only
-            try:
-                src.execute("DETACH idx")
-            except sqlite3.OperationalError:
-                pass
-            clean_index_path = os.path.abspath(index_path).replace("'", "''")
-            src.execute(f"ATTACH 'file:{clean_index_path}?mode=ro' AS idx")
-            try:
-                changed_rows = src.execute(
-                    IDENTITY_SWEEP_SQL, (watermark, reconcile_max + 1)
-                ).fetchall()
-                deleted_rows = src.execute(
-                    DELETES_SWEEP_SQL, (delete_max + 1,)
-                ).fetchall()
-                lo = max(0, watermark - recheck_rows)
-                recheck_rows_res = src.execute(
-                    RECHECK_SWEEP_SQL, (watermark, lo)
-                ).fetchall()
-            finally:
-                src.execute("DETACH idx")
-
-            changed_rowids = [int(r[0]) for r in changed_rows]
-            deleted_rowids = [int(r[0]) for r in deleted_rows]
-            recheck_rowids = [int(r[0]) for r in recheck_rows_res]
-
-            if len(changed_rowids) > reconcile_max:
-                warn(
-                    f"changed identity rows ({len(changed_rowids)}) exceeds "
-                    f"RECONCILE_MAX ({reconcile_max}); rebuilding from scratch"
-                )
-                idx.close()
-                return build_index(
-                    src,
-                    index_path,
-                    db_path,
-                    rebuild=True,
-                    batch=batch,
-                    progress=progress,
-                    reconcile_max=reconcile_max,
-                    delete_max=delete_max,
-                    recheck_rows=recheck_rows,
-                )
-
-            if len(deleted_rowids) > delete_max:
-                warn(
-                    f"deleted rows ({len(deleted_rowids)}) exceeds "
-                    f"DELETE_MAX ({delete_max}); rebuilding from scratch"
-                )
-                idx.close()
-                return build_index(
-                    src,
-                    index_path,
-                    db_path,
-                    rebuild=True,
-                    batch=batch,
-                    progress=progress,
-                    reconcile_max=reconcile_max,
-                    delete_max=delete_max,
-                    recheck_rows=recheck_rows,
-                )
-
-            changed_set = set(changed_rowids)
-            deleted_set = set(deleted_rowids)
-            unique_rechecked = [
-                rid for rid in recheck_rowids
-                if rid not in changed_set and rid not in deleted_set
-            ]
-
-            reconciled_changed = len(changed_rowids)
-            reconciled_deleted = len(deleted_rowids)
-            rechecked = len(unique_rechecked)
-
-            # Apply deletes
-            if deleted_rowids:
-                idx.executemany("DELETE FROM ft WHERE rowid=?", [(rid,) for rid in deleted_rowids])
-                idx.executemany("DELETE FROM part_meta WHERE rowid_=?", [(rid,) for rid in deleted_rowids])
-
-            # Apply changed and rechecked rows
-            rewrite_rowids = changed_rowids + unique_rechecked
-            if rewrite_rowids:
-                for i in range(0, len(rewrite_rowids), 500):
-                    chunk_rids = rewrite_rowids[i : i + 500]
-                    placeholders = ",".join("?" * len(chunk_rids))
-                    sql = (
-                        "SELECT rowid, id, session_id, time_created, time_updated, "
-                        "json_extract(data,'$.type') AS type, data FROM part "
-                        f"WHERE rowid IN ({placeholders})"
-                    )
-                    fetched_rows = src.execute(sql, chunk_rids).fetchall()
-                    if fetched_rows:
-                        write_rows(idx, fetched_rows)
-                    if len(fetched_rows) < len(chunk_rids):
-                        fetched_rids = {int(r["rowid"]) for r in fetched_rows}
-                        missing_rids = [rid for rid in chunk_rids if rid not in fetched_rids]
-                        idx.executemany("DELETE FROM ft WHERE rowid=?", [(rid,) for rid in missing_rids])
-                        idx.executemany("DELETE FROM part_meta WHERE rowid_=?", [(rid,) for rid in missing_rids])
-
-            # Watermark re-point (Point 5):
-            # if the W row was deleted or changed, set watermark_rowid/watermark_part_id to the highest
-            # remaining part_meta row (rowid_ and part_id) - or 0 if empty.
-            if orig_w in deleted_set or orig_w in changed_set:
-                highest = idx.execute(
-                    "SELECT rowid_, part_id FROM part_meta ORDER BY rowid_ DESC LIMIT 1"
-                ).fetchone()
-                if highest is not None:
-                    watermark = int(highest[0])
-                    watermark_part_id = str(highest[1])
-                else:
-                    watermark = 0
-                    watermark_part_id = ""
-                set_meta(idx, "watermark_rowid", watermark)
-                set_meta(idx, "watermark_part_id", watermark_part_id)
-
-            if reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0:
-                idx.commit()
-
-        if (
-            watermark >= src_max
-            and (reconciled_changed == 0 and reconciled_deleted == 0 and rechecked == 0)
-        ):
-            idx.close()
-            return {
-                "mode": "noop",
-                "indexed": 0,
-                "watermark": watermark,
-                "up_to_date": True,
-                "reconciled_changed": 0,
-                "reconciled_deleted": 0,
-                "rechecked": 0,
-            }
-
-        check_disk_precheck(
-            src,
-            index_path,
-            watermark=watermark,
-            src_max=src_max,
-            batch=batch,
-            rebuild=False,
-        )
-
+    idx = open_index_rw(index_path)
     try:
+        if is_rebuild:
+            set_meta(idx, "schema_version", INDEX_SCHEMA_VERSION)
+            set_meta(idx, "source_db", os.path.realpath(db_path))
+            set_meta(idx, "watermark_rowid", 0)
+            set_meta(idx, "watermark_part_id", "")
+            idx.commit()
+            watermark = 0
+            reconciled_changed = 0
+            reconciled_deleted = 0
+            rechecked = 0
+        else:
+            orig_w = int(get_meta(idx, "watermark_rowid") or 0)
+            watermark = orig_w
+            orig_w_id = get_meta(idx, "watermark_part_id") or ""
+            watermark_part_id = orig_w_id
+            reconciled_changed = 0
+            reconciled_deleted = 0
+            rechecked = 0
+
+            if watermark > 0:
+                # Reconcile sweep on the SOURCE connection with the index ATTACHed read-only
+                try:
+                    src.execute("DETACH idx")
+                except sqlite3.OperationalError:
+                    pass
+                clean_index_path = urllib.parse.quote(os.path.abspath(index_path))
+                uri = f"file:{clean_index_path}?mode=ro"
+                src.execute("ATTACH ? AS idx", (uri,))
+                try:
+                    changed_rows = src.execute(
+                        IDENTITY_SWEEP_SQL, (watermark, reconcile_max + 1)
+                    ).fetchall()
+                    deleted_rows = src.execute(
+                        DELETES_SWEEP_SQL, (delete_max + 1,)
+                    ).fetchall()
+                    lo = max(0, watermark - recheck_rows)
+                    recheck_rows_res = src.execute(
+                        RECHECK_SWEEP_SQL, (watermark, lo)
+                    ).fetchall()
+                finally:
+                    try:
+                        src.execute("DETACH idx")
+                    except sqlite3.Error:
+                        pass
+
+                changed_rowids = [int(r[0]) for r in changed_rows]
+                deleted_rowids = [int(r[0]) for r in deleted_rows]
+                recheck_rowids = [int(r[0]) for r in recheck_rows_res]
+
+                if len(changed_rowids) > reconcile_max:
+                    warn(
+                        f"changed identity rows ({len(changed_rowids)}) exceeds "
+                        f"RECONCILE_MAX ({reconcile_max}); rebuilding from scratch"
+                    )
+                    idx.close()
+                    return build_index(
+                        src,
+                        index_path,
+                        db_path,
+                        rebuild=True,
+                        batch=batch,
+                        progress=progress,
+                        reconcile_max=reconcile_max,
+                        delete_max=delete_max,
+                        recheck_rows=recheck_rows,
+                    )
+
+                if len(deleted_rowids) > delete_max:
+                    warn(
+                        f"deleted rows ({len(deleted_rowids)}) exceeds "
+                        f"DELETE_MAX ({delete_max}); rebuilding from scratch"
+                    )
+                    idx.close()
+                    return build_index(
+                        src,
+                        index_path,
+                        db_path,
+                        rebuild=True,
+                        batch=batch,
+                        progress=progress,
+                        reconcile_max=reconcile_max,
+                        delete_max=delete_max,
+                        recheck_rows=recheck_rows,
+                    )
+
+                changed_set = set(changed_rowids)
+                deleted_set = set(deleted_rowids)
+                unique_rechecked = [
+                    rid for rid in recheck_rowids
+                    if rid not in changed_set and rid not in deleted_set
+                ]
+
+                reconciled_changed = len(changed_rowids)
+                reconciled_deleted = len(deleted_rowids)
+                rechecked = len(unique_rechecked)
+
+                # Apply deletes (build tuples once)
+                if deleted_rowids:
+                    del_tuples = [(rid,) for rid in deleted_rowids]
+                    idx.executemany("DELETE FROM ft WHERE rowid=?", del_tuples)
+                    idx.executemany("DELETE FROM part_meta WHERE rowid_=?", del_tuples)
+
+                # Apply changed and rechecked rows
+                rewrite_rowids = changed_rowids + unique_rechecked
+                if rewrite_rowids:
+                    for i in range(0, len(rewrite_rowids), 500):
+                        chunk_rids = rewrite_rowids[i : i + 500]
+                        placeholders = ",".join("?" * len(chunk_rids))
+                        sql = (
+                            "SELECT rowid, id, session_id, time_created, time_updated, "
+                            "json_extract(data,'$.type') AS type, data FROM part "
+                            f"WHERE rowid IN ({placeholders})"
+                        )
+                        fetched_rows = src.execute(sql, chunk_rids).fetchall()
+                        if fetched_rows:
+                            write_rows(idx, fetched_rows)
+                        if len(fetched_rows) < len(chunk_rids):
+                            fetched_rids = {int(r["rowid"]) for r in fetched_rows}
+                            missing_rids = [rid for rid in chunk_rids if rid not in fetched_rids]
+                            if missing_rids:
+                                missing_tuples = [(rid,) for rid in missing_rids]
+                                idx.executemany("DELETE FROM ft WHERE rowid=?", missing_tuples)
+                                idx.executemany("DELETE FROM part_meta WHERE rowid_=?", missing_tuples)
+                                deleted_set.update(missing_rids)
+                                reconciled_deleted += len(missing_rids)
+
+                # Watermark re-point (Point 5):
+                # if the W row was deleted or changed, set watermark_rowid/watermark_part_id to the highest
+                # remaining part_meta row (rowid_ and part_id) - or 0 if empty.
+                if orig_w in deleted_set or orig_w in changed_set:
+                    highest = idx.execute(
+                        "SELECT rowid_, part_id FROM part_meta ORDER BY rowid_ DESC LIMIT 1"
+                    ).fetchone()
+                    if highest is not None:
+                        watermark = int(highest[0])
+                        watermark_part_id = str(highest[1])
+                    else:
+                        watermark = 0
+                        watermark_part_id = ""
+                    set_meta(idx, "watermark_rowid", watermark)
+                    set_meta(idx, "watermark_part_id", watermark_part_id)
+
+                if reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0:
+                    idx.commit()
+
+            if (
+                watermark >= src_max
+                and (reconciled_changed == 0 and reconciled_deleted == 0 and rechecked == 0)
+            ):
+                return {
+                    "mode": "noop",
+                    "indexed": 0,
+                    "watermark": watermark,
+                    "up_to_date": True,
+                    "reconciled_changed": 0,
+                    "reconciled_deleted": 0,
+                    "rechecked": 0,
+                }
+
+            check_disk_precheck(
+                src,
+                index_path,
+                watermark=watermark,
+                src_max=src_max,
+                batch=batch,
+                rebuild=False,
+            )
         # `type` is resolved by json_extract in SQL, exactly as the old
         # implementation filtered it: the field's position inside the blob
         # varies, so no cheaper string probe is safe.
@@ -932,11 +945,12 @@ def build_index(
                     set_meta(idx, "watermark_part_id", last[1])
                     set_meta(idx, "built_at", int(time.time()))
                     idx.commit()
-                    chunk_mode = (
-                        "reconcile"
-                        if (reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0)
-                        else "catchup"
-                    )
+                    if is_rebuild:
+                        chunk_mode = "rebuild"
+                    elif (reconciled_changed > 0 or reconciled_deleted > 0 or rechecked > 0):
+                        chunk_mode = "reconcile"
+                    else:
+                        chunk_mode = "catchup"
                     return {
                         "mode": chunk_mode,
                         "indexed": n,

@@ -897,6 +897,125 @@ class ReconcileTest(unittest.TestCase):
         finally:
             f.close()
 
+    def test_concurrent_delete_between_sweep_and_reread_repoints_watermark(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            p1 = add_part(f.conn, "ses_1", text="item 1", t=10)
+            p2 = add_part(f.conn, "ses_1", text="item 2", t=20)
+            p3 = add_part(f.conn, "ses_1", text="item 3", t=30)
+            f.commit()
+            f.build_index()
+
+            # Update p3 so it will be in changed identity / recheck
+            rid3 = f.conn.execute("SELECT rowid FROM part WHERE id=?", (p3,)).fetchone()[0]
+            update_part(f.conn, rid3, text="item 3 updated", bump=1000)
+            f.commit()
+
+            # A probe that intercepts the source connection:
+            # right after DETACH idx, delete the watermark row (p3) from the source DB
+            class ConcurrentDeleteWrapper:
+                def __init__(self, conn, fixture):
+                    self._conn = conn
+                    self._fixture = fixture
+
+                def __getattr__(self, name):
+                    return getattr(self._conn, name)
+
+                def execute(self, sql, *args, **kw):
+                    res = self._conn.execute(sql, *args, **kw)
+                    if "DETACH idx" in sql:
+                        # Sweep just finished; delete p3 before chunked re-read
+                        self._fixture.conn.execute("DELETE FROM part WHERE rowid=?", (rid3,))
+                        self._fixture.conn.commit()
+                    return res
+
+            src = ConcurrentDeleteWrapper(oc_search.open_source(f.db), f)
+            try:
+                res = oc_search.build_index(
+                    src, f.index, f.db, rebuild=False, progress=False
+                )
+            finally:
+                src.close()
+
+            self.assertEqual(res["mode"], "reconcile")
+            self.assertGreaterEqual(res["reconciled_deleted"], 1)
+            # Watermark must have been re-pointed to row 2
+            self.assertEqual(res["watermark"], 2)
+
+            # Confirm in index meta as well
+            idx = oc_search.open_index_ro(f.index)
+            self.assertEqual(int(oc_search.get_meta(idx, "watermark_rowid")), 2)
+            idx.close()
+        finally:
+            f.close()
+
+    def test_attach_uri_with_special_characters_in_index_path(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            add_part(f.conn, "ses_1", text="special path text", t=10)
+            f.commit()
+
+            special_dir = os.path.join(f.dir.name, "special ?#% dir with spaces")
+            os.makedirs(special_dir, exist_ok=True)
+            special_idx = os.path.join(special_dir, "my?#% index file.db")
+
+            src1 = oc_search.open_source(f.db)
+            try:
+                res1 = oc_search.build_index(
+                    src1, special_idx, f.db, rebuild=True, progress=False
+                )
+            finally:
+                src1.close()
+            self.assertEqual(res1["mode"], "rebuild")
+
+            # Add another part and run reconcile/catchup
+            add_part(f.conn, "ses_1", text="more special path text", t=20)
+            f.commit()
+
+            res2 = oc_search.build_index(
+                oc_search.open_source(f.db), special_idx, f.db, rebuild=False, progress=False
+            )
+            self.assertIn(res2["mode"], ("catchup", "noop", "reconcile"))
+            self.assertTrue(res2["up_to_date"])
+        finally:
+            f.close()
+
+    def test_chunk_boundary_mismatch_during_rebuild_reports_mode_rebuild(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_1")
+            for i in range(6):
+                add_part(f.conn, "ses_1", text=f"item {i}", t=10 + i)
+            f.commit()
+
+            state = {"fired": False}
+
+            class BoundaryProbe(_CheckpointProbe):
+                def probe(self):
+                    if not state["fired"]:
+                        state["fired"] = True
+                        # Alter a boundary row under the scan
+                        f.conn.execute("UPDATE part SET id='prt_mismatch' WHERE rowid=2")
+                        f.conn.commit()
+
+            probe = BoundaryProbe(oc_search.open_source(f.db), f.db)
+            saved = oc_search.READ_CHUNK
+            oc_search.READ_CHUNK = 2
+            try:
+                res = oc_search.build_index(
+                    probe, f.index, f.db, rebuild=True, progress=False
+                )
+            finally:
+                oc_search.READ_CHUNK = saved
+                probe.close()
+
+            self.assertFalse(res["up_to_date"])
+            self.assertEqual(res["mode"], "rebuild")
+        finally:
+            f.close()
+
 
 class FixtureHelpersTest(unittest.TestCase):
     def test_make_db_has_production_indexes(self):
