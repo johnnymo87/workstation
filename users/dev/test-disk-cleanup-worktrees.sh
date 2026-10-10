@@ -441,7 +441,7 @@ else
   fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v2.err")"
 fi
 
-# --- lgtm PR worktrees (lgtm-pr-<N> and legacy pr-<N>) ---
+# --- PR worktrees: lgtm-pr-<N> (lgtm) and pr-<N> (maven-renovate lane) ---
 lgtm_home="$tmpdir/lgtm_home"
 lgtm_repo="$lgtm_home/projects/lgtmrepo"
 mkdir -p "$lgtm_home/projects"
@@ -453,10 +453,10 @@ mkdir -p "$lgtm_repo/.worktrees"
 
 lgtm_pr_201_wt="$lgtm_repo/.worktrees/lgtm-pr-201"
 lgtm_pr_202_wt="$lgtm_repo/.worktrees/lgtm-pr-202"
-legacy_pr_203_wt="$lgtm_repo/.worktrees/pr-203"
+lane_pr_203_wt="$lgtm_repo/.worktrees/pr-203"
 dirty_lgtm_pr_wt="$lgtm_repo/.worktrees/lgtm-pr-204"
 
-for wt in "$lgtm_pr_201_wt" "$lgtm_pr_202_wt" "$legacy_pr_203_wt" "$dirty_lgtm_pr_wt"; do
+for wt in "$lgtm_pr_201_wt" "$lgtm_pr_202_wt" "$lane_pr_203_wt" "$dirty_lgtm_pr_wt"; do
   git -C "$lgtm_repo" worktree add --detach "$wt" origin/main >/dev/null
   echo "pr commit" > "$wt/pr.txt"
   git -C "$wt" add pr.txt
@@ -484,8 +484,8 @@ assert_remove_logged "$lgtm_pr_201_wt" \
   "lgtm-pr worktree whose PR is MERGED is selected for removal"
 assert_remove_not_logged "$lgtm_pr_202_wt" \
   "lgtm-pr worktree whose PR is OPEN is not selected for removal"
-assert_remove_logged "$legacy_pr_203_wt" \
-  "legacy pr-N worktree whose PR is MERGED is selected for removal"
+assert_remove_logged "$lane_pr_203_wt" \
+  "lane pr-N worktree whose PR is MERGED is still selected for removal (unchanged)"
 assert_remove_not_logged "$dirty_lgtm_pr_wt" \
   "dirty lgtm-pr worktree whose PR is MERGED is not selected for removal"
 

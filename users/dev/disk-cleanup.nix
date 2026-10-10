@@ -1457,9 +1457,15 @@ lib.mkMerge [
             # origin/main directly (squash merges), and `last_commit_epoch` is
             # the PR commit time which keeps moving. So they accumulated
             # forever -- one ~14 GB pile across mono/internal-frontends/culops.
-            # Source of the name: lgtm/src/worktree.ts LGTM_WT_PREFIX "lgtm-pr-";
-            # worked under old name pr-N until lgtm renamed it 2026-09-16.
             # Fix: ask GitHub for state and prune if MERGED or CLOSED.
+            #
+            # Names: lgtm creates `lgtm-pr-<N>` (lgtm/src/worktree.ts
+            # LGTM_WT_PREFIX) since 2026-09-16. It moved off `pr-<N>` because
+            # the maven-renovate lane uses `.worktrees/pr-<N>` in mono. This
+            # rule matched only `pr-<N>`, so for three weeks it reaped the
+            # lane's merged trees and none of lgtm's. Both are matched now;
+            # `pr-<N>` keeps its pre-existing behaviour (a merged lane tree is
+            # done, and the guards in remove_merged_worktree still apply).
             if [[ "$wt_name" =~ ^(lgtm-)?pr-([0-9]+)$ ]] && [ -n "$repo_slug" ]; then
               pr_num="''${BASH_REMATCH[2]}"
               gh_timeout="''${DISK_CLEANUP_GH_TIMEOUT:-30}"
