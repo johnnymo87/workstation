@@ -1,7 +1,8 @@
 # Disk partitioning for GCP Compute Engine (C4a ARM)
 #
 # C4a uses NVMe storage controller, so the boot disk is /dev/nvme0n1.
-# Single hyperdisk-balanced 200GB disk — no separate persistent volume.
+# Single hyperdisk-balanced disk (600GB as of 2026-10-10; grown online, see
+# the setting-up-cloudbox skill gotcha #13) — no separate persistent volume.
 # All state lives on the root partition.
 { lib, ... }:
 

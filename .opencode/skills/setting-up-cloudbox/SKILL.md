@@ -22,10 +22,10 @@ gcloud compute instances create cloudbox \
   --machine-type=c4a-standard-16 \
   --image-family=ubuntu-2404-lts-arm64 \
   --image-project=ubuntu-os-cloud \
-  --boot-disk-size=200GB \
+  --boot-disk-size=600GB \
   --boot-disk-type=hyperdisk-balanced \
-  --boot-disk-provisioned-iops=6000 \
-  --boot-disk-provisioned-throughput=280 \
+  --boot-disk-provisioned-iops=12000 \
+  --boot-disk-provisioned-throughput=500 \
   --no-address \
   --metadata=enable-oslogin=FALSE
 ```
@@ -261,7 +261,7 @@ After bootstrap is confirmed working, ensure `PermitRootLogin` is set to `"no"` 
 
 12. **Disk can fill rapidly from auto-updates** — the `pull-workstation` timer runs every 4 hours and applies `home-manager switch`, creating a new generation each time. Combined with system rebuilds, this can produce 30+ generations in a week. The `home-manager-auto-expire` timer (daily) and `nix-gc` timer (weekly) help, but may not keep pace. Manual cleanup: `nix-env --delete-generations +3 --profile /home/dev/.local/state/nix/profiles/home-manager && sudo nix-env --delete-generations +3 --profile /nix/var/nix/profiles/system && sudo nix-collect-garbage`.
 
-13. **Resizing the boot disk is online and safe** — use `gcloud compute disks resize cloudbox --size=NEWGB --zone=us-east1-b --project=my-gcp-project`, then on the VM: find `growpart` in the nix store (`ls /nix/store/*/bin/growpart`) and run `sudo /nix/store/.../growpart /dev/nvme0n1 2 && sudo resize2fs /dev/nvme0n1p2`. No reboot required.
+13. **Resizing the boot disk is online and safe** — use `gcloud compute disks resize cloudbox --size=NEWGB --zone=us-east1-b --project=my-gcp-project`, then on the VM: find `growpart` in the nix store (`ls /nix/store/*/bin/growpart`) and run `sudo /nix/store/.../growpart /dev/nvme0n1 2 && sudo resize2fs /dev/nvme0n1p2`. No reboot required. Snapshot first (`gcloud compute snapshots create <name> --source-disk=cloudbox --source-disk-zone=us-east1-b`): a resize cannot be undone and the disk has no snapshot schedule. Done 400G→600G on 2026-10-10. If you skip the manual steps, a reboot also grows it: `growpart.service` grows the partition and `autoResize = true` on `/` (hosts/cloudbox/hardware.nix) grows ext4.
 
 ## Removing the temporary external IP
 
