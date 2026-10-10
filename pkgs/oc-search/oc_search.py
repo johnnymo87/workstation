@@ -40,7 +40,8 @@ THE THREE THINGS THIS DOES ABOUT IT
    computes a dirty set, and everything above the watermark plus any dirty rows
    are resolved live from the source. A stale index makes oc-search slower,
    never wrong (modulo documented staleness of interior deletes strictly below
-   the recheck window in unlimited search).
+   the recheck window in unlimited search; `--limit` recounts live and is
+   exact).
 
 3. When there is no usable index, the fallback scan is run in parallel across
    rowid ranges (the scan is I/O-latency bound, not bandwidth bound: the same
@@ -49,9 +50,13 @@ THE THREE THINGS THIS DOES ABOUT IT
    deadline for non-interactive callers, so a caller like lgtm gets a
    diagnosable error instead of an unexplained SIGTERM.
 
-`part.rowid` is monotonic in `time_created` (spot-checked every 100,000 rows
-across five months), which is what makes both the watermark and the parallel
-range split legitimate.
+`part.rowid` is monotonic in `time_created` across almost the entire table
+(qualifying exception: the 2026-06-07 bulk-inserted block, rowids ~852k-955k,
+inserted in reverse chronological order). The watermark tail partition and
+parallel scan range splits rely on append order at the head of the table.
+`--limit` uses a tmax prefix bound to return exact newest sessions despite
+historical inversions; only the unindexed heuristic fallback relies on rowid
+as an approximation for time.
 """
 
 from __future__ import annotations
