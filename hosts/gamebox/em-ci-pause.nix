@@ -17,6 +17,10 @@ let
 in {
   systemd.services.em-ci-pause = {
     description = "Pause em-ci runners (Sunshine stream active)";
+    # A switch mid-stream must not bounce this unit: stop would run the resume
+    # (containers start mid-game, may claim a job) and the new start would stop
+    # them again. The new definition applies at the next stream.
+    restartIfChanged = false;
     serviceConfig = {
       Type = "exec";
       ExecStartPre = "${pkgs.coreutils}/bin/touch ${flag}";
@@ -34,7 +38,11 @@ in {
     description = "Reconcile em-ci containers with the pause flag";
     serviceConfig.Type = "oneshot";
     script = ''
-      paused=0; ${systemctl} is-active --quiet em-ci-pause.service && paused=1
+      # "activating" counts as paused: ExecStartPre has already touched the flag.
+      paused=0
+      case "$(${systemctl} is-active em-ci-pause.service || true)" in
+        active|activating|reloading) paused=1 ;;
+      esac
       if [ "$paused" = 0 ] && [ -e ${flag} ]; then rm -f ${flag}; fi   # stale flag
       for u in ${lib.concatStringsSep " " units}; do
         if [ "$paused" = 1 ]; then

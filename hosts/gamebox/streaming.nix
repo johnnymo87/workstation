@@ -152,13 +152,20 @@ in
       encoder = "nvenc";
       # Only ds5 carries motion/gyro through to the host.
       gamepad = "ds5";
-      # Pause em-ci while streaming (hosts/gamebox/em-ci-pause.nix). Absolute path:
-      # Sunshine's user unit sets PATH = mkForce null. --no-block: never hold the
-      # game launch for a container shutdown.
-      global_prep_cmd = builtins.toJSON [{
-        do = "/run/current-system/sw/bin/systemctl --no-block start em-ci-pause.service";
-        undo = "/run/current-system/sw/bin/systemctl --no-block stop em-ci-pause.service";
-      }];
+      # Pause em-ci while streaming (hosts/gamebox/em-ci-pause.nix). Store paths
+      # throughout: Sunshine's user unit sets PATH = mkForce null. --no-block:
+      # never hold the game launch for a container shutdown. Always exit 0:
+      # Sunshine ABORTS the launch when a `do` command exits non-zero, so a
+      # polkit denial or a dead bus must cost the pause, never the game.
+      global_prep_cmd =
+        let
+          hook = verb: pkgs.writeShellScript "em-ci-pause-${verb}" ''
+            ${pkgs.systemd}/bin/systemctl --no-block ${verb} em-ci-pause.service ||
+              echo "em-ci-pause: ${verb} failed; the stream continues without it" >&2
+            exit 0
+          '';
+        in
+        builtins.toJSON [{ do = "${hook "start"}"; undo = "${hook "stop"}"; }];
     };
     # Moonlight's launch menu. Replaces Sunshine's default apps.json, whose
     # X11/xrandr and Steam entries don't work on this box. Ryubing flags were
