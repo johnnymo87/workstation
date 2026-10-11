@@ -70,11 +70,12 @@ NVIDIA OpenShell was evaluated and rejected for this
 | devbox (`hosts/devbox/configuration.nix:1387-1391`) | `MemoryHigh=20G`, `MemorySwapMax=6G` | `MemoryMax=20G`, `MemorySwapMax=6G` |
 | cloudbox (`hosts/cloudbox/configuration.nix:5780-5787`) | `MemoryHigh=56G`, `MemorySwapMax=24G` | `MemoryMax=56G`, `MemorySwapMax=24G` |
 
-Ceiling unchanged; reaching it now means the kernel OOM-kills inside the slice
-(highest `oom_score`, i.e. the runaway by RSS) instead of throttling all of it.
-Same reasoning as the per-serve change of 2026-07-03 (Max-only; the High band
-is the wedge zone). Swap still absorbs up to the swap cap first, so expect a
-short reclaim phase before the kill, not an instant one.
+Ceiling unchanged. Reaching it now means the kernel OOM-kills inside the slice
+(highest `oom_score`, with the serves at adj 200 per §3 so size decides)
+instead of throttling all of it. Same reasoning as the per-serve change of
+2026-07-03 (Max-only; the High band is the wedge zone). Swap fills to the
+swap cap first, and a slow leak can thrash for a long time before the kill;
+see "Goal".
 
 Rewrite the comment that justified slice-level High ("plenty of reclaimable
 page cache … earlyoom backstops") — the incident refutes both halves.
@@ -154,13 +155,17 @@ Devbox only. Cloudbox: config checks (1-2) only, no drill.
    20G (cloudbox 56G), high `max`. Serve processes' `oom_score_adj` = 200.
 2. `oomctl` lists the monitored cgroups; the oomd unit's command line has
    `--dry-run`.
-3. **Drills.** Gate each one on step 1 passing, and give it
-   `-p RuntimeMaxSec=300` so a bad deploy can't recreate the wedge.
+3. **Drills.** Gate each one on step 1 passing, and give it a
+   `RuntimeMaxSec` (300 s for the fast drill; for the slow drill, the time to
+   fill the slice's headroom plus 5 min), and a root-side observer that
+   writes `cgroup.kill` at the deadline (see the plan), so a bad deploy can't
+   recreate the wedge.
    Workload: a monotonically growing allocator (python appending 64 MB
    chunks, never freeing), not `stress-ng`, which re-touches its pages.
    - (a) fast: as fast as possible, to about 30G;
    - (b) slow: about 50 MB/s.
-   **Pass criteria**, all required:
+   **Pass criteria** for (a), all required. For (b) only the first is
+   judged; latency and time-to-kill are recorded:
    - the only cgroup killed is the drill unit: serve
      `memory.events oom_kill` unchanged, no other unit in the
      `journalctl -k` OOM lines, serve `NRestarts` unchanged;
