@@ -22,8 +22,8 @@ git -C ~/projects/workstation fetch origin oom-containment
 git -C ~/projects/workstation worktree add --detach ~/projects/workstation/.worktrees/oom-containment origin/oom-containment
 cd ~/projects/workstation/.worktrees/oom-containment
 sudo nixos-rebuild switch --flake .#devbox
-systemctl --user stop pull-workstation.timer   # else it re-applies MAIN's home-manager every 4 h, reverting Task 3
 nix run home-manager -- switch --flake .#dev
+systemctl --user stop pull-workstation.timer   # AFTER the switch (the switch restarts it); else it re-applies MAIN's home-manager every 4 h, reverting Task 3
 systemctl --user restart opencode-serve-pool.target   # quiet moment (~10 s, interrupts in-flight turns); adj applies only at process start
 ```
 
