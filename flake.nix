@@ -543,6 +543,20 @@
         touch $out
       '';
 
+      # Failover reconciler (devbox em-ci-failover, bead eternal-machinery-0oycj.5).
+      # Pinned assertion count; see hosts/devbox/test-em-ci-failover.sh.
+      em-ci-failover-tests = devboxPkgs.runCommand "em-ci-failover-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.jq ];
+      } ''
+        cd ${self}
+        bash hosts/devbox/test-em-ci-failover.sh 2>&1 | tee "$TMPDIR/f.txt"
+        grep -q '^ALL PASS (19 assertions)' "$TMPDIR/f.txt" || {
+          echo "GATE FAILURE: em-ci-failover suite did not reach ALL PASS (19 assertions)." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---------------------------------------------------------------------
       # workstation-dad9: five suites that existed and ran nowhere.
       #
@@ -2528,6 +2542,7 @@
         ./hosts/devbox/disko.nix
         ./hosts/devbox/em-ci.nix
         ./hosts/devbox/em-ci-monitor.nix
+        ./hosts/devbox/em-ci-failover.nix
       ];
     };
 
