@@ -1356,6 +1356,18 @@ in
     ];
   };
 
+  # systemd-oomd on user slices, DRY-RUN ONLY (2026-10-11 design, §2).
+  # oomd logs "Would have killed …" but kills nothing. Kill mode is a
+  # separate decision based on those logs: its pgscan-based victim choice
+  # likely points at file-cache holders (the serves, tmux panes) once the
+  # slice's swap is exhausted, and ManagedOOMPreference is ignored on the
+  # /user.slice path (owner mismatch). See the design doc.
+  systemd.oomd.enableUserSlices = true;
+  systemd.services.systemd-oomd.serviceConfig.ExecStart = [
+    ""  # clear the upstream ExecStart
+    "${config.systemd.package}/lib/systemd/systemd-oomd --dry-run"
+  ];
+
   # P1: sshd's LISTENER is protected from the OOM killer by sshd itself, not
   # by systemd. Do NOT add OOMScoreAdjust = "-1000" here (workstation-aj1m,
   # devbox mirror of cloudbox's workstation-o5s1.29 / PR #608).
