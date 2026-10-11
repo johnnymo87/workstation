@@ -1,10 +1,12 @@
 # Self-hosted GitHub Actions runners for johnnymo87/eternal-machinery.
 #
-# Declarative NixOS containers, each running one non-ephemeral runner
-# (labels: self-hosted, Linux, ARM64, em-ci). The eternal-machinery workflow
+# Declarative NixOS containers, each running one non-ephemeral runner (default
+# labels: self-hosted, Linux, plus the host architecture, e.g. ARM64 on devbox,
+# X64 on gamebox, plus em-ci). The eternal-machinery workflow
 # (.github/workflows/ci.yml) routes its heavy jobs here when the repo variable
 # HEAVY_RUNNER (or a PR label / dispatch input) says so; otherwise they stay on
-# GitHub-hosted runners.
+# GitHub-hosted runners. ci.yml is moving to request ["self-hosted","em-ci"]
+# (docs/plans/2026-10-11-em-ci-gamebox-design.md §5).
 #
 # Spec: eternal-machinery docs/plans/2026-10-07-ci-self-hosted-plan.md, "PR-2".
 # Beads: eternal-machinery-0oycj (epic), -0oycj.4 (this module).
@@ -18,12 +20,13 @@
 # veth). The isolation is against accidents, not hostile code: the repo is
 # the owner's own, and the runner never runs as `dev`.
 #
-# DISK. Container roots live under /var/lib/nixos-containers (optionally on a
-# dedicated block device via stateDevice). Everything a job writes --
-# workspace, caches, its private /tmp -- is on that filesystem and cannot fill
-# the root disk. What still lands on root is the host nix-daemon's store growth
-# (devenv closures), governed by nix.gc/min-free. The watchdog below is the hard
-# stop for that.
+# DISK. Container roots live under /var/lib/nixos-containers. With stateDevice
+# set (devbox's 30 GB Volume), container writes (workspace, caches, private
+# /tmp) cannot fill root; only the host nix-daemon's store growth (devenv
+# closures) lands on root, governed by nix.gc/min-free. With stateDevice = null
+# (gamebox), container roots share the root filesystem, so both container
+# writes and host store growth land on root. The watchdog below guards against
+# root running out in either mode.
 #
 # RESOURCES. Each container is capped at `cpus` CPUs and `memoryMax` RAM. Builds
 # that the host nix-daemon performs on a container's behalf run in nix-daemon's
@@ -58,8 +61,9 @@ let
 
   runnerPkg = nixpkgs-unstable.legacyPackages.${pkgs.stdenv.hostPlatform.system}.github-runner;
 
-  # Fixed so files on the Volume keep a stable owner across rebuilds. Not used
-  # by anything on the host (verified with getent at authoring time).
+  # Fixed so files on the container state filesystem (stateDevice, else root)
+  # keep a stable owner across rebuilds. Not used by anything on the host
+  # (verified with getent at authoring time).
   ciUid = 2001;
 
   patInContainer = "/run/em-ci/pat";
@@ -118,8 +122,10 @@ let
       # Explicit and distinct: the module defaults the name to the attr name,
       # which is the same in both containers and would collide.
       name = "${cfg.namePrefix}-em-ci-${toString r.n}";
-      # Default labels (self-hosted, Linux, ARM64) plus this one; ci.yml asks
-      # for ["self-hosted","em-ci","ARM64"].
+      # Default labels (self-hosted, Linux, plus host arch: ARM64 on devbox,
+      # X64 on gamebox) plus this one. ci.yml currently asks for
+      # ["self-hosted","em-ci","ARM64"] and is moving to request
+      # ["self-hosted","em-ci"] (docs/plans/2026-10-11-em-ci-gamebox-design.md §5).
       extraLabels = [ "em-ci" ];
       # A config or token change re-registers under the same name.
       replace = true;
@@ -127,8 +133,9 @@ let
       tokenFile = patInContainer;
       user = "em-ci";
       group = "em-ci";
-      # On disk (the Volume), not the default tmpfs RuntimeDirectory. The
-      # module wipes workDir on every service start: one cold job per restart.
+      # On disk (container state filesystem: stateDevice, else root), not the
+      # default tmpfs RuntimeDirectory. The module wipes workDir on every service
+      # start: one cold job per restart.
       workDir = "/var/lib/em-ci/work";
 
       extraEnvironment = {
@@ -182,29 +189,77 @@ in
     runners = mkOption {
       type = types.attrsOf (types.submodule {
         options = {
-          n = mkOption { type = types.int; };
-          hostAddress = mkOption { type = types.str; };
-          localAddress = mkOption { type = types.str; };
+          n = mkOption {
+            type = types.int;
+            description = "Runner index number for container and runner naming (e.g. 1 -> <prefix>-em-ci-1).";
+          };
+          hostAddress = mkOption {
+            type = types.str;
+            description = "IPv4 address on the host side of the container veth pair.";
+          };
+          localAddress = mkOption {
+            type = types.str;
+            description = "IPv4 address on the container side of the veth pair.";
+          };
         };
       });
       description = "Container name -> addressing. Names <= 11 chars (ve-<name>) and must match em-ci-* (egress fence pattern).";
     };
-    namePrefix = mkOption { type = types.str; description = "GitHub runner name prefix, e.g. devbox -> devbox-em-ci-1."; };
-    cpus = mkOption { type = types.int; };
-    memoryMax = mkOption { type = types.str; };
-    stateDevice = mkOption { type = types.nullOr types.str; default = null; };
-    externalInterface = mkOption { type = types.nullOr types.str; default = null;
-      description = "NAT egress interface; null masquerades on every out-interface."; };
-    nameservers = mkOption { type = types.listOf types.str; default = [ "1.1.1.1" "9.9.9.9" "1.0.0.1" ]; };
-    patSecret = mkOption { type = types.str; default = "em_ci_runner_pat"; };
-    watchdogMinFreeGiB = mkOption { type = types.int; default = 10; };
-    pauseFlag = mkOption { type = types.nullOr types.str; default = null;
-      description = "If set, container units carry ConditionPathExists=!<flag> (used by gamebox's streaming pause)."; };
+    namePrefix = mkOption {
+      type = types.str;
+      description = "GitHub runner name prefix, e.g. devbox -> devbox-em-ci-1.";
+    };
+    cpus = mkOption {
+      type = types.ints.positive;
+      description = "Number of CPU cores allocated to each container (systemd CPUQuota = cpus * 100%).";
+    };
+    memoryMax = mkOption {
+      type = types.str;
+      description = "Maximum memory allocated to each container (systemd MemoryMax, e.g. '6G').";
+    };
+    stateDevice = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Block device path mounted at /var/lib/nixos-containers for container state, or null to share root.";
+    };
+    externalInterface = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "NAT egress interface; null masquerades on every out-interface.";
+    };
+    nameservers = mkOption {
+      type = types.listOf types.str;
+      default = [ "1.1.1.1" "9.9.9.9" "1.0.0.1" ];
+      description = "DNS nameservers configured inside each runner container.";
+    };
+    patSecret = mkOption {
+      type = types.str;
+      default = "em_ci_runner_pat";
+      description = "Name of sops.secrets entry holding the GitHub runner PAT (host must import sops-nix).";
+    };
+    watchdogMinFreeGiB = mkOption {
+      type = types.ints.positive;
+      default = 10;
+      description = "Minimum free GiB on the host root filesystem before the disk watchdog stops all runner containers.";
+    };
+    pauseFlag = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "If set, container units carry ConditionPathExists=!<flag> (used by gamebox's streaming pause).";
+    };
   };
 
   config = mkIf cfg.enable {
-    # The 30 GB Volume. nofail so a missing Volume never blocks boot; the
-    # RequiresMountsFor below keeps the containers from starting on root then.
+    assertions = [
+      {
+        assertion = cfg.runners != { };
+        message = "services.em-ci-runners.runners must be non-empty when enabled.";
+      }
+    ];
+
+    # Dedicated block device for container state (when configured, e.g. devbox's
+    # 30 GB Volume). nofail so a missing device never blocks boot; the
+    # RequiresMountsFor below keeps containers from starting on root then.
     fileSystems."/var/lib/nixos-containers" = lib.mkIf (cfg.stateDevice != null) {
       device = cfg.stateDevice;
       fsType = "ext4";
@@ -255,8 +310,8 @@ in
       requires = [ "em-ci-egress-fence.service" ];
       after = [ "em-ci-egress-fence.service" ];
       # systemd-nspawn mounts a tmpfs on the container's /tmp by default, which
-      # would charge every job's temp files to the 6G memory cap. Keep /tmp on
-      # the container root, i.e. on the Volume.
+      # would charge every job's temp files to the configured memory cap. Keep
+      # /tmp on the container root, i.e. on the container state filesystem.
       environment.SYSTEMD_NSPAWN_TMPFS_TMP = "0";
       serviceConfig = {
         CPUQuota = "${toString (cfg.cpus * 100)}%";
@@ -266,11 +321,12 @@ in
       };
     }) cfg.runners) // {
       # EGRESS FENCE. NAT alone lets a container reach anything the host can
-      # route to, and devbox has more than loopback: Docker publishes ports on
-      # 0.0.0.0 (e.g. the BoldCo Supabase stack on 54321-54327) and DNATs traffic
-      # for ANY local address -- including this veth's host side -- into its
-      # bridges via FORWARD, never touching the INPUT firewall. Tailscale's
-      # ts-forward chain also ACCEPTs toward the tailnet ahead of everything.
+      # route to, and hosts often have more than loopback (e.g. on devbox: Docker
+      # publishes ports on 0.0.0.0, such as the BoldCo Supabase stack on
+      # 54321-54327, and DNATs traffic for ANY local address -- including this
+      # veth's host side -- into its bridges via FORWARD, never touching the
+      # INPUT firewall; Tailscale's ts-forward chain also ACCEPTs toward the
+      # tailnet ahead of everything).
       #
       # So drop, in mangle PREROUTING (before Docker's nat DNAT and before any
       # FORWARD chain), every packet from a runner container addressed to the
@@ -328,10 +384,13 @@ in
         '';
       };
 
-      # Hard disk guard for devbox's ROOT filesystem (the Volume cannot fill
-      # root, but host nix store growth for CI closures can). Stops both
-      # containers, which fails their in-flight jobs; GitHub shows them failed
-      # or queued. They stay stopped until someone starts them again:
+      # Hard disk guard for the host's ROOT filesystem. With stateDevice set
+      # (e.g. devbox's 30 GB Volume), container writes cannot fill root, but
+      # host nix store growth for CI closures can. With stateDevice = null
+      # (e.g. gamebox), container roots share the root filesystem and the
+      # watchdog guards against both container writes and host nix store growth.
+      # Stops all containers, which fails their in-flight jobs; GitHub shows
+      # them failed or queued. They stay stopped until someone starts them again:
       #   sudo systemctl start container@em-ci-1 container@em-ci-2
       # Exits non-zero when it fires so the unit shows failed. Telegram
       # alerting hooks in with bead eternal-machinery-0oycj.5.
