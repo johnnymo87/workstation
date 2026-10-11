@@ -68,9 +68,13 @@ when the asset is already present.
 
 Two footguns:
 
-- **First-ever deploy on a fresh Mac**: the helpers are installed *by* the
-  rebuild they unblock, so they are not on `PATH` yet. Use
-  `nix run ~/Code/workstation#darwin-switch` that one time.
+- **Not on `PATH` yet** (the helpers are installed *by* the rebuild they
+  unblock): `nix run ~/Code/workstation#darwin-switch`. On a Mac with no
+  nix-darwin at all there is no `darwin-rebuild` for it to call; seed with
+  `nix run ~/Code/workstation#cfp-prefetch-darwin`, then bootstrap with
+  `sudo nix run nix-darwin#darwin-rebuild -- switch --flake ~/Code/workstation#Y0FMQX93RR-2`.
+- **Don't `sudo darwin-switch`.** It calls sudo itself, and must read the token
+  from *your* Keychain; it refuses to run as root.
 - **Both default to `~/Code/workstation` regardless of your cwd.** If you call
   `cfp-prefetch-darwin` by hand for a worktree that bumps cfp, pass `--flake .`
   — otherwise it seeds the version the main checkout wants and the rebuild

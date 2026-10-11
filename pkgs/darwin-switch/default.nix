@@ -59,6 +59,23 @@ writeShellApplication {
       esac
     done
 
+    # `sudo darwin-switch` out of `sudo darwin-rebuild` habit would look up the
+    # token in ROOT's Keychain and report it missing -- but only on the run
+    # after a cfp bump, since an already-seeded asset short-circuits. Refuse
+    # always, so the habit is corrected before it matters.
+    if [ "$(id -u)" -eq 0 ]; then
+      echo "darwin-switch: run as your user, not under sudo (it calls sudo itself; the token is in YOUR Keychain)" >&2
+      exit 1
+    fi
+
+    # A --flake in the passthrough args would override ours (last wins) and
+    # silently deploy a tree the seed was not computed for.
+    for a in "''${extra[@]}"; do
+      case "$a" in
+        --flake|--flake=*) echo "darwin-switch: pass --flake before --, not after it" >&2; exit 2 ;;
+      esac
+    done
+
     if [ "$(uname -s)" != "Darwin" ]; then
       echo "darwin-switch: not darwin; use nixos-rebuild / home-manager instead" >&2
       exit 1
@@ -81,7 +98,9 @@ writeShellApplication {
       rebuild="$(command -v darwin-rebuild || true)"
     fi
     if [ -z "$rebuild" ]; then
-      echo "darwin-switch: darwin-rebuild not found (first-ever deploy? bootstrap nix-darwin first)" >&2
+      echo "darwin-switch: darwin-rebuild not found. First-ever nix-darwin deploy? Run:" >&2
+      echo "  nix run $flake#cfp-prefetch-darwin -- --flake $flake" >&2
+      echo "  sudo nix run nix-darwin#darwin-rebuild -- switch --flake $flake#<name>" >&2
       exit 1
     fi
 
