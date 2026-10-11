@@ -152,6 +152,13 @@ in
       encoder = "nvenc";
       # Only ds5 carries motion/gyro through to the host.
       gamepad = "ds5";
+      # Pause em-ci while streaming (hosts/gamebox/em-ci-pause.nix). Absolute path:
+      # Sunshine's user unit sets PATH = mkForce null. --no-block: never hold the
+      # game launch for a container shutdown.
+      global_prep_cmd = builtins.toJSON [{
+        do = "/run/current-system/sw/bin/systemctl --no-block start em-ci-pause.service";
+        undo = "/run/current-system/sw/bin/systemctl --no-block stop em-ci-pause.service";
+      }];
     };
     # Moonlight's launch menu. Replaces Sunshine's default apps.json, whose
     # X11/xrandr and Steam entries don't work on this box. Ryubing flags were
