@@ -158,6 +158,14 @@ let
       ]) ++ [ devenvPkg ];
 
       serviceOverrides = {
+        # Retry instead of staying dead. The upstream unit has Restart=no, so a
+        # registration that fails on a transient network error (DNS not up yet
+        # when the container starts at boot or during a switch; first seen on
+        # gamebox's Wi-Fi as "Resource temporarily unavailable
+        # (api.github.com:443)") left the runner offline until restarted by
+        # hand. 60 s apart stays well under the default start limit (5/10 s).
+        Restart = "on-failure";
+        RestartSec = "60s";
         # Warm caches (ccache, pip, npm, mix/hex) live outside the workDir wipe.
         ReadWritePaths = [ "/var/lib/em-ci/cache" ];
         # The module's ProtectHome=yes makes /home mode 000, so eternal-
