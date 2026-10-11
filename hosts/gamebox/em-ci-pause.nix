@@ -14,7 +14,21 @@ let
     ${systemctl} is-failed --quiet em-ci-disk-watchdog.service && exit 0
     ${systemctl} --no-block start ${lib.concatStringsSep " " units}
   '';
+  # Sunshine's global_prep_cmd calls this STABLE path (hosts/gamebox/
+  # streaming.nix). A store path would go stale: a switch does not restart
+  # gamer's Sunshine, which keeps the old conf's paths, and GC can delete them,
+  # after which every launch aborts. Always exits 0: Sunshine ABORTS a launch
+  # when a `do` command exits non-zero, so a polkit denial or a dead bus must
+  # cost the pause, never the game.
+  hook = pkgs.writeShellScript "em-ci-pause-hook" ''
+    case "''${1:-}" in start|stop) ;; *) echo "usage: $0 start|stop" >&2; exit 0 ;; esac
+    ${systemctl} --no-block "$1" em-ci-pause.service ||
+      echo "em-ci-pause: $1 failed; the stream continues without it" >&2
+    exit 0
+  '';
 in {
+  environment.etc."em-ci/pause-hook".source = hook;
+
   systemd.services.em-ci-pause = {
     description = "Pause em-ci runners (Sunshine stream active)";
     # A switch mid-stream must not bounce this unit: stop would run the resume
@@ -24,16 +38,23 @@ in {
     serviceConfig = {
       Type = "exec";
       ExecStartPre = "${pkgs.coreutils}/bin/touch ${flag}";
-      ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+      # The 8 h stale-pause ceiling (a stream whose `undo` never ran: Sunshine
+      # killed, or Moonlight closed without quitting the app). A sleep that
+      # ends, not RuntimeMaxSec: the unit finishes inactive/success instead of
+      # failed (timeout), and ExecStopPost resumes the runners either way.
+      ExecStart = "${pkgs.coreutils}/bin/sleep 8h";
       ExecStartPost = "${systemctl} --no-block stop ${lib.concatStringsSep " " units}";
       # '-': a start refused during shutdown must not fail the stop.
       ExecStopPost = "-${resume}";
-      RuntimeMaxSec = "8h";   # stale-pause ceiling
     };
   };
 
-  # Belt and braces for paths the hook can miss (Sunshine crash, Moonlight
-  # disconnect with an app still running, a stale flag after the pause unit died).
+  # Belt and braces: while paused, keep the flag present and the containers
+  # stopped; while not paused, remove a stale flag. It never STARTS containers:
+  # ending a pause is the resume's job (ExecStopPost), and a container stopped
+  # outside a pause -- by the disk watchdog (whose failed state clears on its
+  # next passing run, so it is no latch) or by an admin -- stays stopped until
+  # someone starts it, as modules/em-ci-runners.nix documents.
   systemd.services.em-ci-reconcile = {
     description = "Reconcile em-ci containers with the pause flag";
     serviceConfig.Type = "oneshot";
@@ -43,15 +64,17 @@ in {
       case "$(${systemctl} is-active em-ci-pause.service || true)" in
         active|activating|reloading) paused=1 ;;
       esac
-      if [ "$paused" = 0 ] && [ -e ${flag} ]; then rm -f ${flag}; fi   # stale flag
+      if [ "$paused" = 0 ]; then
+        rm -f ${flag}   # stale flag
+        exit 0
+      fi
+      # Re-touch: a pass that read "inactive" just before ExecStartPre may have
+      # removed the flag mid-pause.
+      touch ${flag}
       for u in ${lib.concatStringsSep " " units}; do
-        if [ "$paused" = 1 ]; then
-          ${systemctl} is-active --quiet "$u" && ${systemctl} --no-block stop "$u"
-        elif ! ${systemctl} is-failed --quiet em-ci-disk-watchdog.service; then
-          ${systemctl} is-active --quiet "$u" || ${systemctl} --no-block start "$u"
-        fi
+        ${systemctl} is-active --quiet "$u" && ${systemctl} --no-block stop "$u"
       done
-      exit 0   # NixOS `script` runs under -e; without this a no-op pass ends on a non-zero is-active and the unit reads failed
+      exit 0   # NixOS `script` runs under -e; without this a pass ending on a non-zero is-active reads failed
     '';
   };
   systemd.timers.em-ci-reconcile = {
