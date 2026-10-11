@@ -23,7 +23,7 @@ in
       EM_CI_LABEL = "em-ci";
       EM_CI_TICKS = "3";
       EM_CI_ERROR_ALERT = "10";
-      EM_CI_PRIMARY_OFFLINE_ALERT_H = "6";
+      EM_CI_PRIMARY_OFFLINE_ALERT_H = "9";   # above the 8 h streaming-pause ceiling (RuntimeMaxSec)
     };
     serviceConfig = {
       Type = "oneshot";

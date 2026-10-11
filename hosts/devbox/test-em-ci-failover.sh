@@ -24,9 +24,11 @@ setup() { # fresh sandbox per case
   cat >"$S/gh" <<EOF
 #!$bash_bin
 [ -e "$S/api_down" ] && exit 22
+[ -e "$S/write_down" ] && [ "\$1" != GET ] && exit 22
 case "\$1" in GET) cat "$S/runners.json" ;; *) echo "\$*" >>"$S/writes" ;; esac
 EOF
-  printf '#!%s\necho "$1" >>"%s/tg"\n' "$bash_bin" "$S" >"$S/tgs"
+  # Telegram stub fails (sends nothing) while $S/tg_down exists.
+  printf '#!%s\n[ -e "%s/tg_down" ] && exit 7\necho "$1" >>"%s/tg"\n' "$bash_bin" "$S" "$S" >"$S/tgs"
   chmod +x "$S/gh" "$S/tgs"; export EM_CI_GH_API_STUB=$S/gh EM_CI_TG_STUB=$S/tgs
 }
 runners() { # $1: gamebox status, $2: devbox labels json array (e.g. '["em-ci"]' or '[]')
@@ -93,6 +95,29 @@ check "missing fallback runner tolerated" 'tick; tick; tick'
 # 10. Empty state files (crash mid-write) read as defaults, not "".
 setup; runners online '["em-ci"]'; : >"$STATE_DIRECTORY/desired"; : >"$STATE_DIRECTORY/on"; tick
 check "empty state file reads as default" '[ "$(cat $STATE_DIRECTORY/desired)" = present ] && [ "$(cat $STATE_DIRECTORY/on)" = 1 ]'
+
+# 11. gamebox online but WITHOUT the em-ci label is not primary capacity.
+setup; jq -n '{runners:[
+  {id:1,name:"gamebox-em-ci-1",status:"online",busy:false,labels:[{name:"self-hosted"}]},
+  {id:11,name:"devbox-em-ci-1",status:"online",busy:false,labels:[{name:"em-ci"}]}]}' >"$S/runners.json"
+tick; tick; tick
+check "label-less gamebox does not strip devbox" '[ "$(cat $STATE_DIRECTORY/desired)" = present ] && [ -z "$(writes)" ]'
+
+# 12. Persistent label-write failures alert once, at EM_CI_ERROR_ALERT passes.
+setup; runners online '["em-ci"]'; tick; tick; tick; touch "$S/write_down"; : >"$S/tg"
+for _ in 1 2 3 4 5 6 7 8 9; do tick; done
+check "no write alert before 10 failed passes" '[ "$(grep -c "label writes" "$S/tg")" -eq 0 ]'
+tick
+check "write alert at 10 failed passes" '[ "$(grep -c "label writes" "$S/tg")" -eq 1 ]'
+tick
+check "write alert not repeated" '[ "$(grep -c "label writes" "$S/tg")" -eq 1 ]'
+
+# 13. A failed send of the offline alert is retried next pass, not lost.
+setup; runners offline '["em-ci"]'; tick; touch "$S/tg_down"
+EM_CI_NOW=$((1000000 + 6*3600)) tick
+check "offline alert not latched when send fails" '[ "$(cat $STATE_DIRECTORY/offline_alerted)" = 0 ]'
+rm -f "$S/tg_down"; EM_CI_NOW=$((1000000 + 6*3600 + 60)) tick
+check "offline alert sent on retry" '[ "$(grep -c "offline for" "$S/tg")" -eq 1 ]'
 
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"

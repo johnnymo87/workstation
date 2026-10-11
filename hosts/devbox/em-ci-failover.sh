@@ -26,7 +26,7 @@ tg_send() {
   if [ -n "${EM_CI_TG_STUB:-}" ]; then "$EM_CI_TG_STUB" "$1"; return; fi
   printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$(cred tg_bot_token)" |
     curl -fsS -m 20 --retry 3 -o /dev/null \
-      --data-urlencode "chat_id=$(cred tg_chat_id)" --data-urlencode "text=$1" -K - || true
+      --data-urlencode "chat_id=$(cred tg_chat_id)" --data-urlencode "text=$1" -K -
 }
 # An empty file (crash mid-write before put became atomic, or a manual
 # truncate) reads as the default, never as "" -- "" would wedge desired.
@@ -36,18 +36,22 @@ put() { printf '%s\n' "$2" >"$S/$1.tmp" && mv -f "$S/$1.tmp" "$S/$1"; }
 desired=$(get desired present)
 on=$(get on 0); off=$(get off 0); errors=$(get errors 0)
 offline_since=$(get offline_since ""); offline_alerted=$(get offline_alerted 0)
+write_errors=$(get write_errors 0)
 
 if ! runners=$(gh_api GET "/repos/$EM_CI_REPO/actions/runners?per_page=100") ||
    ! jq -e '.runners | type == "array"' >/dev/null <<<"$runners"; then
   errors=$((errors + 1)); put errors "$errors"
   [ "$errors" -ne "$EM_CI_ERROR_ALERT" ] ||
-    tg_send "em-ci failover (devbox): cannot reach the GitHub API for $errors passes; devbox runner labels frozen at '$desired'."
+    tg_send "em-ci failover (devbox): cannot reach the GitHub API for $errors passes; devbox runner labels frozen at '$desired'." || true
   exit 0
 fi
 put errors 0
 
-if jq -e --arg p "$EM_CI_PRIMARY_PREFIX" \
-     'any(.runners[]; (.name | startswith($p)) and .status == "online")' >/dev/null <<<"$runners"; then
+# Primary capacity = a primary runner that is online AND carries the label; an
+# online gamebox stripped of em-ci (e.g. a future demote-on-failures) takes no
+# jobs, so it must not keep devbox stripped too.
+if jq -e --arg p "$EM_CI_PRIMARY_PREFIX" --arg l "$EM_CI_LABEL" \
+     'any(.runners[]; (.name | startswith($p)) and .status == "online" and ([.labels[].name] | index($l) != null))' >/dev/null <<<"$runners"; then
   on=$((on + 1)); off=0; offline_since=""; offline_alerted=0
 else
   off=$((off + 1)); on=0; [ -n "$offline_since" ] || offline_since=$now
@@ -55,29 +59,42 @@ fi
 
 if [ "$desired" = present ] && [ "$on" -ge "$EM_CI_TICKS" ]; then
   desired=absent
-  tg_send "em-ci failover: gamebox runners online; devbox runners stop taking em-ci jobs (label removed, in-flight jobs finish)."
+  tg_send "em-ci failover: gamebox runners online; devbox runners stop taking em-ci jobs (label removed, in-flight jobs finish)." || true
 elif [ "$desired" = absent ] && [ "$off" -ge "$EM_CI_TICKS" ]; then
   desired=present
-  tg_send "em-ci failover: gamebox runners offline; devbox runners now take em-ci jobs."
+  tg_send "em-ci failover: gamebox runners offline; devbox runners now take em-ci jobs." || true
 fi
 
 if [ -n "$offline_since" ] && [ "$offline_alerted" = 0 ] &&
    [ $((now - offline_since)) -ge $((EM_CI_PRIMARY_OFFLINE_ALERT_H * 3600)) ]; then
-  tg_send "em-ci failover: gamebox runners offline for $(( (now - offline_since) / 3600 )) h (a streaming pause cannot last that long). devbox is carrying CI."
-  offline_alerted=1
+  # Latch only on a successful send: a lost one-shot alert is the only signal
+  # of a dead gamebox (e.g. its runners deleted by GitHub after 14 days).
+  tg_send "em-ci failover: gamebox runners offline for $(( (now - offline_since) / 3600 )) h (longer than a streaming pause can last). devbox is carrying CI." &&
+    offline_alerted=1
 fi
 
+write_failed=0
 for name in $EM_CI_FALLBACK_RUNNERS; do
   row=$(jq -c --arg n "$name" --arg l "$EM_CI_LABEL" \
     '[.runners[] | select(.name == $n) | {id, has: ([.labels[].name] | index($l) != null)}][0] // empty' <<<"$runners")
   [ -n "$row" ] || continue   # missing runner: em-ci-monitor reports it
   id=$(jq -r .id <<<"$row"); has=$(jq -r .has <<<"$row")
   if [ "$desired" = present ] && [ "$has" = false ]; then
-    gh_api POST "/repos/$EM_CI_REPO/actions/runners/$id/labels" "{\"labels\":[\"$EM_CI_LABEL\"]}" >/dev/null || true
+    gh_api POST "/repos/$EM_CI_REPO/actions/runners/$id/labels" "{\"labels\":[\"$EM_CI_LABEL\"]}" >/dev/null || write_failed=1
   elif [ "$desired" = absent ] && [ "$has" = true ]; then
-    gh_api DELETE "/repos/$EM_CI_REPO/actions/runners/$id/labels/$EM_CI_LABEL" >/dev/null || true
+    gh_api DELETE "/repos/$EM_CI_REPO/actions/runners/$id/labels/$EM_CI_LABEL" >/dev/null || write_failed=1
   fi
 done
 
-put desired "$desired"; put on "$on"; put off "$off"
+# A failed write is retried next pass (drift is recomputed from the GET), but a
+# persistent one would leave devbox's label wrong forever, so count passes.
+if [ "$write_failed" = 1 ]; then
+  write_errors=$((write_errors + 1))
+  [ "$write_errors" -ne "$EM_CI_ERROR_ALERT" ] ||
+    tg_send "em-ci failover (devbox): label writes on devbox runners have failed for $write_errors passes; devbox labels do not match '$desired'." || true
+else
+  write_errors=0
+fi
+
+put desired "$desired"; put on "$on"; put off "$off"; put write_errors "$write_errors"
 put offline_since "$offline_since"; put offline_alerted "$offline_alerted"

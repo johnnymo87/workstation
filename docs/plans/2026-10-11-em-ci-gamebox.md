@@ -743,7 +743,11 @@ Commit — `feat(em-ci-monitor): watch the failover reconciler`.
 ### Task 9: Deploy to devbox and measure
 
 **Prereq:** devbox healthy (it was not on 2026-10-11; don't deploy into a
-thrashing host).
+thrashing host), AND eternal-machinery PR 2 (#686) merged. Before #686, jobs
+request `ARM64`, which only devbox's runners carry; stripping their `em-ci`
+while gamebox (X64) is online would leave every self-hosted job unmatched.
+Runs created before #686 keep requesting `ARM64` on "re-run failed jobs":
+re-run them fresh instead.
 
 **Step 1:** PR 4 branch on devbox; `sudo nixos-rebuild switch --flake .#devbox`.
 
