@@ -27,10 +27,25 @@
   time.timeZone = "America/New_York";
   i18n.defaultLocale = "en_US.UTF-8";
 
+  # sops-nix configuration
+  sops = {
+    defaultSopsFile = ../../secrets/gamebox.yaml;
+    # Decrypt with the host SSH key; no separate age key file to provision.
+    age.sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
+  };
+
   nix.settings = {
     experimental-features = [ "nix-command" "flakes" ];
     trusted-users = [ "root" "@wheel" ];
     auto-optimise-store = true;
+    # The runner containers' devenv builds go through gamebox's nix-daemon;
+    # without this devenv's closures compile from source.
+    extra-substituters = [
+      "https://devenv.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
+    ];
   };
   nix.gc = {
     automatic = true;

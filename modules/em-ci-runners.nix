@@ -43,9 +43,12 @@
 # package therefore comes from nixpkgs-unstable, which tracks releases more
 # closely than the stable channel. MONTHLY BUMP: check
 #   gh api repos/actions/runner/releases --jq '.[0].tag_name'
-# against `nix eval --raw .#nixosConfigurations.devbox.config.containers.em-ci-1.config.services.github-runners.em-ci.package.version`
+# against `nix eval --raw .#nixosConfigurations.{devbox,gamebox}.config.containers.em-ci-1.config.services.github-runners.em-ci.package.version`
 # and if the runner is behind, `nix flake update nixpkgs-unstable` (note this
-# also moves gamebox's Sunshine), rebuild, and confirm both runners are Online.
+# also rebuilds gamebox's Sunshine locally (CUDA), so lift gamebox's nix-daemon
+# cap for that switch:
+#   sudo systemctl set-property --runtime nix-daemon MemoryMax=infinity CPUQuota=
+# ), check the runner version on both hosts and rebuild both.
 # If unstable has not caught up yet, override only this package.
 #
 # VERIFY after a deploy (see the bead for the full list):
