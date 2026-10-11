@@ -5774,13 +5774,21 @@ EOF
     "vm.user_reserve_kbytes" = 131072;    # 128 MiB — user recovery reserve
   };
 
-  # Soft memory limit on user slice: throttle (not kill) when dev workload
-  # exceeds 56 GB. Leaves ~6 GB for system/kernel/buffers on the 64 GB box.
+  # Hard memory limit on user slice: hard kill (MemoryMax, not MemoryHigh)
+  # when dev workload exceeds 56 GB. Leaves ~6 GB for system/kernel/buffers
+  # on the 64 GB (62 GiB) box.
+  #
+  # MemoryHigh was replaced with MemoryMax for consistency with devbox following
+  # the 2026-10-11 incident (docs/plans/2026-10-11-oom-containment-design.md),
+  # removing the throttle band. This buys no containment here, because the serves
+  # live in a root-level opencode.slice (not under user-1000.slice) and 56G plus
+  # the pool exceeds the 62 GiB host, so earlyoom fires first. The real agent cap
+  # on this host is oc-agent.slice (MemoryMax=20G, users/dev/home.cloudbox.nix).
   # Also cap user swap usage so system services always have swap headroom.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "56G";
+      MemoryMax = "56G";
       MemorySwapMax = "24G";
       TasksMax = 4096;      # Enough for Bazel's symlink-forest threads; still caps runaway fan-out
     };

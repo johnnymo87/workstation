@@ -903,9 +903,18 @@ ${serveIdCase}
       # With Max-only, a ballooned serve OOM-kills fast and Restart=always
       # recovers it in ~10s (sessions persist in the shared DB; TUIs reconnect).
       # Budget: 6G/serve, K=2 -> 12G worst case, inside the user-1000.slice
-      # MemoryHigh=20G (hosts/devbox/configuration.nix) on the 30G host.
+      # MemoryMax=20G (hosts/devbox/configuration.nix) on the 30G host.
       MemoryMax = "6G";
-      OOMScoreAdjust = 500;
+      # OOM score adjustment: an OOM at a cgroup limit sizes adj points against
+      # memory.max + swap (26G here, so 1 point = 26 MB). At 500 the serves
+      # carried a 7.8G handicap against an adj-200 `systemd-run --user` job.
+      # At 200 they tie with other user-manager services, and size decides.
+      # Going to 0 (cloudbox's shape) waits on porting oc-scoped-shell to devbox
+      # (follow-up "D").
+      # NOTE: this unit and opencode-serve-pool.target are
+      # X-SwitchMethod=keep-old, so the new adj only applies after an
+      # explicit restart of opencode-serve-pool.target.
+      OOMScoreAdjust = 200;
       Restart = "always";
       RestartSec = 10;
       # A wedged serve's SIGTERM handler is a JS-level process.once — a frozen
@@ -1925,7 +1934,7 @@ down and its silence means nothing. This host has no second leg.
   # eternal-machinery repo).
   #
   # PIDs-only for phase 1 per the design doc. No memory or CPU caps;
-  # the parent user-1000.slice already has MemoryHigh=12G and
+  # the parent user-1000.slice already has MemoryMax=20G and
   # MemorySwapMax=6G, which is sufficient.
   #
   # See docs/plans/2026-04-18-agents-slice-hierarchy-design.md (Phase 0)

@@ -770,7 +770,7 @@ lib.mkIf isCloudbox {
   #
   # NOTE the new neighbours. This slice nests under user-1000.slice, so builds
   # that used to sit in system.slice now also count against that slice's
-  # MemoryHigh/MemorySwapMax/TasksMax (hosts/cloudbox/configuration.nix), which
+  # MemoryMax/MemorySwapMax/TasksMax (hosts/cloudbox/configuration.nix), which
   # they share with tmux, nvim and every interactive shell. TasksMax in
   # particular is worth remembering: bazel's symlink-forest and sandbox phases
   # are thread-hungry, so a pathological build now shows up as task exhaustion

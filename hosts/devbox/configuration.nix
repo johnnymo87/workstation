@@ -1335,11 +1335,38 @@ in
     freeMemKillThreshold = 5;     # SIGKILL when <5% RAM free (~800 MB)
     freeSwapKillThreshold = 100;
     reportInterval = 15;
+    # Victim selection: kernel /proc/<pid>/oom_score (+300 for --prefer,
+    # -300 for --avoid). The opencode serves (comm .opencode-wrapp) are
+    # deliberately NOT in --prefer (matching cloudbox workstation-o5s1.5):
+    # the serve is the most stateful process on the box, and under the
+    # pressure that brings earlyoom in, its JS event loop is too stalled to
+    # run its SIGTERM handler.
+    #
+    # Evidence (2026-10-11 incident): earlyoom chose serve :4096 (oom_score
+    # 1309, including the +300 preference) when it was too frozen to exit,
+    # and retried with "kill failed: Timer expired" every 10 s for an hour.
+    # No earlyoom option bounds retries on a frozen victim; earlyoom is left
+    # as is, as the whole-host backstop.
+    #
+    # beam.smp is deliberately not in --prefer because it would match the main
+    # dev BEAM and docker BEAMs, not just runaway test jobs.
     extraArgs = [
-      "--prefer" "(^|/)(\\.opencode-wrapp|node|bun|headless_shell|nix-build)$"
+      "--prefer" "(^|/)(node|bun|headless_shell|nix-build)$"
       "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd|cloudflared)$"
     ];
   };
+
+  # systemd-oomd on user slices, DRY-RUN ONLY (2026-10-11 design, §2).
+  # oomd logs "Would have killed …" but kills nothing. Kill mode is a
+  # separate decision based on those logs: its pgscan-based victim choice
+  # likely points at file-cache holders (the serves, tmux panes) once the
+  # slice's swap is exhausted, and ManagedOOMPreference is ignored on the
+  # /user.slice path (owner mismatch). See the design doc.
+  systemd.oomd.enableUserSlices = true;
+  systemd.services.systemd-oomd.serviceConfig.ExecStart = [
+    ""  # clear the upstream ExecStart
+    "${config.systemd.package}/lib/systemd/systemd-oomd --dry-run"
+  ];
 
   # P1: sshd's LISTENER is protected from the OOM killer by sshd itself, not
   # by systemd. Do NOT add OOMScoreAdjust = "-1000" here (workstation-aj1m,
@@ -1374,20 +1401,27 @@ in
     "vm.user_reserve_kbytes" = 65536;     # 64 MiB — user recovery reserve
   };
 
-  # P4: Aggregate cap on user slice — throttle (not kill) when the dev
-  # workload exceeds the soft ceiling.  Sized 2026-07-03 (workstation-94g8)
+  # P4: Aggregate cap on user slice — hard kill (MemoryMax, not MemoryHigh)
+  # when the dev workload exceeds the ceiling. Sized 2026-07-03 (workstation-94g8)
   # for the CURRENT 30G host (the old 12G value dated from the 16G box):
   # 20G leaves ~10G for system/kernel/buffers and comfortably contains the
   # opencode serve pool worst case (K=2 x MemoryMax=6G, users/dev/
-  # home.devbox.nix) plus editors/BEAM/tools.  Slice-level High is kept (unlike
-  # the per-serve units, which are Max-only after the 2026-07-03 wedge)
-  # because at slice scope there is plenty of reclaimable page cache spread
-  # across many processes, and earlyoom (P0) backstops the kill path.
+  # home.devbox.nix) plus editors/BEAM/tools.
+  #
+  # MemoryHigh was replaced with MemoryMax following the 2026-10-11 incident:
+  # a runaway systemd-run --user test job landed in unmetered app.slice and pinned
+  # user-1000.slice to its High/SwapMax ceiling, where direct reclaim throttled
+  # allocating threads without ever killing, crawling both opencode serves and
+  # SSH logins for ~12 h (see docs/plans/2026-10-11-oom-containment-design.md).
+  # A fast allocator is now OOM-killed within seconds of reaching the slice's
+  # RAM+swap cap (20G + 6G swap). A slow leak can still thrash at Max because
+  # the kernel retries the charge as long as reclaim makes progress; closing
+  # that needs a pressure killer (systemd-oomd), which is gated on soak data.
   # Also cap user swap usage so the zram device doesn't saturate.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "20G";
+      MemoryMax = "20G";
       MemorySwapMax = "6G";
       # TasksMax bumped from 512 -> 2048 after evidence (eternal-machinery
       # bead hedl, 2026-04-18) that 512 was too low for the real dev

@@ -457,11 +457,20 @@ restarted 4096, 4097, 4098 — then died at 4098 and never reached 4099.
 # --collect + a unique name: without them a finished-failed or still-running
 # job holds the name and the NEXT invocation dies with "unit already exists",
 # in exactly the fire-and-forget context where nobody is watching.
+# -p MemoryMax: size this to the job (-p MemorySwapMax=0 prevents swap thrash).
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 systemd-run --user --unit="my-job-$$" --no-block --collect \
+  -p MemoryMax=8G -p MemorySwapMax=0 \
   --setenv=PATH="$PATH" \
   bash -c '<command> >> /tmp/my-job.log 2>&1'
 ```
+
+An uncapped `--user` unit lands in `app.slice`, whose only limit is the whole
+user slice. On 2026-10-11 one runaway test job froze devbox for 12 h that way.
+Cap every background job. A job killed at its cap leaves only a log that stops
+mid-way (`--collect` removes the unit); `journalctl --user -u my-job-…` says
+"killed by the OOM killer". Raise the cap or shrink the job; don't retry it
+unchanged.
 
 If you reuse a fixed unit name deliberately (so you can find it in the journal),
 clear the old one first — and note that `reset-failed` only releases a name held

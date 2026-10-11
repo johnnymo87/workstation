@@ -69,7 +69,7 @@ zramctl
 
 # Check OOM mitigations still applied
 systemctl show opencode-serve --property=MemoryMax,MemoryHigh
-cat /sys/fs/cgroup/user.slice/user-1000.slice/memory.high
+cat /sys/fs/cgroup/user.slice/user-1000.slice/memory.max
 ```
 
 ## Why --keep-disk

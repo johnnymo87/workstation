@@ -371,8 +371,8 @@ writeShellApplication {
       # ---- the per-UID login slice (bead workstation-o5s1.16) --------------
       # user-$uid.slice, ONE LEVEL ABOVE the user manager. It holds the cap
       # that actually binds swap for everything under this user:
-      # MemorySwapMax=24G (hosts/cloudbox/configuration.nix), and the only
-      # MemoryHigh in the user tree. On 2026-09-26 it read swap.peak ==
+      # MemorySwapMax=24G and MemoryMax=56G (hosts/cloudbox/configuration.nix).
+      # On 2026-09-26 it read swap.peak ==
       # swap.max == 24 GiB, i.e. the cap had been reached, while the
       # user-manager row below it reads swap_max=max. Without this row, every
       # swap_ev_max in the user tree counts refusals against a cap that is
