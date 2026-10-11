@@ -2546,16 +2546,25 @@
     # NixOS system configuration for the physical x86_64 gaming PC (headless
     # Sunshine streaming host). The flake's only x86_64-linux output: CI runs
     # on aarch64, so this is evaluated by `nix flake check` but never built
-    # there. Build it on the box itself.
+    # there (build it on the box itself). devenvPkg for x86_64 needs
+    # import-from-derivation of an x86_64-only drv (cabal2nix-cachix,
+    # preferLocalBuild, allowSubstitutes=false), so evaluating gamebox on
+    # aarch64 requires `--option always-allow-substitutes true` with
+    # devenv.cachix.org as a substituter; CI sets it — see ci.yml.
     nixosConfigurations.gamebox = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
-      specialArgs = { inherit (inputs) nixpkgs-unstable; };
+      specialArgs = {
+        inherit (inputs) nixpkgs-unstable;
+        devenvPkg = devenv.packages."x86_64-linux".devenv;
+      };
       modules = [
         disko.nixosModules.disko
+        sops-nix.nixosModules.sops
         ./hosts/gamebox/configuration.nix
         ./hosts/gamebox/hardware.nix
         ./hosts/gamebox/disko.nix
         ./hosts/gamebox/streaming.nix
+        ./hosts/gamebox/em-ci.nix
       ];
     };
 

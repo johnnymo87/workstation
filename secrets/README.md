@@ -8,6 +8,7 @@ This directory uses sops-nix with age encryption for secrets.
 |------|------|-------------|---------|
 | `devbox.yaml` | NixOS devbox | sops-nix NixOS module (`/run/secrets/`) | github_ssh_key, cloudflare_api_token, gemini_api_key, ... |
 | `cloudbox.yaml` | NixOS cloudbox (GCP) | sops-nix NixOS module (`/run/secrets/`) | work tokens, jenkins, buildbuddy, ... |
+| `gamebox.yaml` | NixOS gamebox (physical x86_64) | sops-nix NixOS module (`/run/secrets/`) | em_ci_runner_pat (fine-grained PAT "em-ci-gamebox-runner", eternal-machinery only, Administration RW); recipients: gamebox host key + devbox |
 
 ## Devbox Setup (already done)
 

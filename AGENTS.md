@@ -238,6 +238,14 @@ wrong," and only varying the invocation separates them. See
 [Attributing Causes](https://github.com/johnnymo87/workstation/blob/main/assets/opencode/skills/attributing-causes/SKILL.md)
 on interrogating the instrument.
 
+**Evaluating gamebox on aarch64 (devbox/cloudbox).** Gamebox's `devenvPkg`
+(x86_64) is an import-from-derivation of an x86_64-only drv (`cabal2nix-cachix`,
+marked `preferLocalBuild = true; allowSubstitutes = false`) that an aarch64
+host cannot build locally. It is cached on devenv.cachix.org, but nix only
+substitutes `preferLocalBuild`/`allowSubstitutes=false` drvs when
+`always-allow-substitutes = true`. Local equivalent:
+`nix flake check --keep-going --option always-allow-substitutes true` (on devbox/cloudbox).
+
 ## Pipefail Inversion Guard
 
 `nix flake check` runs `users/dev/test-pipefail-inversion.sh`: no `.sh` or

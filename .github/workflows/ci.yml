@@ -46,12 +46,20 @@ jobs:
       # devenv.cachix.org and 404 from cache.nixos.org, and the key below is the
       # one the cachix API reports for the cache AND the one that signed that
       # path's narinfo.
+      #
+      # gamebox's devenvPkg (x86_64) is import-from-derivation of an x86_64-only
+      # drv (cabal2nix-cachix, preferLocalBuild, allowSubstitutes=false) that
+      # the aarch64 runner cannot build; it is on devenv.cachix.org but nix only
+      # substitutes preferLocalBuild/allowSubstitutes=false drvs when
+      # always-allow-substitutes = true.
+      # Local equivalent: nix flake check --keep-going --option always-allow-substitutes true (on devbox/cloudbox).
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v14
         with:
           extra-conf: |
             extra-substituters = https://devenv.cachix.org
             extra-trusted-public-keys = devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=
+            always-allow-substitutes = true
 
       # The remaining cost after the devenv substituter was this repo's own
 
