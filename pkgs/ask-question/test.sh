@@ -6,23 +6,16 @@
 # recursive fixed-output hash over a bun-produced on-disk tree (whose hash
 # drifts on every nixpkgs bun bump and forces a manual refresh).
 #
-# ask-question is meta.platforms = linux (it deploys only on devbox/cloudbox),
-# so it is filtered out of `packages.aarch64-darwin`. We therefore exercise the
-# real default.nix via callPackage against the current system's nixpkgs, which
-# works uniformly on darwin and linux and reads the working tree directly (so
-# newly-added deps/ files are visible before they are committed).
+# We exercise the real default.nix via callPackage against the current system's
+# nixpkgs rather than a flake output, which works uniformly on darwin and linux
+# and reads the working tree directly (so newly-added deps/ files are visible
+# before they are committed).
 #
 # Run: bash pkgs/ask-question/test.sh
 set -o errexit -o nounset -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
-
-# ask-question is meta.platforms = linux. On darwin (where the relay server, not
-# the client, lives) evaluating the top-level package trips the platform
-# assertion; allow it so we can cross-verify the (platform-independent) build
-# here. No-op on the real linux targets where it is natively supported.
-export NIXPKGS_ALLOW_UNSUPPORTED_SYSTEM=1
 
 # jq comes from THIS repo's locked nixpkgs (--inputs-from), not the ambient
 # flake registry. Unpinned, every CI run would resolve and download whatever

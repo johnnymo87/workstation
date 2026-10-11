@@ -52,7 +52,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | Skill | Scope | Purpose |
 |-------|-------|---------|
 | [ask-question](skills/ask-question/SKILL.md) | cross | Draft a technical research question and send to ChatGPT for investigation. |
-| [using-chatgpt-relay](skills/using-chatgpt-relay/SKILL.md) | cross | Send ChatGPT queries from any remote NixOS host (devbox or cloudbox) via `ask-question` CLI. Setup + troubleshooting for the chatgpt-relay. |
+| [using-chatgpt-relay](skills/using-chatgpt-relay/SKILL.md) | cross | Send ChatGPT queries from macOS or any remote NixOS host (devbox or cloudbox) via the `ask-question` CLI. Setup + troubleshooting for the chatgpt-relay. |
 | [using-gws](skills/using-gws/SKILL.md) | cross | Google Workspace APIs (Gmail, Drive, Docs, Sheets, Calendar) via the `gws` CLI. Account switching, available services, common commands. |
 | [using-atlassian](skills/using-atlassian/SKILL.md) | work-only | Read/write Jira tickets, fetch Confluence pages, JQL search, comments, attachment downloads. |
 | [formatting-slack-messages](skills/formatting-slack-messages/SKILL.md) | cross | Composing a Slack post — the MCP sends under the human's own name, so disclose authorship, get the first draft approved, reply in-thread, and link everything a reader cannot otherwise open. Plus mrkdwn dialect quirks (single-asterisk bold, underscore italic, no headers, angle-bracket links) and attaching files by `file_path` from the staging dir, never base64 through the context window. |
