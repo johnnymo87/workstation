@@ -467,7 +467,10 @@ systemd-run --user --unit="my-job-$$" --no-block --collect \
 
 An uncapped `--user` unit lands in `app.slice`, whose only limit is the whole
 user slice. On 2026-10-11 one runaway test job froze devbox for 12 h that way.
-Cap every background job.
+Cap every background job. A job killed at its cap leaves only a log that stops
+mid-way (`--collect` removes the unit); `journalctl --user -u my-job-…` says
+"killed by the OOM killer". Raise the cap or shrink the job; don't retry it
+unchanged.
 
 If you reuse a fixed unit name deliberately (so you can find it in the journal),
 clear the old one first — and note that `reset-failed` only releases a name held

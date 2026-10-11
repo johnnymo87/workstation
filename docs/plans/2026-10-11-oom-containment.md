@@ -160,7 +160,8 @@ merge.
 ### Task 8: deploy devbox + drills
 
 **Prereq:** devbox healthy (`uptime` load reasonable, slice
-`memory.pressure` some avg60 < 5).
+`memory.pressure` some avg60 < 5, slice `memory.current` below ~18G: writing
+`memory.max` below current usage OOM-kills on the spot).
 
 **Step 1:** Deploy as described in the header, then
 `nix run home-manager -- switch --flake .#dev` for Task 3.
@@ -170,7 +171,7 @@ merge.
 ```bash
 cat /sys/fs/cgroup/user.slice/user-1000.slice/memory.{max,high,swap.max}   # 21474836480 / max / 6442450944
 for u in opencode-serve@4096 opencode-serve@4097; do cat /proc/$(systemctl --user show -p MainPID --value $u)/oom_score_adj; done  # 200
-systemctl cat systemd-oomd | grep ExecStart                               # ... --dry-run
+tr '\0' ' ' </proc/$(systemctl show -p MainPID --value systemd-oomd)/cmdline   # running process has --dry-run
 oomctl | sed -n '/Monitored/,$p'                                          # user.slice + user-manager slices listed
 ```
 
@@ -197,56 +198,81 @@ must be bounded (an agent can't run an infinite loop in its bash tool), and
 it is the real second guard, because `RuntimeMaxSec` is enforced by
 `systemd --user`, which sits inside the thrashing slice.
 
-`/tmp/oom-observer.sh` (args: drill unit name, deadline seconds):
+`/tmp/oom-observer.sh` (args: drill unit name, deadline seconds). Revised
+after the pre-PR review: a transient system unit's PATH on NixOS is only
+systemd's own bin dir, so the script sets PATH and refuses to run without its
+tools; it waits up to 120 s for the drill unit to appear instead of quitting
+after 10 s; and it measures `GAP` across the sleep only, so slow (but
+under-3 s) health probes don't raise false gaps.
 
 ```bash
 #!/usr/bin/env bash
 set -u
+export PATH=/run/current-system/sw/bin:$PATH
 unit=$1; deadline=$2
 S=/sys/fs/cgroup/user.slice/user-1000.slice
 D="$S/user@1000.service/app.slice/$unit"
 log=/tmp/$unit-obs.log; : >"$log"
-start=$(date +%s); last=$start
-for _ in $(seq 1 $(( (deadline + 60) / 2 ))); do
+for c in date grep cut curl sleep; do command -v "$c" >/dev/null || { echo "MISSING $c" >>"$log"; exit 1; }; done
+start=$(date +%s); last=$start; seen=0
+while :; do
   now=$(date +%s)
-  [ $((now - last)) -le 5 ] || echo "GAP $((now - last))s" >>"$log"
-  last=$now
-  line="$(date +%T) swapev=$(grep max $S/memory.swap.events | cut -d' ' -f2) swappeak=$(cat $S/memory.swap.peak 2>/dev/null)"
+  [ $((now - last)) -le 4 ] || echo "GAP $((now - last))s" >>"$log"
+  line="$(date +%T) swapev=$(grep '^max' $S/memory.swap.events | cut -d' ' -f2) swapcur=$(cat $S/memory.swap.current) cur=$(cat $S/memory.current)"
   for p in 4096 4097; do line+=" $(curl -s -m3 -o /dev/null -w "$p:%{http_code}/%{time_total}" http://127.0.0.1:$p/global/health)"; done
   echo "$line" >>"$log"
+  [ -d "$D" ] && seen=1
   if [ $((now - start)) -ge $((deadline + 30)) ] && [ -e "$D/cgroup.kill" ]; then
     echo 1 >"$D/cgroup.kill"; echo "OBSERVER KILLED $unit" >>"$log"
   fi
-  [ -d "$D" ] || [ $((now - start)) -lt 10 ] || { echo "unit gone" >>"$log"; break; }
+  if [ $seen = 1 ] && [ ! -d "$D" ]; then echo "unit gone $(date +%T)" >>"$log"; break; fi
+  if [ $seen = 0 ] && [ $((now - start)) -ge 120 ]; then echo "UNIT NEVER APPEARED" >>"$log"; exit 1; fi
+  if [ $((now - start)) -ge $((deadline + 120)) ]; then echo "OBSERVER TIMEOUT" >>"$log"; break; fi
+  last=$(date +%s)
   sleep 2
 done
 ```
 
-**Before/after snapshot** (`/tmp/oom-snap.sh <file>`), read from cgroupfs, root:
+**Before/after snapshot** (`/tmp/oom-snap.sh <file>`), run as **dev** (not
+sudo: `systemctl --user` must reach dev's manager). The `\x2d` path component
+is quoted, because bash turns an unquoted `\x` into `x` and the glob then
+matches nothing. The serve slice's `oom_kill` is hierarchical and survives an
+instance restart; `NRestarts` catches a restart the per-instance counter
+would miss.
 
 ```bash
 #!/usr/bin/env bash
 out=$1; : >"$out"
+A=/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice
 n=0
-for f in /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-opencode\x2dserve.slice/opencode-serve@*.service/memory.events; do
+for f in "$A"/'app-opencode\x2dserve.slice'/opencode-serve@*.service/memory.events; do
   [ -e "$f" ] || continue; n=$((n+1)); echo "$f $(grep oom_kill "$f")" >>"$out"
 done
-echo "matched=$n" >>"$out"       # MUST be 2; fix the glob from `systemctl --user status opencode-serve@4096 | grep CGroup` if not
-for u in 4096 4097; do echo "pid$u=$(systemctl --user show -p MainPID --value opencode-serve@$u)" >>"$out"; done
+echo "matched=$n" >>"$out"       # MUST be 2
+echo "serveslice $(grep oom_kill "$A"/'app-opencode\x2dserve.slice'/memory.events)" >>"$out"
+for u in 4096 4097; do
+  echo "serve$u $(systemctl --user show -p MainPID -p NRestarts opencode-serve@$u | tr '\n' ' ')" >>"$out"
+done
 ```
+
+Gate: `matched=2`, and both `MainPID=` values non-empty and non-zero.
 
 **Step 5: drill (a), fast.**
 
 ```bash
-sudo bash /tmp/oom-snap.sh /tmp/drill-a-before.txt; grep -q 'matched=2' /tmp/drill-a-before.txt || exit 1
-sudo systemd-run --unit=oom-drill-obs-a --collect bash /tmp/oom-observer.sh oom-drill-a.service 300
+bash /tmp/oom-snap.sh /tmp/drill-a-before.txt   # then check the gate above
+sudo systemd-run --unit=oom-drill-obs-a --collect -p RuntimeMaxSec=600 bash /tmp/oom-observer.sh oom-drill-a.service 300
+sleep 3; grep -q swapev= /tmp/oom-drill-a.service-obs.log || exit 1   # observer is sampling
 t0=$(date '+%F %T')
 systemd-run --user --unit=oom-drill-a --collect -p RuntimeMaxSec=300 /run/current-system/sw/bin/python3 /tmp/oom-drill.py 0
 ```
 
 (No per-unit MemoryMax, on purpose: the slice cap must be what fires.) Wait
 for `/tmp/oom-drill-a.service-obs.log` to show `unit gone`, then
-`sudo bash /tmp/oom-snap.sh /tmp/drill-a-after.txt`.
+`bash /tmp/oom-snap.sh /tmp/drill-a-after.txt`.
+
+Drive the drills over ssh from another machine, not from an opencode session
+on devbox: the pool restart kills a devbox session's own serve mid-turn.
 
 **Step 6: drill (b), slow (50 MB/s).** Compute the deadline first:
 `headroom_mb = (20480 + 6144) - (current slice anon MB)`, read from
@@ -258,7 +284,7 @@ Same commands as (a), with names `-b` and that deadline (unit
 
 Drill (a) passes only if ALL of the following hold:
 - **no other kill:**
-  - `diff` of before/after shows the same serve `oom_kill` counts and pids;
+  - `diff` of before/after shows the same serve and serve-slice `oom_kill` counts, MainPIDs and `NRestarts`;
   - `journalctl -k --since "$t0" | grep -iE 'oom-kill|Killed process'` names only the drill;
   - `journalctl -u earlyoom --since "$t0" | grep -i sending` is empty;
 - **swap exercised:** `swapev` rose during the drill (the slice's `memory.swap.events max` delta > 0);
@@ -267,8 +293,10 @@ Drill (a) passes only if ALL of the following hold:
 
 Drill (b) FAILS only if something other than the drill was killed (the
 same three checks). Record without judging: how it ended (kernel kill with
-the time taken, `RuntimeMaxSec`, or the observer's kill) and the worst
-health latency.
+the time taken, `RuntimeMaxSec`, or the observer's kill), the worst health
+latency, and whether `swapev` rose at all (a `RuntimeMaxSec` ending with no
+swap-cap events means the deadline was too short to reach the cap, not the
+thrash case).
 
 For both drills, collect oomd's dry-run verdicts:
 `journalctl -u systemd-oomd --since "$t0" | grep -i "would have"`.
