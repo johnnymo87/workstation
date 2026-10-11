@@ -1,14 +1,14 @@
 ---
 name: using-chatgpt-relay
-description: Send ChatGPT queries from any remote NixOS host (devbox or cloudbox) via the ask-question CLI. Use when /ask-question fails with "Server not running" or when setting up chatgpt-relay for the first time on a new host.
+description: Send ChatGPT queries from macOS or any remote NixOS host (devbox or cloudbox) via the ask-question CLI. Use when /ask-question fails with "Server not running" or when setting up chatgpt-relay for the first time on a new host.
 allowed-tools: [Bash, Read]
 ---
 
 # Using chatgpt-relay
 
-The `ask-question` CLI runs on a remote NixOS host (devbox or cloudbox) and
-talks to `ask-question-server` running on macOS with a real browser. The
-relay is an SSH reverse-tunnel pattern, not host-specific.
+`ask-question-server` runs on macOS with a real browser. The `ask-question`
+CLI talks to it at `127.0.0.1:3033`: directly when you are on the Mac, and
+over an SSH reverse tunnel from a remote NixOS host (devbox or cloudbox).
 
 ## Architecture
 
@@ -68,14 +68,15 @@ In this repo the persistent tunnel launchd agents (`devbox-dev-tunnel`,
 `cloudbox-dev-tunnel`) already carry port 3033 — see the
 `troubleshooting-nixos-host` skill for the full port table.
 
-### 3. On the remote host: the CLI is already installed
+### 3. The CLI is already installed (every host)
 
-On the NixOS hosts (devbox + cloudbox) the `ask-question` CLI is installed
+On every host (devbox, cloudbox, macOS) the `ask-question` CLI is installed
 declaratively as a Nix package (`pkgs/ask-question`, wired into
-`home.base.nix` under `isDevbox || isCloudbox`). There is **no** `npm install`
-/ `npm link` step, and the repo is **not** cloned on these hosts — only the
-client is packaged. The `ask-question-server` and `ask-question-login` halves
-need playwright + a browser and run only on macOS (`~/Code/chatgpt-relay`).
+`home.base.nix` under `isDevbox || isCloudbox || isDarwin`). There is **no**
+`npm install` / `npm link` step for the client. On the Mac it needs no tunnel:
+the default `http://127.0.0.1:3033` is the server itself. The
+`ask-question-server` and `ask-question-login` halves need playwright + a
+browser and run only on macOS, from the `~/Code/chatgpt-relay` checkout.
 
 If `ask-question` is missing (e.g. on a freshly provisioned host), apply
 home-manager:
@@ -85,13 +86,15 @@ home-manager:
 nix run home-manager -- switch --flake ~/projects/workstation#dev
 # cloudbox
 nix run home-manager -- switch --flake ~/projects/workstation#cloudbox
+# macOS
+darwin-switch
 ```
 
 To bump the pinned version, edit `pkgs/ask-question/default.nix` (`rev` +
-`src.hash`, plus `undiciVersion` and the node-modules `outputHash` if the
-upstream lockfile changed), then re-apply.
+`src.hash`); to bump undici, follow the header comment in that file (edit
+`deps/package.json`, regenerate `deps/package-lock.json`). Then re-apply.
 
-### 4. On the remote host: Verify connection
+### 4. Verify connection (remote host or Mac)
 
 ```bash
 # Check tunnel is working

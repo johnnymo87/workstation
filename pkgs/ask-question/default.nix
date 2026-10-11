@@ -92,6 +92,8 @@ stdenvNoCC.mkDerivation {
     description = "chatgpt-relay client CLI: send prompts to ask-question-server over the localhost:3033 tunnel";
     homepage = "https://github.com/johnnymo87/chatgpt-relay";
     mainProgram = "ask-question";
-    platforms = platforms.linux;
+    # linux: devbox/cloudbox reach the Mac's server over the :3033 tunnel.
+    # darwin: agents on the Mac itself talk to the local server directly.
+    platforms = platforms.linux ++ platforms.darwin;
   };
 }
