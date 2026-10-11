@@ -90,5 +90,9 @@ check "offline-6h alert not repeated" '[ "$(grep -c "offline for" "$S/tg")" -eq 
 setup; jq -n '{runners:[{id:1,name:"gamebox-em-ci-1",status:"online",busy:false,labels:[]}]}' >"$S/runners.json"
 check "missing fallback runner tolerated" 'tick; tick; tick'
 
+# 10. Empty state files (crash mid-write) read as defaults, not "".
+setup; runners online '["em-ci"]'; : >"$STATE_DIRECTORY/desired"; : >"$STATE_DIRECTORY/on"; tick
+check "empty state file reads as default" '[ "$(cat $STATE_DIRECTORY/desired)" = present ] && [ "$(cat $STATE_DIRECTORY/on)" = 1 ]'
+
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"

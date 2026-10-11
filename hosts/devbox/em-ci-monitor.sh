@@ -190,7 +190,7 @@ if ! last_trigger=$(systemctl show -p LastTriggerUSec --value em-ci-failover.tim
   add "failover:timer" "cannot inspect em-ci-failover.timer via systemctl"
 else
   last_sec=""
-  if [ -n "$last_trigger" ] && [ "$last_trigger" != "n/a" ]; then
+  if [ -n "$last_trigger" ] && [ "$last_trigger" != "n/a" ] && [ "$last_trigger" != 0 ]; then
     last_sec=$(date -d "$last_trigger" +%s 2>/dev/null || true)
   fi
 

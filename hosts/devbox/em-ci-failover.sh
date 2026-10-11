@@ -16,7 +16,7 @@ S=${STATE_DIRECTORY:?}
 gh_api() { # $1 method, $2 path, [$3 json body]
   if [ -n "${EM_CI_GH_API_STUB:-}" ]; then "$EM_CI_GH_API_STUB" "$@"; return; fi
   local body=()
-  [ -z "${3:-}" ] || body=(--data-raw "$3")
+  [ -z "${3:-}" ] || body=(-H "Content-Type: application/json" --data-raw "$3")
   printf 'header = "Authorization: Bearer %s"\n' "$(cred gh_token)" |
     curl -fsS -m 30 --retry 2 -X "$1" \
       -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -28,8 +28,10 @@ tg_send() {
     curl -fsS -m 20 --retry 3 -o /dev/null \
       --data-urlencode "chat_id=$(cred tg_chat_id)" --data-urlencode "text=$1" -K - || true
 }
-get() { cat "$S/$1" 2>/dev/null || echo "$2"; }
-put() { printf '%s\n' "$2" >"$S/$1"; }
+# An empty file (crash mid-write before put became atomic, or a manual
+# truncate) reads as the default, never as "" -- "" would wedge desired.
+get() { local v; v=$(cat "$S/$1" 2>/dev/null || true); echo "${v:-$2}"; }
+put() { printf '%s\n' "$2" >"$S/$1.tmp" && mv -f "$S/$1.tmp" "$S/$1"; }
 
 desired=$(get desired present)
 on=$(get on 0); off=$(get off 0); errors=$(get errors 0)
