@@ -1413,10 +1413,10 @@ in
   # user-1000.slice to its High/SwapMax ceiling, where direct reclaim throttled
   # allocating threads without ever killing, crawling both opencode serves and
   # SSH logins for ~12 h (see docs/plans/2026-10-11-oom-containment-design.md).
-  # A fast allocator now OOM-kills within seconds. A slow leak can still thrash
-  # at Max because the kernel retries the charge as long as reclaim makes
-  # progress; closing that needs a pressure killer (systemd-oomd), which is
-  # gated on soak data.
+  # A fast allocator is now OOM-killed within seconds of reaching the slice's
+  # RAM+swap cap (20G + 6G swap). A slow leak can still thrash at Max because
+  # the kernel retries the charge as long as reclaim makes progress; closing
+  # that needs a pressure killer (systemd-oomd), which is gated on soak data.
   # Also cap user swap usage so the zram device doesn't saturate.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";

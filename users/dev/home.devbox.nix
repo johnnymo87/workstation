@@ -911,8 +911,9 @@ ${serveIdCase}
       # At 200 they tie with other user-manager services, and size decides.
       # Going to 0 (cloudbox's shape) waits on porting oc-scoped-shell to devbox
       # (follow-up "D").
-      # NOTE: this unit has X-SwitchMethod=keep-old (lines 819, 933), so the new
-      # adj only applies after an explicit restart of opencode-serve-pool.target.
+      # NOTE: this unit and opencode-serve-pool.target are
+      # X-SwitchMethod=keep-old, so the new adj only applies after an
+      # explicit restart of opencode-serve-pool.target.
       OOMScoreAdjust = 200;
       Restart = "always";
       RestartSec = 10;
