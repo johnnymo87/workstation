@@ -1335,8 +1335,23 @@ in
     freeMemKillThreshold = 5;     # SIGKILL when <5% RAM free (~800 MB)
     freeSwapKillThreshold = 100;
     reportInterval = 15;
+    # Victim selection: kernel /proc/<pid>/oom_score (+300 for --prefer,
+    # -300 for --avoid). The opencode serves (comm .opencode-wrapp) are
+    # deliberately NOT in --prefer (matching cloudbox workstation-o5s1.5):
+    # the serve is the most stateful process on the box, and under the
+    # pressure that brings earlyoom in, its JS event loop is too stalled to
+    # run its SIGTERM handler.
+    #
+    # Evidence (2026-10-11 incident): earlyoom chose serve :4096 (oom_score
+    # 1309, including the +300 preference) when it was too frozen to exit,
+    # and retried with "kill failed: Timer expired" every 10 s for an hour.
+    # No earlyoom option bounds retries on a frozen victim; earlyoom is left
+    # as is, as the whole-host backstop.
+    #
+    # beam.smp is deliberately not in --prefer because it would match the main
+    # dev BEAM and docker BEAMs, not just runaway test jobs.
     extraArgs = [
-      "--prefer" "(^|/)(\\.opencode-wrapp|node|bun|headless_shell|nix-build)$"
+      "--prefer" "(^|/)(node|bun|headless_shell|nix-build)$"
       "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd|cloudflared)$"
     ];
   };
