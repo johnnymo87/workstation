@@ -2,7 +2,8 @@
 #
 # Only the `ask-question` CLI is packaged here: a thin ESM HTTP client that
 # POSTs prompts to `ask-question-server` (running on macOS with a real
-# browser) over the localhost:3033 SSH reverse tunnel. The `ask-question-server`
+# browser) at 127.0.0.1:3033 -- directly on the Mac, or over the SSH reverse
+# tunnel from devbox/cloudbox. The `ask-question-server`
 # and `ask-question-login` commands are intentionally NOT packaged — they need
 # playwright + a browser and only ever run on the macOS side.
 #
@@ -89,7 +90,7 @@ stdenvNoCC.mkDerivation {
   passthru = { inherit nodeModules; };
 
   meta = with lib; {
-    description = "chatgpt-relay client CLI: send prompts to ask-question-server over the localhost:3033 tunnel";
+    description = "chatgpt-relay client CLI: send prompts to ask-question-server at 127.0.0.1:3033";
     homepage = "https://github.com/johnnymo87/chatgpt-relay";
     mainProgram = "ask-question";
     # linux: devbox/cloudbox reach the Mac's server over the :3033 tunnel.

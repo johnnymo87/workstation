@@ -14,7 +14,8 @@ over an SSH reverse tunnel from a remote NixOS host (devbox or cloudbox).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  REMOTE NIXOS HOST (devbox or cloudbox)                                 │
+│  REMOTE NIXOS HOST (devbox or cloudbox)  — on the Mac itself, the CLI   │
+│                                            skips the tunnel entirely    │
 │                                                                         │
 │  OpenCode → /ask-question → ask-question CLI                            │
 │                                      │                                  │
@@ -42,9 +43,13 @@ over an SSH reverse tunnel from a remote NixOS host (devbox or cloudbox).
 ```bash
 cd ~/Code/chatgpt-relay
 npm install
-ask-question-login          # One-time: log into ChatGPT in browser
-ask-question-server         # Keep running
+node src/login.js           # One-time: log into ChatGPT in browser
+npm run server:log          # Keep running (logs to ~/.local/state/chatgpt-relay/daemon.log)
 ```
+
+The server-side bins are **not** on PATH, by design. Do not `npm link` this
+checkout to get them: it would also install an unpinned `ask-question` that
+shadows or races the Nix-packaged client (§3).
 
 ### 2. On macOS: Create SSH reverse tunnel
 
@@ -146,17 +151,17 @@ they're immediately falsifiable by writing the code.
 
 ### "Server not running or not responding"
 
-1. **Check tunnel on the remote host:**
+1. **On a remote host, check the tunnel:**
    ```bash
    curl -s http://localhost:3033/health
    ```
-   If no response, the SSH tunnel isn't active.
+   If no response, the SSH tunnel isn't active (or the server is down; see 2).
 
-2. **Check server on macOS:**
+2. **On macOS, check the server:**
    ```bash
    curl -s http://localhost:3033/health
    ```
-   If no response, start `ask-question-server`.
+   If no response, start it: `cd ~/Code/chatgpt-relay && npm run server:log`.
 
 3. **Reconnect with tunnel:**
    ```bash
@@ -168,7 +173,7 @@ they're immediately falsifiable by writing the code.
 
 On macOS:
 ```bash
-ask-question-login
+cd ~/Code/chatgpt-relay && node src/login.js
 ```
 
 ### Tunnel drops on disconnect
