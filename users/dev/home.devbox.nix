@@ -903,9 +903,17 @@ ${serveIdCase}
       # With Max-only, a ballooned serve OOM-kills fast and Restart=always
       # recovers it in ~10s (sessions persist in the shared DB; TUIs reconnect).
       # Budget: 6G/serve, K=2 -> 12G worst case, inside the user-1000.slice
-      # MemoryHigh=20G (hosts/devbox/configuration.nix) on the 30G host.
+      # MemoryMax=20G (hosts/devbox/configuration.nix) on the 30G host.
       MemoryMax = "6G";
-      OOMScoreAdjust = 500;
+      # OOM score adjustment: an OOM at a cgroup limit sizes adj points against
+      # memory.max + swap (26G here, so 1 point = 26 MB). At 500 the serves
+      # carried a 7.8G handicap against an adj-200 `systemd-run --user` job.
+      # At 200 they tie with other user-manager services, and size decides.
+      # Going to 0 (cloudbox's shape) waits on porting oc-scoped-shell to devbox
+      # (follow-up "D").
+      # NOTE: this unit has X-SwitchMethod=keep-old (lines 819, 933), so the new
+      # adj only applies after an explicit restart of opencode-serve-pool.target.
+      OOMScoreAdjust = 200;
       Restart = "always";
       RestartSec = 10;
       # A wedged serve's SIGTERM handler is a JS-level process.once — a frozen
