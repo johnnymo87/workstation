@@ -177,6 +177,42 @@ Devbox only. Cloudbox: config checks (1-2) only, no drill.
    case, an expected and documented limitation), and oomd's dry-run "Would
    have killed …" lines for both drills.
 
+### Measured 2026-10-11 (devbox, deployed from #659's head)
+
+Config checks: slice `memory.max` 21474836480, `memory.high` max,
+`memory.swap.max` 6442450944; both serves `oom_score_adj` 200 after the pool
+restart; the running oomd's command line has `--dry-run`; `oomctl` monitors
+`/user.slice` and the user-manager slices.
+
+Workload (owner's choice): each 64 MB chunk is a copy of a block that is half
+`os.urandom`, half zeros, so it compresses about 2:1 in zram like real heap
+data and the slice's swap costs real host RAM. The page-touching allocator in
+the plan compresses to almost nothing and would not have loaded the host.
+
+| | (a) fast | (b) ~50 MB/s |
+|---|---|---|
+| Start → kernel kill | 15:38:50 → 15:39:26 (36 s) | 15:41:29 → 15:48:55 (7 min 26 s) |
+| Killed | only `oom-drill-a` (`CONSTRAINT_MEMCG`, `oom_memcg=/user.slice/user-1000.slice`) | only `oom-drill-b` (same) |
+| Serve `oom_kill`, MainPID, `NRestarts` | unchanged | unchanged |
+| earlyoom kills | none | none |
+| Slice swap reached `swap.max` | yes (`swap.events max` 0 → 283861) | yes (283861 → 288182) |
+| Worst serve health probe | 2.93 s (4096, as the drill started) | one >3 s timeout (4096, at the cap, 2 s before the kill) |
+| Observer `GAP` lines / observer kill | 0 / no | 0 / no |
+| oomd dry-run "Would have killed" | none | none |
+
+Drill (a) passed every criterion. Drill (b) passed its one judged criterion.
+It did not thrash: the slow leak was killed about 2 s after the slice's swap
+hit the cap, well inside its 742 s `RuntimeMaxSec`.
+
+Observations for the follow-ups:
+- On the way to the cap the slice swaps out its neighbours: about 6G of slice
+  swap against the drill's own 2.9-3.2G swap peak. Serve :4096 then paid for
+  swap-in, with one >3 s probe at the cap in (b) and one failed probe about
+  a minute after (a), outside the observer window. Both serves recovered
+  without restarting.
+- oomd logged nothing at all. Neither drill held PSI `full` above 80% for
+  30 s, so its dry-run soak (workstation-ofyx) has no data from these drills.
+
 ## Rollout
 
 devbox first; cloudbox (change 1 only) after one day without unexpected kills
