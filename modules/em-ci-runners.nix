@@ -158,13 +158,26 @@ let
       ]) ++ [ devenvPkg ];
 
       serviceOverrides = {
-        # Retry instead of staying dead. The upstream unit has Restart=no, so a
-        # registration that fails on a transient network error (DNS not up yet
-        # when the container starts at boot or during a switch; first seen on
-        # gamebox's Wi-Fi as "Resource temporarily unavailable
-        # (api.github.com:443)") left the runner offline until restarted by
-        # hand. 60 s apart stays well under the default start limit (5/10 s).
-        Restart = "on-failure";
+        # Retry instead of staying dead. LOAD-BEARING, not a Wi-Fi workaround:
+        # any container start that must (re-)register -- first boot, PAT
+        # rotation via restartUnits -- fails its first attempt by construction.
+        # The configure step (ExecStartPre) blocks the container's boot; the
+        # container signals READY only when boot finishes; the host brings up
+        # ve-em-ci-N (address, route) only after READY. So configure runs with
+        # no network and fails ("Resource temporarily unavailable
+        # (api.github.com:443)", first seen on gamebox). Upstream sets
+        # Restart=no (hence mkForce), which left the runner offline until
+        # restarted by hand. With the default RestartMode=normal the failure
+        # ends the start job, boot completes, the veth comes up, and the retry
+        # 60 s later succeeds.
+        #
+        # Two couplings: (1) configure must FAIL in under the host's 60 s
+        # container@ start timeout (today ~37 s = timeout:2 x attempts:3 x 3
+        # nameservers); adding nameservers/attempts can turn this into an
+        # endless container restart loop. (2) RestartMode=direct would deadlock
+        # (start job never ends, network never comes up).
+        # Stops (watchdog, pause) are not failures and never trigger this.
+        Restart = lib.mkForce "on-failure";
         RestartSec = "60s";
         # Warm caches (ccache, pip, npm, mix/hex) live outside the workDir wipe.
         ReadWritePaths = [ "/var/lib/em-ci/cache" ];
