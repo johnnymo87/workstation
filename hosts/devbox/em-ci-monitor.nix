@@ -48,9 +48,11 @@ let
     wants = [ "network-online.target" ];
     environment = {
       EM_CI_REPO = "johnnymo87/eternal-machinery";
+      # Devbox runners only: gamebox runners are not added (offline = normal pause; the 6 h alert lives in em-ci-failover).
       EM_CI_RUNNERS = lib.concatMapStringsSep " " (c: "devbox-${c}") containers;
       EM_CI_CONTAINERS = lib.concatStringsSep " " containers;
       EM_CI_LABEL = "em-ci";
+      EM_CI_FAILOVER_STALE_MIN = "5";
       EM_CI_QUEUE_MAX_MIN = "20";
       EM_CI_SETUP_WINDOW_MIN = "20";
       EM_CI_BACKLOG_MAX_MIN = "120";

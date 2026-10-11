@@ -14,9 +14,9 @@
 # Configuration (environment, set by the unit):
 #   EM_CI_REPO, EM_CI_RUNNERS (space-separated runner names),
 #   EM_CI_CONTAINERS (space-separated container names), EM_CI_LABEL,
-#   EM_CI_QUEUE_MAX_MIN, EM_CI_BACKLOG_MAX_MIN, EM_CI_SETUP_WINDOW_MIN,
-#   EM_CI_ROOT_MIN_GB, EM_CI_VOLUME, EM_CI_VOLUME_MIN_GB, EM_CI_REMIND_H,
-#   EM_CI_RUNBOOK, STATE_DIRECTORY.
+#   EM_CI_FAILOVER_STALE_MIN, EM_CI_QUEUE_MAX_MIN, EM_CI_BACKLOG_MAX_MIN,
+#   EM_CI_SETUP_WINDOW_MIN, EM_CI_ROOT_MIN_GB, EM_CI_VOLUME,
+#   EM_CI_VOLUME_MIN_GB, EM_CI_REMIND_H, EM_CI_RUNBOOK, STATE_DIRECTORY.
 #   EM_CI_MONITOR_DRY_RUN=1 prints instead of sending and pinging, and keeps
 #   no state.
 #
@@ -72,6 +72,8 @@ add() { keys+=("$1"); problems+=("$2"); } # $1: stable key, $2: text
 now=$(date +%s)
 since_iso=$(date -u -d "@$(( now - 3 * 3600 ))" +%Y-%m-%dT%H:%M:%SZ)
 
+# Counts only runners carrying $EM_CI_LABEL, so label-stripped devbox runners
+# correctly stop counting as idle.
 idle_em_ci_runners() { # $1: runners JSON. Prints the count; fails on bad JSON.
   jq -e --arg l "$EM_CI_LABEL" \
     '[.runners[] | select(.status == "online" and (.busy | not) and ([.labels[].name] | index($l)))] | length' \
@@ -181,6 +183,28 @@ done
 if systemctl is-failed --quiet em-ci-disk-watchdog.service; then
   add "watchdog" "the disk watchdog fired (root disk was low; it stops the containers)"
 fi
+if systemctl is-failed --quiet em-ci-failover.service; then
+  add "failover" "em-ci-failover failed (devbox runner labels not reconciled)"
+fi
+if ! last_trigger=$(systemctl show -p LastTriggerUSec --value em-ci-failover.timer 2>/dev/null); then
+  add "failover:timer" "cannot inspect em-ci-failover.timer via systemctl"
+else
+  last_sec=""
+  if [ -n "$last_trigger" ] && [ "$last_trigger" != "n/a" ] && [ "$last_trigger" != 0 ]; then
+    last_sec=$(date -d "$last_trigger" +%s 2>/dev/null || true)
+  fi
+
+  if [ -z "$last_sec" ]; then
+    add "failover:stale" "em-ci-failover never ran since boot (em-ci-failover.timer has not triggered)"
+  else
+    diff_sec=$(( now - last_sec ))
+    [ "$diff_sec" -ge 0 ] || diff_sec=0
+    diff_min=$(( diff_sec / 60 ))
+    if [ "$diff_min" -ge "${EM_CI_FAILOVER_STALE_MIN:-5}" ]; then
+      add "failover:stale" "em-ci-failover has not run for $diff_min min (timer em-ci-failover.timer last triggered: $last_trigger)"
+    fi
+  fi
+fi
 root_kib=$(df --output=avail -k / | tail -n 1 | tr -d ' ')
 root_gb=$(( root_kib / 1024 / 1024 ))
 [ "$root_gb" -ge "$EM_CI_ROOT_MIN_GB" ] || add "disk:root" "root disk has $root_gb GB free (alert below $EM_CI_ROOT_MIN_GB GB)"
@@ -210,11 +234,11 @@ fi
 msg=""
 if [ "$sig" = ok ]; then
   if [ -n "$prev_sig" ] && [ "$prev_sig" != ok ]; then
-    msg="em-ci (devbox CI runners): resolved, all checks OK again."
+    msg="em-ci (CI runners): resolved, all checks OK again."
   fi
 elif [ "$sig" != "$prev_sig" ] || [ $(( now - prev_at )) -ge $(( EM_CI_REMIND_H * 3600 )) ]; then
-  head="em-ci (devbox CI runners): problem"
-  [ "$sig" = "$prev_sig" ] && head="em-ci (devbox CI runners): STILL failing"
+  head="em-ci (CI runners): problem"
+  [ "$sig" = "$prev_sig" ] && head="em-ci (CI runners): STILL failing"
   body=$(printf -- '- %s\n' "${problems[@]}")
   # Telegram rejects messages over 4096 characters.
   [ "${#body}" -le 3500 ] || body="${body:0:3500}... (truncated; see the Actions tab)"
