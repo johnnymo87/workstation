@@ -68,6 +68,12 @@
       # run BEFORE a rebuild -- the whole point is that the rebuild it unblocks
       # cannot build it first. See pkgs/cfp-prefetch-darwin/default.nix.
       cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
+      # `sudo darwin-rebuild switch` with the cfp seed run first, so the private
+      # asset can never 404 the rebuild. `nix run .#darwin-switch` works before
+      # it is on PATH. See pkgs/darwin-switch/default.nix.
+      darwin-switch = p.callPackage ./pkgs/darwin-switch {
+        cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
+      };
       clerk = p.callPackage ./pkgs/clerk { };
       codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
