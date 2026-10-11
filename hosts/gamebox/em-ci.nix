@@ -3,7 +3,10 @@
 # docs/plans/2026-10-11-em-ci-gamebox-design.md.
 { ... }:
 {
-  imports = [ ../../modules/em-ci-runners.nix ];
+  imports = [
+    ../../modules/em-ci-runners.nix
+    ./em-ci-pause.nix
+  ];
 
   services.em-ci-runners = {
     enable = true;
@@ -16,6 +19,7 @@
     memoryMax = "5G";
     stateDevice = null;          # root NVMe; the disk watchdog guards it
     externalInterface = null;    # Ethernet or Wi-Fi, whichever is up
+    pauseFlag = "/run/em-ci-paused";
   };
 
   # Builds the containers request run in nix-daemon's cgroup, outside the
