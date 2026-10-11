@@ -274,6 +274,9 @@ lib.mkIf isDarwin {
     # has no GITHUB_TOKEN anywhere the builder can see and the failed fetch
     # takes the whole system build down with it, not just cfp. Idempotent.
     localPkgs.cfp-prefetch-darwin
+    # The everyday rebuild command: runs cfp-prefetch-darwin, then
+    # `sudo darwin-rebuild switch --flake ~/Code/workstation#<host>`.
+    localPkgs.darwin-switch
     (pkgs.writeShellApplication {
       name = "pigeon-setup-secrets";
       text = ''
@@ -1166,7 +1169,7 @@ launchctl kickstart -k gui/\$(id -u)/$LABEL
 
 IMPORTANT: Also check the serve pool. Restarting only the front door creates dangerous version skew if the serves remain on old code -- an old serve 404s the door's session-scoped routes. Both are launchd agents; \`launchctl kickstart -k\` each of org.nix-community.home.opencode-serve-0/-1 too if they are also stale.
 
-If a kickstart does not clear this, the installed plist itself is stale (home-manager's bootstrap failed). Re-run: sudo darwin-rebuild switch --flake ~/Code/workstation#\$(hostname -s)
+If a kickstart does not clear this, the installed plist itself is stale (home-manager's bootstrap failed). Re-run: darwin-switch
 
 Running store path: $RUNNING_VER
 Installed store path: $INSTALLED_PATH

@@ -26,7 +26,7 @@ nix run home-manager -- switch --flake .#cloudbox      # cloudbox
 
 **macOS (nix-darwin):**
 ```bash
-sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2      # System + user combined
+darwin-switch      # cfp-prefetch-darwin + sudo darwin-rebuild switch (system + user)
 ```
 
 ## Work in a Worktree, Not the Primary Root

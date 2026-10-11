@@ -48,8 +48,13 @@ enableUnattendedRemoteRoot = true;   # was false
 ### 2. Apply it locally (this rebuild is interactive; you're at the Mac)
 
 ```bash
-sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2
+darwin-switch    # seeds the private cfp asset, then sudo darwin-rebuild switch
 ```
+
+The remote driver's later `sudo darwin-rebuild switch` cannot seed that asset:
+over SSH the login Keychain is normally locked. If the change being deployed
+remotely bumps cfp, run `cfp-prefetch-darwin --flake <that checkout>` at the
+Mac before opening the window.
 
 ### 3. Open the on-demand reverse-SSH window (from the Mac)
 

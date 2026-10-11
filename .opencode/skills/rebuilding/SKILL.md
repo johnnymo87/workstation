@@ -26,12 +26,18 @@ There are NixOS activation guards that will abort if you use the wrong target, b
 
 **macOS** uses `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (system + home combined).
 
-### macOS: seed the cfp asset FIRST, or the whole rebuild dies
+### macOS: use `darwin-switch`, which seeds the cfp asset first
 
 ```bash
-cfp-prefetch-darwin        # idempotent; no-op when already seeded
-sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2
+darwin-switch              # = cfp-prefetch-darwin, then sudo darwin-rebuild switch
 ```
+
+`darwin-switch` (pkgs/darwin-switch) deploys `~/Code/workstation` by default
+(`--flake DIR` to override), asks the flake for its darwinConfiguration name
+instead of trusting `hostname -s` (they have drifted: hostname `Y0FMQX93RR`,
+target `Y0FMQX93RR-2`), and passes args after `--` to darwin-rebuild. Plain
+`sudo darwin-rebuild switch` still works, but only if you run
+`cfp-prefetch-darwin` first yourself — the rest of this section is why.
 
 `claude-failover-proxy` is fetched from a **private** GitHub repo. cloudbox's
 nix-daemon carries a `GITHUB_TOKEN` (sops `EnvironmentFile`) so its fetch is
@@ -62,12 +68,18 @@ when the asset is already present.
 
 Two footguns:
 
-- **First-ever deploy on a fresh Mac**: the helper is installed *by* the rebuild
-  it unblocks, so it is not on `PATH` yet. Use
-  `nix run ~/Code/workstation#cfp-prefetch-darwin` that one time.
-- **It defaults to `~/Code/workstation` regardless of your cwd.** If you are
-  deploying a worktree that bumps cfp, pass `--flake .` — otherwise it seeds the
-  version the main checkout wants and the rebuild still 404s on yours.
+- **Not on `PATH` yet** (the helpers are installed *by* the rebuild they
+  unblock): `nix run ~/Code/workstation#darwin-switch`. On a Mac with no
+  nix-darwin at all there is no `darwin-rebuild` for it to call; seed with
+  `nix run ~/Code/workstation#cfp-prefetch-darwin`, then bootstrap with
+  `sudo nix run nix-darwin#darwin-rebuild -- switch --flake ~/Code/workstation#Y0FMQX93RR-2`.
+- **Don't `sudo darwin-switch`.** It calls sudo itself, and must read the token
+  from *your* Keychain; it refuses to run as root.
+- **Both default to `~/Code/workstation` regardless of your cwd.** If you call
+  `cfp-prefetch-darwin` by hand for a worktree that bumps cfp, pass `--flake .`
+  — otherwise it seeds the version the main checkout wants and the rebuild
+  still 404s on yours. `darwin-switch --flake DIR` hands the same DIR to both
+  steps, so it cannot get them out of sync.
 
 ## Deploy From The Main Worktree, Never A Worktree Or Scratch Checkout
 
