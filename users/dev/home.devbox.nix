@@ -1934,7 +1934,7 @@ down and its silence means nothing. This host has no second leg.
   # eternal-machinery repo).
   #
   # PIDs-only for phase 1 per the design doc. No memory or CPU caps;
-  # the parent user-1000.slice already has MemoryHigh=12G and
+  # the parent user-1000.slice already has MemoryMax=20G and
   # MemorySwapMax=6G, which is sufficient.
   #
   # See docs/plans/2026-04-18-agents-slice-hierarchy-design.md (Phase 0)

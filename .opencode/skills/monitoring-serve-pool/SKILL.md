@@ -137,7 +137,7 @@ The serve units are `MemoryMax=6G` with **no MemoryHigh** (revised
 throttle-forever band — exactly the wedge zone above. With Max-only, a
 ballooned serve is OOM-killed and `Restart=always` brings it back in ~10s;
 sessions persist in the shared `opencode.db` and TUIs reconnect. The
-aggregate backstop is `user-1000.slice` `MemoryHigh=20G`
+aggregate backstop is `user-1000.slice` `MemoryMax=20G`
 (`hosts/devbox/configuration.nix`, sized for the 30G host) plus earlyoom.
 
 `TimeoutStopSec=15` on the serve units: a frozen loop provably never runs
