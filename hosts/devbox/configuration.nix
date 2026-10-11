@@ -1374,20 +1374,27 @@ in
     "vm.user_reserve_kbytes" = 65536;     # 64 MiB — user recovery reserve
   };
 
-  # P4: Aggregate cap on user slice — throttle (not kill) when the dev
-  # workload exceeds the soft ceiling.  Sized 2026-07-03 (workstation-94g8)
+  # P4: Aggregate cap on user slice — hard kill (MemoryMax, not MemoryHigh)
+  # when the dev workload exceeds the ceiling. Sized 2026-07-03 (workstation-94g8)
   # for the CURRENT 30G host (the old 12G value dated from the 16G box):
   # 20G leaves ~10G for system/kernel/buffers and comfortably contains the
   # opencode serve pool worst case (K=2 x MemoryMax=6G, users/dev/
-  # home.devbox.nix) plus editors/BEAM/tools.  Slice-level High is kept (unlike
-  # the per-serve units, which are Max-only after the 2026-07-03 wedge)
-  # because at slice scope there is plenty of reclaimable page cache spread
-  # across many processes, and earlyoom (P0) backstops the kill path.
+  # home.devbox.nix) plus editors/BEAM/tools.
+  #
+  # MemoryHigh was replaced with MemoryMax following the 2026-10-11 incident:
+  # a runaway systemd-run --user test job landed in unmetered app.slice and pinned
+  # user-1000.slice to its High/SwapMax ceiling, where direct reclaim throttled
+  # allocating threads without ever killing, crawling both opencode serves and
+  # SSH logins for ~12 h (see docs/plans/2026-10-11-oom-containment-design.md).
+  # A fast allocator now OOM-kills within seconds. A slow leak can still thrash
+  # at Max because the kernel retries the charge as long as reclaim makes
+  # progress; closing that needs a pressure killer (systemd-oomd), which is
+  # gated on soak data.
   # Also cap user swap usage so the zram device doesn't saturate.
   systemd.slices."user-1000" = {
     description = "User slice for UID 1000 (dev)";
     sliceConfig = {
-      MemoryHigh = "20G";
+      MemoryMax = "20G";
       MemorySwapMax = "6G";
       # TasksMax bumped from 512 -> 2048 after evidence (eternal-machinery
       # bead hedl, 2026-04-18) that 512 was too low for the real dev
