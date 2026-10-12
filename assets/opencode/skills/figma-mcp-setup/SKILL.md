@@ -57,8 +57,13 @@ owner's **seat** in the plan that owns the file:
 On a View or Collab seat, a single exploratory session can spend the month.
 Plan the calls: get the node links from the designer, fetch each frame once
 with `nodeId` set and a small `depth`, and save what you learn (to the plan doc,
-say) instead of fetching again. Batch all the nodes you want rendered into one
-`download_figma_images` call.
+say) instead of fetching again. Put every node you want rendered into one
+`download_figma_images` call: that is one Tier 1 request per format (PNG, SVG)
+instead of one per node. Files in a Starter-plan team are capped at about 6
+reads a month whatever the seat.
+
+The token's budget is shared: every session granted `figma`, and anything
+else using the same person's PATs, draws on it.
 
 ## Using it
 
@@ -110,6 +115,12 @@ nix run home-manager -- switch --flake .#cloudbox     # writes .mcp.figma into o
 The sops key must exist before `hosts/cloudbox/configuration.nix` declares
 `figma_access_token`, or the nixos-rebuild fails. They land together.
 
+**Then restart the serves.** opencode reads its config, and expands the
+`{file:}` token reference, when a serve starts. Serves started before the
+switch don't have `mcp.figma`, and `oc-mcp-enable` reports it as "not
+configured". Run `reset-workspace` (see the `resetting-workspace` skill) or
+wait for the 3 AM nightly reset.
+
 ## macOS setup
 
 ```bash
@@ -143,16 +154,19 @@ Then grant it to a session and call `figma_get_figma_data` on a known node.
 1. Mint a new token as above (same single scope).
 2. Store it with the cloudbox `sops set` command or the macOS `security` command.
 3. Cloudbox: commit `secrets/cloudbox.yaml`, then `nixos-rebuild switch`. No
-   home-manager switch is needed: opencode.json holds a file reference, and the
-   server reads the file each time it starts.
-4. Revoke the old token in Figma.
+   home-manager switch is needed (opencode.json holds only a file reference),
+   but running serves expanded that reference at startup and still hold the
+   old token: restart them (`reset-workspace`, or the nightly reset). macOS:
+   `darwin-rebuild switch`, then restart OpenCode.
+4. Only then revoke the old token in Figma. Revoking first makes every figma
+   call 403 until the serves restart.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---------|-------|
-| `MCP server 'figma' is not configured on this host` | No `.mcp.figma` in opencode.json: the secret is missing, or the switch hasn't been applied. |
-| `403` / `Forbidden` from a tool | Token expired (90-day cap), lacks `file_content:read`, or the owner cannot open that file. |
+| `MCP server 'figma' is not configured on this host` | Check `jq .mcp.figma ~/.config/opencode/opencode.json`. Null: the secret is missing or the switch hasn't been applied. Present: the serve started before the switch; restart it. |
+| `403` / `Forbidden` from a tool | Token expired (90-day cap), lacks `file_content:read`, or the owner cannot open that file. Right after a rotation: the serve still holds the old token; restart it. |
 | `429` rate limit | Seat quota. `X-Figma-Rate-Limit-Type: low` means a View/Collab seat (about 20 Tier 1 calls a month); wait for the reset, or use a token from a Dev/Full-seat owner. |
 | `resolves outside the allowed image directory` | `localPath` must be relative, e.g. `cops-6793`, not `/tmp/...`. |
 | Gemini-tier subagent returns empty while figma is granted | Test the server against Gemini (`opencode-agents` skill, "Testing a new MCP server against Gemini"); if it fails, add `figma*: false` to the Gemini-tier agents. |

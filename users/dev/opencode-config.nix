@@ -383,7 +383,7 @@ let
   # `--env /dev/null`: upstream loads `<cwd>/.env` with override=true, so without
   # this a checkout's .env could replace FIGMA_API_KEY or set FIGMA_PROXY.
   # `--image-dir`: download_figma_images rejects paths outside this directory,
-  # and the default is the server's cwd (the serve's, not the session's). /tmp
+  # and the default is whatever cwd opencode spawns the server in. /tmp
   # because opencode.base.json pre-approves only `/tmp/*` for external access,
   # so agents can Read the rendered PNGs without a permission prompt.
   figmaImageDir = "/tmp/opencode/figma-images";
