@@ -2644,6 +2644,7 @@
           home-manager.extraSpecialArgs = {
             localPkgs = localPkgsFor darwinSystem;
             devenvPkg = devenv.packages.${darwinSystem}.devenv;
+            honkPkg = honk.packages.${darwinSystem}.honkd;
             assetsPath = ./assets;
         projects = projectsFor "darwin";
         isLinux = false;
