@@ -451,12 +451,15 @@ in
       # kept the old key: precisely the split-brain the listing appears to
       # prevent. Half an automatic restart is worse than none.
       #
-      # ROTATING THIS SECRET is therefore a manual, three-unit operation, and
-      # order does not matter because they are broken until all are done:
+      # ROTATING THIS SECRET is therefore a manual, three-unit operation. honkd
+      # (user unit, reads this file through ~/.local/state/honk/secret) sits
+      # between them, and goose comes FIRST: a honkd that starts against goose's
+      # old key fails, and its restart backoff (RestartSteps) can then hold it
+      # down for up to 5 minutes.
+      #   sudo systemctl restart goose-serve
       #   systemctl --user restart honkd
-      #   sudo systemctl restart goose-serve pigeon-daemon
-      # Do it in a window: goose 1.48.0 has no cancel, so bouncing the serve
-      # kills any in-flight turn without reporting it.
+      #   sudo systemctl restart pigeon-daemon
+      # Do it in a window: bouncing the serve kills any in-flight turn.
       pigeon_goose_acp_token = {
         owner = "dev";
         group = "dev";
