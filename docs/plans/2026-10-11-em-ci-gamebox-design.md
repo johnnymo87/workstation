@@ -171,10 +171,23 @@ devbox's PAT, then:
 - Each desired-state transition → Telegram notice.
 
 Known behaviour, stated rather than solved:
-- After a hard network cut GitHub keeps a runner `online` for an unmeasured
-  window. Jobs queued meanwhile are delayed, not lost. A job running when Wi-Fi
-  drops is failed by GitHub after ~10 min. Worst-case failover delay ≈
-  offline-flip + 3 ticks. Measure at rollout step 4 and tune.
+- After a network cut GitHub keeps a runner `online` for a short window. Jobs
+  queued meanwhile are delayed, not lost. A job running when Wi-Fi drops is
+  failed by GitHub after ~10 min. Failover delay ≈ offline-flip + 3 ticks.
+  **Measured 2026-10-11** (gamebox on office Wi-Fi, all runners idle, polled
+  every 15 s, so each figure is ±15 s):
+
+  | Event | gamebox runners offline | devbox regains `em-ci` | after recovery: gamebox online | devbox loses `em-ci` |
+  |---|---|---|---|---|
+  | Real Moonlight stream (pause) | 46 s | 3 m 22 s | ≤ 15 s after quit | 2 m 19 s after quit |
+  | Container egress dropped for 8 min (stands in for a network cut; host stayed reachable) | 40-55 s | 3 m 16 s | 11-27 s after restore | ~2 m 30 s after restore |
+  | `systemctl kill -s KILL` both containers | never (auto-restart in < 3 s, runners reconnected) | no failover | n/a | n/a |
+
+  The offline flip is under a minute, so `EM_CI_TICKS = 3` stays: it is most
+  of the failover delay but filters flapping. Sunshine ran the pause hook and
+  started the game 22 ms apart, so the pause does not delay the launch. A
+  real Wi-Fi drop was not measured (it adds Wi-Fi + Tailscale reconnect on the
+  way back, not to the failover itself).
 - Streams shorter than 3 ticks: jobs queue briefly, no failover.
 - gamebox returns mid-devbox-job: the label is removed, the job finishes.
 - Office ↔ home network change: in-flight downloads may fail; accepted.
