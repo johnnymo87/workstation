@@ -152,6 +152,16 @@ in
       encoder = "nvenc";
       # Only ds5 carries motion/gyro through to the host.
       gamepad = "ds5";
+      # Pause em-ci while streaming. The hook (hosts/gamebox/em-ci-pause.nix)
+      # lives at a stable /etc path, uses --no-block (never hold the launch for
+      # a container shutdown) and always exits 0 (a failing `do` aborts the
+      # launch). Absolute path: Sunshine's user unit sets PATH = mkForce null.
+      # NOTE: a switch does not restart gamer's Sunshine; restart it once after
+      # changing these lines:  sudo -u gamer XDG_RUNTIME_DIR=/run/user/$(id -u gamer) systemctl --user restart sunshine
+      global_prep_cmd = builtins.toJSON [{
+        do = "/etc/em-ci/pause-hook start";
+        undo = "/etc/em-ci/pause-hook stop";
+      }];
     };
     # Moonlight's launch menu. Replaces Sunshine's default apps.json, whose
     # X11/xrandr and Steam entries don't work on this box. Ryubing flags were
