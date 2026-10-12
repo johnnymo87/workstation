@@ -1209,10 +1209,21 @@ lib.mkMerge [
       # every idle tree on the host the night lgtm ships a v2. It proceeds as
       # if there were no cache -- today's pre-guard behaviour -- but loudly,
       # so the guard cannot go quietly inert.
-      entries = cache.get("entries") if isinstance(cache, dict) else None
-      if not isinstance(cache, dict) or cache.get("version") != 1 or not isinstance(entries, dict):
+      #
+      # v1: "entries" maps each PR to ONE attribution. v2 (lgtm-zsf1):
+      # "candidates" maps each PR to a LIST of candidate parts, and which one
+      # created the PR is decided by lgtm at lookup. Every candidate counts
+      # here: a tree is pinned if ANY of them sits in it, erring toward keep.
+      version = cache.get("version") if isinstance(cache, dict) else None
+      entries = None
+      if version == 1 and isinstance(cache.get("entries"), dict):
+          entries = list(cache["entries"].values())
+      elif version == 2 and isinstance(cache.get("candidates"), dict):
+          entries = [c for lst in cache["candidates"].values()
+                     if isinstance(lst, list) for c in lst]
+      if entries is None:
           print("FREE-UNRECOGNISED-CACHE version=%r" % (
-              cache.get("version") if isinstance(cache, dict) else type(cache).__name__))
+              version if isinstance(cache, dict) else type(cache).__name__))
           sys.exit(0)
 
       # ROOT is the load-bearing id: it is the session lgtm-shepherd wakes,
@@ -1226,7 +1237,7 @@ lib.mkMerge [
       # and its open PR is usually its latest -- fewer `gh` calls.
       owned = sorted({
           (e.get("repo"), e.get("prNumber"))
-          for e in entries.values()
+          for e in entries
           if isinstance(e, dict)
           and (e.get("rootSessionId") in ids or e.get("originSessionId") in ids)
           and e.get("repo") and e.get("prNumber")

@@ -431,14 +431,21 @@ run_with_cache '{"version": 1, "scannedThrough": 0, "entries": {"example/repo#10
 assert_remove_not_logged "$openpr_wt" \
   "a gh call that times out keeps the tree (fail-closed, not skipped)"
 
-run_with_cache '{"version": 2, "entries": {"example/repo#101": {"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}}}' v2
+# lgtm cache v2 (lgtm-zsf1): every PR maps to a LIST of candidate parts. The
+# open PR's session is the SECOND candidate, so only a reader that walks the
+# whole list pins the tree.
+run_with_cache '{"version": 2, "scannedThrough": 0, "candidates": {"example/repo#101": [{"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_elsewhere", "originSessionId": "ses_elsewhere"}, {"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}]}}' v2
+assert_remove_not_logged "$openpr_wt" \
+  "a v2 cache pins the tree when ANY candidate session of an open PR sits in it"
+
+run_with_cache '{"version": 3, "candidates": {"example/repo#101": [{"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}]}}' v3
 assert_remove_logged "$openpr_wt" \
   "an UNRECOGNISED cache format falls back to pre-guard behaviour instead of pinning every idle tree"
 # The harness's log() writes to stderr (the real script's writes to stdout).
-if cat "$tmpdir/harness-v2.out" "$tmpdir/harness-v2.err" | grep -q "unrecognised format"; then
+if cat "$tmpdir/harness-v3.out" "$tmpdir/harness-v3.err" | grep -q "unrecognised format"; then
   pass "an unrecognised cache format is announced, so the guard cannot go quietly inert"
 else
-  fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v2.err")"
+  fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v3.err")"
 fi
 
 # --- PR worktrees: lgtm-pr-<N> (lgtm) and pr-<N> (maven-renovate lane) ---
