@@ -32,9 +32,14 @@
     # which lacks the KWin capture backend the headless-streaming design
     # depends on. Everything else stays on the stable nixpkgs above.
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    honk = {
+      url = "github:johnnymo87/honk";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, ... }@inputs:
+  outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, honk, ... }@inputs:
   let
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -2595,6 +2600,7 @@
         inherit self;
         localPkgs = localPkgsFor devboxSystem;
         devenvPkg = devenv.packages.${devboxSystem}.devenv;
+        honkPkg = honk.packages.${devboxSystem}.honkd;
         assetsPath = ./assets;
         projects = projectsFor "devbox";
         isLinux = true;
@@ -2615,6 +2621,7 @@
         inherit self;
         localPkgs = localPkgsFor devboxSystem;
         devenvPkg = devenv.packages.${devboxSystem}.devenv;
+        honkPkg = honk.packages.${devboxSystem}.honkd;
         assetsPath = ./assets;
         projects = projectsFor "cloudbox";
         isLinux = true;
@@ -2637,6 +2644,7 @@
           home-manager.extraSpecialArgs = {
             localPkgs = localPkgsFor darwinSystem;
             devenvPkg = devenv.packages.${darwinSystem}.devenv;
+            honkPkg = honk.packages.${darwinSystem}.honkd;
             assetsPath = ./assets;
         projects = projectsFor "darwin";
         isLinux = false;

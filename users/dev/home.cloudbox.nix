@@ -4,7 +4,7 @@
 # Closely mirrors home.devbox.nix but without:
 #   - /persist volume checks (GCP uses single persistent boot disk)
 # And uses #cloudbox for the pull-workstation HM flake target.
-{ config, pkgs, lib, localPkgs, projects, isCloudbox, assetsPath, ... }:
+{ config, pkgs, lib, localPkgs, projects, isCloudbox, assetsPath, honkPkg, ... }:
 
 let
   # Serve-pool descriptor: the SAME single source of truth the serve units and
@@ -343,6 +343,7 @@ lib.mkIf isCloudbox {
   home.packages = with pkgs; [
 
     gooseCli
+    honkPkg
 
     # `bazel` on PATH is a SHIM, not bazelisk (bead workstation-mqp3). It re-execs
     # the build inside `systemd-run --user --scope --slice=bazel`, so bazel is
@@ -1076,6 +1077,56 @@ lib.mkIf isCloudbox {
       WantedBy = [ "default.target" ];
     };
   };
+
+  # honkd: durable ACP relay proxy for goose (honk M1b, bead honk-znj.4).
+  # Proxies ACP traffic between pigeon-daemon and production goose (:4080).
+  # Inert until cutover B4b repoints PIGEON_GOOSE_ACP_URL to ws://127.0.0.1:4280/acp.
+  #
+  # Unit policy:
+  # - StartLimitIntervalSec=0: honkd exits if goose is not up yet at boot; retry forever
+  #   with RestartSec=5 until goose is reachable (see honk-oi2 retry bead).
+  # - RestartSteps=10, RestartMaxDelaySec=300: back off exponential restart delay up to 5 min
+  #   on permanent failure (e.g. unpatched goose rollback) to avoid looping every 5s against
+  #   production goose forever (each start opens a control connection and DELETEs leftovers).
+  # - X-SwitchMethod=keep-old: home-manager switch must not bounce honkd mid-turn
+  #   (drops active streams; copy of devbox pool/door idiom). sd-switch still daemon-reloads,
+  #   so a honk bump takes effect at the next restart of any kind (crash, OOM, reboot), and
+  #   the honk CLI on PATH updates immediately — honk bumps should be treated as deploys.
+  #   An explicit `systemctl --user restart honkd` in a quiet window applies a binary upgrade immediately.
+  # - MemoryMax=1G, MemorySwapMax=0: bounds cgroup resources and prevents swap churn.
+  # - Excluded from nightly reset-workspace restarts (honkd is a relay daemon, not an
+  #   opencode serve pool instance).
+  systemd.user.services.honkd = {
+    Unit = {
+      Description = "honkd - durable ACP proxy for goose";
+      After = [ "network.target" ];
+      X-SwitchMethod = "keep-old";
+      StartLimitIntervalSec = 0;
+    };
+    Service = {
+      Type = "simple";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token";
+      Restart = "always";
+      RestartSec = 5;
+      RestartSteps = 10;
+      RestartMaxDelaySec = 300;
+      MemoryMax = "1G";
+      MemorySwapMax = "0";
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # Stable token pre-seed: ensure ~/.local/state/honk exists (0700) and
+  # ~/.local/state/honk/secret is a symlink to /run/secrets/pigeon_goose_acp_token.
+  # L+ atomically replaces any regular file or broken symlink natively at
+  # configuration time. This must exist before honkd's first start, because
+  # otherwise honkd mints a random downstream secret and pigeon's token stops matching.
+  systemd.user.tmpfiles.rules = [
+    "d %h/.local/state/honk 0700 - - -"
+    "L+ %h/.local/state/honk/secret - - - - /run/secrets/pigeon_goose_acp_token"
+  ];
 
   # Auto-expire old home-manager generations
   # store.options also expires the user nix profile's generations, which
