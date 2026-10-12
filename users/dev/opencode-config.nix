@@ -374,6 +374,26 @@ let
   # The version pin lives in pkgs/dvc/default.nix.
   devcycle-mcp = "${localPkgs.dvc}/bin/dvc-mcp";
 
+  # Figma MCP: Framelink (GLips/Figma-Context-MCP), nix-built in
+  # pkgs/figma-mcp-server — see that file for why not Figma's own remote or
+  # desktop server (OpenCode is refused by the remote's client allowlist; the
+  # desktop one needs the Figma app). Both tools are reads; the token is a
+  # personal access token with only `file_content:read`.
+  #
+  # `--env /dev/null`: upstream loads `<cwd>/.env` with override=true, so without
+  # this a checkout's .env could replace FIGMA_API_KEY or set FIGMA_PROXY.
+  # `--image-dir`: download_figma_images rejects paths outside this directory,
+  # and the default is the server's cwd (the serve's, not the session's). /tmp
+  # because opencode.base.json pre-approves only `/tmp/*` for external access,
+  # so agents can Read the rendered PNGs without a permission prompt.
+  figmaImageDir = "/tmp/opencode/figma-images";
+  figmaMcpCommand = [
+    "${localPkgs.figma-mcp-server}/bin/figma-mcp-server"
+    "--stdio"
+    "--env" "/dev/null"
+    "--image-dir" figmaImageDir
+  ];
+
   # ---------------------------------------------------------------------------
   # MCP credential indirection ({file:...} references, not values)
   # ---------------------------------------------------------------------------
@@ -494,6 +514,7 @@ let
     "slack_mcp_xoxp_token"
     "pagerduty_user_api_key"
     "rollbar_access_token"
+    "figma_access_token"
     "devcycle_client_id"
     "devcycle_client_secret"
     "devcycle_project_key"
@@ -1413,6 +1434,7 @@ in
       "injectSlackMcpSecretsSops"
       "injectPagerDutyMcpSecretsSops"
       "injectRollbarMcpSecretsSops"
+      "injectFigmaMcpSecretsSops"
       "injectDevcycleMcpSecretsSops"
     ] ''
       set -euo pipefail
@@ -1891,6 +1913,80 @@ in
             "enabled": false,
             "environment": {
               "ROLLBAR_ACCESS_TOKEN": $token
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject the Figma MCP entry (Framelink, read-only) on macOS from Keychain.
+  # Disabled by default; granted per session (`oc-mcp-enable <id> figma`). See
+  # the figma-mcp-setup skill and the `figmaMcpCommand` binding above.
+  home.activation.injectFigmaMcpSecrets = lib.mkIf isDarwin
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      ${keychainMirror { name = "figma_access_token"; service = "figma-access-token"; flag = "have_figma"; }}
+
+      if [[ "$have_figma" -eq 0 ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.figma)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "opencode MCP: figma not configured (optional) -- no 'figma-access-token' in Keychain; omitting mcp.figma. To enable, see the figma-mcp-setup skill." >&2
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --argjson command ${lib.escapeShellArg (builtins.toJSON figmaMcpCommand)} \
+          --arg token "${secretRef "figma_access_token"}" \
+          '.mcp.figma = {
+            "type": "local",
+            "command": $command,
+            "enabled": false,
+            "environment": {
+              "FIGMA_API_KEY": $token
+            }
+          }' "$runtime" > "$tmp"
+
+        mv "$tmp" "$runtime"
+      fi
+    '');
+
+  # Inject the Figma MCP entry on cloudbox from sops. Same shape as Darwin.
+  home.activation.injectFigmaMcpSecretsSops = lib.mkIf isCloudbox
+    (lib.hm.dag.entryAfter [ "mergeOpencode" ] ''
+      set -euo pipefail
+
+      runtime="$HOME/.config/opencode/opencode.json"
+
+      ${sopsPresent { name = "figma_access_token"; flag = "have_figma"; }}
+
+      if [[ "$have_figma" -eq 0 ]]; then
+        if [[ -f "$runtime" ]]; then
+          tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+          ${pkgs.jq}/bin/jq 'del(.mcp.figma)' "$runtime" > "$tmp"
+          mv "$tmp" "$runtime"
+        fi
+        echo "opencode MCP: figma not configured (optional) -- no figma_access_token in sops; omitting mcp.figma. To enable, see the figma-mcp-setup skill." >&2
+      # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
+      elif [[ -f "$runtime" ]]; then
+        tmp="$(mktemp "''${runtime}.tmp.XXXXXX")"
+
+        ${pkgs.jq}/bin/jq \
+          --argjson command ${lib.escapeShellArg (builtins.toJSON figmaMcpCommand)} \
+          --arg token "${secretRef "figma_access_token"}" \
+          '.mcp.figma = {
+            "type": "local",
+            "command": $command,
+            "enabled": false,
+            "environment": {
+              "FIGMA_API_KEY": $token
             }
           }' "$runtime" > "$tmp"
 

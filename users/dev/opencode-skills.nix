@@ -84,6 +84,7 @@ let
   workOnlySkills = [
     "cleaning-disk"
     "escalating-azure-aks-rbac"
+    "figma-mcp-setup"
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"

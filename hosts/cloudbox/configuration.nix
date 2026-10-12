@@ -421,6 +421,13 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Figma MCP (Framelink) personal access token, `file_content:read` only.
+      # Figma caps PATs at 90 days: see the figma-mcp-setup skill for rotation.
+      figma_access_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # GCP project name (org-identifying)
       google_cloud_project = {
         owner = "dev";
