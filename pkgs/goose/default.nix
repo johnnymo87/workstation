@@ -19,7 +19,17 @@
 #   3. GCP_AUTH_SCOPES: the scopes goose requests when refreshing gcloud ADC
 #      credentials (upstream: cloud-platform only). A gateway that attributes
 #      requests by identity needs userinfo.email too.
-# All are inert unless their variables are set.
+# Patches 1-3 are inert unless their variables are set.
+#   4. developer/shell: cancel, timeout and drop terminate the command's whole
+#      process group (SIGTERM, 2s grace, SIGKILL). Upstream killed only the
+#      direct child, so a cancelled `sleep`/build left orphans running.
+#   5. acp-http GET /acp with `Acp-Takeover: 1` takes over a held SSE stream
+#      instead of answering 409 (HTTP transport only).
+#   6. acp-http SSE event ids, a bounded per-stream replay ring, and
+#      Last-Event-ID resume (HTTP transport only). 5 and 6 are advertised in an
+#      `Acp-Stream-Features: takeover, replay` response header and only change
+#      behaviour for a client that sends those headers; the honk relay
+#      (johnnymo87/honk) depends on them. The WebSocket transport is unchanged.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -29,6 +39,8 @@
 # probes. Bumping is a deploy action: back up sessions.db, bump, restart
 # goose-serve in a window, re-run those probes. Session DB schema is 16 at both
 # 1.48.0 and 1.54.0, so this particular bump needs no migration.
+# patched-1.54.0.3 (2026-10-12) is the same v1.54.0 base with patches 4-6 added;
+# the three pigeon probes passed against it on an isolated serve (2026-10-11).
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -41,8 +53,8 @@
 }:
 
 let
-  version = "1.54.0-patched.2";
-  tag = "patched-1.54.0.2";
+  version = "1.54.0-patched.3";
+  tag = "patched-1.54.0.3";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -54,11 +66,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-BxLs1VyTQF//IZQZzMAcUXvMVZp3JdFh/l2E3kzpySk=";
+      hash = "sha256-cvVJUE5GZ43KVSIuSB0pgPE8LvUTYsIMEKsQ/6fKyKA=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-X+OhF/FxRrMSExxDsX+V0rSVqhHvmRh87z1DlIOpXJ4=";
+      hash = "sha256-LLcY6vQd4R8mhsf8yUk7vfIwfBM6VmZfOBhokgOC590=";
     };
   };
 
