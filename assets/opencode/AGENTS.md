@@ -59,6 +59,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [slack-mcp-setup](skills/slack-mcp-setup/SKILL.md) | work-only | Set up the Slack MCP server with an `xoxp` User OAuth token. macOS Keychain or cloudbox sops. Per-tool env gates and the `file_path` upload allowlist. |
 | [pagerduty-mcp-setup](skills/pagerduty-mcp-setup/SKILL.md) | work-only | Set up the PagerDuty MCP server with a User API token. macOS Keychain or cloudbox sops. |
 | [rollbar-mcp-setup](skills/rollbar-mcp-setup/SKILL.md) | work-only | Set up Rollbar's official MCP server (project access token) for error triage. macOS Keychain or cloudbox sops. Pairs with pagerduty-mcp-setup for the paged-about-Rollbar flow. |
+| [figma-mcp-setup](skills/figma-mcp-setup/SKILL.md) | work-only | Read Figma designs (layout, copy, rendered frames) via the read-only Framelink MCP and a `file_content:read` PAT. macOS Keychain or cloudbox sops. Why not Figma's official MCP (OpenCode is refused), the View-seat quota of about 20 reads a month, and 90-day rotation. |
 
 ### Platform Tooling
 

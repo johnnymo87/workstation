@@ -80,6 +80,7 @@
       # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
       # two can never drift to different @devcycle/cli versions.
       dvc = p.callPackage ./pkgs/dvc { };
+      figma-mcp-server = p.callPackage ./pkgs/figma-mcp-server { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
