@@ -665,6 +665,10 @@ in
       OnCalendar = "*:7/10";
       Persistent = false;
       RandomizedDelaySec = 60;
+      # AccuracySec defaults to 1min and is applied ON TOP of the jitter, which
+      # would let this drift toward :09 and cloudbox's :05 shepherd toward :07.
+      # Pin it so the window really is :07:00-:08:00.
+      AccuracySec = "1s";
     };
   };
 
