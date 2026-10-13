@@ -32,8 +32,10 @@ GEMINI_FLASH_PHASES: list[dict] = [
 ]
 # Gemini 4 Argon (released 2026-10-13, flagship reasoning tier — NOT a Flash
 # successor). Introductory rate through 2026-11-30, standard from 2026-12-01.
-# Identical per-1M on the Developer API and Vertex *global* (Vertex delivers
-# the intro rate as 50% credits back; non-global regions add ~10%). No
+# Identical per-1M on the Developer API and Vertex *global*. These are NET
+# rates: Vertex delivers the intro price as 50% credits back, so a GCP billing
+# export shows list ($4/$20) plus a credit line — reconcile against net
+# spend, not the list line. Non-global regions add ~10%. No
 # long-context tier is published. Implicit caching only, so cache_write is 0.
 # Sources: https://ai.google.dev/gemini-api/docs/pricing and
 # https://cloud.google.com/vertex-ai/generative-ai/pricing (fetched 2026-10-13).

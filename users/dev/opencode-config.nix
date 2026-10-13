@@ -60,8 +60,14 @@ let
   # workloads stay on 3.8 Flash, which is ~2.7x cheaper now and ~5x cheaper
   # from 2026-12-01 to 2026-12-31. Thinking levels: low / medium / high.
   # Like the Flash entry this is a static INTRODUCTORY rate (through
-  # 2026-11-30); from 2026-12-01 it doubles to 4 / 20 / 0.20 and must be
-  # edited by hand. oc-cost/oc-tags rate books are dated and need no edit.
+  # 2026-11-30); from 2026-12-01 it doubles to 4 / 20 / 0.20 and MUST be
+  # edited by hand (bead workstation-jdxe). This block feeds opencode's
+  # recorded per-message $.cost, which oc-tags uses for opencode sessions —
+  # so a missed edit permanently halves Argon spend in oc-tags. Only
+  # oc-cost's estimate and oc-tags' goose rows use the dated rate books.
+  # Rates are NET of Google's promo: on Vertex the intro price is delivered
+  # as 50% credits back, so the billing export shows list ($4/$20) plus a
+  # separate credit line.
   # Sources: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon and
   # https://cloud.google.com/vertex-ai/generative-ai/pricing
   geminiArgonModel = {
