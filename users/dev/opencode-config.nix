@@ -55,6 +55,40 @@ let
       output = [ "text" ];
     };
   };
+  # Gemini 4 Argon (released 2026-10-13): Google's flagship reasoning model.
+  # Catalogued so it is selectable and costed; NOT a default or agent pin —
+  # workloads stay on 3.8 Flash, which is ~2.7x cheaper now and ~5x cheaper
+  # from 2026-12-01 to 2026-12-31. Thinking levels: low / medium / high.
+  # Like the Flash entry this is a static INTRODUCTORY rate (through
+  # 2026-11-30); from 2026-12-01 it doubles to 4 / 20 / 0.20 and must be
+  # edited by hand. oc-cost/oc-tags rate books are dated and need no edit.
+  # Sources: https://ai.google.dev/gemini-api/docs/models/gemini-4-argon and
+  # https://cloud.google.com/vertex-ai/generative-ai/pricing
+  geminiArgonModel = {
+    id = "gemini-4-argon";
+    name = "Gemini 4 Argon";
+    family = "gemini";
+    release_date = "2026-10-13";
+    attachment = true;
+    reasoning = true;
+    temperature = true;
+    tool_call = true;
+    cost = {
+      input = 2.0;
+      output = 10.0;
+      cache_read = 0.10;
+    };
+    limit = {
+      context = 1048576;
+      # 65,536 is the default synchronous cap; the 1M "long decode" mode is
+      # opt-in and not something opencode requests.
+      output = 65536;
+    };
+    modalities = {
+      input = [ "text" "image" "video" "audio" "pdf" ];
+      output = [ "text" ];
+    };
+  };
 
   # Patch agent model pins so each host resolves to a model it can actually
   # reach. Two independent, order-independent rewrites:
@@ -829,6 +863,7 @@ let
         google = (opencodeBase.provider.google or {}) // {
           models = ((opencodeBase.provider.google or {}).models or {}) // {
             "gemini-3.8-flash" = gemini38FlashModel;
+            "gemini-4-argon" = geminiArgonModel;
           };
         };
       } // lib.optionalAttrs isDevbox {
@@ -904,6 +939,7 @@ let
         "google-vertex" = (opencodeBase.provider."google-vertex" or {}) // {
           models = ((opencodeBase.provider."google-vertex" or {}).models or {}) // {
             "gemini-3.8-flash" = gemini38FlashModel;
+            "gemini-4-argon" = geminiArgonModel;
           };
         };
       } // lib.optionalAttrs isCloudbox {

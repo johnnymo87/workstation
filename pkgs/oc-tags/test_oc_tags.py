@@ -2334,6 +2334,18 @@ class TestGoosePricingAndRates(unittest.TestCase):
         self.assertEqual(rate_2027["output"], 7.50)
         self.assertEqual(rate_2027["cache_read"], 0.15)
 
+    def test_dated_gemini_4_argon_rates(self):
+        # Intro 2 / 10 / 0.10 through 2026-11-30; standard 4 / 20 / 0.20 from
+        # 2026-12-01 (boundary inclusive).
+        last_intro = oc_tags.goose_rate_for("gemini-4-argon", day="2026-11-30")
+        self.assertEqual(
+            (last_intro["input"], last_intro["output"], last_intro["cache_read"]),
+            (2.0, 10.0, 0.10))
+        standard = oc_tags.goose_rate_for("gemini-4-argon", day="2026-12-01")
+        self.assertEqual(
+            (standard["input"], standard["output"], standard["cache_read"]),
+            (4.0, 20.0, 0.20))
+
 
 class TestGooseRateDrift(unittest.TestCase):
     """Assert GOOSE_MODEL_RATES stays in sync with pkgs/oc-cost/oc_cost.py."""

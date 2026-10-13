@@ -544,6 +544,28 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
                     oc_cost.rate_for("google-vertex", model, day),
                     (model, day))
 
+    def test_gemini_4_argon_phases_on_both_routes(self):
+        # Intro 2 / 10 / cache 0.10 through 2026-11-30; standard 4 / 20 / 0.20
+        # from 2026-12-01. Same per-1M price on Vertex global and the
+        # Developer API, so both routes share one definition.
+        for provider in ("google-vertex", "google"):
+            intro = oc_cost.rate_for(provider, "gemini-4-argon", "2026-11-30")
+            self.assertEqual(
+                (intro["input"], intro["output"], intro["cache_read"]),
+                (2, 10, 0.10), provider)
+            std = oc_cost.rate_for(provider, "gemini-4-argon", "2026-12-01")
+            self.assertEqual(
+                (std["input"], std["output"], std["cache_read"]),
+                (4, 20, 0.20), provider)
+
+    def test_gemini_4_argon_is_priced_not_unpriced(self):
+        toks = {"input": 1_000_000, "output": 1_000_000, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message(
+            "google-vertex", "gemini-4-argon", toks, "2026-10-13")
+        self.assertAlmostEqual(cost, 2 + 10, places=6)
+        self.assertEqual(tier, "base")
+
     def test_gemini_flash_last_intro_day_is_still_intro(self):
         e = oc_cost.rate_for("google-vertex", "gemini-3.8-flash", "2026-12-31")
         self.assertEqual(e["input"], 0.75)
