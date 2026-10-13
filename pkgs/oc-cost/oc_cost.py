@@ -30,6 +30,19 @@ GEMINI_FLASH_PHASES: list[dict] = [
     {"from": "0001-01-01", "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0},
     {"from": "2027-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.15, "cache_write": 0},
 ]
+# Gemini 4 Argon (released 2026-10-13, flagship reasoning tier — NOT a Flash
+# successor). Introductory rate through 2026-11-30, standard from 2026-12-01.
+# Identical per-1M on the Developer API and Vertex *global*. These are NET
+# rates: Vertex delivers the intro price as 50% credits back, so a GCP billing
+# export shows list ($4/$20) plus a credit line — reconcile against net
+# spend, not the list line. Non-global regions add ~10%. No
+# long-context tier is published. Implicit caching only, so cache_write is 0.
+# Sources: https://ai.google.dev/gemini-api/docs/pricing and
+# https://cloud.google.com/vertex-ai/generative-ai/pricing (fetched 2026-10-13).
+GEMINI_4_ARGON_PHASES: list[dict] = [
+    {"from": "0001-01-01", "input": 2, "output": 10, "cache_read": 0.10, "cache_write": 0},
+    {"from": "2026-12-01", "input": 4, "output": 20, "cache_read": 0.20, "cache_write": 0},
+]
 # Shared 3.5 Flash rate (undated: no introductory phase).
 GEMINI_35_FLASH: dict = {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5}
 
@@ -114,6 +127,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google-vertex", "gemini-3.6-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
+    ("google-vertex", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {
@@ -138,6 +152,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google", "gemini-3.6-flash"): GEMINI_FLASH_PHASES,
     ("google", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
     ("google", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
+    ("google", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
     # --- OpenAI ---
     ("openai", "gpt-5.5"): {
         "input": 5, "output": 30, "cache_read": 0.50, "cache_write": 0,
