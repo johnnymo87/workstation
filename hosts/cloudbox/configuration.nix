@@ -884,7 +884,13 @@ in
         # token travels as a QUERY PARAMETER, not a bearer header (a Bearer
         # header gets 401); pigeon appends it from PIGEON_GOOSE_ACP_TOKEN
         # below, which is why it is absent from this URL.
-        "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4080/acp"
+        #
+        # Points at honkd (:4280), the durable relay in front of goose-serve
+        # (:4080), so a turn survives a pigeon or honkd restart. honkd's
+        # downstream secret is a symlink to the same token. Rollback: set this
+        # back to :4080, switch, and repoint session rows
+        # (see the honk repo's docs/plans/2026-10-11-honk-m1-cutover.md).
+        "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
