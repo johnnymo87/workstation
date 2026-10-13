@@ -600,8 +600,10 @@ in
       # exactly two timer periods and would race the next fire.
       TimeoutStartSec = 1500;
       # Capped because an uncapped job froze this box for 12h on 2026-10-11.
-      # A full sweep (uncached attribution scan of a 4.5 GB opencode.db)
-      # peaked at 166 MB on 2026-10-13, so 2G is >10x headroom.
+      # Measured 2026-10-13: a steady-state sweep peaks at ~145 MB. The first
+      # live sweep (cold, no attribution cache, 4.5 GB opencode.db) peaked at
+      # 1.6G, but that is mostly page cache from 1.5G read off disk; clean file
+      # pages are reclaimed at the cap before anything is OOM-killed.
       MemoryMax = "2G";
       MemorySwapMax = 0;
       User = "dev";
