@@ -802,6 +802,14 @@ let
       effort = "high";
       cost = { input = 10; output = 50; cache_read = 1; cache_write = 12.5; };
     };
+    # codex-lb advertises ctx=500000 for this slug, but mkCodexLbModel's 272000
+    # limit is kept on purpose: above 272k the whole request bills at the higher
+    # tier (4/15/0.2), which opencode's cost merge cannot represent.
+    "gpt-6.1-sol" = mkCodexLbModel {
+      name = "GPT-6.1 Sol";
+      effort = "high";
+      cost = { input = 2; output = 10; cache_read = 0.1; cache_write = 2.5; };
+    };
     "gpt-5.6-sol" = mkCodexLbModel {
       name = "GPT-5.6 Sol";
       effort = "high";
