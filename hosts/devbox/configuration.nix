@@ -14,6 +14,15 @@ let
   # e5c8e409..., version 1) so serves boot-assert clean.
   servePool = (import ../../users/dev/serve-pool.nix).forHost.devbox;
   routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
+
+  # lgtm author-side shepherd for the repos devbox owns (lgtm-5ksr.5). See
+  # systemd.services.lgtm-shepherd below. Flip to false to stop it; nothing
+  # else reads its state.
+  enableLgtmShepherd = true;
+  # The dedicated clone the shepherd runs from (see the unit's comment).
+  lgtmDeployDir = "/home/dev/projects/lgtm-deploy";
+  # Shared alert helper (pkgs/opencode-drift-alert), as cloudbox uses it.
+  driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
 in
 {
   # Guard: abort activation if applying the wrong host's config.
@@ -545,6 +554,157 @@ in
   systemd.targets.pigeon = {
     description = "Pigeon stack (cloudflared + daemon)";
     wants = [ "cloudflared-tunnel.service" "pigeon-daemon.service" ];
+  };
+
+  # ---------------------------------------------------------------------------
+  # lgtm author-side PR shepherd, devbox half (lgtm-5ksr.5; design in lgtm
+  # docs/plans/2026-10-02-multi-box-ownership-design.md).
+  #
+  # Same program as cloudbox's lgtm-shepherd (hosts/cloudbox/configuration.nix),
+  # narrowed by lgtm.yml's `ownership:` block to the repos devbox owns
+  # (johnnymo87/eternal-machinery, my-podcasts, yt-to-lichess at the time of
+  # writing). Cloudbox stopped shepherding those when the block landed, so
+  # while this is off NOTHING watches them.
+  #
+  # Shepherd ONLY. Devbox reviews nothing: no lgtm-run, no reviewer PATs in
+  # ~/.config/lgtm/tokens (boxes.devbox.reviewers is [] in lgtm.yml).
+  #
+  # No OPENCODE_URL and no front-door exemption, on purpose: the shepherd never
+  # talks to a serve. It reads ~/.local/share/opencode/opencode.db directly for
+  # attribution and liveness, and wakes sessions through pigeon's /swarm/send
+  # (PIGEON_DAEMON_URL default, loopback :4731; bearer token read at call time
+  # from /run/secrets/pigeon_daemon_auth_token). Alerts go to this box's own
+  # pigeon /alert, i.e. devbox's Telegram.
+  #
+  # Runs from a DEDICATED clone, /home/dev/projects/lgtm-deploy, not from
+  # ~/projects/lgtm, where sessions do lgtm development: a branch checked out
+  # there would otherwise be what the timer runs. A clone rather than a
+  # worktree because disk-cleanup removes old worktrees. Created by hand:
+  #   git clone git@github.com:johnnymo87/lgtm.git ~/projects/lgtm-deploy
+  # `git pull` in it IS a deploy (lgtm.yml included); do it deliberately, and
+  # pull cloudbox's ~/projects/lgtm at the same time when ownership changes.
+  # ---------------------------------------------------------------------------
+  systemd.services.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
+    description = "LGTM author-side PR shepherd sweep (devbox-owned repos)";
+    onFailure = [ "lgtm-shepherd-failure.service" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    # No kubectl/azure-cli: rollout watching is off on devbox (no clusters).
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.jq pkgs.curl pkgs.coreutils pkgs.bash ];
+    serviceConfig = {
+      Type = "oneshot";
+      # Type=oneshot defaults to TimeoutStartSec=infinity, and a timer will not
+      # start a unit still activating, so one hang would stop the shepherd for
+      # good. 1500s copies cloudbox (see its comment); the bound is there for the
+      # synchronous opencode.db attribution scan, not GitHub. Not 1200: that is
+      # exactly two timer periods and would race the next fire.
+      TimeoutStartSec = 1500;
+      # Capped because an uncapped job froze this box for 12h on 2026-10-11.
+      # Measured 2026-10-13: a steady-state sweep peaks at ~145 MB. The first
+      # live sweep (cold, no attribution cache, 4.5 GB opencode.db) peaked at
+      # 1.6G, but that is mostly page cache from 1.5G read off disk; clean file
+      # pages are reclaimed at the cap before anything is OOM-killed.
+      MemoryMax = "2G";
+      MemorySwapMax = 0;
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = lgtmDeployDir;
+      Environment = [
+        "HOME=/home/dev"
+        "LGTM_PROJECTS_DIR=/home/dev/projects"
+        # The deploy clone's own config, explicitly, so the cwd default can
+        # never silently pick up another checkout's lgtm.yml.
+        "LGTM_CONFIG=${lgtmDeployDir}/lgtm.yml"
+        # Which box this is. lgtm.yml has an `ownership:` block, so the shepherd
+        # refuses to start without it.
+        "LGTM_BOX=devbox"
+        # Kill switch, as on cloudbox. Flipping this (or enableLgtmShepherd)
+        # off is the whole rollback story.
+        "LGTM_ENABLE_SHEPHERD=1"
+        # Wake the authoring session about review threads waiting on it,
+        # instead of texting the human. Bounded in lgtm src/agentRouting.ts.
+        "LGTM_ENABLE_AGENT_ROUTING=1"
+        # Tell the authoring session its PR merged. With rollout off, lgtm
+        # writes the pending markers itself (lgtm-5ksr.3.1), so this works
+        # without LGTM_ENABLE_ROLLOUT -- unlike the cloudbox comment's warning,
+        # which predates that change.
+        "LGTM_ENABLE_MERGE_NOTICE=1"
+        # LGTM_ENABLE_ROLLOUT deliberately unset: no Kubernetes on devbox.
+      ];
+      ExecStart = "${pkgs.writeShellScript "lgtm-shepherd" ''
+        set -euo pipefail
+        export PATH="/home/dev/.nix-profile/bin:/home/dev/.local/bin:$PATH"
+        if [ ! -f ${lgtmDeployDir}/src/shepherdMain.ts ]; then
+          echo "lgtm deploy clone missing at ${lgtmDeployDir}; see hosts/devbox/configuration.nix" >&2
+          exit 1
+        fi
+        # `gh search prs --author @me` resolves @me from this token, so the PRs
+        # swept are exactly the ones this identity authored.
+        export GH_TOKEN="$(cat ${config.sops.secrets.github_api_token.path})"
+        if [ ! -d ${lgtmDeployDir}/node_modules ]; then
+          cd ${lgtmDeployDir}
+          ${pkgs.nodejs}/bin/npm ci --no-audit --no-fund
+        fi
+        exec ${pkgs.nodejs}/bin/node \
+          ${lgtmDeployDir}/node_modules/tsx/dist/cli.mjs \
+          ${lgtmDeployDir}/src/shepherdMain.ts
+      ''}";
+    };
+  };
+
+  # Every 10 minutes at :07 (+ up to 60s jitter), around the clock. The phase is
+  # load-bearing (lgtm-0re): every lgtm timer on both boxes searches GitHub as
+  # the same user, and a shared minute spends one allowance twice -- measured as
+  # 5 of 6 discovery legs returning 403 secondary rate limit, silently. Cloudbox
+  # runs lgtm-run at :00 and its shepherd at :05 (+60s jitter); :07 keeps clear
+  # of both. Do not raise the jitter past ~2 minutes without re-checking.
+  #
+  # Persistent=false: a missed sweep is worthless, the next one re-derives
+  # everything from live GitHub state.
+  systemd.timers.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:7/10";
+      Persistent = false;
+      RandomizedDelaySec = 60;
+      # AccuracySec defaults to 1min and is applied ON TOP of the jitter, which
+      # would let this drift toward :09 and cloudbox's :05 shepherd toward :07.
+      # Pin it so the window really is :07:00-:08:00.
+      AccuracySec = "1s";
+    };
+  };
+
+  # A failing sweep is silent by nature (the symptom is an author never told),
+  # so failure must reach a human. Same helper and backoff as cloudbox.
+  systemd.services.lgtm-shepherd-failure = lib.mkIf enableLgtmShepherd {
+    description = "Alert that the LGTM shepherd sweep failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "lgtm-failure";
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "lgtm-shepherd-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show lgtm-shepherd -p Result --value 2>/dev/null || echo unknown)"
+        ${driftAlert} /var/lib/lgtm-failure/alert-shepherd "lgtm-shepherd:''$RESULT" \
+          "devbox LGTM shepherd sweep FAILED (Result=''$RESULT).
+
+While it is failing, nobody is told about PRs in devbox-owned repos
+(eternal-machinery, my-podcasts, yt-to-lichess): no needs_reply wakes and no
+merge notices. Cloudbox does not cover these repos.
+
+Result=timeout means the sweep hit TimeoutStartSec=1500 (likely the opencode.db
+attribution scan). Result=oom-kill means it hit MemoryMax=2G. Result=exit-code
+means it crashed, or the deploy clone at ${lgtmDeployDir} is missing.
+
+Check:
+  systemctl show lgtm-shepherd -p Result --value
+  journalctl -u lgtm-shepherd -n 80 --no-pager" \
+          900 14400
+      ''}";
+    };
   };
 
   # opencode-serve now runs as a systemd USER service (under user@1000.service),
