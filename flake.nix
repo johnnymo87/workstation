@@ -563,6 +563,20 @@
         touch $out
       '';
 
+      # Disk-triggered dead-path GC (devbox nix-gc-floor).
+      # Pinned assertion count; see hosts/devbox/test-nix-gc-floor.sh.
+      nix-gc-floor-tests = devboxPkgs.runCommand "nix-gc-floor-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        bash hosts/devbox/test-nix-gc-floor.sh 2>&1 | tee "$TMPDIR/g.txt"
+        grep -q '^ALL PASS (16 assertions)' "$TMPDIR/g.txt" || {
+          echo "GATE FAILURE: nix-gc-floor suite did not reach ALL PASS (16 assertions)." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---------------------------------------------------------------------
       # workstation-dad9: five suites that existed and ran nowhere.
       #
@@ -2571,6 +2585,7 @@
         ./hosts/devbox/em-ci.nix
         ./hosts/devbox/em-ci-monitor.nix
         ./hosts/devbox/em-ci-failover.nix
+        ./hosts/devbox/nix-gc-floor.nix
       ];
     };
 

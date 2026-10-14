@@ -1060,6 +1060,13 @@ Check:
     # would otherwise have taken the last of the disk. That is worth having as a
     # backstop and is not worth describing as a solution.
     #
+    # CORRECTION, 2026-10-14: "the dead set mid-day is small" stopped being
+    # true. Every `nix flake check` on devbox realises checks.home-cloudbox,
+    # ~10G of closure that is dead the moment the check ends; on 2026-10-13 a
+    # plain GC found 8.5G dead mid-day after free space fell 34G -> 19G and
+    # em-ci-monitor paged. Collecting that between builds is
+    # hosts/devbox/nix-gc-floor.nix (25G trigger), not this setting.
+    #
     # TENSION WITH THE disk-watch COMMENT, acknowledged rather than ignored:
     # users/dev/disk-cleanup.nix argues that auto-running a GC above ~90% full
     # is hazardous, because the cleaning-disk skill records a GC generating
@@ -1107,6 +1114,8 @@ Check:
   # filled on the 11th/12th, mid-window, with the next weekly run due on the
   # 14th. That is addressed by min-free/max-free above (reactive, but only
   # during builds) and by disk-watch (the alarm, users/dev/disk-cleanup.nix).
+  # Dead paths that pile up BETWEEN builds (flake checks) are collected by
+  # hosts/devbox/nix-gc-floor.nix.
   nix.gc = {
     automatic = true;
     dates = "weekly";
