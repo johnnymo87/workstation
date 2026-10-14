@@ -48,7 +48,7 @@ check "above trigger: nix-store not called" '[ "$(calls)" -eq 0 ]'
 setup; avail 19; after 31; reports 12288.50; tick
 check "below trigger: one GC" '[ "$(calls)" -eq 1 ]'
 check "GC uses the local store, not the daemon" 'grep -q "^unset " "$S/calls"'
-check "GC is bounded to target-avail (16 GiB)" 'grep -q -- "--quiet --gc --max-freed $((16 * 1024 * 1024 * 1024))\$" "$S/calls"'
+check "GC is bounded to target-avail (16 GiB)" 'grep -q -- "--store local --quiet --gc --max-freed $((16 * 1024 * 1024 * 1024))\$" "$S/calls"'
 check "useful GC: no backoff" '[ ! -e "$S/state/backoff" ]'
 check "logs the GC-reported amount" 'grep -q "GC freed 12 GiB" "$S/out"'
 

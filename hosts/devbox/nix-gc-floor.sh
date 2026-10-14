@@ -46,7 +46,7 @@ echo "nix-gc-floor: root free $(gib "$before") GiB < ${trigger_gib} GiB; collect
 # cgroup, where nix-gc-floor.nix's I/O limits apply. (devbox's root disk runs
 # the `none` scheduler, so the daemon's idle I/O class would not protect
 # anything.) --quiet: one summary line on stdout instead of a line per path.
-report=$(nix-store --quiet --gc --max-freed "$need_bytes")
+report=$(nix-store --store local --quiet --gc --max-freed "$need_bytes")
 echo "nix-gc-floor: nix-store: $report"
 freed_mib=0
 if [[ $report =~ ([0-9]+)(\.[0-9]+)?\ MiB\ freed ]]; then freed_mib=${BASH_REMATCH[1]}; fi
