@@ -1065,7 +1065,7 @@ Check:
     # ~10G of closure that is dead the moment the check ends; on 2026-10-13 a
     # plain GC found 8.5G dead mid-day after free space fell 34G -> 19G and
     # em-ci-monitor paged. Collecting that between builds is
-    # hosts/devbox/nix-gc-floor.nix (25G trigger), not this setting.
+    # hosts/devbox/nix-gc-floor.nix (25G trigger, I/O-throttled), not this setting.
     #
     # TENSION WITH THE disk-watch COMMENT, acknowledged rather than ignored:
     # users/dev/disk-cleanup.nix argues that auto-running a GC above ~90% full

@@ -570,8 +570,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-nix-gc-floor.sh 2>&1 | tee "$TMPDIR/g.txt"
-        grep -q '^ALL PASS (16 assertions)' "$TMPDIR/g.txt" || {
-          echo "GATE FAILURE: nix-gc-floor suite did not reach ALL PASS (16 assertions)." >&2
+        grep -q '^ALL PASS (17 assertions)' "$TMPDIR/g.txt" || {
+          echo "GATE FAILURE: nix-gc-floor suite did not reach ALL PASS (17 assertions)." >&2
           exit 1
         }
         touch $out
