@@ -1096,11 +1096,6 @@ lib.mkIf isCloudbox {
   # - MemoryMax=1G, MemorySwapMax=0: bounds cgroup resources and prevents swap churn.
   # - Excluded from nightly reset-workspace restarts (honkd is a relay daemon, not an
   #   opencode serve pool instance).
-  # - --max-sessions 48 (default 16, no LRU yet): ~20 timer-driven goose coordinators
-  #   wake every 15 min through honkd and each stays held for the 15-min idle TTL, on
-  #   top of pigeon and chat sessions. A held goose session costs ~0.5-1.7 MB and
-  #   9-12 threads in goose-serve (honk M0 A14). Hitting the cap returns
-  #   "held-session limit reached" (bead honk-9qf.1.2).
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
@@ -1110,7 +1105,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --max-sessions 48";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
