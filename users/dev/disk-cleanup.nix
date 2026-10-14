@@ -2460,12 +2460,15 @@ lib.mkMerge [
   # orphan rate anyone has. If that rate is ever observed to be ~0 for a month,
   # delete this whole block rather than tuning it.
   #
-  # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's test
-  # is a STRICT SUBSET of the nightly's: it requires the recorded workspace to
-  # be GONE *and* the server to be dead, where the nightly requires only the
-  # latter. Every base this removes is one the nightly would also have removed,
-  # just sooner. There is no case where bazel-reap deletes something
-  # disk-cleanup would have kept.
+  # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's
+  # deletion criteria are a STRICT SUBSET of the nightly's: outside pressure
+  # it requires the recorded workspace to be GONE *and* the server to be dead;
+  # under disk pressure (used >= 80%) it also reaps live-workspace bases whose
+  # server is dead and whose command.log has been idle for >= 3h (or >= 30m for
+  # lgtm-pr-*). Both tiers require a dead server, whereas the nightly requires
+  # only a dead server unconditionally. Every base this removes is one the
+  # nightly would also have removed, just sooner. There is no case where
+  # bazel-reap deletes something disk-cleanup would have kept.
   #
   # CONSERVATISM IS FREE HERE, which is the property that shapes the whole
   # script. Anything ambiguous -- no marker, unreadable marker, probe failure,
@@ -2503,13 +2506,15 @@ lib.mkMerge [
   #      deleting" -- it achieves the same thing without a sidecar file that
   #      could itself be lost.
   #
-  #   3. A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF ITS SERVER IS DEAD,
-  #      which is the whole reason the marker is consulted at all. Bazel
-  #      servers idle out after max_idle_secs, which home.base.nix sets to 300
-  #      on cloudbox (5 minutes), so a worktree someone is actively working
-  #      in has no server for most of its life. The single live base on the box at the
-  #      time of writing was exactly that: workspace present, no server pid --
-  #      the nightly would delete it at 03:00 and this reaper will not.
+  #   3. OUTSIDE PRESSURE, A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF
+  #      ITS SERVER IS DEAD; UNDER PRESSURE, IT IS REAPED ONLY WHEN IDLE.
+  #      Bazel servers idle out after max_idle_secs, which home.base.nix sets
+  #      to 300 on cloudbox (5 minutes), so a worktree someone is actively
+  #      working in has no server for most of its life. Outside pressure,
+  #      workspace existence unconditionally pins the base. Under pressure
+  #      (root used >= 80%), server liveness alone cannot protect active work,
+  #      so command.log idle age (>= 30m for lgtm-pr-*, >= 3h otherwise) is
+  #      required before reaping.
   #
   # WHY NO GUARD 4 (the opencode session table) HERE, since the bead asks for
   # it and its absence would otherwise look like an oversight. GUARD 4 exists
@@ -2531,7 +2536,7 @@ lib.mkMerge [
       # from being scheduled cleanly. Every step degrades to a log line.
       set -uo pipefail
 
-      PATH="${lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
+      PATH="''${BAZEL_REAP_PATH_PREFIX:+$BAZEL_REAP_PATH_PREFIX:}${lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
 
       # Seams. Nothing shipped overrides these; the suite does.
       BASE="''${BAZEL_REAP_BASE:-$HOME/.cache/bazel/_bazel_$(whoami)}"
@@ -2558,7 +2563,9 @@ lib.mkMerge [
       case "$IDLE_MIN" in ""|*[!0-9]*) IDLE_MIN=180 ;; esac
 
       used_pct="''${BAZEL_REAP_USED_PCT:-}"
-      if [ -z "$used_pct" ]; then
+      if [ -n "$used_pct" ]; then
+        used_pct="''${used_pct%%%}"
+      else
         used_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
       fi
 
@@ -2605,6 +2612,9 @@ lib.mkMerge [
         fi
       done
 
+      orphan_candidates=()
+      pressure_candidates=()
+
       # --- 2. Classify each output base. -----------------------------------
       for entry in "$BASE"/*; do
         [ -d "$entry" ] || continue
@@ -2649,8 +2659,7 @@ lib.mkMerge [
               continue
             fi
           fi
-          is_orphan=1
-          reap_desc="workspace gone: $workspace"
+          orphan_candidates+=("$name|$workspace|$entry")
         else
           # --- WORKSPACE EXISTS ---
           # Low pressure: keep all bases whose workspace is live.
@@ -2659,8 +2668,8 @@ lib.mkMerge [
             continue
           fi
 
-          # High pressure tier: reap if server is dead, command.log exists, and
-          # idle age >= threshold (30m for lgtm-pr-*, 180m otherwise).
+          # High pressure tier: reap if server is dead, command.log exists,
+          # stat succeeds, and idle age >= threshold (30m for lgtm-pr-*, 180m otherwise).
           if [ -f "$pid_file" ]; then
             server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
             if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
@@ -2675,6 +2684,14 @@ lib.mkMerge [
             continue
           fi
 
+          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || true)
+          case "$mtime" in
+            ""|*[!0-9]*)
+              log "keep $name (could not stat command.log: $workspace)"
+              continue
+              ;;
+          esac
+
           ws_base=$(basename "$workspace")
           case "$ws_base" in
             lgtm-pr-*) req_idle_min="$LGTM_IDLE_MIN" ;;
@@ -2682,7 +2699,6 @@ lib.mkMerge [
           esac
 
           now=$(date +%s)
-          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || echo 0)
           idle_sec=$((now - mtime))
           [ "$idle_sec" -lt 0 ] && idle_sec=0
           idle_min=$((idle_sec / 60))
@@ -2692,21 +2708,22 @@ lib.mkMerge [
             continue
           fi
 
-          if [ "$idle_min" -ge 60 ]; then
-            idle_desc="$((idle_min / 60))h"
-          else
-            idle_desc="''${idle_min}m"
-          fi
-
-          is_orphan=0
-          reap_desc="idle $idle_desc under pressure ''${used_pct}%: $workspace"
+          pressure_candidates+=("$idle_sec|$name|$workspace|$entry|$req_idle_min")
         fi
+      done
 
-        # --- REAP CANDIDATE (orphan or pressure) ---
+      # --- 3. Drain orphans up to MAX_PER_PASS. ----------------------------
+      # Orphans take priority over pressure reaps under the shared limit.
+      for item in "''${orphan_candidates[@]:-}"; do
+        [ -n "$item" ] || continue
+        IFS='|' read -r name workspace entry <<<"$item"
+
         if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
           log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
           break
         fi
+
+        reap_desc="workspace gone: $workspace"
 
         if [ -n "$DRY_RUN" ]; then
           size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
@@ -2717,35 +2734,10 @@ lib.mkMerge [
           continue
         fi
 
-        # Re-check immediately before the rename, with NOTHING slow in
-        # between. Closing it entirely would need a lock; the loss if we do
-        # race is a cold rebuild, not anyone's work.
-        if [ "$is_orphan" -eq 1 ]; then
-          if [ -e "$workspace" ]; then
-            log "keep $name (workspace reappeared during scan: $workspace)"
-            continue
-          fi
-        else
-          if [ -f "$pid_file" ]; then
-            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
-              log "keep $name (server pid $server_pid became active before action)"
-              continue
-            fi
-          fi
-          if [ ! -f "$cmd_log" ]; then
-            log "keep $name (command.log vanished before action: $workspace)"
-            continue
-          fi
-          now=$(date +%s)
-          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || echo 0)
-          idle_sec=$((now - mtime))
-          [ "$idle_sec" -lt 0 ] && idle_sec=0
-          idle_min=$((idle_sec / 60))
-          if [ "$idle_min" -lt "$req_idle_min" ]; then
-            log "keep $name (became active before action: $workspace)"
-            continue
-          fi
+        # Pre-rename re-check for orphans
+        if [ -e "$workspace" ]; then
+          log "keep $name (workspace reappeared during scan: $workspace)"
+          continue
         fi
 
         staged="$BASE/$TRASH_PREFIX$name.$$"
@@ -2754,10 +2746,90 @@ lib.mkMerge [
           continue
         fi
 
-        # Past this point the base is gone from Bazel's view and the tree is
-        # unambiguously garbage, so a failure here is a retry, not a puzzle --
-        # and measuring it here rather than before the rename costs nothing
-        # while removing the race above.
+        reaped=$((reaped + 1))
+        size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
+        case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+        if purge_tree "$staged"; then
+          log "reaped $name ($((size_kb / 1024)) MB, $reap_desc)"
+          freed_kb=$((freed_kb + size_kb))
+        else
+          log "WARN: staged $name but could not fully delete it; will retry next pass"
+        fi
+      done
+
+      # --- 4. Drain pressure candidates (oldest first) with remaining quota.
+      sorted_pressure=()
+      if [ "''${#pressure_candidates[@]}" -gt 0 ]; then
+        while IFS= read -r line; do
+          [ -n "$line" ] && sorted_pressure+=("$line")
+        done < <(printf '%s\n' "''${pressure_candidates[@]}" | sort -t '|' -k1,1nr)
+      fi
+
+      for item in "''${sorted_pressure[@]:-}"; do
+        [ -n "$item" ] || continue
+        IFS='|' read -r idle_sec name workspace entry req_idle_min <<<"$item"
+
+        if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
+          log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
+          break
+        fi
+
+        idle_min=$((idle_sec / 60))
+        if [ "$idle_min" -ge 60 ]; then
+          idle_desc="$((idle_min / 60))h"
+        else
+          idle_desc="''${idle_min}m"
+        fi
+        reap_desc="idle $idle_desc under pressure ''${used_pct}%: $workspace"
+
+        if [ -n "$DRY_RUN" ]; then
+          size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
+          case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+          log "would reap $name ($((size_kb / 1024)) MB, $reap_desc)"
+          reaped=$((reaped + 1))
+          freed_kb=$((freed_kb + size_kb))
+          continue
+        fi
+
+        # Pre-rename re-check for pressure candidates
+        pid_file="$entry/server/server.pid.txt"
+        if [ -f "$pid_file" ]; then
+          server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+          if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+            log "keep $name (server pid $server_pid became active before action)"
+            continue
+          fi
+        fi
+
+        cmd_log="$entry/command.log"
+        if [ ! -f "$cmd_log" ]; then
+          log "keep $name (command.log vanished before action: $workspace)"
+          continue
+        fi
+
+        mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || true)
+        case "$mtime" in
+          ""|*[!0-9]*)
+            log "keep $name (could not stat command.log before action: $workspace)"
+            continue
+            ;;
+        esac
+
+        now=$(date +%s)
+        idle_sec=$((now - mtime))
+        [ "$idle_sec" -lt 0 ] && idle_sec=0
+        idle_min=$((idle_sec / 60))
+        if [ "$idle_min" -lt "$req_idle_min" ]; then
+          log "keep $name (became active before action: $workspace)"
+          continue
+        fi
+
+        staged="$BASE/$TRASH_PREFIX$name.$$"
+        if ! mv "$entry" "$staged" 2>/dev/null; then
+          log "WARN: could not stage $name for deletion; skipping"
+          continue
+        fi
+
         reaped=$((reaped + 1))
         size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
         case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
@@ -2781,7 +2853,7 @@ lib.mkMerge [
 
   systemd.user.services.bazel-reap = {
     Unit = {
-      Description = "Reap orphaned Bazel output bases";
+      Description = "Reap orphaned and idle Bazel output bases";
     };
     Service = {
       Type = "oneshot";
@@ -2805,7 +2877,7 @@ lib.mkMerge [
 
   systemd.user.timers.bazel-reap = {
     Unit = {
-      Description = "Reap orphaned Bazel output bases timer";
+      Description = "Reap orphaned and idle Bazel output bases timer";
     };
     Timer = {
       # Same shape as disk-watch, and for the same reason: OnUnitActiveSec is

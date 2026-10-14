@@ -427,6 +427,71 @@ test_dry_run_under_pressure() {
     "$(! grep -q '^\[bazel-reap\] reaped' <<<"$out" && echo yes || echo no)"
 }
 
+test_stat_command_log_failure_keeps_base() {
+  echo "TEST: stat failure on command.log fails safe and keeps the base"
+  local root wt base out fakebin real_stat
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000010 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  fakebin="$tmpdir/fakebin"
+  mkdir -p "$fakebin"
+  real_stat="$(command -v stat)"
+  cat <<EOF > "$fakebin/stat"
+#!/usr/bin/env bash
+if [[ "\$*" == *command.log* ]]; then
+  exit 1
+fi
+exec "$real_stat" "\$@"
+EOF
+  chmod +x "$fakebin/stat"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_PATH_PREFIX="$fakebin")"
+  check "base survived when stat command.log failed" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged stat failure" \
+    "$(grep -q 'keep 10000000.*could not stat command\.log' <<<"$out" && echo yes || echo no)"
+}
+
+test_orphans_prioritized_over_pressure_under_rate_limit() {
+  echo "TEST: orphans take priority over pressure reaps under rate limit"
+  local root wt base_pressure base_orphan out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  # Hash 000... sorts before fff...
+  base_pressure="$(make_base "$root" 00000000000000000000000000000001 "$wt")"
+  echo "log" > "$base_pressure/command.log"
+  touch -d "4 hours ago" "$base_pressure/command.log"
+
+  base_orphan="$(make_base "$root" ffffffffffffffffffffffffffffffff "$root/vanished-workspace")"
+
+  out="$(run_reaper "$root" BAZEL_REAP_MAX=1 BAZEL_REAP_USED_PCT=90)"
+  check "orphan reaped despite sorting after pressure candidate" \
+    "$([ ! -d "$base_orphan" ] && echo yes || echo no)"
+  check "pressure candidate kept due to rate limit" \
+    "$([ -d "$base_pressure" ] && echo yes || echo no)"
+  check "says rate limit reached for pressure candidate" \
+    "$(grep -q 'rate limit reached (1 this pass); 00000000.* waits' <<<"$out" && echo yes || echo no)"
+}
+
+test_used_pct_trailing_percent_stripped() {
+  echo "TEST: trailing % in BAZEL_REAP_USED_PCT is stripped"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000011 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT="90%")"
+  check "base reaped when USED_PCT has trailing %" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "logged reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== bazel-reap regression tests ==="
@@ -450,6 +515,9 @@ test_live_server_high_pressure_kept
 test_missing_command_log_high_pressure_kept
 test_non_numeric_used_pct_treated_as_no_pressure
 test_dry_run_under_pressure
+test_stat_command_log_failure_keeps_base
+test_orphans_prioritized_over_pressure_under_rate_limit
+test_used_pct_trailing_percent_stripped
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="
