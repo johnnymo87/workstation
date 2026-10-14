@@ -2424,6 +2424,23 @@ lib.mkMerge [
   # recorded the correct read on 09-16 ("6 of 8 bases belong to LIVE
   # worktrees... reaping is hygiene") and the reversal should not have happened.
   #
+  # 2026-10-13 AMENDMENT: THE PRESSURE TIER AS A DISK LEVER.
+  # The "hygiene, not a disk lever" claim above held for ORPHANS. On 2026-10-13,
+  # cloudbox's root disk reached 100% full, and Bazel held ~67G of idle
+  # live-workspace bases across 20 output bases with dead servers. The pressure
+  # tier added below is the disk lever, gated at root used >= 80% (5 points
+  # below disk-watch's 85% alarm, so it acts before paging a human).
+  #
+  # The invariant is preserved and restated: everything reaped is still
+  # something the nightly would reap (the nightly requires only a dead server).
+  # bazel-reap never deletes something the nightly keeps; it only deletes it
+  # earlier, and only under disk pressure.
+  #
+  # Note the deliberate trade-off: a cold rebuild of a live worktree idle >= 3h
+  # (or >= 30m for lgtm-pr-* workspaces). Bazel servers idle out after 300s, so
+  # server liveness alone cannot protect an in-progress session; command.log
+  # idle age is the signal.
+  #
   # For scale, on 2026-09-21 with the box at 87%: all of bazel is 13 GB of the
   # 327 GB in use (~/.cache/bazel 11G, ~/bazel-cache 1.7G). The drivers are
   # elsewhere -- ~/projects 90G, /var 75G, /nix 48G, /tmp 41G. Anyone arriving
@@ -2529,6 +2546,32 @@ lib.mkMerge [
       # the disk. Anything over the limit is simply left for the next pass.
       MAX_PER_PASS="''${BAZEL_REAP_MAX:-4}"
 
+      # Pressure thresholds and seams. Pressure tier reaps live workspaces idle
+      # >= IDLE_MIN (or LGTM_IDLE_MIN for lgtm-pr-*) when root disk used% >= PRESSURE_PCT.
+      PRESSURE_PCT="''${BAZEL_REAP_PRESSURE_PCT:-80}"
+      case "$PRESSURE_PCT" in ""|*[!0-9]*) PRESSURE_PCT=80 ;; esac
+
+      LGTM_IDLE_MIN="''${BAZEL_REAP_LGTM_IDLE_MIN:-30}"
+      case "$LGTM_IDLE_MIN" in ""|*[!0-9]*) LGTM_IDLE_MIN=30 ;; esac
+
+      IDLE_MIN="''${BAZEL_REAP_IDLE_MIN:-180}"
+      case "$IDLE_MIN" in ""|*[!0-9]*) IDLE_MIN=180 ;; esac
+
+      used_pct="''${BAZEL_REAP_USED_PCT:-}"
+      if [ -z "$used_pct" ]; then
+        used_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+      fi
+
+      under_pressure=0
+      case "$used_pct" in
+        ""|*[!0-9]*) under_pressure=0 ;;
+        *)
+          if [ "$used_pct" -ge "$PRESSURE_PCT" ]; then
+            under_pressure=1
+          fi
+          ;;
+      esac
+
       # Staging prefix. NOT dot-prefixed: see the header. Must not collide with
       # a bazel md5 base name, which is 32 hex characters.
       TRASH_PREFIX="_reaping-"
@@ -2592,28 +2635,74 @@ lib.mkMerge [
           continue
         fi
 
-        # THE FIRST HALF OF THE ORPHAN TEST. Existence, not liveness -- see the
-        # header on why that is deliberate and why it subsumes GUARD 4. A
-        # worktree deleted and recreated at the same path reads as live and is
-        # kept, which is the safe direction.
-        if [ -e "$workspace" ]; then
-          log "keep $name (workspace live: $workspace)"
-          continue
-        fi
-
-        # THE SECOND HALF. A live server pins the base regardless of what
-        # happened to the directory. PID reuse can only cause a false
-        # "alive" here, which over-keeps.
         pid_file="$entry/server/server.pid.txt"
-        if [ -f "$pid_file" ]; then
-          server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-          if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
-            log "keep $name (server pid $server_pid alive despite missing workspace)"
+
+        if [ ! -e "$workspace" ]; then
+          # --- ORPHAN CANDIDATE ---
+          # Workspace is gone. A live server pins the base regardless of what
+          # happened to the directory. PID reuse can only cause a false
+          # "alive" here, which over-keeps.
+          if [ -f "$pid_file" ]; then
+            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              log "keep $name (server pid $server_pid alive despite missing workspace)"
+              continue
+            fi
+          fi
+          is_orphan=1
+          reap_desc="workspace gone: $workspace"
+        else
+          # --- WORKSPACE EXISTS ---
+          # Low pressure: keep all bases whose workspace is live.
+          if [ "$under_pressure" -eq 0 ]; then
+            log "keep $name (workspace live: $workspace)"
             continue
           fi
+
+          # High pressure tier: reap if server is dead, command.log exists, and
+          # idle age >= threshold (30m for lgtm-pr-*, 180m otherwise).
+          if [ -f "$pid_file" ]; then
+            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              log "keep $name (server pid $server_pid alive: $workspace)"
+              continue
+            fi
+          fi
+
+          cmd_log="$entry/command.log"
+          if [ ! -f "$cmd_log" ]; then
+            log "keep $name (missing command.log: $workspace)"
+            continue
+          fi
+
+          ws_base=$(basename "$workspace")
+          case "$ws_base" in
+            lgtm-pr-*) req_idle_min="$LGTM_IDLE_MIN" ;;
+            *) req_idle_min="$IDLE_MIN" ;;
+          esac
+
+          now=$(date +%s)
+          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || echo 0)
+          idle_sec=$((now - mtime))
+          [ "$idle_sec" -lt 0 ] && idle_sec=0
+          idle_min=$((idle_sec / 60))
+
+          if [ "$idle_min" -lt "$req_idle_min" ]; then
+            log "keep $name (idle ''${idle_min}m < ''${req_idle_min}m under pressure ''${used_pct}%: $workspace)"
+            continue
+          fi
+
+          if [ "$idle_min" -ge 60 ]; then
+            idle_desc="$((idle_min / 60))h"
+          else
+            idle_desc="''${idle_min}m"
+          fi
+
+          is_orphan=0
+          reap_desc="idle $idle_desc under pressure ''${used_pct}%: $workspace"
         fi
 
-        # --- orphan ---
+        # --- REAP CANDIDATE (orphan or pressure) ---
         if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
           log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
           break
@@ -2622,20 +2711,41 @@ lib.mkMerge [
         if [ -n "$DRY_RUN" ]; then
           size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
           case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
-          log "would reap $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          log "would reap $name ($((size_kb / 1024)) MB, $reap_desc)"
           reaped=$((reaped + 1))
           freed_kb=$((freed_kb + size_kb))
           continue
         fi
 
         # Re-check immediately before the rename, with NOTHING slow in
-        # between -- the measurement moved below the rename precisely so this
-        # window is microseconds rather than however long `du` takes on 3 GB of
-        # small files. Closing it entirely would need a lock; the loss if we do
+        # between. Closing it entirely would need a lock; the loss if we do
         # race is a cold rebuild, not anyone's work.
-        if [ -e "$workspace" ]; then
-          log "keep $name (workspace reappeared during scan: $workspace)"
-          continue
+        if [ "$is_orphan" -eq 1 ]; then
+          if [ -e "$workspace" ]; then
+            log "keep $name (workspace reappeared during scan: $workspace)"
+            continue
+          fi
+        else
+          if [ -f "$pid_file" ]; then
+            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              log "keep $name (server pid $server_pid became active before action)"
+              continue
+            fi
+          fi
+          if [ ! -f "$cmd_log" ]; then
+            log "keep $name (command.log vanished before action: $workspace)"
+            continue
+          fi
+          now=$(date +%s)
+          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || echo 0)
+          idle_sec=$((now - mtime))
+          [ "$idle_sec" -lt 0 ] && idle_sec=0
+          idle_min=$((idle_sec / 60))
+          if [ "$idle_min" -lt "$req_idle_min" ]; then
+            log "keep $name (became active before action: $workspace)"
+            continue
+          fi
         fi
 
         staged="$BASE/$TRASH_PREFIX$name.$$"
@@ -2652,7 +2762,7 @@ lib.mkMerge [
         size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
         case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
         if purge_tree "$staged"; then
-          log "reaped $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          log "reaped $name ($((size_kb / 1024)) MB, $reap_desc)"
           freed_kb=$((freed_kb + size_kb))
         else
           log "WARN: staged $name but could not fully delete it; will retry next pass"
@@ -2662,7 +2772,7 @@ lib.mkMerge [
       if [ "$reaped" -gt 0 ]; then
         verb="would free"
         [ -z "$DRY_RUN" ] && verb="freed"
-        log "$reaped orphaned output base(s), $verb $((freed_kb / 1024)) MB"
+        log "$reaped output base(s), $verb $((freed_kb / 1024)) MB"
       fi
 
       exit 0

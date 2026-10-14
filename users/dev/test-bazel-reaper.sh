@@ -45,7 +45,19 @@ set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmpdir="$(mktemp -d)"
-trap 'chmod -R u+w "$tmpdir" 2>/dev/null; rm -rf "$tmpdir"' EXIT
+
+pids=()
+cleanup() {
+  for p in "${pids[@]:-}"; do
+    [ -n "$p" ] || continue
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
+  chmod -R u+w "$tmpdir" 2>/dev/null || true
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
 pass_count=0
 fail_count=0
@@ -108,7 +120,7 @@ new_root() {
 
 run_reaper() {
   local root="$1"; shift
-  env BAZEL_REAP_BASE="$root" "$@" "$script" 2>&1
+  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" "$script" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -139,9 +151,11 @@ test_keeps_live_server_despite_missing_workspace() {
   base="$(make_base "$root" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$root/vanished")"
   sleep 300 &
   pid=$!
+  pids+=("$pid")
   echo "$pid" > "$base/server/server.pid.txt"
   out="$(run_reaper "$root")"
-  kill "$pid" 2>/dev/null
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   check "base with live server survives" "$([ -d "$base" ] && echo yes || echo no)"
   check "and names the pid" \
     "$(grep -q "server pid $pid alive" <<<"$out" && echo yes || echo no)"
@@ -267,6 +281,153 @@ test_never_exits_nonzero() {
 }
 
 # ---------------------------------------------------------------------------
+# Pressure tier (idle bases with live workspaces under disk pressure).
+# ---------------------------------------------------------------------------
+
+test_live_workspace_idle_4h_low_pressure_kept() {
+  echo "TEST: live workspace idle 4h is kept at low pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000001 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=50)"
+  check "base survived at low pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged workspace live" \
+    "$(grep -q 'keep 10000000.* (workspace live' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_workspace_idle_4h_high_pressure_reaped() {
+  echo "TEST: live workspace idle 4h is reaped at high pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000002 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base reaped at high pressure" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "workspace directory untouched" "$([ -d "$wt" ] && echo yes || echo no)"
+  check "logged reap with idle and pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_workspace_idle_1h_high_pressure_kept() {
+  echo "TEST: live workspace idle 1h is kept at high pressure (under 3h threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000003 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "1 hour ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base survived at high pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged keep with idle reason" \
+    "$(grep -q 'keep 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_lgtm_workspace_idle_45m_high_pressure_reaped() {
+  echo "TEST: lgtm-pr-* workspace idle 45min is reaped at high pressure (>= 30m threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/lgtm-pr-1234"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000004 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "45 minutes ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "lgtm base reaped at high pressure" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "lgtm workspace untouched" "$([ -d "$wt" ] && echo yes || echo no)"
+  check "logged lgtm reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_non_lgtm_workspace_idle_45m_high_pressure_kept() {
+  echo "TEST: non-lgtm workspace idle 45min is kept at high pressure (< 180m threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/feature-branch"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000005 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "45 minutes ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "non-lgtm base survived at high pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged keep with idle reason" \
+    "$(grep -q 'keep 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_server_high_pressure_kept() {
+  echo "TEST: live server pins base even under high pressure and idle 4h"
+  local root wt base out pid
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000006 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  sleep 300 &
+  pid=$!
+  pids+=("$pid")
+  echo "$pid" > "$base/server/server.pid.txt"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  check "base with live server survives under pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "names the live server pid" \
+    "$(grep -q "server pid $pid alive" <<<"$out" && echo yes || echo no)"
+}
+
+test_missing_command_log_high_pressure_kept() {
+  echo "TEST: missing command.log keeps base even under high pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000007 "$wt")"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base survives without command.log" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logs reason for missing command.log" \
+    "$(grep -q 'keep 10000000.*missing command\.log' <<<"$out" && echo yes || echo no)"
+}
+
+test_non_numeric_used_pct_treated_as_no_pressure() {
+  echo "TEST: non-numeric BAZEL_REAP_USED_PCT is treated as no pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000008 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=notanumber)"
+  check "base survives when used_pct is non-numeric" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logs workspace live (no pressure)" \
+    "$(grep -q 'keep 10000000.* (workspace live' <<<"$out" && echo yes || echo no)"
+}
+
+test_dry_run_under_pressure() {
+  echo "TEST: rehearsal mode under pressure classifies but does not delete"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000009 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_DRY_RUN=1 BAZEL_REAP_USED_PCT=90)"
+  check "base still present after rehearsal under pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "says 'would reap' with under pressure" \
+    "$(grep -q 'would reap 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+  check "does not claim to have reaped" \
+    "$(! grep -q '^\[bazel-reap\] reaped' <<<"$out" && echo yes || echo no)"
+}
+
+# ---------------------------------------------------------------------------
 
 echo "=== bazel-reap regression tests ==="
 test_keeps_live_workspace_without_server
@@ -280,6 +441,15 @@ test_rate_limit
 test_resumes_staged_leftover
 test_missing_base_dir_is_not_an_error
 test_never_exits_nonzero
+test_live_workspace_idle_4h_low_pressure_kept
+test_live_workspace_idle_4h_high_pressure_reaped
+test_live_workspace_idle_1h_high_pressure_kept
+test_lgtm_workspace_idle_45m_high_pressure_reaped
+test_non_lgtm_workspace_idle_45m_high_pressure_kept
+test_live_server_high_pressure_kept
+test_missing_command_log_high_pressure_kept
+test_non_numeric_used_pct_treated_as_no_pressure
+test_dry_run_under_pressure
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="

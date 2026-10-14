@@ -889,15 +889,15 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
-        grep -q '^=== 23 passed, 0 failed ===' "$TMPDIR/br.txt" || {
-          echo "GATE FAILURE: bazel-reap suite did not reach its 23/0 tally." >&2
+        grep -q '^=== 44 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 44/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as its neighbours: the tally is printed by the
         # suite, so a suite gutted to three assertions still prints a truthful
         # "3 passed, 0 failed". The count is what makes deletion visible.
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 23 ] || {
-          echo "GATE FAILURE: expected 23 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 44 ] || {
+          echo "GATE FAILURE: expected 44 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
           exit 1
         }
