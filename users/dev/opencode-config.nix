@@ -812,7 +812,8 @@ let
     };
     "gpt-6-luna" = mkCodexLbModel {
       name = "GPT-6 Luna";
-      effort = "low";
+      # OpenAI's GPT-6 guide recommends starting Luna at High, not the old Luna tier's low.
+      effort = "high";
       cost = { input = 0.1; output = 0.5; cache_read = 0.01; cache_write = 0.125; };
     };
     "gpt-5.6-sol" = mkCodexLbModel {
