@@ -45,7 +45,7 @@ Python, embedded the same way `venvSweepPy` is embedded. It reuses `pathsInUsePy
   rewritten by cargo invocations). Only directories are walked at depth 2-3, because
   `deps/` holds tens of thousands of files. A stat error counts as "fresh" (keep).
 - **Thresholds.**
-  - Reap if idle ≥ `CARGO_REAP_IDLE_H` (default 48h, at any pressure). This is hygiene.
+  - Reap if idle ≥ `CARGO_REAP_IDLE_H` (default 168h / 7 days, at any pressure). This is hygiene.
   - Reap if idle ≥ `CARGO_REAP_PRESSURE_IDLE_H` (default 3h) AND used% ≥ `PRESSURE_PCT`.
   - Seam: `CARGO_REAP_USED_PCT` overrides the `df` reading. Otherwise use
     `os.statvfs("/")` (used = (blocks - bfree) / (blocks - bfree + bavail), rounded up, which

@@ -120,7 +120,7 @@ new_root() {
 
 run_reaper() {
   local root="$1"; shift
-  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" "$script" 2>&1
+  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" bash "$script" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ test_resumes_staged_leftover() {
 test_missing_base_dir_is_not_an_error() {
   echo "TEST: absent bazel cache dir exits clean (a host that never ran bazel)"
   local rc
-  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" bash "$script" >/dev/null 2>&1
   rc=$?
   check "exits 0" "$([ "$rc" = 0 ] && echo yes || echo no)"
 }
@@ -273,7 +273,7 @@ test_never_exits_nonzero() {
   # Make the base itself unremovable by taking write permission off its PARENT,
   # so even the rename fails. The script must log and move on.
   chmod a-w "$root"
-  env BAZEL_REAP_BASE="$root" "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$root" bash "$script" >/dev/null 2>&1
   rc=$?
   chmod u+w "$root"
   check "exits 0 despite being unable to act" "$([ "$rc" = 0 ] && echo yes || echo no)"
@@ -492,6 +492,88 @@ test_used_pct_trailing_percent_stripped() {
     "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
 }
 
+test_session_active_in_workspace_keeps_base_under_pressure() {
+  echo "TEST: active opencode session in workspace keeps base under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000012 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  db="$tmpdir/opencode-bazel-active.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$wt', int(time.time() * 1000))); con.commit(); con.close()"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_SESSION_DB="$db")"
+  check "base survived when session active in workspace" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged session active" \
+    "$(grep -q 'keep 10000000.*opencode session active in .* within 3h' <<<"$out" && echo yes || echo no)"
+}
+
+test_session_stale_in_workspace_allows_reap_under_pressure() {
+  echo "TEST: stale opencode session in workspace allows reap under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000013 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  db="$tmpdir/opencode-bazel-stale.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$wt', int((time.time() - 5 * 3600) * 1000))); con.commit(); con.close()"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_SESSION_DB="$db")"
+  check "base reaped when session is stale" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "logged reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_proc_in_use_keeps_base_under_pressure() {
+  echo "TEST: process with cwd inside base keeps base under pressure (/proc probe)"
+  local root wt base out pid execroot
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000014 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  execroot="$base/execroot/myproject"
+  mkdir -p "$execroot"
+  ( cd "$execroot" && sleep 300 ) &
+  pid=$!
+  pids+=("$pid")
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  check "base kept when process has cwd inside base" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged in use by live process" \
+    "$(grep -q 'keep 10000000.*in use by a live process' <<<"$out" && echo yes || echo no)"
+}
+
+test_proc_error_keeps_base_under_pressure() {
+  echo "TEST: /proc probe error fails safe and keeps base under pressure"
+  local root wt base out emptyproc
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000015 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  emptyproc="$tmpdir/emptyproc"
+  mkdir -p "$emptyproc"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_PROC="$emptyproc")"
+  check "base kept when /proc probe raises error" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged proc probe error" \
+    "$(grep -q 'keep 10000000.*error probing /proc' <<<"$out" && echo yes || echo no)"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== bazel-reap regression tests ==="
@@ -518,6 +600,10 @@ test_dry_run_under_pressure
 test_stat_command_log_failure_keeps_base
 test_orphans_prioritized_over_pressure_under_rate_limit
 test_used_pct_trailing_percent_stripped
+test_session_active_in_workspace_keeps_base_under_pressure
+test_session_stale_in_workspace_allows_reap_under_pressure
+test_proc_in_use_keeps_base_under_pressure
+test_proc_error_keeps_base_under_pressure
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="

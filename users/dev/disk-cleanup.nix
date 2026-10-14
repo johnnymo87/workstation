@@ -126,7 +126,7 @@ let
   sessionOwnsPy = ''
     SESSION_ACTIVE_DAYS = 7
 
-    def session_owns(p, db_path, missing="free"):
+    def session_owns(p, db_path, missing="free", active_seconds=None):
         """'session' | 'free' | 'unknown'. Only 'free' permits removal.
 
         `missing` is what a db file that does not exist counts as.
@@ -138,7 +138,9 @@ let
             candidates.add(os.path.realpath(p))
         except OSError:
             pass
-        cutoff_ms = int((time.time() - SESSION_ACTIVE_DAYS * 86400) * 1000)
+        if active_seconds is None:
+            active_seconds = SESSION_ACTIVE_DAYS * 86400
+        cutoff_ms = int((time.time() - active_seconds) * 1000)
         try:
             # Read-only URI: a concurrent serve is writing this database and
             # must never be disturbed by a cleanup probe.
@@ -843,11 +845,14 @@ let
   # cargoReapPy: daytime reaping of idle cargo target/ directories.
   # Reuses pathsInUsePy for /proc process in-use checks, and adds /proc/<pid>/maps
   # scanning for memory-mapped files (rust-analyzer proc-macro server dlopens).
+  # Reuses sessionOwnsPy for opencode session activity checks under pressure.
   # ==========================================================================
   cargoReapPy = ''
-    import fnmatch, math, os, re, shutil, stat, sys, time
+    import fnmatch, math, os, re, shutil, sqlite3, stat, sys, time
 
     ${pathsInUsePy}
+
+    ${sessionOwnsPy}
 
     def log(msg):
         print(f"[cargo-reap] {msg}", flush=True)
@@ -1050,12 +1055,13 @@ let
         else:
             roots = [os.path.expanduser("~/projects")]
 
-        idle_h_threshold = float(os.environ.get("CARGO_REAP_IDLE_H", 48))
+        idle_h_threshold = float(os.environ.get("CARGO_REAP_IDLE_H", 168))
         pressure_idle_h_threshold = float(os.environ.get("CARGO_REAP_PRESSURE_IDLE_H", 3))
         pressure_pct = float(os.environ.get("CARGO_REAP_PRESSURE_PCT", 80))
         max_per_pass = int(os.environ.get("CARGO_REAP_MAX", 3))
         trash_dir = os.environ.get("CARGO_REAP_TRASH") or os.path.expanduser("~/.cache/cargo-reap/trash")
         proc_dir = os.environ.get("CARGO_REAP_PROC") or "/proc"
+        session_db = os.environ.get("CARGO_REAP_SESSION_DB") or os.path.expanduser("~/.local/share/opencode/opencode.db")
         dry_run = bool(os.environ.get("CARGO_REAP_DRY_RUN"))
 
         # Phase 0: purge leftovers in trash
@@ -1092,6 +1098,12 @@ let
             if idle_h >= idle_h_threshold:
                 reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {idle_h_threshold:.0f}h"))
             elif under_pressure and idle_h >= pressure_idle_h_threshold:
+                ws = os.path.dirname(target)
+                active_sec = pressure_idle_h_threshold * 3600
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                if verdict in ("session", "unknown"):
+                    log(f"keep {target} (opencode session active in {ws} within {int(pressure_idle_h_threshold)}h)")
+                    continue
                 reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%"))
             else:
                 if under_pressure:
@@ -1126,6 +1138,14 @@ let
             if not recheck_ok:
                 log(f"keep {target} (activity detected before action)")
                 continue
+
+            if "under pressure" in reason:
+                ws = os.path.dirname(target)
+                active_sec = pressure_idle_h_threshold * 3600
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                if verdict in ("session", "unknown"):
+                    log(f"keep {target} (opencode session became active before action: {ws})")
+                    continue
 
             if dry_run:
                 size_mb = dir_size_mb(target)
@@ -2516,16 +2536,22 @@ lib.mkMerge [
   #      so command.log idle age (>= 30m for lgtm-pr-*, >= 3h otherwise) is
   #      required before reaping.
   #
-  # WHY NO GUARD 4 (the opencode session table) HERE, since the bead asks for
-  # it and its absence would otherwise look like an oversight. GUARD 4 exists
-  # because a live opencode session holds NO /proc handle in its worktree, so
-  # /proc-based liveness would delete a live session's directory. This reaper
-  # never decides whether a worktree is alive -- it asks only whether the
-  # directory EXISTS. A session whose directory still exists protects its base
-  # through that existence alone, and a session whose directory is already gone
-  # is already dead by the time we look (see the
-  # reviving-worktree-orphaned-sessions skill). The existence test subsumes the
-  # session table rather than ignoring it.
+  # WHY NO GUARD 4 (the opencode session table) ON THE ORPHAN PATH, and why
+  # the pressure tier DOES consult it (and /proc).
+  # For orphans, GUARD 4 is unnecessary because a live opencode session holds
+  # NO /proc handle in its worktree, but its worktree directory EXISTS. A session
+  # whose directory was already deleted is already dead (see
+  # reviving-worktree-orphaned-sessions). So workspace existence subsumes the
+  # session table on the orphan path.
+  #
+  # FOR THE PRESSURE TIER, THE WORKSPACE STILL EXISTS. Existence no longer
+  # protects it. Bazel servers idle out after 300s, so an agent actively editing
+  # code or planning a next step in a worktree often has no running bazel server.
+  # To avoid destroying the output base under an active session, the pressure tier
+  # explicitly checks opencode's session table (sessionOwnsPy) to protect any
+  # workspace updated within the idle window (3h, or 30m for lgtm-pr-*), and
+  # runs pathsInUsePy (/proc probe) immediately before renaming to protect any
+  # in-flight compiler or build processes inside the base.
   home.file.".local/bin/bazel-reap" = {
     executable = true;
     text = ''
@@ -2708,6 +2734,31 @@ lib.mkMerge [
             continue
           fi
 
+          # Session guard: keep if opencode session updated workspace within window
+          session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+          session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
+import os, sqlite3, sys, time
+
+${sessionOwnsPy}
+
+ws = sys.argv[1]
+db = sys.argv[2]
+active_sec = float(sys.argv[3])
+print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+PYEOF
+)
+          case "$session_verdict" in
+            session|unknown)
+              if [ "$req_idle_min" -ge 60 ]; then
+                window_desc="$((req_idle_min / 60))h"
+              else
+                window_desc="''${req_idle_min}m"
+              fi
+              log "keep $name (opencode session active in $workspace within $window_desc)"
+              continue
+              ;;
+          esac
+
           pressure_candidates+=("$idle_sec|$name|$workspace|$entry|$req_idle_min")
         fi
       done
@@ -2824,6 +2875,64 @@ lib.mkMerge [
           continue
         fi
 
+        # Session guard re-check before action
+        session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+        session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
+import os, sqlite3, sys, time
+
+${sessionOwnsPy}
+
+ws = sys.argv[1]
+db = sys.argv[2]
+active_sec = float(sys.argv[3])
+print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+PYEOF
+)
+        case "$session_verdict" in
+          session|unknown)
+            log "keep $name (opencode session became active before action: $workspace)"
+            continue
+            ;;
+        esac
+
+        # /proc probe immediately before rename
+        proc_dir="''${BAZEL_REAP_PROC:-/proc}"
+        in_use_verdict=$(${pkgs.python3}/bin/python3 - "$proc_dir" "$entry" <<'PYEOF'
+import os, sys
+
+${pathsInUsePy}
+
+proc = sys.argv[1]
+entry = sys.argv[2]
+paths = [entry]
+try:
+    paths.append(os.path.realpath(entry))
+except OSError:
+    pass
+
+try:
+    in_use = paths_in_use(paths, proc=proc)
+    if in_use:
+        print("in_use")
+    else:
+        print("free")
+except Exception:
+    print("error")
+PYEOF
+)
+        case "$in_use_verdict" in
+          in_use)
+            log "keep $name (in use by a live process)"
+            continue
+            ;;
+          free)
+            ;;
+          *)
+            log "keep $name (error probing /proc before action)"
+            continue
+            ;;
+        esac
+
         staged="$BASE/$TRASH_PREFIX$name.$$"
         if ! mv "$entry" "$staged" 2>/dev/null; then
           log "WARN: could not stage $name for deletion; skipping"
@@ -2904,7 +3013,7 @@ lib.mkMerge [
   #
   # DUAL-TIER PRESSURE REAPING. Like bazel-reap, cargo-reap runs on a 15-minute
   # timer during the day, but balances hygiene against build interruption:
-  #   - Hygiene tier: idle >= 48h (CARGO_REAP_IDLE_H), reaped at ANY pressure.
+  #   - Hygiene tier: idle >= 168h / 7 days (CARGO_REAP_IDLE_H), reaped at ANY pressure.
   #   - Pressure tier: idle >= 3h (CARGO_REAP_PRESSURE_IDLE_H), reaped ONLY
   #     when disk used% >= 80% (CARGO_REAP_PRESSURE_PCT, 5 points below
   #     disk-watch's 85% warn threshold).
@@ -2943,12 +3052,13 @@ lib.mkMerge [
 
       # Seams / env vars. Nothing shipped overrides these; the test suite does.
       export CARGO_REAP_ROOTS="''${CARGO_REAP_ROOTS:-$HOME/projects}"
-      export CARGO_REAP_IDLE_H="''${CARGO_REAP_IDLE_H:-48}"
+      export CARGO_REAP_IDLE_H="''${CARGO_REAP_IDLE_H:-168}"
       export CARGO_REAP_PRESSURE_IDLE_H="''${CARGO_REAP_PRESSURE_IDLE_H:-3}"
       export CARGO_REAP_PRESSURE_PCT="''${CARGO_REAP_PRESSURE_PCT:-80}"
       export CARGO_REAP_MAX="''${CARGO_REAP_MAX:-3}"
       export CARGO_REAP_TRASH="''${CARGO_REAP_TRASH:-$HOME/.cache/cargo-reap/trash}"
       export CARGO_REAP_PROC="''${CARGO_REAP_PROC:-/proc}"
+      export CARGO_REAP_SESSION_DB="''${CARGO_REAP_SESSION_DB:-}"
       export CARGO_REAP_DRY_RUN="''${CARGO_REAP_DRY_RUN:-}"
       export CARGO_REAP_USED_PCT="''${CARGO_REAP_USED_PCT:-}"
 

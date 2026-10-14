@@ -106,14 +106,14 @@ run_reaper() {
 # Tests.
 # ---------------------------------------------------------------------------
 
-test_idle_49h_low_pressure_reaped() {
-  echo "TEST: target idle 49h at low pressure is reaped (hygiene tier)"
+test_idle_8d_low_pressure_reaped() {
+  echo "TEST: target idle 8d at low pressure is reaped (hygiene tier)"
   local root out target
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
-  check "target reaped when idle 49h at low pressure" \
+  check "target reaped when idle 8d at low pressure" \
     "$([ ! -d "$target" ] && echo yes || echo no)"
   check "reports reaped in log" \
     "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
@@ -121,6 +121,19 @@ test_idle_49h_low_pressure_reaped() {
     "$(! grep -q 'Traceback' <<<"$out" && echo yes || echo no)"
   check "happy path produces no ERROR" \
     "$(! grep -q 'ERROR:' <<<"$out" && echo yes || echo no)"
+}
+
+test_idle_49h_low_pressure_kept() {
+  echo "TEST: target idle 49h at low pressure is kept (hygiene window is 168h)"
+  local root out target
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 49
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
+  check "target kept when idle 49h at low pressure" \
+    "$([ -d "$target" ] && echo yes || echo no)"
+  check "reports keep in log" \
+    "$(grep -q 'keep .*proj/target' <<<"$out" && echo yes || echo no)"
 }
 
 test_idle_4h_low_pressure_kept() {
@@ -168,8 +181,8 @@ test_ignores_missing_or_non_cargo_tag() {
   root="$(new_root)"
   t1="$root/proj1/target"
   t2="$root/proj2/target"
-  make_target "$t1" 49 "none"
-  make_target "$t2" 49 "Signature: 8a477f597d28d172789f06886806bc55\n# Tag created by other_tool\n"
+  make_target "$t1" 192 "none"
+  make_target "$t2" 192 "Signature: 8a477f597d28d172789f06886806bc55\n# Tag created by other_tool\n"
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
   check "target without CACHEDIR.TAG is ignored" \
     "$([ -d "$t1" ] && echo yes || echo no)"
@@ -182,7 +195,7 @@ test_ignores_symlink_target() {
   local root out real_t sym_t
   root="$(new_root)"
   real_t="$root/real_target"
-  make_target "$real_t" 49
+  make_target "$real_t" 192
   mkdir -p "$root/proj"
   sym_t="$root/proj/target"
   ln -s "$real_t" "$sym_t"
@@ -198,7 +211,7 @@ test_keeps_target_in_use_by_cwd() {
   local root out target sleeper_pid i link
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   (cd "$target" && exec sleep 60) &
   sleeper_pid=$!
   pids+=("$sleeper_pid")
@@ -223,10 +236,10 @@ test_keeps_target_in_use_by_mapped_file() {
   local root out target mapped_file mapper_pid ready_file i
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   mapped_file="$target/debug/deps/libmacro.so"
   echo "elf-macro-binary" > "$mapped_file"
-  find "$target" -depth | while read -r p; do touch -d "49 hours ago" "$p"; done
+  find "$target" -depth | while read -r p; do touch -d "192 hours ago" "$p"; done
 
   ready_file="$tmpdir/map_ready_$$"
   python3 -c '
@@ -261,7 +274,7 @@ test_keeps_target_when_root_symlinked_and_cwd_in_real_target() {
   sym_root="$tmpdir/sym_root_$$"
   ln -s "$real_root" "$sym_root"
   real_target="$real_root/proj/target"
-  make_target "$real_target" 49
+  make_target "$real_target" 192
 
   (cd "$real_target" && exec sleep 60) &
   sleeper_pid=$!
@@ -294,7 +307,7 @@ test_reap_does_not_chmod_or_delete_symlinked_external_file() {
   ln -s "$ext_file" "$target/debug/deps/ext_link"
   find "$target" -depth | while read -r p; do
     [ -L "$p" ] && continue
-    touch -d "49 hours ago" "$p"
+    touch -d "192 hours ago" "$p"
   done
 
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
@@ -312,11 +325,11 @@ test_reaps_readonly_target_and_subdir() {
   local root out target sub
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   sub="$target/readonly_sub"
   mkdir -p "$sub"
   echo "sub payload" > "$sub/file"
-  find "$target" -depth | while read -r p; do touch -d "49 hours ago" "$p"; done
+  find "$target" -depth | while read -r p; do touch -d "192 hours ago" "$p"; done
   chmod 0555 "$sub"
   chmod 0555 "$target"
 
@@ -332,7 +345,7 @@ test_unreadable_proc_keeps_everything() {
   local root out target empty_proc
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   empty_proc="$tmpdir/empty_proc"
   mkdir -p "$empty_proc"
   out="$(run_reaper "$root" CARGO_REAP_PROC="$empty_proc" CARGO_REAP_USED_PCT=50)"
@@ -350,10 +363,10 @@ test_rate_limit_and_oldest_first() {
   t2="$root/p2/target"
   t3="$root/p3/target"
   t4="$root/p4/target"
-  make_target "$t1" 100
-  make_target "$t2" 80
-  make_target "$t3" 60
-  make_target "$t4" 50
+  make_target "$t1" 200
+  make_target "$t2" 190
+  make_target "$t3" 180
+  make_target "$t4" 170
   out="$(run_reaper "$root" CARGO_REAP_MAX=2 CARGO_REAP_USED_PCT=50)"
   check "oldest target 1 reaped" \
     "$([ ! -d "$t1" ] && echo yes || echo no)"
@@ -372,7 +385,7 @@ test_dry_run_deletes_nothing() {
   local root out target
   root="$(new_root)"
   target="$root/proj/target"
-  make_target "$target" 49
+  make_target "$target" 192
   out="$(run_reaper "$root" CARGO_REAP_DRY_RUN=1 CARGO_REAP_USED_PCT=50)"
   check "dry run leaves target intact" \
     "$([ -d "$target" ] && echo yes || echo no)"
@@ -402,9 +415,9 @@ test_skips_git_and_node_modules() {
   t_real="$root/proj/target"
   t_git="$root/proj/.git/target"
   t_node="$root/proj/node_modules/target"
-  make_target "$t_real" 49
-  make_target "$t_git" 49
-  make_target "$t_node" 49
+  make_target "$t_real" 192
+  make_target "$t_git" 192
+  make_target "$t_node" 192
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
   check "repo target reaped" \
     "$([ ! -d "$t_real" ] && echo yes || echo no)"
@@ -419,7 +432,7 @@ test_finds_target_under_worktrees() {
   local root out wt_target
   root="$(new_root)"
   wt_target="$root/proj/.worktrees/feature/target"
-  make_target "$wt_target" 49
+  make_target "$wt_target" 192
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
   check "worktree target reaped" \
     "$([ ! -d "$wt_target" ] && echo yes || echo no)"
@@ -442,10 +455,41 @@ test_missing_root_does_not_crash() {
     "$(! grep -q 'ERROR:' <<<"$out$out2" && echo yes || echo no)"
 }
 
+test_session_active_in_workspace_kept_under_pressure() {
+  echo "TEST: active opencode session in workspace keeps target under pressure"
+  local root out target db
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 4
+  db="$tmpdir/opencode-active.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$root/proj', int(time.time() * 1000))); con.commit(); con.close()"
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_SESSION_DB="$db")"
+  check "target kept when session active in workspace" \
+    "$([ -d "$target" ] && echo yes || echo no)"
+  check "reports session active in log" \
+    "$(grep -q 'keep .*proj/target.*opencode session active in .*proj within 3h' <<<"$out" && echo yes || echo no)"
+}
+
+test_session_stale_in_workspace_reaped_under_pressure() {
+  echo "TEST: stale opencode session in workspace allows reap under pressure"
+  local root out target db
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 4
+  db="$tmpdir/opencode-stale.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$root/proj', int((time.time() - 5 * 3600) * 1000))); con.commit(); con.close()"
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_SESSION_DB="$db")"
+  check "target reaped when session is older than window" \
+    "$([ ! -d "$target" ] && echo yes || echo no)"
+  check "reports reaped in log" \
+    "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== cargo-reap regression tests ==="
-test_idle_49h_low_pressure_reaped
+test_idle_8d_low_pressure_reaped
+test_idle_49h_low_pressure_kept
 test_idle_4h_low_pressure_kept
 test_idle_4h_high_pressure_reaped
 test_idle_1h_high_pressure_kept
@@ -463,6 +507,8 @@ test_leftover_trash_purged
 test_skips_git_and_node_modules
 test_finds_target_under_worktrees
 test_missing_root_does_not_crash
+test_session_active_in_workspace_kept_under_pressure
+test_session_stale_in_workspace_reaped_under_pressure
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="
