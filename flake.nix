@@ -904,6 +904,28 @@
         touch $out
       '';
 
+      cargo-reaper-tests = devboxPkgs.runCommand "cargo-reaper-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+          devboxPkgs.findutils devboxPkgs.python3
+        ];
+        CARGO_REAP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/cargo-reap".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-cargo-reaper.sh 2>&1 | tee "$TMPDIR/cr.txt"
+        grep -q '^=== 34 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
+          echo "GATE FAILURE: cargo-reap suite did not reach its 34/0 tally." >&2
+          exit 1
+        }
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 34 ] || {
+          echo "GATE FAILURE: expected 34 'PASS' lines, got" \
+               "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       bazelrc-disk-cache-tests = devboxPkgs.runCommand "bazelrc-disk-cache-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep

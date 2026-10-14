@@ -839,6 +839,314 @@ let
   venvSweepMinMb = 50;
   venvSweepShellAgeDays = 2;
 
+  # ==========================================================================
+  # cargoReapPy: daytime reaping of idle cargo target/ directories.
+  # Reuses pathsInUsePy for /proc process in-use checks, and adds /proc/<pid>/maps
+  # scanning for memory-mapped files (rust-analyzer proc-macro server dlopens).
+  # ==========================================================================
+  cargoReapPy = ''
+    import fnmatch, math, os, re, shutil, stat, sys, time
+
+    ${pathsInUsePy}
+
+    def log(msg):
+        print(f"[cargo-reap] {msg}", flush=True)
+
+    def mapped_paths_in_use(paths, proc=None):
+        proc = proc or "/proc"
+        paths = [p.rstrip("/") or "/" for p in paths]
+        inuse = set()
+        for pid in os.listdir(proc):
+            if not pid.isdigit():
+                continue
+            maps_file = os.path.join(proc, pid, "maps")
+            try:
+                with open(maps_file, "r", errors="replace") as f:
+                    for line in f:
+                        parts = line.split(maxsplit=5)
+                        if len(parts) >= 6:
+                            mapped = parts[5].strip()
+                            for p in paths:
+                                if mapped == p or mapped.startswith(p + "/"):
+                                    inuse.add(p)
+            except OSError:
+                continue
+        return inuse
+
+    def get_paths_in_use(paths, proc=None):
+        inuse = paths_in_use(paths, proc=proc)
+        inuse.update(mapped_paths_in_use(paths, proc=proc))
+        return inuse
+
+    def is_real_dir(p):
+        try:
+            st = os.lstat(p)
+            return stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+        except OSError:
+            return False
+
+    def is_candidate_target(p, uid):
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                return False
+            if st.st_uid != uid:
+                return False
+            tag_path = os.path.join(p, "CACHEDIR.TAG")
+            if not os.path.isfile(tag_path) or os.path.islink(tag_path):
+                return False
+            with open(tag_path, "r", errors="replace") as f:
+                content = f.read()
+                return "created by cargo" in content
+        except OSError:
+            return False
+
+    def find_targets(roots, uid):
+        candidates = []
+        for root in roots:
+            root = os.path.normpath(root)
+            if not os.path.isdir(root):
+                continue
+            queue = [(root, 0)]
+            while queue:
+                curr_dir, depth = queue.pop(0)
+                if depth >= 4:
+                    continue
+                try:
+                    names = sorted(os.listdir(curr_dir))
+                except OSError:
+                    continue
+                for name in names:
+                    subpath = os.path.join(curr_dir, name)
+                    if name == "target":
+                        if is_candidate_target(subpath, uid):
+                            candidates.append(subpath)
+                        continue
+                    if name in (".git", "node_modules"):
+                        continue
+                    if depth + 1 < 4 and is_real_dir(subpath):
+                        queue.append((subpath, depth + 1))
+        return candidates
+
+    def get_idle_seconds(target, now):
+        try:
+            st = os.lstat(target)
+            newest = st.st_mtime
+            for name1 in os.listdir(target):
+                p1 = os.path.join(target, name1)
+                st1 = os.lstat(p1)
+                if stat.S_ISLNK(st1.st_mode):
+                    continue
+                if stat.S_ISREG(st1.st_mode):
+                    newest = max(newest, st1.st_mtime)
+                elif stat.S_ISDIR(st1.st_mode):
+                    newest = max(newest, st1.st_mtime)
+                    for name2 in os.listdir(p1):
+                        p2 = os.path.join(p1, name2)
+                        st2 = os.lstat(p2)
+                        if stat.S_ISDIR(st2.st_mode) and not stat.S_ISLNK(st2.st_mode):
+                            newest = max(newest, st2.st_mtime)
+                            for name3 in os.listdir(p2):
+                                p3 = os.path.join(p2, name3)
+                                st3 = os.lstat(p3)
+                                if stat.S_ISDIR(st3.st_mode) and not stat.S_ISLNK(st3.st_mode):
+                                    newest = max(newest, st3.st_mtime)
+            return max(0.0, now - newest)
+        except OSError:
+            return 0.0
+
+    def dir_size_mb(path):
+        total = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(path):
+                for name in filenames + dirnames:
+                    try:
+                        st = os.lstat(os.path.join(dirpath, name))
+                        total += getattr(st, "st_blocks", 0) * 512
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total // (1024 * 1024)
+
+    def get_used_pct():
+        override = os.environ.get("CARGO_REAP_USED_PCT")
+        if override is not None and override != "":
+            try:
+                return int(override)
+            except ValueError:
+                pass
+        try:
+            st = os.statvfs("/")
+            used_blocks = st.f_blocks - st.f_bfree
+            total_blocks = used_blocks + st.f_bavail
+            if total_blocks <= 0:
+                return 0
+            return int(math.ceil(100.0 * used_blocks / total_blocks))
+        except OSError:
+            return 0
+
+    def purge_trash(trash_dir):
+        if not os.path.exists(trash_dir):
+            return
+        try:
+            entries = sorted(os.listdir(trash_dir))
+        except OSError:
+            return
+        for entry in entries:
+            staged = os.path.join(trash_dir, entry)
+            try:
+                if os.path.islink(staged) or os.path.isfile(staged):
+                    os.unlink(staged)
+                    log(f"purged leftover {entry}")
+                elif os.path.isdir(staged):
+                    for root_dir, dirs, files in os.walk(staged):
+                        for d in dirs:
+                            try:
+                                os.chmod(os.path.join(root_dir, d), 0o700)
+                            except OSError:
+                                pass
+                        for f in files:
+                            try:
+                                os.chmod(os.path.join(root_dir, f), 0o600)
+                            except OSError:
+                                pass
+                    shutil.rmtree(staged)
+                    log(f"purged leftover {entry}")
+            except OSError as e:
+                log(f"WARN: could not purge leftover {entry}: {e}")
+
+    def main():
+        roots_env = os.environ.get("CARGO_REAP_ROOTS")
+        if roots_env is not None and roots_env.strip() != "":
+            roots = [r.rstrip("/") or "/" for r in roots_env.split()]
+        else:
+            roots = [os.path.expanduser("~/projects")]
+
+        idle_h_threshold = float(os.environ.get("CARGO_REAP_IDLE_H", 48))
+        pressure_idle_h_threshold = float(os.environ.get("CARGO_REAP_PRESSURE_IDLE_H", 3))
+        pressure_pct = float(os.environ.get("CARGO_REAP_PRESSURE_PCT", 80))
+        max_per_pass = int(os.environ.get("CARGO_REAP_MAX", 3))
+        trash_dir = os.environ.get("CARGO_REAP_TRASH") or os.path.expanduser("~/.cache/cargo-reap/trash")
+        proc_dir = os.environ.get("CARGO_REAP_PROC") or "/proc"
+        dry_run = bool(os.environ.get("CARGO_REAP_DRY_RUN"))
+
+        # Phase 0: purge leftovers in trash
+        purge_trash(trash_dir)
+
+        now = time.time()
+        uid = os.getuid()
+        used_pct = get_used_pct()
+        under_pressure = (used_pct >= pressure_pct)
+
+        # Discovery
+        candidates = find_targets(roots, uid)
+        if not candidates:
+            return
+
+        # In-use probe
+        try:
+            in_use_set = get_paths_in_use(candidates, proc=proc_dir)
+        except OSError as e:
+            log(f"probe error reading /proc ({e}); keeping all targets")
+            for c in candidates:
+                log(f"keep {c} (error reading /proc)")
+            return
+
+        reapable = []
+        for target in candidates:
+            if target in in_use_set:
+                log(f"keep {target} (in use by live process)")
+                continue
+
+            idle_sec = get_idle_seconds(target, now)
+            idle_h = idle_sec / 3600.0
+
+            if idle_h >= idle_h_threshold:
+                reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {idle_h_threshold:.0f}h"))
+            elif under_pressure and idle_h >= pressure_idle_h_threshold:
+                reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%"))
+            else:
+                if under_pressure:
+                    log(f"keep {target} (idle {idle_h:.1f}h < {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%)")
+                else:
+                    log(f"keep {target} (idle {idle_h:.1f}h < {idle_h_threshold:.0f}h, low pressure {used_pct}%)")
+
+        reapable.sort(key=lambda item: item[1], reverse=True)
+
+        reaped_count = 0
+        freed_mb_total = 0
+
+        for target, idle_sec, idle_h, reason in reapable:
+            if reaped_count >= max_per_pass:
+                log(f"rate limit reached ({max_per_pass} this pass); {target} waits for the next one")
+                break
+
+            if not os.path.exists(target):
+                continue
+
+            try:
+                if get_paths_in_use([target], proc=proc_dir):
+                    log(f"keep {target} (became in use before action)")
+                    continue
+            except OSError as e:
+                log(f"keep {target} (probe error reading /proc before action: {e})")
+                continue
+
+            idle_now = get_idle_seconds(target, time.time())
+            idle_h_now = idle_now / 3600.0
+            recheck_ok = (idle_h_now >= idle_h_threshold) or (under_pressure and idle_h_now >= pressure_idle_h_threshold)
+            if not recheck_ok:
+                log(f"keep {target} (activity detected before action)")
+                continue
+
+            if dry_run:
+                size_mb = dir_size_mb(target)
+                log(f"would reap {target} ({size_mb} MB, idle {idle_h_now:.1f}h)")
+                reaped_count += 1
+                freed_mb_total += size_mb
+                continue
+
+            try:
+                os.makedirs(trash_dir, exist_ok=True)
+                sanitized = re.sub(r'[^A-Za-z0-9_.-]', '_', target.lstrip('/'))
+                staged = os.path.join(trash_dir, f"{sanitized}.{os.getpid()}")
+                os.rename(target, staged)
+            except OSError as e:
+                log(f"WARN: could not stage {target} for deletion: {e}")
+                continue
+
+            size_mb = dir_size_mb(staged)
+            reaped_count += 1
+            freed_mb_total += size_mb
+
+            try:
+                for root_dir, dirs, files in os.walk(staged):
+                    for d in dirs:
+                        try:
+                            os.chmod(os.path.join(root_dir, d), 0o700)
+                        except OSError:
+                            pass
+                    for f in files:
+                        try:
+                            os.chmod(os.path.join(root_dir, f), 0o600)
+                        except OSError:
+                            pass
+                shutil.rmtree(staged)
+                log(f"reaped {target} ({size_mb} MB, idle {idle_h_now:.1f}h)")
+            except OSError as e:
+                log(f"WARN: staged {target} but could not fully delete it ({e}); will retry next pass")
+
+        if reaped_count > 0:
+            verb = "would free" if dry_run else "freed"
+            log(f"{reaped_count} target(s), {verb} {freed_mb_total} MB")
+
+    try:
+        main()
+    except Exception as e:
+        log(f"WARN: unexpected error during cargo reap: {e}")
+  '';
+
   # --------------------------------------------------------------------------
   # disk-watch, the alarm BETWEEN cleanups -- ONE implementation, instantiated
   # per host.
@@ -2371,6 +2679,103 @@ lib.mkMerge [
       # none, so OnStartupSec supplies the first. Persistent= is omitted
       # because replaying a missed pass is meaningless -- the next pass
       # re-derives everything from the filesystem.
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ==========================================================================
+  # cargo-reap: idle cargo target/ directories during the day.
+  #
+  # WHY THIS EXISTS. On 2026-10-13 cloudbox's root disk reached 100%. About
+  # 97G was idle cargo target/ directories under ~/projects/{goose-patched*,honk*}
+  # that had not been built in hours. Nothing automatic touches cargo target
+  # directories: the nightly disk-cleanup does not scan ~/projects for them,
+  # and bazel-reap only handles Bazel output bases whose workspace is gone.
+  #
+  # DUAL-TIER PRESSURE REAPING. Like bazel-reap, cargo-reap runs on a 15-minute
+  # timer during the day, but balances hygiene against build interruption:
+  #   - Hygiene tier: idle >= 48h (CARGO_REAP_IDLE_H), reaped at ANY pressure.
+  #   - Pressure tier: idle >= 3h (CARGO_REAP_PRESSURE_IDLE_H), reaped ONLY
+  #     when disk used% >= 80% (CARGO_REAP_PRESSURE_PCT, 5 points below
+  #     disk-watch's 85% warn threshold).
+  #
+  # SAFETY AND FAIL-SAFES:
+  #   1. Process in-use probe: paths_in_use() checks whether any live process
+  #      has the target or a file under it as cwd, exe, or open fd.
+  #   2. Memory-mapped files (rust-analyzer guard): rust-analyzer's proc-macro
+  #      server dlopens .so files from target/debug/deps, keeping them memory
+  #      mapped without holding an open fd. Scanning /proc/<pid>/maps path column
+  #      catches mapped files under target/.
+  #   3. Fail-safe proc probe: if /proc cannot be inspected, keep everything.
+  #   4. Stat error fail-safe: any stat error during idle-age calculation treats
+  #      the target as fresh (keep).
+  #   5. Stage-before-delete: os.rename() moves target into a staging trash dir
+  #      (~/.cache/cargo-reap/trash) on the same filesystem before shutil.rmtree.
+  #      Phase 0 of every pass purges leftovers in trash, so partial deletes are
+  #      retried without reclassification.
+  #   6. Always exits 0: a nonzero exit puts the unit into `failed`, stopping
+  #      subsequent timer passes. Every error degrades to a log line.
+  # ==========================================================================
+  home.file.".local/bin/cargo-reap" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      # NOTE: `set -e` is deliberately absent, for the same reason disk-watch
+      # and bazel-reap omit it. This is a janitor on a 15-minute timer; a non-zero
+      # exit puts the unit into `failed`, a state nobody reads, and stops the
+      # NEXT pass from being scheduled cleanly. Every step degrades to a log line.
+      set -uo pipefail
+
+      PATH="${lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.python3
+      ]}:$PATH"
+
+      # Seams / env vars. Nothing shipped overrides these; the test suite does.
+      export CARGO_REAP_ROOTS="''${CARGO_REAP_ROOTS:-$HOME/projects}"
+      export CARGO_REAP_IDLE_H="''${CARGO_REAP_IDLE_H:-48}"
+      export CARGO_REAP_PRESSURE_IDLE_H="''${CARGO_REAP_PRESSURE_IDLE_H:-3}"
+      export CARGO_REAP_PRESSURE_PCT="''${CARGO_REAP_PRESSURE_PCT:-80}"
+      export CARGO_REAP_MAX="''${CARGO_REAP_MAX:-3}"
+      export CARGO_REAP_TRASH="''${CARGO_REAP_TRASH:-$HOME/.cache/cargo-reap/trash}"
+      export CARGO_REAP_PROC="''${CARGO_REAP_PROC:-/proc}"
+      export CARGO_REAP_DRY_RUN="''${CARGO_REAP_DRY_RUN:-}"
+      export CARGO_REAP_USED_PCT="''${CARGO_REAP_USED_PCT:-}"
+
+      ${pkgs.python3}/bin/python3 - <<'PYEOF'
+      ${cargoReapPy}
+      PYEOF
+      exit 0
+    '';
+  };
+
+  systemd.user.services.cargo-reap = {
+    Unit = {
+      Description = "Reap idle cargo target directories";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/cargo-reap";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [
+        "HOME=%h"
+        "PATH=/run/current-system/sw/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.cargo-reap = {
+    Unit = {
+      Description = "Reap idle cargo target directories timer";
+    };
+    Timer = {
       OnStartupSec = "10min";
       OnUnitActiveSec = "15min";
     };
