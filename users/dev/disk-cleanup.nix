@@ -874,8 +874,23 @@ let
         return inuse
 
     def get_paths_in_use(paths, proc=None):
-        inuse = paths_in_use(paths, proc=proc)
-        inuse.update(mapped_paths_in_use(paths, proc=proc))
+        path_map = {}
+        for p in paths:
+            path_map[p] = p
+            try:
+                real_p = os.path.realpath(p)
+                path_map[real_p] = p
+            except OSError:
+                pass
+
+        query_paths = sorted(path_map.keys())
+        hits = paths_in_use(query_paths, proc=proc)
+        hits.update(mapped_paths_in_use(query_paths, proc=proc))
+
+        inuse = set()
+        for hit in hits:
+            if hit in path_map:
+                inuse.add(path_map[hit])
         return inuse
 
     def is_real_dir(p):
@@ -896,7 +911,7 @@ let
             if not os.path.isfile(tag_path) or os.path.islink(tag_path):
                 return False
             with open(tag_path, "r", errors="replace") as f:
-                content = f.read()
+                content = f.read(1024)
                 return "created by cargo" in content
         except OSError:
             return False
@@ -910,8 +925,6 @@ let
             queue = [(root, 0)]
             while queue:
                 curr_dir, depth = queue.pop(0)
-                if depth >= 4:
-                    continue
                 try:
                     names = sorted(os.listdir(curr_dir))
                 except OSError:
@@ -986,6 +999,30 @@ let
         except OSError:
             return 0
 
+    def make_tree_writable(path):
+        """Ensure path and its non-symlink subdirectories are writable (0o700).
+
+        Never chmods files or follows symlinks, preventing mutation of files
+        outside the tree. Unlinking entries only requires write+search on the
+        parent directory.
+        """
+        try:
+            if not os.path.islink(path) and os.path.isdir(path):
+                try:
+                    os.chmod(path, 0o700)
+                except OSError:
+                    pass
+                for root_dir, dirs, _ in os.walk(path, followlinks=False):
+                    for d in dirs:
+                        dp = os.path.join(root_dir, d)
+                        if not os.path.islink(dp) and os.path.isdir(dp):
+                            try:
+                                os.chmod(dp, 0o700)
+                            except OSError:
+                                pass
+        except OSError:
+            pass
+
     def purge_trash(trash_dir):
         if not os.path.exists(trash_dir):
             return
@@ -1000,17 +1037,7 @@ let
                     os.unlink(staged)
                     log(f"purged leftover {entry}")
                 elif os.path.isdir(staged):
-                    for root_dir, dirs, files in os.walk(staged):
-                        for d in dirs:
-                            try:
-                                os.chmod(os.path.join(root_dir, d), 0o700)
-                            except OSError:
-                                pass
-                        for f in files:
-                            try:
-                                os.chmod(os.path.join(root_dir, f), 0o600)
-                            except OSError:
-                                pass
+                    make_tree_writable(staged)
                     shutil.rmtree(staged)
                     log(f"purged leftover {entry}")
             except OSError as e:
@@ -1110,29 +1137,26 @@ let
             try:
                 os.makedirs(trash_dir, exist_ok=True)
                 sanitized = re.sub(r'[^A-Za-z0-9_.-]', '_', target.lstrip('/'))
-                staged = os.path.join(trash_dir, f"{sanitized}.{os.getpid()}")
+                staged = os.path.join(trash_dir, f"{sanitized}.{os.getpid()}.{time.time_ns()}")
+                # Ensure target root is writable so os.rename across parent dirs succeeds
+                # even if target directory itself was read-only (e.g. 0555).
+                try:
+                    if not os.path.islink(target) and os.path.isdir(target):
+                        os.chmod(target, 0o700)
+                except OSError:
+                    pass
                 os.rename(target, staged)
             except OSError as e:
                 log(f"WARN: could not stage {target} for deletion: {e}")
                 continue
 
             size_mb = dir_size_mb(staged)
-            reaped_count += 1
-            freed_mb_total += size_mb
 
             try:
-                for root_dir, dirs, files in os.walk(staged):
-                    for d in dirs:
-                        try:
-                            os.chmod(os.path.join(root_dir, d), 0o700)
-                        except OSError:
-                            pass
-                    for f in files:
-                        try:
-                            os.chmod(os.path.join(root_dir, f), 0o600)
-                        except OSError:
-                            pass
+                make_tree_writable(staged)
                 shutil.rmtree(staged)
+                reaped_count += 1
+                freed_mb_total += size_mb
                 log(f"reaped {target} ({size_mb} MB, idle {idle_h_now:.1f}h)")
             except OSError as e:
                 log(f"WARN: staged {target} but could not fully delete it ({e}); will retry next pass")
@@ -1144,7 +1168,7 @@ let
     try:
         main()
     except Exception as e:
-        log(f"WARN: unexpected error during cargo reap: {e}")
+        log(f"ERROR: unexpected error during cargo reap: {e}")
   '';
 
   # --------------------------------------------------------------------------

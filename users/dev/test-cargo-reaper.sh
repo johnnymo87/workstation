@@ -17,16 +17,32 @@
 # ASYMMETRY AND FAIL-SAFES:
 #   1. A target in use by cwd, exe, open fd, or /proc/<pid>/maps (rust-analyzer)
 #      must be kept.
-#   2. If /proc cannot be inspected, fail safe: keep everything.
-#   3. Stat errors during idle-age calculation count as fresh (keep).
-#   4. Deletion stages via atomic rename to trash on the same filesystem
+#   2. Realpaths are resolved so candidates reached via symlinked paths match
+#      live /proc state.
+#   3. If /proc cannot be inspected, fail safe: keep everything.
+#   4. Stat errors during idle-age calculation count as fresh (keep).
+#   5. Deletion stages via atomic rename to trash on the same filesystem
 #      before rmtree, so partial deletes can be cleaned up without reclassification.
+#   6. File modes inside targets are never chmodded (unlink needs only directory
+#      write+search), preventing mutation of external files via symlinks.
 
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmpdir="$(mktemp -d)"
-trap 'chmod -R u+w "$tmpdir" 2>/dev/null; rm -rf "$tmpdir"' EXIT
+
+pids=()
+cleanup() {
+  for p in "${pids[@]:-}"; do
+    [ -n "$p" ] || continue
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
+  chmod -R u+w "$tmpdir" 2>/dev/null || true
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
 pass_count=0
 fail_count=0
@@ -101,6 +117,10 @@ test_idle_49h_low_pressure_reaped() {
     "$([ ! -d "$target" ] && echo yes || echo no)"
   check "reports reaped in log" \
     "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
+  check "happy path produces no Traceback" \
+    "$(! grep -q 'Traceback' <<<"$out" && echo yes || echo no)"
+  check "happy path produces no ERROR" \
+    "$(! grep -q 'ERROR:' <<<"$out" && echo yes || echo no)"
 }
 
 test_idle_4h_low_pressure_kept() {
@@ -175,15 +195,23 @@ test_ignores_symlink_target() {
 
 test_keeps_target_in_use_by_cwd() {
   echo "TEST: target in use as process cwd is kept"
-  local root out target sleeper_pid
+  local root out target sleeper_pid i link
   root="$(new_root)"
   target="$root/proj/target"
   make_target "$target" 49
   (cd "$target" && exec sleep 60) &
   sleeper_pid=$!
+  pids+=("$sleeper_pid")
+  for i in $(seq 1 50); do
+    link="$(readlink "/proc/$sleeper_pid/cwd" 2>/dev/null || true)"
+    [ "$link" = "$target" ] && break
+    sleep 0.05
+  done
+
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
   kill "$sleeper_pid" 2>/dev/null || true
   wait "$sleeper_pid" 2>/dev/null || true
+
   check "target in use by process cwd is kept" \
     "$([ -d "$target" ] && echo yes || echo no)"
   check "reports keep in use in log" \
@@ -192,7 +220,7 @@ test_keeps_target_in_use_by_cwd() {
 
 test_keeps_target_in_use_by_mapped_file() {
   echo "TEST: target with file memory-mapped by process is kept (rust-analyzer guard)"
-  local root out target mapped_file mapper_pid
+  local root out target mapped_file mapper_pid ready_file i
   root="$(new_root)"
   target="$root/proj/target"
   make_target "$target" 49
@@ -200,21 +228,103 @@ test_keeps_target_in_use_by_mapped_file() {
   echo "elf-macro-binary" > "$mapped_file"
   find "$target" -depth | while read -r p; do touch -d "49 hours ago" "$p"; done
 
+  ready_file="$tmpdir/map_ready_$$"
   python3 -c '
 import mmap, sys, time
 with open(sys.argv[1], "rb") as f:
     m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    with open(sys.argv[2], "w") as rf:
+        rf.write("ready\n")
     time.sleep(60)
-' "$mapped_file" &
+' "$mapped_file" "$ready_file" &
   mapper_pid=$!
-  sleep 0.1
+  pids+=("$mapper_pid")
+  for i in $(seq 1 50); do
+    [ -f "$ready_file" ] && break
+    sleep 0.05
+  done
+
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
   kill "$mapper_pid" 2>/dev/null || true
   wait "$mapper_pid" 2>/dev/null || true
+
   check "target with file mapped by process is kept" \
     "$([ -d "$target" ] && echo yes || echo no)"
   check "reports keep in use in log" \
     "$(grep -q 'keep .*proj/target.*in use' <<<"$out" && echo yes || echo no)"
+}
+
+test_keeps_target_when_root_symlinked_and_cwd_in_real_target() {
+  echo "TEST: target with symlinked root is kept when process cwd is in real path"
+  local real_root sym_root target real_target sleeper_pid out i link
+  real_root="$(new_root)"
+  sym_root="$tmpdir/sym_root_$$"
+  ln -s "$real_root" "$sym_root"
+  real_target="$real_root/proj/target"
+  make_target "$real_target" 49
+
+  (cd "$real_target" && exec sleep 60) &
+  sleeper_pid=$!
+  pids+=("$sleeper_pid")
+  for i in $(seq 1 50); do
+    link="$(readlink "/proc/$sleeper_pid/cwd" 2>/dev/null || true)"
+    [ "$link" = "$real_target" ] && break
+    sleep 0.05
+  done
+
+  out="$(run_reaper "$sym_root" CARGO_REAP_USED_PCT=50)"
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+
+  check "target with symlinked root is kept when process cwd is in real path" \
+    "$([ -d "$real_target" ] && echo yes || echo no)"
+  check "reports keep in use in log" \
+    "$(grep -q 'keep .*proj/target.*in use' <<<"$out" && echo yes || echo no)"
+}
+
+test_reap_does_not_chmod_or_delete_symlinked_external_file() {
+  echo "TEST: reaping target containing symlink to external file does not chmod or delete it"
+  local root out target ext_file mode
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 0
+  ext_file="$tmpdir/external_file_$$"
+  echo "external payload" > "$ext_file"
+  chmod 0755 "$ext_file"
+  ln -s "$ext_file" "$target/debug/deps/ext_link"
+  find "$target" -depth | while read -r p; do
+    [ -L "$p" ] && continue
+    touch -d "49 hours ago" "$p"
+  done
+
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
+  check "target with external symlink is reaped" \
+    "$([ ! -d "$target" ] && echo yes || echo no)"
+  check "external symlink target file still exists" \
+    "$([ -f "$ext_file" ] && echo yes || echo no)"
+  mode="$(stat -c '%a' "$ext_file" 2>/dev/null || stat -f '%Op' "$ext_file" 2>/dev/null)"
+  check "external symlink target file mode untouched" \
+    "$([ "$mode" = "755" ] && echo yes || echo no)"
+}
+
+test_reaps_readonly_target_and_subdir() {
+  echo "TEST: target dir itself is 0555 with a 0555 subdir is still fully reaped"
+  local root out target sub
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 49
+  sub="$target/readonly_sub"
+  mkdir -p "$sub"
+  echo "sub payload" > "$sub/file"
+  find "$target" -depth | while read -r p; do touch -d "49 hours ago" "$p"; done
+  chmod 0555 "$sub"
+  chmod 0555 "$target"
+
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=50)"
+  check "read-only target dir and subdir are reaped" \
+    "$([ ! -e "$target" ] && echo yes || echo no)"
+  check "reports reaped in log" \
+    "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
 }
 
 test_unreadable_proc_keeps_everything() {
@@ -318,15 +428,18 @@ test_finds_target_under_worktrees() {
 }
 
 test_missing_root_does_not_crash() {
-  echo "TEST: absent root dir exits 0 cleanly"
-  local rc
-  "$script" >/dev/null 2>&1
+  echo "TEST: absent root dir exits 0 cleanly with no Traceback or ERROR"
+  local rc out rc2 out2
+  out="$("$script" 2>&1)"
   rc=$?
-  # Also test explicitly with a non-existent path in CARGO_REAP_ROOTS
-  env CARGO_REAP_ROOTS="$tmpdir/definitely-not-here" "$script" >/dev/null 2>&1
-  local rc2=$?
+  out2="$(env CARGO_REAP_ROOTS="$tmpdir/definitely-not-here" "$script" 2>&1)"
+  rc2=$?
   check "missing root exits 0" \
     "$([ "$rc" = 0 ] && [ "$rc2" = 0 ] && echo yes || echo no)"
+  check "missing root produces no Traceback" \
+    "$(! grep -q 'Traceback' <<<"$out$out2" && echo yes || echo no)"
+  check "missing root produces no ERROR" \
+    "$(! grep -q 'ERROR:' <<<"$out$out2" && echo yes || echo no)"
 }
 
 # ---------------------------------------------------------------------------
@@ -340,6 +453,9 @@ test_ignores_missing_or_non_cargo_tag
 test_ignores_symlink_target
 test_keeps_target_in_use_by_cwd
 test_keeps_target_in_use_by_mapped_file
+test_keeps_target_when_root_symlinked_and_cwd_in_real_target
+test_reap_does_not_chmod_or_delete_symlinked_external_file
+test_reaps_readonly_target_and_subdir
 test_unreadable_proc_keeps_everything
 test_rate_limit_and_oldest_first
 test_dry_run_deletes_nothing
