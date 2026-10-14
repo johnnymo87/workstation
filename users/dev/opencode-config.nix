@@ -810,6 +810,11 @@ let
       effort = "high";
       cost = { input = 2; output = 10; cache_read = 0.1; cache_write = 2.5; };
     };
+    "gpt-6-luna" = mkCodexLbModel {
+      name = "GPT-6 Luna";
+      effort = "low";
+      cost = { input = 0.1; output = 0.5; cache_read = 0.01; cache_write = 0.125; };
+    };
     "gpt-5.6-sol" = mkCodexLbModel {
       name = "GPT-5.6 Sol";
       effort = "high";
