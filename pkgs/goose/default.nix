@@ -30,6 +30,18 @@
 #      `Acp-Stream-Features: takeover, replay` response header and only change
 #      behaviour for a client that sends those headers; the honk relay
 #      (johnnymo87/honk) depends on them. The WebSocket transport is unchanged.
+#   7. A restored session keeps its stored prompt-cache TTL unless
+#      GOOSE_CACHE_TTL is set globally (upstream re-derived it from global
+#      config on every restore, so a session pinned to 1h fell back to 5m).
+#   8. ACP `_goose/unstable/session/settings/set {sessionId, cacheTtl?, recipe?}`
+#      pins a session's cache TTL and recipe (instructions + final_output),
+#      live and persisted; validated before anything changes; idempotent.
+#   9. ACP session/prompt `_meta.goose.maxTurns` bounds that run's agent loop
+#      (ACP otherwise always uses the global limit, default 1000).
+#   7-9 let a timer-driven coordinator run its standing recipe sessions through
+#   goose-serve (via honk) the way `goose run --recipe --resume` did. 8 and 9
+#   change nothing for a client that does not send them; 7 only matters for a
+#   session that stores a TTL (all such rows today are 1h coordinator sessions).
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -41,6 +53,8 @@
 # 1.48.0 and 1.54.0, so this particular bump needs no migration.
 # patched-1.54.0.3 (2026-10-12) is the same v1.54.0 base with patches 4-6 added;
 # the three pigeon probes passed against it on an isolated serve (2026-10-11).
+# patched-1.54.0.4 (2026-10-13) adds patches 7-9 on the same base (fork PR
+# johnnymo87/goose#2); no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -53,8 +67,8 @@
 }:
 
 let
-  version = "1.54.0-patched.3";
-  tag = "patched-1.54.0.3";
+  version = "1.54.0-patched.4";
+  tag = "patched-1.54.0.4";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -66,11 +80,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-cvVJUE5GZ43KVSIuSB0pgPE8LvUTYsIMEKsQ/6fKyKA=";
+      hash = "sha256-Pb6ZCw+DJi8I3tmScSdRunUoPwfykvsRuZQ3f7L6KKM=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-LLcY6vQd4R8mhsf8yUk7vfIwfBM6VmZfOBhokgOC590=";
+      hash = "sha256-+qCZkbiMdx4FsYkrpb4/1bWdlp5Tb+0ROYcAWZDUfZU=";
     };
   };
 
