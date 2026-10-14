@@ -882,23 +882,45 @@
       bazel-reaper-tests = devboxPkgs.runCommand "bazel-reaper-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
-          devboxPkgs.findutils
+          devboxPkgs.findutils devboxPkgs.python3
         ];
         BAZEL_REAP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/bazel-reap".source;
       } ''
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
-        grep -q '^=== 23 passed, 0 failed ===' "$TMPDIR/br.txt" || {
-          echo "GATE FAILURE: bazel-reap suite did not reach its 23/0 tally." >&2
+        grep -q '^=== 59 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 59/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as its neighbours: the tally is printed by the
         # suite, so a suite gutted to three assertions still prints a truthful
         # "3 passed, 0 failed". The count is what makes deletion visible.
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 23 ] || {
-          echo "GATE FAILURE: expected 23 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 59 ] || {
+          echo "GATE FAILURE: expected 59 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      cargo-reaper-tests = devboxPkgs.runCommand "cargo-reaper-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+          devboxPkgs.findutils devboxPkgs.python3
+        ];
+        CARGO_REAP_SRC = self.homeConfigurations.cloudbox.config.home.file.".local/bin/cargo-reap".source;
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-cargo-reaper.sh 2>&1 | tee "$TMPDIR/cr.txt"
+        grep -q '^=== 51 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
+          echo "GATE FAILURE: cargo-reap suite did not reach its 51/0 tally." >&2
+          exit 1
+        }
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 51 ] || {
+          echo "GATE FAILURE: expected 51 'PASS' lines, got" \
+               "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")." >&2
           exit 1
         }
         touch $out

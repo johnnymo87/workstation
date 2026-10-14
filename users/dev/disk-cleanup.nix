@@ -126,7 +126,7 @@ let
   sessionOwnsPy = ''
     SESSION_ACTIVE_DAYS = 7
 
-    def session_owns(p, db_path, missing="free"):
+    def session_owns(p, db_path, missing="free", active_seconds=None):
         """'session' | 'free' | 'unknown'. Only 'free' permits removal.
 
         `missing` is what a db file that does not exist counts as.
@@ -138,7 +138,9 @@ let
             candidates.add(os.path.realpath(p))
         except OSError:
             pass
-        cutoff_ms = int((time.time() - SESSION_ACTIVE_DAYS * 86400) * 1000)
+        if active_seconds is None:
+            active_seconds = SESSION_ACTIVE_DAYS * 86400
+        cutoff_ms = int((time.time() - active_seconds) * 1000)
         try:
             # Read-only URI: a concurrent serve is writing this database and
             # must never be disturbed by a cleanup probe.
@@ -838,6 +840,356 @@ let
   venvSweepAgeDays = 3;
   venvSweepMinMb = 50;
   venvSweepShellAgeDays = 2;
+
+  # ==========================================================================
+  # cargoReapPy: daytime reaping of idle cargo target/ directories.
+  # Reuses pathsInUsePy for /proc process in-use checks, and adds /proc/<pid>/maps
+  # scanning for memory-mapped files (rust-analyzer proc-macro server dlopens).
+  # Reuses sessionOwnsPy for opencode session activity checks under pressure.
+  # ==========================================================================
+  cargoReapPy = ''
+    import fnmatch, math, os, re, shutil, sqlite3, stat, sys, time
+
+    ${pathsInUsePy}
+
+    ${sessionOwnsPy}
+
+    def log(msg):
+        print(f"[cargo-reap] {msg}", flush=True)
+
+    def mapped_paths_in_use(paths, proc=None):
+        proc = proc or "/proc"
+        paths = [p.rstrip("/") or "/" for p in paths]
+        inuse = set()
+        for pid in os.listdir(proc):
+            if not pid.isdigit():
+                continue
+            maps_file = os.path.join(proc, pid, "maps")
+            try:
+                with open(maps_file, "r", errors="replace") as f:
+                    for line in f:
+                        parts = line.split(maxsplit=5)
+                        if len(parts) >= 6:
+                            mapped = parts[5].strip()
+                            for p in paths:
+                                if mapped == p or mapped.startswith(p + "/"):
+                                    inuse.add(p)
+            except OSError:
+                continue
+        return inuse
+
+    def get_paths_in_use(paths, proc=None):
+        path_map = {}
+        for p in paths:
+            path_map[p] = p
+            try:
+                real_p = os.path.realpath(p)
+                path_map[real_p] = p
+            except OSError:
+                pass
+
+        query_paths = sorted(path_map.keys())
+        hits = paths_in_use(query_paths, proc=proc)
+        hits.update(mapped_paths_in_use(query_paths, proc=proc))
+
+        inuse = set()
+        for hit in hits:
+            if hit in path_map:
+                inuse.add(path_map[hit])
+        return inuse
+
+    def is_real_dir(p):
+        try:
+            st = os.lstat(p)
+            return stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+        except OSError:
+            return False
+
+    def is_candidate_target(p, uid):
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+                return False
+            if st.st_uid != uid:
+                return False
+            tag_path = os.path.join(p, "CACHEDIR.TAG")
+            if not os.path.isfile(tag_path) or os.path.islink(tag_path):
+                return False
+            with open(tag_path, "r", errors="replace") as f:
+                content = f.read(1024)
+                return "created by cargo" in content
+        except OSError:
+            return False
+
+    def find_targets(roots, uid):
+        candidates = []
+        for root in roots:
+            root = os.path.normpath(root)
+            if not os.path.isdir(root):
+                continue
+            queue = [(root, 0)]
+            while queue:
+                curr_dir, depth = queue.pop(0)
+                try:
+                    names = sorted(os.listdir(curr_dir))
+                except OSError:
+                    continue
+                for name in names:
+                    subpath = os.path.join(curr_dir, name)
+                    if name == "target":
+                        if is_candidate_target(subpath, uid):
+                            candidates.append(subpath)
+                        continue
+                    if name in (".git", "node_modules"):
+                        continue
+                    if depth + 1 < 4 and is_real_dir(subpath):
+                        queue.append((subpath, depth + 1))
+        return candidates
+
+    def get_idle_seconds(target, now):
+        try:
+            st = os.lstat(target)
+            newest = st.st_mtime
+            for name1 in os.listdir(target):
+                p1 = os.path.join(target, name1)
+                st1 = os.lstat(p1)
+                if stat.S_ISLNK(st1.st_mode):
+                    continue
+                if stat.S_ISREG(st1.st_mode):
+                    newest = max(newest, st1.st_mtime)
+                elif stat.S_ISDIR(st1.st_mode):
+                    newest = max(newest, st1.st_mtime)
+                    for name2 in os.listdir(p1):
+                        p2 = os.path.join(p1, name2)
+                        st2 = os.lstat(p2)
+                        if stat.S_ISDIR(st2.st_mode) and not stat.S_ISLNK(st2.st_mode):
+                            newest = max(newest, st2.st_mtime)
+                            for name3 in os.listdir(p2):
+                                p3 = os.path.join(p2, name3)
+                                st3 = os.lstat(p3)
+                                if stat.S_ISDIR(st3.st_mode) and not stat.S_ISLNK(st3.st_mode):
+                                    newest = max(newest, st3.st_mtime)
+            return max(0.0, now - newest)
+        except OSError:
+            return 0.0
+
+    def dir_size_mb(path):
+        total = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(path):
+                for name in filenames + dirnames:
+                    try:
+                        st = os.lstat(os.path.join(dirpath, name))
+                        total += getattr(st, "st_blocks", 0) * 512
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total // (1024 * 1024)
+
+    def get_used_pct():
+        override = os.environ.get("CARGO_REAP_USED_PCT")
+        if override is not None and override != "":
+            try:
+                return int(override)
+            except ValueError:
+                pass
+        try:
+            st = os.statvfs("/")
+            used_blocks = st.f_blocks - st.f_bfree
+            total_blocks = used_blocks + st.f_bavail
+            if total_blocks <= 0:
+                return 0
+            return int(math.ceil(100.0 * used_blocks / total_blocks))
+        except OSError:
+            return 0
+
+    def make_tree_writable(path):
+        """Ensure path and its non-symlink subdirectories are writable (0o700).
+
+        Never chmods files or follows symlinks, preventing mutation of files
+        outside the tree. Unlinking entries only requires write+search on the
+        parent directory.
+        """
+        try:
+            if not os.path.islink(path) and os.path.isdir(path):
+                try:
+                    os.chmod(path, 0o700)
+                except OSError:
+                    pass
+                for root_dir, dirs, _ in os.walk(path, followlinks=False):
+                    for d in dirs:
+                        dp = os.path.join(root_dir, d)
+                        if not os.path.islink(dp) and os.path.isdir(dp):
+                            try:
+                                os.chmod(dp, 0o700)
+                            except OSError:
+                                pass
+        except OSError:
+            pass
+
+    def purge_trash(trash_dir):
+        if not os.path.exists(trash_dir):
+            return
+        try:
+            entries = sorted(os.listdir(trash_dir))
+        except OSError:
+            return
+        for entry in entries:
+            staged = os.path.join(trash_dir, entry)
+            try:
+                if os.path.islink(staged) or os.path.isfile(staged):
+                    os.unlink(staged)
+                    log(f"purged leftover {entry}")
+                elif os.path.isdir(staged):
+                    make_tree_writable(staged)
+                    shutil.rmtree(staged)
+                    log(f"purged leftover {entry}")
+            except OSError as e:
+                log(f"WARN: could not purge leftover {entry}: {e}")
+
+    def main():
+        roots_env = os.environ.get("CARGO_REAP_ROOTS")
+        if roots_env is not None and roots_env.strip() != "":
+            roots = [r.rstrip("/") or "/" for r in roots_env.split()]
+        else:
+            roots = [os.path.expanduser("~/projects")]
+
+        idle_h_threshold = float(os.environ.get("CARGO_REAP_IDLE_H", 168))
+        pressure_idle_h_threshold = float(os.environ.get("CARGO_REAP_PRESSURE_IDLE_H", 3))
+        pressure_pct = float(os.environ.get("CARGO_REAP_PRESSURE_PCT", 80))
+        max_per_pass = int(os.environ.get("CARGO_REAP_MAX", 3))
+        trash_dir = os.environ.get("CARGO_REAP_TRASH") or os.path.expanduser("~/.cache/cargo-reap/trash")
+        proc_dir = os.environ.get("CARGO_REAP_PROC") or "/proc"
+        session_db = os.environ.get("CARGO_REAP_SESSION_DB") or os.path.expanduser("~/.local/share/opencode/opencode.db")
+        dry_run = bool(os.environ.get("CARGO_REAP_DRY_RUN"))
+
+        # Phase 0: purge leftovers in trash
+        purge_trash(trash_dir)
+
+        now = time.time()
+        uid = os.getuid()
+        used_pct = get_used_pct()
+        under_pressure = (used_pct >= pressure_pct)
+
+        # Discovery
+        candidates = find_targets(roots, uid)
+        if not candidates:
+            return
+
+        # In-use probe
+        try:
+            in_use_set = get_paths_in_use(candidates, proc=proc_dir)
+        except OSError as e:
+            log(f"probe error reading /proc ({e}); keeping all targets")
+            for c in candidates:
+                log(f"keep {c} (error reading /proc)")
+            return
+
+        reapable = []
+        for target in candidates:
+            if target in in_use_set:
+                log(f"keep {target} (in use by live process)")
+                continue
+
+            idle_sec = get_idle_seconds(target, now)
+            idle_h = idle_sec / 3600.0
+
+            if idle_h >= idle_h_threshold:
+                reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {idle_h_threshold:.0f}h"))
+            elif under_pressure and idle_h >= pressure_idle_h_threshold:
+                ws = os.path.dirname(target)
+                active_sec = pressure_idle_h_threshold * 3600
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                if verdict in ("session", "unknown"):
+                    log(f"keep {target} (opencode session active in {ws} within {int(pressure_idle_h_threshold)}h)")
+                    continue
+                reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%"))
+            else:
+                if under_pressure:
+                    log(f"keep {target} (idle {idle_h:.1f}h < {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%)")
+                else:
+                    log(f"keep {target} (idle {idle_h:.1f}h < {idle_h_threshold:.0f}h, low pressure {used_pct}%)")
+
+        reapable.sort(key=lambda item: item[1], reverse=True)
+
+        reaped_count = 0
+        freed_mb_total = 0
+
+        for target, idle_sec, idle_h, reason in reapable:
+            if reaped_count >= max_per_pass:
+                log(f"rate limit reached ({max_per_pass} this pass); {target} waits for the next one")
+                break
+
+            if not os.path.exists(target):
+                continue
+
+            try:
+                if get_paths_in_use([target], proc=proc_dir):
+                    log(f"keep {target} (became in use before action)")
+                    continue
+            except OSError as e:
+                log(f"keep {target} (probe error reading /proc before action: {e})")
+                continue
+
+            idle_now = get_idle_seconds(target, time.time())
+            idle_h_now = idle_now / 3600.0
+            recheck_ok = (idle_h_now >= idle_h_threshold) or (under_pressure and idle_h_now >= pressure_idle_h_threshold)
+            if not recheck_ok:
+                log(f"keep {target} (activity detected before action)")
+                continue
+
+            if "under pressure" in reason:
+                ws = os.path.dirname(target)
+                active_sec = pressure_idle_h_threshold * 3600
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                if verdict in ("session", "unknown"):
+                    log(f"keep {target} (opencode session became active before action: {ws})")
+                    continue
+
+            if dry_run:
+                size_mb = dir_size_mb(target)
+                log(f"would reap {target} ({size_mb} MB, idle {idle_h_now:.1f}h)")
+                reaped_count += 1
+                freed_mb_total += size_mb
+                continue
+
+            try:
+                os.makedirs(trash_dir, exist_ok=True)
+                sanitized = re.sub(r'[^A-Za-z0-9_.-]', '_', target.lstrip('/'))
+                staged = os.path.join(trash_dir, f"{sanitized}.{os.getpid()}.{time.time_ns()}")
+                # Ensure target root is writable so os.rename across parent dirs succeeds
+                # even if target directory itself was read-only (e.g. 0555).
+                try:
+                    if not os.path.islink(target) and os.path.isdir(target):
+                        os.chmod(target, 0o700)
+                except OSError:
+                    pass
+                os.rename(target, staged)
+            except OSError as e:
+                log(f"WARN: could not stage {target} for deletion: {e}")
+                continue
+
+            size_mb = dir_size_mb(staged)
+
+            try:
+                make_tree_writable(staged)
+                shutil.rmtree(staged)
+                reaped_count += 1
+                freed_mb_total += size_mb
+                log(f"reaped {target} ({size_mb} MB, idle {idle_h_now:.1f}h)")
+            except OSError as e:
+                log(f"WARN: staged {target} but could not fully delete it ({e}); will retry next pass")
+
+        if reaped_count > 0:
+            verb = "would free" if dry_run else "freed"
+            log(f"{reaped_count} target(s), {verb} {freed_mb_total} MB")
+
+    try:
+        main()
+    except Exception as e:
+        log(f"ERROR: unexpected error during cargo reap: {e}")
+  '';
 
   # --------------------------------------------------------------------------
   # disk-watch, the alarm BETWEEN cleanups -- ONE implementation, instantiated
@@ -2092,6 +2444,23 @@ lib.mkMerge [
   # recorded the correct read on 09-16 ("6 of 8 bases belong to LIVE
   # worktrees... reaping is hygiene") and the reversal should not have happened.
   #
+  # 2026-10-13 AMENDMENT: THE PRESSURE TIER AS A DISK LEVER.
+  # The "hygiene, not a disk lever" claim above held for ORPHANS. On 2026-10-13,
+  # cloudbox's root disk reached 100% full, and Bazel held ~67G of idle
+  # live-workspace bases across 20 output bases with dead servers. The pressure
+  # tier added below is the disk lever, gated at root used >= 80% (5 points
+  # below disk-watch's 85% alarm, so it acts before paging a human).
+  #
+  # The invariant is preserved and restated: everything reaped is still
+  # something the nightly would reap (the nightly requires only a dead server).
+  # bazel-reap never deletes something the nightly keeps; it only deletes it
+  # earlier, and only under disk pressure.
+  #
+  # Note the deliberate trade-off: a cold rebuild of a live worktree idle >= 3h
+  # (or >= 30m for lgtm-pr-* workspaces). Bazel servers idle out after 300s, so
+  # server liveness alone cannot protect an in-progress session; command.log
+  # idle age is the signal.
+  #
   # For scale, on 2026-09-21 with the box at 87%: all of bazel is 13 GB of the
   # 327 GB in use (~/.cache/bazel 11G, ~/bazel-cache 1.7G). The drivers are
   # elsewhere -- ~/projects 90G, /var 75G, /nix 48G, /tmp 41G. Anyone arriving
@@ -2111,12 +2480,15 @@ lib.mkMerge [
   # orphan rate anyone has. If that rate is ever observed to be ~0 for a month,
   # delete this whole block rather than tuning it.
   #
-  # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's test
-  # is a STRICT SUBSET of the nightly's: it requires the recorded workspace to
-  # be GONE *and* the server to be dead, where the nightly requires only the
-  # latter. Every base this removes is one the nightly would also have removed,
-  # just sooner. There is no case where bazel-reap deletes something
-  # disk-cleanup would have kept.
+  # WHY THIS IS SAFE TO RUN HOURLY WHEN THE NIGHTLY IS NOT. This reaper's
+  # deletion criteria are a STRICT SUBSET of the nightly's: outside pressure
+  # it requires the recorded workspace to be GONE *and* the server to be dead;
+  # under disk pressure (used >= 80%) it also reaps live-workspace bases whose
+  # server is dead and whose command.log has been idle for >= 3h (or >= 30m for
+  # lgtm-pr-*). Both tiers require a dead server, whereas the nightly requires
+  # only a dead server unconditionally. Every base this removes is one the
+  # nightly would also have removed, just sooner. There is no case where
+  # bazel-reap deletes something disk-cleanup would have kept.
   #
   # CONSERVATISM IS FREE HERE, which is the property that shapes the whole
   # script. Anything ambiguous -- no marker, unreadable marker, probe failure,
@@ -2154,24 +2526,32 @@ lib.mkMerge [
   #      deleting" -- it achieves the same thing without a sidecar file that
   #      could itself be lost.
   #
-  #   3. A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF ITS SERVER IS DEAD,
-  #      which is the whole reason the marker is consulted at all. Bazel
-  #      servers idle out after max_idle_secs, which home.base.nix sets to 300
-  #      on cloudbox (5 minutes), so a worktree someone is actively working
-  #      in has no server for most of its life. The single live base on the box at the
-  #      time of writing was exactly that: workspace present, no server pid --
-  #      the nightly would delete it at 03:00 and this reaper will not.
+  #   3. OUTSIDE PRESSURE, A BASE WITH A LIVE WORKSPACE IS NOT REAPED EVEN IF
+  #      ITS SERVER IS DEAD; UNDER PRESSURE, IT IS REAPED ONLY WHEN IDLE.
+  #      Bazel servers idle out after max_idle_secs, which home.base.nix sets
+  #      to 300 on cloudbox (5 minutes), so a worktree someone is actively
+  #      working in has no server for most of its life. Outside pressure,
+  #      workspace existence unconditionally pins the base. Under pressure
+  #      (root used >= 80%), server liveness alone cannot protect active work,
+  #      so command.log idle age (>= 30m for lgtm-pr-*, >= 3h otherwise) is
+  #      required before reaping.
   #
-  # WHY NO GUARD 4 (the opencode session table) HERE, since the bead asks for
-  # it and its absence would otherwise look like an oversight. GUARD 4 exists
-  # because a live opencode session holds NO /proc handle in its worktree, so
-  # /proc-based liveness would delete a live session's directory. This reaper
-  # never decides whether a worktree is alive -- it asks only whether the
-  # directory EXISTS. A session whose directory still exists protects its base
-  # through that existence alone, and a session whose directory is already gone
-  # is already dead by the time we look (see the
-  # reviving-worktree-orphaned-sessions skill). The existence test subsumes the
-  # session table rather than ignoring it.
+  # WHY NO GUARD 4 (the opencode session table) ON THE ORPHAN PATH, and why
+  # the pressure tier DOES consult it (and /proc).
+  # For orphans, GUARD 4 is unnecessary because a live opencode session holds
+  # NO /proc handle in its worktree, but its worktree directory EXISTS. A session
+  # whose directory was already deleted is already dead (see
+  # reviving-worktree-orphaned-sessions). So workspace existence subsumes the
+  # session table on the orphan path.
+  #
+  # FOR THE PRESSURE TIER, THE WORKSPACE STILL EXISTS. Existence no longer
+  # protects it. Bazel servers idle out after 300s, so an agent actively editing
+  # code or planning a next step in a worktree often has no running bazel server.
+  # To avoid destroying the output base under an active session, the pressure tier
+  # explicitly checks opencode's session table (sessionOwnsPy) to protect any
+  # workspace updated within the idle window (3h, or 30m for lgtm-pr-*), and
+  # runs pathsInUsePy (/proc probe) immediately before renaming to protect any
+  # in-flight compiler or build processes inside the base.
   home.file.".local/bin/bazel-reap" = {
     executable = true;
     text = ''
@@ -2182,7 +2562,7 @@ lib.mkMerge [
       # from being scheduled cleanly. Every step degrades to a log line.
       set -uo pipefail
 
-      PATH="${lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
+      PATH="''${BAZEL_REAP_PATH_PREFIX:+$BAZEL_REAP_PATH_PREFIX:}${lib.makeBinPath [ pkgs.coreutils ]}:$PATH"
 
       # Seams. Nothing shipped overrides these; the suite does.
       BASE="''${BAZEL_REAP_BASE:-$HOME/.cache/bazel/_bazel_$(whoami)}"
@@ -2196,6 +2576,34 @@ lib.mkMerge [
       # headroom, far above the observed fill rate, while never monopolising
       # the disk. Anything over the limit is simply left for the next pass.
       MAX_PER_PASS="''${BAZEL_REAP_MAX:-4}"
+
+      # Pressure thresholds and seams. Pressure tier reaps live workspaces idle
+      # >= IDLE_MIN (or LGTM_IDLE_MIN for lgtm-pr-*) when root disk used% >= PRESSURE_PCT.
+      PRESSURE_PCT="''${BAZEL_REAP_PRESSURE_PCT:-80}"
+      case "$PRESSURE_PCT" in ""|*[!0-9]*) PRESSURE_PCT=80 ;; esac
+
+      LGTM_IDLE_MIN="''${BAZEL_REAP_LGTM_IDLE_MIN:-30}"
+      case "$LGTM_IDLE_MIN" in ""|*[!0-9]*) LGTM_IDLE_MIN=30 ;; esac
+
+      IDLE_MIN="''${BAZEL_REAP_IDLE_MIN:-180}"
+      case "$IDLE_MIN" in ""|*[!0-9]*) IDLE_MIN=180 ;; esac
+
+      used_pct="''${BAZEL_REAP_USED_PCT:-}"
+      if [ -n "$used_pct" ]; then
+        used_pct="''${used_pct%%%}"
+      else
+        used_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9' || true)
+      fi
+
+      under_pressure=0
+      case "$used_pct" in
+        ""|*[!0-9]*) under_pressure=0 ;;
+        *)
+          if [ "$used_pct" -ge "$PRESSURE_PCT" ]; then
+            under_pressure=1
+          fi
+          ;;
+      esac
 
       # Staging prefix. NOT dot-prefixed: see the header. Must not collide with
       # a bazel md5 base name, which is 32 hex characters.
@@ -2230,6 +2638,9 @@ lib.mkMerge [
         fi
       done
 
+      orphan_candidates=()
+      pressure_candidates=()
+
       # --- 2. Classify each output base. -----------------------------------
       for entry in "$BASE"/*; do
         [ -d "$entry" ] || continue
@@ -2260,47 +2671,121 @@ lib.mkMerge [
           continue
         fi
 
-        # THE FIRST HALF OF THE ORPHAN TEST. Existence, not liveness -- see the
-        # header on why that is deliberate and why it subsumes GUARD 4. A
-        # worktree deleted and recreated at the same path reads as live and is
-        # kept, which is the safe direction.
-        if [ -e "$workspace" ]; then
-          log "keep $name (workspace live: $workspace)"
-          continue
-        fi
-
-        # THE SECOND HALF. A live server pins the base regardless of what
-        # happened to the directory. PID reuse can only cause a false
-        # "alive" here, which over-keeps.
         pid_file="$entry/server/server.pid.txt"
-        if [ -f "$pid_file" ]; then
-          server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
-          if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
-            log "keep $name (server pid $server_pid alive despite missing workspace)"
+
+        if [ ! -e "$workspace" ]; then
+          # --- ORPHAN CANDIDATE ---
+          # Workspace is gone. A live server pins the base regardless of what
+          # happened to the directory. PID reuse can only cause a false
+          # "alive" here, which over-keeps.
+          if [ -f "$pid_file" ]; then
+            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              log "keep $name (server pid $server_pid alive despite missing workspace)"
+              continue
+            fi
+          fi
+          orphan_candidates+=("$name|$workspace|$entry")
+        else
+          # --- WORKSPACE EXISTS ---
+          # Low pressure: keep all bases whose workspace is live.
+          if [ "$under_pressure" -eq 0 ]; then
+            log "keep $name (workspace live: $workspace)"
             continue
           fi
-        fi
 
-        # --- orphan ---
+          # High pressure tier: reap if server is dead, command.log exists,
+          # stat succeeds, and idle age >= threshold (30m for lgtm-pr-*, 180m otherwise).
+          if [ -f "$pid_file" ]; then
+            server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+              log "keep $name (server pid $server_pid alive: $workspace)"
+              continue
+            fi
+          fi
+
+          cmd_log="$entry/command.log"
+          if [ ! -f "$cmd_log" ]; then
+            log "keep $name (missing command.log: $workspace)"
+            continue
+          fi
+
+          mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || true)
+          case "$mtime" in
+            ""|*[!0-9]*)
+              log "keep $name (could not stat command.log: $workspace)"
+              continue
+              ;;
+          esac
+
+          ws_base=$(basename "$workspace")
+          case "$ws_base" in
+            lgtm-pr-*) req_idle_min="$LGTM_IDLE_MIN" ;;
+            *) req_idle_min="$IDLE_MIN" ;;
+          esac
+
+          now=$(date +%s)
+          idle_sec=$((now - mtime))
+          [ "$idle_sec" -lt 0 ] && idle_sec=0
+          idle_min=$((idle_sec / 60))
+
+          if [ "$idle_min" -lt "$req_idle_min" ]; then
+            log "keep $name (idle ''${idle_min}m < ''${req_idle_min}m under pressure ''${used_pct}%: $workspace)"
+            continue
+          fi
+
+          # Session guard: keep if opencode session updated workspace within window
+          session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+          session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
+import os, sqlite3, sys, time
+
+${sessionOwnsPy}
+
+ws = sys.argv[1]
+db = sys.argv[2]
+active_sec = float(sys.argv[3])
+print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+PYEOF
+)
+          case "$session_verdict" in
+            session|unknown)
+              if [ "$req_idle_min" -ge 60 ]; then
+                window_desc="$((req_idle_min / 60))h"
+              else
+                window_desc="''${req_idle_min}m"
+              fi
+              log "keep $name (opencode session active in $workspace within $window_desc)"
+              continue
+              ;;
+          esac
+
+          pressure_candidates+=("$idle_sec|$name|$workspace|$entry|$req_idle_min")
+        fi
+      done
+
+      # --- 3. Drain orphans up to MAX_PER_PASS. ----------------------------
+      # Orphans take priority over pressure reaps under the shared limit.
+      for item in "''${orphan_candidates[@]:-}"; do
+        [ -n "$item" ] || continue
+        IFS='|' read -r name workspace entry <<<"$item"
+
         if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
           log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
           break
         fi
 
+        reap_desc="workspace gone: $workspace"
+
         if [ -n "$DRY_RUN" ]; then
           size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
           case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
-          log "would reap $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          log "would reap $name ($((size_kb / 1024)) MB, $reap_desc)"
           reaped=$((reaped + 1))
           freed_kb=$((freed_kb + size_kb))
           continue
         fi
 
-        # Re-check immediately before the rename, with NOTHING slow in
-        # between -- the measurement moved below the rename precisely so this
-        # window is microseconds rather than however long `du` takes on 3 GB of
-        # small files. Closing it entirely would need a lock; the loss if we do
-        # race is a cold rebuild, not anyone's work.
+        # Pre-rename re-check for orphans
         if [ -e "$workspace" ]; then
           log "keep $name (workspace reappeared during scan: $workspace)"
           continue
@@ -2312,15 +2797,153 @@ lib.mkMerge [
           continue
         fi
 
-        # Past this point the base is gone from Bazel's view and the tree is
-        # unambiguously garbage, so a failure here is a retry, not a puzzle --
-        # and measuring it here rather than before the rename costs nothing
-        # while removing the race above.
         reaped=$((reaped + 1))
         size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
         case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
         if purge_tree "$staged"; then
-          log "reaped $name ($((size_kb / 1024)) MB, workspace gone: $workspace)"
+          log "reaped $name ($((size_kb / 1024)) MB, $reap_desc)"
+          freed_kb=$((freed_kb + size_kb))
+        else
+          log "WARN: staged $name but could not fully delete it; will retry next pass"
+        fi
+      done
+
+      # --- 4. Drain pressure candidates (oldest first) with remaining quota.
+      sorted_pressure=()
+      if [ "''${#pressure_candidates[@]}" -gt 0 ]; then
+        while IFS= read -r line; do
+          [ -n "$line" ] && sorted_pressure+=("$line")
+        done < <(printf '%s\n' "''${pressure_candidates[@]}" | sort -t '|' -k1,1nr)
+      fi
+
+      for item in "''${sorted_pressure[@]:-}"; do
+        [ -n "$item" ] || continue
+        IFS='|' read -r idle_sec name workspace entry req_idle_min <<<"$item"
+
+        if [ "$reaped" -ge "$MAX_PER_PASS" ]; then
+          log "rate limit reached ($MAX_PER_PASS this pass); $name waits for the next one"
+          break
+        fi
+
+        idle_min=$((idle_sec / 60))
+        if [ "$idle_min" -ge 60 ]; then
+          idle_desc="$((idle_min / 60))h"
+        else
+          idle_desc="''${idle_min}m"
+        fi
+        reap_desc="idle $idle_desc under pressure ''${used_pct}%: $workspace"
+
+        if [ -n "$DRY_RUN" ]; then
+          size_kb=$(du -sk "$entry" 2>/dev/null | cut -f1)
+          case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+          log "would reap $name ($((size_kb / 1024)) MB, $reap_desc)"
+          reaped=$((reaped + 1))
+          freed_kb=$((freed_kb + size_kb))
+          continue
+        fi
+
+        # Pre-rename re-check for pressure candidates
+        pid_file="$entry/server/server.pid.txt"
+        if [ -f "$pid_file" ]; then
+          server_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+          if [ -n "$server_pid" ] && kill -0 "$server_pid" 2>/dev/null; then
+            log "keep $name (server pid $server_pid became active before action)"
+            continue
+          fi
+        fi
+
+        cmd_log="$entry/command.log"
+        if [ ! -f "$cmd_log" ]; then
+          log "keep $name (command.log vanished before action: $workspace)"
+          continue
+        fi
+
+        mtime=$(stat -c %Y "$cmd_log" 2>/dev/null || true)
+        case "$mtime" in
+          ""|*[!0-9]*)
+            log "keep $name (could not stat command.log before action: $workspace)"
+            continue
+            ;;
+        esac
+
+        now=$(date +%s)
+        idle_sec=$((now - mtime))
+        [ "$idle_sec" -lt 0 ] && idle_sec=0
+        idle_min=$((idle_sec / 60))
+        if [ "$idle_min" -lt "$req_idle_min" ]; then
+          log "keep $name (became active before action: $workspace)"
+          continue
+        fi
+
+        # Session guard re-check before action
+        session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+        session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
+import os, sqlite3, sys, time
+
+${sessionOwnsPy}
+
+ws = sys.argv[1]
+db = sys.argv[2]
+active_sec = float(sys.argv[3])
+print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+PYEOF
+)
+        case "$session_verdict" in
+          session|unknown)
+            log "keep $name (opencode session became active before action: $workspace)"
+            continue
+            ;;
+        esac
+
+        # /proc probe immediately before rename
+        proc_dir="''${BAZEL_REAP_PROC:-/proc}"
+        in_use_verdict=$(${pkgs.python3}/bin/python3 - "$proc_dir" "$entry" <<'PYEOF'
+import os, sys
+
+${pathsInUsePy}
+
+proc = sys.argv[1]
+entry = sys.argv[2]
+paths = [entry]
+try:
+    paths.append(os.path.realpath(entry))
+except OSError:
+    pass
+
+try:
+    in_use = paths_in_use(paths, proc=proc)
+    if in_use:
+        print("in_use")
+    else:
+        print("free")
+except Exception:
+    print("error")
+PYEOF
+)
+        case "$in_use_verdict" in
+          in_use)
+            log "keep $name (in use by a live process)"
+            continue
+            ;;
+          free)
+            ;;
+          *)
+            log "keep $name (error probing /proc before action)"
+            continue
+            ;;
+        esac
+
+        staged="$BASE/$TRASH_PREFIX$name.$$"
+        if ! mv "$entry" "$staged" 2>/dev/null; then
+          log "WARN: could not stage $name for deletion; skipping"
+          continue
+        fi
+
+        reaped=$((reaped + 1))
+        size_kb=$(du -sk "$staged" 2>/dev/null | cut -f1)
+        case "''${size_kb:-}" in ""|*[!0-9]*) size_kb=0 ;; esac
+        if purge_tree "$staged"; then
+          log "reaped $name ($((size_kb / 1024)) MB, $reap_desc)"
           freed_kb=$((freed_kb + size_kb))
         else
           log "WARN: staged $name but could not fully delete it; will retry next pass"
@@ -2330,7 +2953,7 @@ lib.mkMerge [
       if [ "$reaped" -gt 0 ]; then
         verb="would free"
         [ -z "$DRY_RUN" ] && verb="freed"
-        log "$reaped orphaned output base(s), $verb $((freed_kb / 1024)) MB"
+        log "$reaped output base(s), $verb $((freed_kb / 1024)) MB"
       fi
 
       exit 0
@@ -2339,7 +2962,7 @@ lib.mkMerge [
 
   systemd.user.services.bazel-reap = {
     Unit = {
-      Description = "Reap orphaned Bazel output bases";
+      Description = "Reap orphaned and idle Bazel output bases";
     };
     Service = {
       Type = "oneshot";
@@ -2363,7 +2986,7 @@ lib.mkMerge [
 
   systemd.user.timers.bazel-reap = {
     Unit = {
-      Description = "Reap orphaned Bazel output bases timer";
+      Description = "Reap orphaned and idle Bazel output bases timer";
     };
     Timer = {
       # Same shape as disk-watch, and for the same reason: OnUnitActiveSec is
@@ -2371,6 +2994,104 @@ lib.mkMerge [
       # none, so OnStartupSec supplies the first. Persistent= is omitted
       # because replaying a missed pass is meaningless -- the next pass
       # re-derives everything from the filesystem.
+      OnStartupSec = "10min";
+      OnUnitActiveSec = "15min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ==========================================================================
+  # cargo-reap: idle cargo target/ directories during the day.
+  #
+  # WHY THIS EXISTS. On 2026-10-13 cloudbox's root disk reached 100%. About
+  # 97G was idle cargo target/ directories under ~/projects/{goose-patched*,honk*}
+  # that had not been built in hours. Nothing automatic touches cargo target
+  # directories: the nightly disk-cleanup does not scan ~/projects for them,
+  # and bazel-reap only handles Bazel output bases whose workspace is gone.
+  #
+  # DUAL-TIER PRESSURE REAPING. Like bazel-reap, cargo-reap runs on a 15-minute
+  # timer during the day, but balances hygiene against build interruption:
+  #   - Hygiene tier: idle >= 168h / 7 days (CARGO_REAP_IDLE_H), reaped at ANY pressure.
+  #   - Pressure tier: idle >= 3h (CARGO_REAP_PRESSURE_IDLE_H), reaped ONLY
+  #     when disk used% >= 80% (CARGO_REAP_PRESSURE_PCT, 5 points below
+  #     disk-watch's 85% warn threshold).
+  #
+  # SAFETY AND FAIL-SAFES:
+  #   1. Process in-use probe: paths_in_use() checks whether any live process
+  #      has the target or a file under it as cwd, exe, or open fd.
+  #   2. Memory-mapped files (rust-analyzer guard): rust-analyzer's proc-macro
+  #      server dlopens .so files from target/debug/deps, keeping them memory
+  #      mapped without holding an open fd. Scanning /proc/<pid>/maps path column
+  #      catches mapped files under target/.
+  #   3. Fail-safe proc probe: if /proc cannot be inspected, keep everything.
+  #   4. Stat error fail-safe: any stat error during idle-age calculation treats
+  #      the target as fresh (keep).
+  #   5. Stage-before-delete: os.rename() moves target into a staging trash dir
+  #      (~/.cache/cargo-reap/trash) on the same filesystem before shutil.rmtree.
+  #      Phase 0 of every pass purges leftovers in trash, so partial deletes are
+  #      retried without reclassification.
+  #   6. Always exits 0: a nonzero exit puts the unit into `failed`, stopping
+  #      subsequent timer passes. Every error degrades to a log line.
+  # ==========================================================================
+  home.file.".local/bin/cargo-reap" = {
+    executable = true;
+    text = ''
+      #!${pkgs.bash}/bin/bash
+      # NOTE: `set -e` is deliberately absent, for the same reason disk-watch
+      # and bazel-reap omit it. This is a janitor on a 15-minute timer; a non-zero
+      # exit puts the unit into `failed`, a state nobody reads, and stops the
+      # NEXT pass from being scheduled cleanly. Every step degrades to a log line.
+      set -uo pipefail
+
+      PATH="${lib.makeBinPath [
+        pkgs.coreutils
+        pkgs.python3
+      ]}:$PATH"
+
+      # Seams / env vars. Nothing shipped overrides these; the test suite does.
+      export CARGO_REAP_ROOTS="''${CARGO_REAP_ROOTS:-$HOME/projects}"
+      export CARGO_REAP_IDLE_H="''${CARGO_REAP_IDLE_H:-168}"
+      export CARGO_REAP_PRESSURE_IDLE_H="''${CARGO_REAP_PRESSURE_IDLE_H:-3}"
+      export CARGO_REAP_PRESSURE_PCT="''${CARGO_REAP_PRESSURE_PCT:-80}"
+      export CARGO_REAP_MAX="''${CARGO_REAP_MAX:-3}"
+      export CARGO_REAP_TRASH="''${CARGO_REAP_TRASH:-$HOME/.cache/cargo-reap/trash}"
+      export CARGO_REAP_PROC="''${CARGO_REAP_PROC:-/proc}"
+      export CARGO_REAP_SESSION_DB="''${CARGO_REAP_SESSION_DB:-}"
+      export CARGO_REAP_DRY_RUN="''${CARGO_REAP_DRY_RUN:-}"
+      export CARGO_REAP_USED_PCT="''${CARGO_REAP_USED_PCT:-}"
+
+      ${pkgs.python3}/bin/python3 - <<'PYEOF'
+      ${cargoReapPy}
+      PYEOF
+      exit 0
+    '';
+  };
+
+  systemd.user.services.cargo-reap = {
+    Unit = {
+      Description = "Reap idle cargo target directories";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "%h/.local/bin/cargo-reap";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      Environment = [
+        "HOME=%h"
+        "PATH=/run/current-system/sw/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.cargo-reap = {
+    Unit = {
+      Description = "Reap idle cargo target directories timer";
+    };
+    Timer = {
       OnStartupSec = "10min";
       OnUnitActiveSec = "15min";
     };

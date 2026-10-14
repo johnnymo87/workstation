@@ -45,7 +45,19 @@ set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmpdir="$(mktemp -d)"
-trap 'chmod -R u+w "$tmpdir" 2>/dev/null; rm -rf "$tmpdir"' EXIT
+
+pids=()
+cleanup() {
+  for p in "${pids[@]:-}"; do
+    [ -n "$p" ] || continue
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
+  chmod -R u+w "$tmpdir" 2>/dev/null || true
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
 pass_count=0
 fail_count=0
@@ -108,7 +120,7 @@ new_root() {
 
 run_reaper() {
   local root="$1"; shift
-  env BAZEL_REAP_BASE="$root" "$@" "$script" 2>&1
+  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" bash "$script" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -139,9 +151,11 @@ test_keeps_live_server_despite_missing_workspace() {
   base="$(make_base "$root" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$root/vanished")"
   sleep 300 &
   pid=$!
+  pids+=("$pid")
   echo "$pid" > "$base/server/server.pid.txt"
   out="$(run_reaper "$root")"
-  kill "$pid" 2>/dev/null
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
   check "base with live server survives" "$([ -d "$base" ] && echo yes || echo no)"
   check "and names the pid" \
     "$(grep -q "server pid $pid alive" <<<"$out" && echo yes || echo no)"
@@ -246,7 +260,7 @@ test_resumes_staged_leftover() {
 test_missing_base_dir_is_not_an_error() {
   echo "TEST: absent bazel cache dir exits clean (a host that never ran bazel)"
   local rc
-  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" bash "$script" >/dev/null 2>&1
   rc=$?
   check "exits 0" "$([ "$rc" = 0 ] && echo yes || echo no)"
 }
@@ -259,11 +273,305 @@ test_never_exits_nonzero() {
   # Make the base itself unremovable by taking write permission off its PARENT,
   # so even the rename fails. The script must log and move on.
   chmod a-w "$root"
-  env BAZEL_REAP_BASE="$root" "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$root" bash "$script" >/dev/null 2>&1
   rc=$?
   chmod u+w "$root"
   check "exits 0 despite being unable to act" "$([ "$rc" = 0 ] && echo yes || echo no)"
   check "base untouched" "$([ -d "$base" ] && echo yes || echo no)"
+}
+
+# ---------------------------------------------------------------------------
+# Pressure tier (idle bases with live workspaces under disk pressure).
+# ---------------------------------------------------------------------------
+
+test_live_workspace_idle_4h_low_pressure_kept() {
+  echo "TEST: live workspace idle 4h is kept at low pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000001 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=50)"
+  check "base survived at low pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged workspace live" \
+    "$(grep -q 'keep 10000000.* (workspace live' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_workspace_idle_4h_high_pressure_reaped() {
+  echo "TEST: live workspace idle 4h is reaped at high pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000002 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base reaped at high pressure" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "workspace directory untouched" "$([ -d "$wt" ] && echo yes || echo no)"
+  check "logged reap with idle and pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_workspace_idle_1h_high_pressure_kept() {
+  echo "TEST: live workspace idle 1h is kept at high pressure (under 3h threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000003 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "1 hour ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base survived at high pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged keep with idle reason" \
+    "$(grep -q 'keep 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_lgtm_workspace_idle_45m_high_pressure_reaped() {
+  echo "TEST: lgtm-pr-* workspace idle 45min is reaped at high pressure (>= 30m threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/lgtm-pr-1234"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000004 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "45 minutes ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "lgtm base reaped at high pressure" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "lgtm workspace untouched" "$([ -d "$wt" ] && echo yes || echo no)"
+  check "logged lgtm reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_non_lgtm_workspace_idle_45m_high_pressure_kept() {
+  echo "TEST: non-lgtm workspace idle 45min is kept at high pressure (< 180m threshold)"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/feature-branch"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000005 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "45 minutes ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "non-lgtm base survived at high pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged keep with idle reason" \
+    "$(grep -q 'keep 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_live_server_high_pressure_kept() {
+  echo "TEST: live server pins base even under high pressure and idle 4h"
+  local root wt base out pid
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000006 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  sleep 300 &
+  pid=$!
+  pids+=("$pid")
+  echo "$pid" > "$base/server/server.pid.txt"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  check "base with live server survives under pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "names the live server pid" \
+    "$(grep -q "server pid $pid alive" <<<"$out" && echo yes || echo no)"
+}
+
+test_missing_command_log_high_pressure_kept() {
+  echo "TEST: missing command.log keeps base even under high pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000007 "$wt")"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  check "base survives without command.log" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logs reason for missing command.log" \
+    "$(grep -q 'keep 10000000.*missing command\.log' <<<"$out" && echo yes || echo no)"
+}
+
+test_non_numeric_used_pct_treated_as_no_pressure() {
+  echo "TEST: non-numeric BAZEL_REAP_USED_PCT is treated as no pressure"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000008 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=notanumber)"
+  check "base survives when used_pct is non-numeric" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logs workspace live (no pressure)" \
+    "$(grep -q 'keep 10000000.* (workspace live' <<<"$out" && echo yes || echo no)"
+}
+
+test_dry_run_under_pressure() {
+  echo "TEST: rehearsal mode under pressure classifies but does not delete"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000009 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_DRY_RUN=1 BAZEL_REAP_USED_PCT=90)"
+  check "base still present after rehearsal under pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "says 'would reap' with under pressure" \
+    "$(grep -q 'would reap 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+  check "does not claim to have reaped" \
+    "$(! grep -q '^\[bazel-reap\] reaped' <<<"$out" && echo yes || echo no)"
+}
+
+test_stat_command_log_failure_keeps_base() {
+  echo "TEST: stat failure on command.log fails safe and keeps the base"
+  local root wt base out fakebin real_stat
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000010 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  fakebin="$tmpdir/fakebin"
+  mkdir -p "$fakebin"
+  real_stat="$(command -v stat)"
+  cat <<EOF > "$fakebin/stat"
+#!/usr/bin/env bash
+if [[ "\$*" == *command.log* ]]; then
+  exit 1
+fi
+exec "$real_stat" "\$@"
+EOF
+  chmod +x "$fakebin/stat"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_PATH_PREFIX="$fakebin")"
+  check "base survived when stat command.log failed" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged stat failure" \
+    "$(grep -q 'keep 10000000.*could not stat command\.log' <<<"$out" && echo yes || echo no)"
+}
+
+test_orphans_prioritized_over_pressure_under_rate_limit() {
+  echo "TEST: orphans take priority over pressure reaps under rate limit"
+  local root wt base_pressure base_orphan out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  # Hash 000... sorts before fff...
+  base_pressure="$(make_base "$root" 00000000000000000000000000000001 "$wt")"
+  echo "log" > "$base_pressure/command.log"
+  touch -d "4 hours ago" "$base_pressure/command.log"
+
+  base_orphan="$(make_base "$root" ffffffffffffffffffffffffffffffff "$root/vanished-workspace")"
+
+  out="$(run_reaper "$root" BAZEL_REAP_MAX=1 BAZEL_REAP_USED_PCT=90)"
+  check "orphan reaped despite sorting after pressure candidate" \
+    "$([ ! -d "$base_orphan" ] && echo yes || echo no)"
+  check "pressure candidate kept due to rate limit" \
+    "$([ -d "$base_pressure" ] && echo yes || echo no)"
+  check "says rate limit reached for pressure candidate" \
+    "$(grep -q 'rate limit reached (1 this pass); 00000000.* waits' <<<"$out" && echo yes || echo no)"
+}
+
+test_used_pct_trailing_percent_stripped() {
+  echo "TEST: trailing % in BAZEL_REAP_USED_PCT is stripped"
+  local root wt base out
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000011 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT="90%")"
+  check "base reaped when USED_PCT has trailing %" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "logged reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_session_active_in_workspace_keeps_base_under_pressure() {
+  echo "TEST: active opencode session in workspace keeps base under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000012 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  db="$tmpdir/opencode-bazel-active.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$wt', int(time.time() * 1000))); con.commit(); con.close()"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_SESSION_DB="$db")"
+  check "base survived when session active in workspace" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged session active" \
+    "$(grep -q 'keep 10000000.*opencode session active in .* within 3h' <<<"$out" && echo yes || echo no)"
+}
+
+test_session_stale_in_workspace_allows_reap_under_pressure() {
+  echo "TEST: stale opencode session in workspace allows reap under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000013 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  db="$tmpdir/opencode-bazel-stale.db"
+  python3 -c "import sqlite3, time; con = sqlite3.connect('$db'); con.execute('create table session (id text primary key, directory text, time_updated integer)'); con.execute('insert into session values (?, ?, ?)', ('s1', '$wt', int((time.time() - 5 * 3600) * 1000))); con.commit(); con.close()"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_SESSION_DB="$db")"
+  check "base reaped when session is stale" "$([ ! -d "$base" ] && echo yes || echo no)"
+  check "logged reap under pressure" \
+    "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_proc_in_use_keeps_base_under_pressure() {
+  echo "TEST: process with cwd inside base keeps base under pressure (/proc probe)"
+  local root wt base out pid execroot
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000014 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  execroot="$base/execroot/myproject"
+  mkdir -p "$execroot"
+  ( cd "$execroot" && sleep 300 ) &
+  pid=$!
+  pids+=("$pid")
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+
+  check "base kept when process has cwd inside base" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged in use by live process" \
+    "$(grep -q 'keep 10000000.*in use by a live process' <<<"$out" && echo yes || echo no)"
+}
+
+test_proc_error_keeps_base_under_pressure() {
+  echo "TEST: /proc probe error fails safe and keeps base under pressure"
+  local root wt base out emptyproc
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000015 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+
+  emptyproc="$tmpdir/emptyproc"
+  mkdir -p "$emptyproc"
+
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_PROC="$emptyproc")"
+  check "base kept when /proc probe raises error" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged proc probe error" \
+    "$(grep -q 'keep 10000000.*error probing /proc' <<<"$out" && echo yes || echo no)"
 }
 
 # ---------------------------------------------------------------------------
@@ -280,6 +588,22 @@ test_rate_limit
 test_resumes_staged_leftover
 test_missing_base_dir_is_not_an_error
 test_never_exits_nonzero
+test_live_workspace_idle_4h_low_pressure_kept
+test_live_workspace_idle_4h_high_pressure_reaped
+test_live_workspace_idle_1h_high_pressure_kept
+test_lgtm_workspace_idle_45m_high_pressure_reaped
+test_non_lgtm_workspace_idle_45m_high_pressure_kept
+test_live_server_high_pressure_kept
+test_missing_command_log_high_pressure_kept
+test_non_numeric_used_pct_treated_as_no_pressure
+test_dry_run_under_pressure
+test_stat_command_log_failure_keeps_base
+test_orphans_prioritized_over_pressure_under_rate_limit
+test_used_pct_trailing_percent_stripped
+test_session_active_in_workspace_keeps_base_under_pressure
+test_session_stale_in_workspace_allows_reap_under_pressure
+test_proc_in_use_keeps_base_under_pressure
+test_proc_error_keeps_base_under_pressure
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="
