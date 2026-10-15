@@ -36,6 +36,22 @@
 #   REAUTH_HARNESS_DIR   default ~/.local/lib/gcloud-reauth
 #   REAUTH_STATE_DIR     default ~/.local/state/gcloud-reauth
 #   REAUTH_NODE          node binary (default: node from PATH)
+#   IDP_ORIGIN, IDP_SESSION_PATH
+#                        enable the IdP session checks below (the agent sets
+#                        both); without them every due run goes to the browser
+#   REAUTH_REFRESH_AFTER_SECONDS   default 21600 (6h); see "which credentials"
+#   REAUTH_HUMAN_WAIT_SECONDS      default 900; see "waiting for a human"
+#
+# Usage: gcloud-reauth-refresh [--force]
+#   --force   refresh every credential now, however recently it was refreshed
+#
+# SCHEDULE. The agent fires hourly on a calendar interval, and this script
+# decides whether anything is due. It used to fire on an 8h StartInterval, which
+# on this Mac counts only AWAKE time and does not catch up after sleep: on
+# 2026-10-15 a laptop that slept overnight and napped through the day went 16h
+# without a run, the CLI credential died, and a human re-authed by hand. A
+# calendar job does fire on wake (once, however many slots were missed), and an
+# hourly check that usually says `not_due` costs one log row.
 
 set -uo pipefail
 
@@ -43,6 +59,7 @@ set -uo pipefail
 # raise SIGPIPE and kill this script mid-flight -- silently, before it could log
 # or notify. Ignore it so the write merely fails and we handle it below.
 trap '' PIPE
+have_lock=no
 
 REMOTE="${REAUTH_REMOTE:?set REAUTH_REMOTE to the remote ssh host alias}"
 CDP_URL="${REAUTH_CDP_URL:-http://127.0.0.1:9223}"
@@ -54,31 +71,42 @@ WORK="$STATE/run"
 
 mkdir -p "$STATE" "$WORK"
 
-# The two agents' intervals (8h and 90m) share a period of exactly 24h, so once
-# a day they fire in the same second. The refresh closes IdP tabs as it starts,
-# which would make a concurrent keepalive probe report a session that is
-# actually fine as missing -- a false "go and sign in" notification. mkdir is
-# the atomic primitive here; macOS has no flock(1).
-LOCK="$STATE/reauth.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  # Stale lock from a killed run should not wedge the refresher forever.
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
-    rmdir "$LOCK" 2>/dev/null
-    mkdir "$LOCK" 2>/dev/null || true
-  fi
-fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+FORCE=no
+[ "${1:-}" = --force ] && FORCE=yes
+
+# --- wait out a dark wake ---------------------------------------------------
+# A calendar job that comes due while the Mac sleeps fires on the next wake --
+# and that may be a DarkWake (Power Nap): no display, network up for a few
+# seconds, then sleep again with this process frozen mid-login. That would end
+# in a dead ssh session and a spurious notification. So wait for a FULL wake,
+# which the kernel reports as the graphics bit (2) in System Capabilities.
+# While asleep this loop is frozen along with everything else, so in practice
+# it resumes when the human opens the lid. Before the lock, deliberately: a
+# run parked here must not block the keepalive or a manual run.
+# Bounded at 24h of awake polling; an unreadable ioreg counts as awake.
+# (Same block in keepalive.sh.)
+full_wake() {
+  local caps
+  caps="$(/usr/sbin/ioreg -c IOPMrootDomain -r -d1 2>/dev/null \
+    | sed -n 's/.*"System Capabilities" = \([0-9]*\).*/\1/p' | head -1)"
+  [ -z "$caps" ] || [ $(( caps & 2 )) -ne 0 ]
+}
+for _ in $(seq 1 2880); do full_wake && break; sleep 30; done
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# The credentials this run is responsible for, in order. CLI first: it is the
-# older flow and its failure modes are the better understood.
-CREDENTIALS=(cli adc)
+# Every credential this job manages, in order. CLI first: it is the older flow
+# and its failure modes are the better understood. CREDENTIALS, below, is the
+# subset THIS run is responsible for.
+ALL_CREDENTIALS=(cli adc)
+CREDENTIALS=("${ALL_CREDENTIALS[@]}")
 
 # --- logging and notification ----------------------------------------------
-# Every credential this run is responsible for gets exactly one row, on every
-# path -- "quietly did nothing" is not reachable. Any outcome other than
-# `refreshed` also raises a notification of its own. The failure this replaces
+# Every credential gets a row on every run, on every path -- "quietly did
+# nothing" is not reachable, and that includes `not_due`. (A run that waits for
+# a human and retries writes a second row for what it retried.) Any outcome
+# other than `refreshed` and the three quiet ones below raises a notification
+# of its own. The failure this replaces
 # ran green on a timer for ~14 hours while the credential was dead, and then
 # ran green again while the OTHER credential was dead.
 record() {
@@ -98,10 +126,17 @@ with open(log, "a") as f:
 PY
   LAST_OUTCOME="$outcome"
   echo "credential=$cred outcome=$outcome ${detail:+detail=$detail}"
-  if [ "$outcome" != refreshed ]; then
-    notify "$cred" "$outcome" "$detail"
-    failed=yes
-  fi
+  case "$outcome" in
+    refreshed|not_due|skipped) ;;
+    # Already notified when the failure happened; a reminder every hour would
+    # train the human to ignore these.
+    backing_off) failed=yes ;;
+    # Quiet but not fine: the human was told when the wait began, and the
+    # keepalive repeats that every hour. Re-raising here would be a second,
+    # hourly, focus-stealing copy of the same message.
+    waiting_for_human) failed=yes ;;
+    *) notify "$cred" "$outcome" "$detail"; failed=yes ;;
+  esac
 }
 
 notify() {
@@ -123,6 +158,154 @@ notify() {
 
 failed=no
 LAST_OUTCOME=""
+
+# --- which credentials are due ----------------------------------------------
+# Due = no `refreshed` row in the last REAUTH_REFRESH_AFTER_SECONDS. The
+# session-control policy has killed these credentials ~16h after minting.
+# 6h is a trade, not a derivation: each refresh steals browser focus for ~30s,
+# and while the Mac is awake 6h gives two retries inside one lifetime. Across
+# a night it cannot help -- a credential up to 6h old at lid-close dies after
+# ~10h of sleep, and the morning run needs a human at the IdP anyway. A
+# smaller value only moves that overnight death later, at the cost of more
+# focus steals by day.
+# Per credential: if ADC failed and CLI did not, the next run retries only ADC.
+# Rows written before credentials were split out count as cli.
+#
+# BACKOFF. A failure that is not a human stop (verify_failed, no_authcode, a
+# changed consent page...) usually fails the same way again, and each attempt
+# steals focus and notifies. So after one, wait RETRY_AFTER before the next.
+# Human stops are handled by the waiting gate below instead.
+REFRESH_AFTER="${REAUTH_REFRESH_AFTER_SECONDS:-21600}"
+RETRY_AFTER="${REAUTH_RETRY_AFTER_SECONDS:-7200}"
+# Prints, per credential:
+#   "<cred> <due|fresh|backoff> <age-seconds|never> <last-outcome> <since-last-attempt-seconds>"
+cred_status() {
+  python3 - "$LOG" "$REFRESH_AFTER" "$RETRY_AFTER" "${ALL_CREDENTIALS[@]}" <<'PY'
+import json, sys, datetime
+log, after, retry, creds = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
+QUIET = ("not_due", "skipped", "backing_off")
+HUMAN = ("human_required", "waiting_for_human")
+last_ok, last_outcome, last_attempt = {}, {}, {}
+parse = datetime.datetime.fromisoformat
+try:
+    lines = open(log).read().splitlines()
+except FileNotFoundError:
+    lines = []
+for line in lines:
+    # One bad row must not take the whole history down with it: that would
+    # make everything look due, forever.
+    try:
+        r = json.loads(line)
+        c = r.get("credential") or "cli"
+        o = r.get("outcome")
+        ts = parse(r["ts"])
+        if o == "refreshed":
+            last_ok[c] = ts
+        if o not in QUIET:
+            last_outcome[c] = o
+            last_attempt[c] = ts
+    except Exception:
+        continue
+now = datetime.datetime.now(datetime.timezone.utc)
+for c in creds:
+    ok = last_ok.get(c)
+    age = int((now - ok).total_seconds()) if ok else None
+    o = last_outcome.get(c) or "none"
+    since = int((now - last_attempt[c]).total_seconds()) if c in last_attempt else 10**9
+    if age is not None and age < after:
+        state = "fresh"
+    elif o not in ("refreshed", "none") + HUMAN and since < retry:
+        state = "backoff"
+    else:
+        state = "due"
+    print(c, state, "never" if age is None else age, o, since)
+PY
+}
+
+CREDENTIALS=()
+waiting_on_human=yes
+status="$(cred_status)"
+if [ "$(grep -c . <<<"$status")" -ne "${#ALL_CREDENTIALS[@]}" ]; then
+  # Cannot tell what is due: treat everything as due rather than exit rowless.
+  echo "WARNING: could not read refresh history from $LOG; refreshing everything" >&2
+  status="$(printf '%s due never unknown 0\n' "${ALL_CREDENTIALS[@]}")"
+fi
+while read -r cred due age last since; do
+  if [ "$FORCE" = yes ] || [ "$due" = due ]; then
+    CREDENTIALS+=("$cred")
+    case "$last" in human_required|waiting_for_human) ;; *) waiting_on_human=no ;; esac
+  elif [ "$due" = backoff ]; then
+    record "$cred" "backing_off" "Last attempt failed ($last) $((since / 60)) min ago; next try after $((RETRY_AFTER / 60)) min, or run gcloud-reauth-refresh --force"
+  else
+    record "$cred" "not_due" "Refreshed $((age / 60)) min ago; due after $((REFRESH_AFTER / 60)) min"
+  fi
+done <<<"$status"
+if [ "${#CREDENTIALS[@]}" -eq 0 ]; then
+  [ "$failed" = no ] && exit 0   # backing_off is not "fine"
+  exit 1
+fi
+
+# --- one run at a time ------------------------------------------------------
+# This run and the keepalive drive the same browser, and this one closes IdP
+# tabs as it starts, which would make a concurrent keepalive probe report a
+# session that is actually fine as missing -- a false "go and sign in"
+# notification. Both agents fire on wake, so they DO start together. mkdir is
+# the atomic primitive here; macOS has no flock(1). The keepalive holds the
+# lock for seconds, so wait for it rather than skip. Taken only once something
+# is due: a `not_due` run must not make the keepalive wait on it.
+LOCK="$STATE/reauth.lock"
+for _ in $(seq 1 36); do
+  if mkdir "$LOCK" 2>/dev/null; then have_lock=yes; break; fi
+  # Stale lock from a killed run should not wedge the refresher forever.
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+    continue
+  fi
+  sleep 5
+done
+# Release only a lock we took: removing another run's would let a third start.
+trap '[ "$have_lock" = yes ] && rmdir "$LOCK" 2>/dev/null' EXIT
+
+if [ "$have_lock" != yes ]; then
+  for cred in "${CREDENTIALS[@]}"; do
+    record "$cred" "skipped" "Another reauth run has held $LOCK for over 3 minutes"
+  done
+  exit 0
+fi
+
+# --- the IdP session ----------------------------------------------------------
+# Read through the same background-tab probe the keepalive uses: no focus
+# steal, no credential touched. In 2026-09/10 history a refresh succeeded every
+# time the keepalive had last seen a live IdP session, and stopped at the IdP
+# sign-in every time it had not.
+# Prints yes | no | unknown. Unknown (probe crashed, no IDP_* env) never blocks.
+idp_session() {
+  if [ -z "${IDP_ORIGIN:-}" ] || [ -z "${IDP_SESSION_PATH:-}" ]; then
+    echo unknown; return
+  fi
+  local out
+  out="$(IDP_LOG="$STATE/idp-session.jsonl" IDP_SESSION_PATH="$IDP_SESSION_PATH" \
+         REAUTH_CDP_URL="$CDP_URL" \
+         timeout 120 "$NODE" "$LIB/idp-session-probe.mjs" "$IDP_ORIGIN" 2>/dev/null)"
+  python3 -c '
+import json, sys
+try:
+    r = json.loads(sys.argv[1])
+except Exception:
+    print("unknown"); raise SystemExit
+h = r.get("has_session")
+print("unknown" if r.get("error") or h is None else ("yes" if h else "no"))' "$out"
+}
+
+# Already told the human, and they have not signed in yet: say so quietly
+# rather than raising the sign-in page and a notification again every hour.
+# Only when the probe positively says "no session"; a forced run always tries.
+if [ "$waiting_on_human" = yes ] && [ "$FORCE" = no ] && [ "$(idp_session)" = no ]; then
+  for cred in "${CREDENTIALS[@]}"; do
+    record "$cred" "waiting_for_human" "Still no IdP session in the isolated Chrome; sign in there and the next hourly run (or gcloud-reauth-refresh) finishes the refresh"
+  done
+  exit 1
+fi
 
 # A failure before any login starts applies to every credential: record it once
 # per credential, so neither row stream ever has a silent gap, then stop.
@@ -308,7 +491,7 @@ except Exception:
     print("unknown")' "$dir/e2e-result.json" 2>/dev/null)"
     case "$reason" in
       idp_login_required|password_demanded|mfa_demanded|bot_blocked)
-        record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open and raised." ;;
+        record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open and raised; sign in there and this run retries by itself." ;;
       *)
         record "$cred" "no_authcode" "Browser flow ended without a code (outcome: $reason)" ;;
     esac
@@ -361,32 +544,76 @@ except Exception:
   esac
 }
 
-# --- run every credential ---------------------------------------------------
-# Both run even when the first fails: they are independent credentials with
+# --- run the due credentials -----------------------------------------------
+# All run even when one fails: they are independent credentials with
 # independent failure modes, and a CLI fault must not leave ADC unattempted.
-# The one exception is a stop for a human at the shared IdP sign-in. The ADC
+# The one exception is a stop for a human at the shared IdP sign-in. A later
 # flow would hit the same page in the same browser, and its first act is to
 # close stale IdP tabs -- the very tab just raised for the human, possibly
 # mid-typing. It still gets its own row and its own notification.
 rm -f "$WORK"/authfifo "$WORK"/authcode.txt   # pre-ADC single-workdir layout
-cli_handed_off=no
-for cred in "${CREDENTIALS[@]}"; do
-  if [ "$cred" != cli ] && [ "$cli_handed_off" = yes ]; then
-    record "$cred" "human_required" "Not attempted: the CLI login is waiting at the IdP sign-in. Sign in there, then run gcloud-reauth-refresh."
-    continue
-  fi
-  refresh_one "$cred"
-  # Keyed on what the browser actually did (a tab raised for the human), not
-  # on the mapped outcome: e2e.mjs can raise the tab and then still end in
-  # `error`, which maps to no_authcode.
-  if [ "$cred" = cli ]; then
+attempt() {
+  local cred handed_off=no
+  PENDING=()
+  for cred in "$@"; do
+    if [ "$handed_off" = yes ]; then
+      record "$cred" "human_required" "Not attempted: an earlier login is waiting at the IdP sign-in. Sign in there; this run waits ${HUMAN_WAIT}s, then the next hourly run takes over."
+      PENDING+=("$cred")
+      continue
+    fi
+    refresh_one "$cred"
+    [ "$LAST_OUTCOME" = refreshed ] || PENDING+=("$cred")
+    # Keyed on what the browser actually did (a tab raised for the human), not
+    # on the mapped outcome: e2e.mjs can raise the tab and then still end in
+    # `error`, which maps to no_authcode.
     if [ "$LAST_OUTCOME" = human_required ] || python3 -c '
 import json,sys
-sys.exit(0 if json.load(open(sys.argv[1])).get("awaiting_human") else 1)' "$WORK/cli/e2e-result.json" 2>/dev/null; then
-      cli_handed_off=yes
+sys.exit(0 if json.load(open(sys.argv[1])).get("awaiting_human") else 1)' "$WORK/$cred/e2e-result.json" 2>/dev/null; then
+      handed_off=yes
+      HANDOFF_REASON="$(python3 -c '
+import json,sys
+print(json.load(open(sys.argv[1])).get("outcome") or "unknown")' "$WORK/$cred/e2e-result.json" 2>/dev/null)"
     fi
+  done
+  HANDED_OFF="$handed_off"
+}
+HANDOFF_REASON=""
+
+HUMAN_WAIT="${REAUTH_HUMAN_WAIT_SECONDS:-900}"
+attempt "${CREDENTIALS[@]}"
+
+# --- waiting for a human ------------------------------------------------------
+# The notification just told the human to sign in, and they usually do within a
+# minute or two. Watch for it rather than leaving the credentials dead until the
+# next hourly run: poll the IdP session (background tab; the raised sign-in tab
+# is left alone) and, once it is live, retry what is still pending. Exactly one
+# retry -- a second stop means something other than a missing sign-in.
+#
+# Only for a stop at the IdP's sign-in form. A Google-side stop (password, MFA,
+# bot check) happens WITH a live IdP session, so the first poll would say yes
+# and the retry would close the very tab the human is typing in. And a "yes"
+# counts only after a "no" has been seen, i.e. after the session state actually
+# changed, for the same reason.
+if [ "$HANDED_OFF" = yes ] && [ "$HANDOFF_REASON" = idp_login_required ] \
+   && [ "${#PENDING[@]}" -gt 0 ] && [ "$HUMAN_WAIT" -gt 0 ]; then
+  echo "waiting up to ${HUMAN_WAIT}s for an IdP sign-in"
+  deadline=$(( $(date +%s) + HUMAN_WAIT ))
+  signed_in=no
+  seen_no=no
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 20
+    case "$(idp_session)" in
+      no) seen_no=yes ;;
+      yes) [ "$seen_no" = yes ] && { signed_in=yes; break; } ;;
+    esac
+  done
+  if [ "$signed_in" = yes ]; then
+    # Let the human's tab finish its redirect before the retry closes it.
+    sleep 10
+    failed=no   # the retry's rows decide this run's exit status
+    attempt "${PENDING[@]}"
   fi
-done
+fi
 
 [ "$failed" = no ] && exit 0
 exit 1

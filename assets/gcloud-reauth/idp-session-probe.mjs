@@ -50,14 +50,14 @@ let browser;
 try {
   // protocolTimeout well under the wrapper's `timeout 120`: a stall must surface
   // as a logged error with the page closed, not as an outside SIGTERM that skips
-  // the finally block and leaves a tab behind every 90 minutes.
+  // the finally block and leaves a tab behind every hour.
   browser = await puppeteer.connect({
     browserURL: CDP_URL,
     defaultViewport: null,
     protocolTimeout: 60000,
   });
   row.reachable = true;
-  // Background target, not newPage(): this runs every 90 minutes and must never
+  // Background target, not newPage(): this runs every hour and must never
   // raise the Chrome window while someone is working. See bg-page.mjs.
   const { page, mode } = await newBackgroundPage(browser);
   row.page_mode = mode;

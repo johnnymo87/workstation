@@ -309,21 +309,25 @@ lib.mkIf isDarwin {
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
   launchd.agents = {
-    # Refresh the remote host's gcloud credentials PROACTIVELY, every 8 hours:
-    # both the CLI login and Application Default Credentials (what opencode's
-    # Vertex providers use), each verified and logged separately. See
+    # Refresh the remote host's gcloud credentials PROACTIVELY: both the CLI
+    # login and Application Default Credentials (what opencode's Vertex
+    # providers use), each verified and logged separately. See
     # assets/gcloud-reauth/refresh.sh.
     #
     # Not reactive. The previous design polled every 15 min and refreshed only
     # after detecting failure, so the credential was always dead for some window
     # first -- and when the detection itself failed silently, that window was
-    # ~14 hours. The reauth interval is ~17h, so refreshing on a timer whether
-    # or not it has expired removes the detection problem rather than improving
-    # it: no failure detector, no rate limiter, nothing to get subtly wrong.
+    # ~14 hours. The credentials die ~16h after minting, so refreshing on age
+    # whether or not they have expired removes the detection problem rather
+    # than improving it.
     #
-    # 8h rather than 12 buys two attempts inside one expiry window. Best-effort
-    # by design: a sleeping Mac simply misses its slot (launchd runs one missed
-    # StartInterval on wake), and the next slot picks it up.
+    # HOURLY CALENDAR CHECK, NOT AN 8h StartInterval. The script refreshes only
+    # what is >6h old, so most runs log `not_due` and exit. StartInterval was
+    # wrong here: on this Mac it counts only AWAKE time and does NOT run a
+    # missed slot on wake -- measured 2026-10-15, when the 8h agent went 16h
+    # of wall-clock without firing and the CLI credential died. A calendar
+    # interval does fire on wake (missed slots coalesce into one), and the
+    # script waits out a DarkWake before doing anything.
     gcloud-reauth-refresh = {
       enable = true;
       config = {
@@ -340,20 +344,30 @@ lib.mkIf isDarwin {
             # heuristic, and the stale-tab cleanup silently stops working.
             IDP_ORIGIN="$(/usr/bin/security find-generic-password -s idp-origin -w 2>/dev/null)" || {
               echo "gcloud-reauth-refresh: Keychain item idp-origin missing" >&2; exit 1; }
-            export REAUTH_REMOTE IDP_ORIGIN
+            # Lets the refresh see the IdP session through the keepalive's
+            # background probe: to wait for a human's sign-in and retry, and to
+            # stay quiet rather than re-raise the sign-in page every hour.
+            IDP_SESSION_PATH="$(/usr/bin/security find-generic-password -s idp-session-path -w 2>/dev/null)" || {
+              echo "gcloud-reauth-refresh: Keychain item idp-session-path missing" >&2; exit 1; }
+            export REAUTH_REMOTE IDP_ORIGIN IDP_SESSION_PATH
             export REAUTH_NODE="${pkgs.nodejs}/bin/node"
             exec "${config.home.profileDirectory}/bin/gcloud-reauth-refresh"
           ''
         ];
         RunAtLoad = false;  # do not fire a browser flow during a rebuild
-        StartInterval = 28800;  # 8h
+        # Minute 7 / keepalive minute 37: apart in steady state. On wake both
+        # fire together; the shared reauth.lock serialises them (each waits
+        # for the other rather than skipping).
+        StartCalendarInterval = [ { Minute = 7; } ];
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.err.log";
       };
     };
 
     # Hold the IdP session warm. Separate from the refresher above because the
-    # IdP's timeout is IDLE-based and ~2h, which no 8-hourly job can satisfy.
+    # IdP's timeout is IDLE-based and ~2h, and the refresher only touches the
+    # IdP when something is due. Nothing can hold it across a night's sleep: a
+    # Mac asleep for >2h comes back needing one human sign-in.
     # There must be exactly one thing poking this session; this is it.
     gcloud-reauth-idp-keepalive = {
       enable = true;
@@ -372,7 +386,10 @@ lib.mkIf isDarwin {
           ''
         ];
         RunAtLoad = false;
-        StartInterval = 5400;  # 90 min, comfortably inside the ~2h idle timeout
+        # Hourly, comfortably inside the ~2h idle timeout. A calendar interval
+        # rather than StartInterval for the same reason as the refresher: it
+        # fires on wake. (Was 90 min of AWAKE time, which drifts.)
+        StartCalendarInterval = [ { Minute = 37; } ];
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.err.log";
       };
@@ -381,7 +398,7 @@ lib.mkIf isDarwin {
     # The isolated Chrome both agents above drive, on 127.0.0.1:9223. Nothing
     # used to start it: it was launched by hand once, died, and the refresher
     # logged cdp_unreachable for two weeks. Always-on rather than on-demand
-    # because the keepalive needs it every 90 min and a human_required refresh
+    # because the keepalive needs it every hour and a human_required refresh
     # must leave it up for the human anyway. The wrapper adopts an instance it
     # did not start (Chrome's own relaunch-after-update) instead of handing off
     # to it and exiting 0, which under KeepAlive would respawn forever. See
