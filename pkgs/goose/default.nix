@@ -42,6 +42,9 @@
 #   goose-serve (via honk) the way `goose run --recipe --resume` did. 8 and 9
 #   change nothing for a client that does not send them; 7 only matters for a
 #   session that stores a TTL (all such rows today are 1h coordinator sessions).
+#  10. ACP session/list sorts and limits on session ids before fetching full
+#      rows (recipe_json etc.), so a page takes ~0.01s instead of ~1.5s with
+#      500+ sessions. Same rows, same order.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -55,6 +58,7 @@
 # the three pigeon probes passed against it on an isolated serve (2026-10-11).
 # patched-1.54.0.4 (2026-10-13) adds patches 7-9 on the same base (fork PR
 # johnnymo87/goose#2); no schema change.
+# patched-1.54.0.5 (2026-10-15) adds patch 10 (fork PR johnnymo87/goose#3).
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -67,8 +71,8 @@
 }:
 
 let
-  version = "1.54.0-patched.4";
-  tag = "patched-1.54.0.4";
+  version = "1.54.0-patched.5";
+  tag = "patched-1.54.0.5";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -80,11 +84,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-Pb6ZCw+DJi8I3tmScSdRunUoPwfykvsRuZQ3f7L6KKM=";
+      hash = "sha256-ll3Y0T/l8YjBvoqhggQi0WRrW6fY6ZgdD/y3Kiw0LVY=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-+qCZkbiMdx4FsYkrpb4/1bWdlp5Tb+0ROYcAWZDUfZU=";
+      hash = "sha256-MwGgLGndJzsoUpaw1dCTpwautP3iS2mPCRuHkMFnLwQ=";
     };
   };
 
