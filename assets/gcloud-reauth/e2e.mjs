@@ -13,32 +13,69 @@ const url = fs.readFileSync(process.argv[2], 'utf8').trim();
 // have an authenticated browser fetch it, then read a value back out. That is
 // the same capability, one indirection removed.
 //
-// So: exact-match host, path and client_id against what `gcloud auth login`
-// must produce. Anything else refuses to navigate. Compare parsed components,
-// never substrings -- the same rule the authcode check below exists for.
-// Observed 2026-09-17 from gcloud 537.0.0 on the remote host. The client_id is
-// the public, well-known gcloud CLI client, identical for every install.
-// ---------------------------------------------------------------------------
-const ALLOWED_AUTH_HOST = 'accounts.google.com';
-const ALLOWED_AUTH_PATH = '/o/oauth2/auth';
-const ALLOWED_CLIENT_ID = '32555940559.apps.googleusercontent.com';
-const ALLOWED_REDIRECT_URI = 'https://sdk.cloud.google.com/authcode.html';
-
+// So: exact-match host, path and client_id against what the gcloud login being
+// driven must produce. Anything else refuses to navigate. Compare parsed
+// components, never substrings -- the same rule the authcode check below exists
+// for.
+//
 // Pinning the client is NOT enough on its own, because this harness auto-clicks
 // consent. A compromised remote can reuse gcloud's own (public) client_id with
 // its own PKCE verifier and simply ASK FOR MORE -- add Gmail, Drive or directory
 // scopes and the consent screen we click through grants them for your identity.
 // So the scope set is an allowlist too: exactly what gcloud requests, nothing
-// added. Captured 2026-09-18 from gcloud 537.0.0.
-const ALLOWED_SCOPES = new Set([
-  'openid',
-  'https://www.googleapis.com/auth/userinfo.email',
-  'https://www.googleapis.com/auth/cloud-platform',
-  'https://www.googleapis.com/auth/appengine.admin',
-  'https://www.googleapis.com/auth/sqlservice.login',
-  'https://www.googleapis.com/auth/compute',
-  'https://www.googleapis.com/auth/accounts.reauth',
-]);
+// added.
+//
+// TWO PROFILES, CHOSEN BY THE CALLER, NEVER INFERRED FROM THE URL. The CLI
+// login and the Application Default Credentials login use different public
+// OAuth clients, redirect pages and scope sets. Selecting the profile by
+// looking at the URL would let the remote pick which allowlist it is checked
+// against -- and would make each allowlist the union of both. REAUTH_FLOW is
+// set by refresh.sh for the login IT started; an unset or unknown value refuses.
+// ---------------------------------------------------------------------------
+const ALLOWED_AUTH_HOST = 'accounts.google.com';
+const ALLOWED_AUTH_PATH = '/o/oauth2/auth';
+const PROFILES = {
+  // `gcloud auth login`. Client and redirect observed 2026-09-17, scopes
+  // 2026-09-18, gcloud 537.0.0. The well-known public gcloud CLI client.
+  cli: {
+    clientId: '32555940559.apps.googleusercontent.com',
+    redirectUri: 'https://sdk.cloud.google.com/authcode.html',
+    scopes: new Set([
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/cloud-platform',
+      'https://www.googleapis.com/auth/appengine.admin',
+      'https://www.googleapis.com/auth/sqlservice.login',
+      'https://www.googleapis.com/auth/compute',
+      'https://www.googleapis.com/auth/accounts.reauth',
+    ]),
+  },
+  // `gcloud auth application-default login`. All three observed 2026-10-15 from
+  // gcloud 537.0.0 on the remote host. The well-known public gcloud ADC client,
+  // identical for every install.
+  adc: {
+    clientId: '764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com',
+    redirectUri: 'https://sdk.cloud.google.com/applicationdefaultauthcode.html',
+    scopes: new Set([
+      'openid',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/cloud-platform',
+      'https://www.googleapis.com/auth/sqlservice.login',
+    ]),
+  },
+};
+
+const FLOW = process.env.REAUTH_FLOW;
+if (!Object.hasOwn(PROFILES, FLOW ?? '')) {
+  // Exit 4 (not 3): this is the caller's misconfiguration, not a hostile URL.
+  console.error(`REFUSING: REAUTH_FLOW must be one of ${Object.keys(PROFILES).join('|')}, got ${JSON.stringify(FLOW)}`);
+  process.exit(4);
+}
+const PROFILE = PROFILES[FLOW];
+const ALLOWED_CLIENT_ID = PROFILE.clientId;
+const ALLOWED_REDIRECT_URI = PROFILE.redirectUri;
+const ALLOWED_SCOPES = PROFILE.scopes;
+const AUTHCODE_PAGE = new URL(ALLOWED_REDIRECT_URI);
 
 const validateAuthUrl = (raw) => {
   let u;
@@ -84,12 +121,16 @@ const ACCT = process.env.SPIKE_ACCOUNT;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The IdP redirect carries the OAuth continue/RelayState in its query string,
-// which CONTAINS the literal 'sdk.cloud.google.com/authcode'. A substring test
-// therefore reports "we reached the authcode page" while sitting on The IdP's
-// login form. Compare host and path, never the whole URL.
+// which CONTAINS the literal redirect URI (e.g. 'sdk.cloud.google.com/authcode').
+// A substring test therefore reports "we reached the authcode page" while
+// sitting on The IdP's login form. Compare host and path, never the whole URL --
+// and compare them to THIS flow's pinned redirect URI exactly, so the CLI and
+// ADC code pages cannot stand in for each other.
 const onAuthcode = (u) => {
-  try { const x = new URL(u); return x.host === 'sdk.cloud.google.com' && x.pathname.startsWith('/authcode'); }
-  catch { return false; }
+  try {
+    const x = new URL(u);
+    return x.protocol === 'https:' && x.host === AUTHCODE_PAGE.host && x.pathname === AUTHCODE_PAGE.pathname;
+  } catch { return false; }
 };
 const t0 = Date.now();
 const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`, ...a);
@@ -111,7 +152,7 @@ if (urlRejection) {
   // Refuse BEFORE connecting to the browser -- a rejected URL must not so much
   // as open a tab in a profile holding a live session.
   const row = {
-    ts: new Date().toISOString(), probe: 'browser_e2e', outcome: 'url_rejected',
+    ts: new Date().toISOString(), probe: 'browser_e2e', flow: FLOW, outcome: 'url_rejected',
     url_rejected_reason: urlRejection, awaiting_human: false,
   };
   const LOG = process.env.GCLOUD_REAUTH_PROBE_LOG
@@ -140,6 +181,7 @@ const bodyText = async () => (await page.evaluate(() => document.body.innerText)
 let handoffToHuman = false;
 const result = {
   ts: new Date().toISOString(),
+  flow: FLOW,
   completed_on_cookies: false,
   password_demanded: false,
   mfa_demanded: false,
@@ -252,6 +294,7 @@ try {
     ts: result.ts,
     account: process.env.SPIKE_ACCOUNT ?? null,
     probe: 'browser_e2e',
+    flow: FLOW,
     token_ok: null,
     reauth_required: null,
     completed_on_cookies: result.completed_on_cookies,

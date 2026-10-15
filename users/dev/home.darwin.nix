@@ -309,7 +309,10 @@ lib.mkIf isDarwin {
 
   # Cloudflare Tunnel launchd agent with Keychain-sourced token
   launchd.agents = {
-    # Refresh the remote host's gcloud credential PROACTIVELY, every 8 hours.
+    # Refresh the remote host's gcloud credentials PROACTIVELY, every 8 hours:
+    # both the CLI login and Application Default Credentials (what opencode's
+    # Vertex providers use), each verified and logged separately. See
+    # assets/gcloud-reauth/refresh.sh.
     #
     # Not reactive. The previous design polled every 15 min and refreshed only
     # after detecting failure, so the credential was always dead for some window
