@@ -146,7 +146,7 @@ const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`
 // (~once a day), so a brief focus steal is an acceptable price for a path that
 // works. Do not reintroduce the background variant HERE without measuring it.
 // It IS used by idp-session-probe.mjs (see bg-page.mjs): that path loads one
-// static asset and runs every 90 minutes, and was measured separately. Finding
+// static asset and runs every hour, and was measured separately. Finding
 // createTarget in this tree is therefore not evidence that this note is stale.
 if (urlRejection) {
   // Refuse BEFORE connecting to the browser -- a rejected URL must not so much

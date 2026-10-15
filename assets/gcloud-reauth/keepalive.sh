@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Hold the IdP session open with one authenticated read every ~90 min.
+# Hold the IdP session open with one authenticated read every hour.
 #
-# Why this exists alongside the 8-hourly refresh: the two sessions that matter
+# Why this exists alongside the refresh: the two sessions that matter
 # have very different lifetimes. Google's session in the isolated profile is
 # long-lived and carries most refreshes on its own. The IdP session has a 2-hour
-# IDLE timeout and is needed only when Google decides to re-federate -- so an
-# 8-hourly refresh cannot keep it warm, and a refresh that happens to need it
-# would find it gone. One read every 90 minutes resets the idle clock.
+# IDLE timeout and is needed only when Google decides to re-federate -- so a
+# refresh every few hours cannot keep it warm, and a refresh that happens to need it
+# would find it gone. One read every hour resets the idle clock.
 #
 # It cannot REVIVE a lapsed session. Any gap longer than the idle timeout (lid
 # closed overnight, Chrome not running) needs a human to sign in at the IdP in
@@ -60,14 +60,28 @@ PY
   fi
 }
 
+# Wait for a FULL wake before touching the browser: a calendar job missed
+# during sleep fires on the next wake, which may be a DarkWake (Power Nap) with
+# no display and seconds of network. Same block as refresh.sh, which explains it.
+full_wake() {
+  local caps
+  caps="$(/usr/sbin/ioreg -c IOPMrootDomain -r -d1 2>/dev/null \
+    | sed -n 's/.*"System Capabilities" = \([0-9]*\).*/\1/p' | head -1)"
+  [ -z "$caps" ] || [ $(( caps & 2 )) -ne 0 ]
+}
+for _ in $(seq 1 2880); do full_wake && break; sleep 30; done
+
 # Defer to a refresh in progress: it drives the same browser and closes IdP
 # tabs, and it pokes the IdP session itself, so skipping is correct rather than
-# merely safe.
+# merely safe. TAKE the lock rather than only checking for it: both agents fire
+# together on wake, and a check-then-probe would race the refresh's tab cleanup.
+# The refresh waits for this lock (seconds) instead of skipping.
 LOCK="$STATE/reauth.lock"
-if [ -d "$LOCK" ]; then
+if ! mkdir "$LOCK" 2>/dev/null; then
   record "skipped" "A refresh is running; it keeps the session warm on its own"
   exit 0
 fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 # Retried for ~90s to ride out the gcloud-reauth-chrome agent's respawn gap
 # (60s ThrottleInterval); see refresh.sh.
