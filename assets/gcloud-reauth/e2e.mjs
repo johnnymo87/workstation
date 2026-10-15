@@ -176,7 +176,14 @@ for (const p of await browser.pages()) {
   }
 }
 const page = await browser.newPage();
-const bodyText = async () => (await page.evaluate(() => document.body.innerText)).replace(/\s+/g, ' ');
+const bodyText = async () => {
+  // A page-level evaluate can also land mid-navigation; one retry after the
+  // new document settles covers it.
+  for (let i = 0; ; i++) {
+    try { return (await page.evaluate(() => document.body.innerText)).replace(/\s+/g, ' '); }
+    catch (e) { if (i >= 1) throw e; await sleep(2000); }
+  }
+};
 
 let handoffToHuman = false;
 const result = {
@@ -194,10 +201,19 @@ const result = {
   outcome: null,
 };
 
+// Element handles die when the page navigates under them -- and these pages
+// redirect on their own for a while after each click. Using a stale handle
+// throws "Argument should belong to the same JavaScript world as target
+// object" (or "Execution context was destroyed"), which used to abort the whole
+// flow as outcome `error`: 3 of 33 runs by 2026-10-15. Treat a dead handle as
+// "not this one" and move on; the loops re-query on their next pass.
+const textOf = async (h) => {
+  try { return ((await h.evaluate((e) => e.innerText || '')) || ''); } catch { return ''; }
+};
 const clickByText = async (patterns) => {
   const hs = await page.$$('button, div[role="button"], li, div[role="link"], span[jsname]');
   for (const h of hs) {
-    const t = ((await h.evaluate((e) => e.innerText || '')) || '').trim();
+    const t = (await textOf(h)).trim();
     if (patterns.some((p) => p.test(t))) {
       try { await h.click(); return t.replace(/\s+/g, ' ').slice(0, 60); } catch {}
     }
@@ -235,8 +251,10 @@ try {
   // Step: account chooser
   const hs = await page.$$('li, div[role="link"], div[data-identifier]');
   for (const h of hs) {
-    const t = await h.evaluate((e) => e.innerText || '');
-    if (t.includes(ACCT)) { await h.click(); result.clicks.push('account-row'); break; }
+    const t = await textOf(h);
+    if (t.includes(ACCT)) {
+      try { await h.click(); result.clicks.push('account-row'); break; } catch {}
+    }
   }
   await sleep(6000);
   await inspect('02-after-account');
@@ -284,7 +302,8 @@ try {
   else result.outcome = 'stalled';
 } catch (e) {
   result.outcome = 'error';
-  log('ERROR', e.message);
+  result.error = e.message;
+  log('ERROR', e.stack || e.message);
 } finally {
   console.log('RESULT:', JSON.stringify(result));
   const LOG = process.env.GCLOUD_REAUTH_PROBE_LOG
