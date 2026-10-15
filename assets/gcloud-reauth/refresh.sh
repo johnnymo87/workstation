@@ -176,12 +176,23 @@ LOGIN_CMD_CLI='gcloud auth login --no-launch-browser'
 # exactly the state this job exists to get ahead of; and a file mtime is
 # satisfied by any unrelated rewrite (set-quota-project itself is one).
 #
+# The value to restore is also pinned in a remote sidecar, written only when
+# non-empty. Read only from the file being rewritten, one failed restore would
+# be reported once and then become the new normal: the next run would find no
+# quota project, have nothing to preserve, and call that `refreshed` forever.
+# HUP/PIPE are ignored so that losing the ssh channel after the login wrote the
+# file cannot skip the restore.
+#
 # Only marker lines reach this Mac; the project id and the token stay remote.
 # Not exec'd: the steps after the login are the point.
 # shellcheck disable=SC2016  # expanded by the remote shell, deliberately
-LOGIN_CMD_ADC='f="$HOME/.config/gcloud/application_default_credentials.json"
+LOGIN_CMD_ADC='trap "" HUP PIPE
+f="$HOME/.config/gcloud/application_default_credentials.json"
+pin="$HOME/.local/state/gcloud-reauth/adc-quota-project"
 fp() { jq -r ".refresh_token // empty" "$f" 2>/dev/null | sha256sum | cut -c1-16; }
 qp="$(jq -r ".quota_project_id // empty" "$f" 2>/dev/null)"
+[ -n "$qp" ] || qp="$(cat "$pin" 2>/dev/null)"
+if [ -n "$qp" ]; then mkdir -p "${pin%/*}" && printf "%s\n" "$qp" > "$pin"; fi
 before="$(fp)"
 gcloud auth application-default login --no-launch-browser --disable-quota-project || exit $?
 if [ "$(fp)" != "$before" ]; then echo "gcloud-reauth: rotated=yes"; else echo "gcloud-reauth: rotated=no"; fi
@@ -207,13 +218,16 @@ VERIFY_CMD_ADC='gcloud auth application-default print-access-token >/dev/null 2>
 GPID=""
 abort_remote() {
   [ -n "$GPID" ] && kill "$GPID" 2>/dev/null
-  exec 3>&- 2>/dev/null
+  # Closing an already-closed fd is not an error. Do NOT add 2>/dev/null here:
+  # on a bare `exec` it would redirect the shell's stderr for the rest of the
+  # run, swallowing the next flow's errors and osascript's warning.
+  exec 3>&-
   [ -n "$GPID" ] && wait "$GPID" 2>/dev/null
   GPID=""
 }
 
 refresh_one() {
-  local cred="$1" login_cmd verify_cmd dir answered=0 prompts node_rc reason verdict qp_mode
+  local cred="$1" login_cmd verify_cmd dir answered=0 prompts node_rc reason verdict qp_mode login_rc
   case "$cred" in
     cli) login_cmd="$LOGIN_CMD_CLI"; verify_cmd="$VERIFY_CMD_CLI" ;;
     adc) login_cmd="$LOGIN_CMD_ADC"; verify_cmd="$VERIFY_CMD_ADC" ;;
@@ -309,9 +323,18 @@ except Exception:
   rm -f "$dir/authcode.txt"
   exec 3>&-
   wait "$GPID" 2>/dev/null
+  login_rc=$?
   GPID=""
 
-  # 5. Verify, rather than trust the exit code.
+  # 5. Verify, rather than trust the exit code -- but do not ignore it either.
+  # A failed code exchange leaves the OLD credential in place, and an old
+  # credential that has not died yet still mints a token, so a token check
+  # alone would call that `refreshed`. Exit status comes from the remote
+  # command through ssh (124 if the local timeout fired).
+  if [ "$login_rc" -ne 0 ]; then
+    record "$cred" "verify_failed" "Remote $cred login exited $login_rc after the code was delivered; the old credential may still be in place. See $dir/gcloud-login.log"
+    return
+  fi
   verdict="$(timeout 60 ssh -o ClearAllForwardings=yes "$REMOTE" "$verify_cmd" \
     2>/dev/null | tr -d '\r' | tail -1)"
   if [ "$cred" = adc ] && [ "$verdict" = ok ]; then
@@ -346,15 +369,22 @@ except Exception:
 # close stale IdP tabs -- the very tab just raised for the human, possibly
 # mid-typing. It still gets its own row and its own notification.
 rm -f "$WORK"/authfifo "$WORK"/authcode.txt   # pre-ADC single-workdir layout
-cli_outcome=""
+cli_handed_off=no
 for cred in "${CREDENTIALS[@]}"; do
-  if [ "$cred" != cli ] && [ "$cli_outcome" = human_required ]; then
+  if [ "$cred" != cli ] && [ "$cli_handed_off" = yes ]; then
     record "$cred" "human_required" "Not attempted: the CLI login is waiting at the IdP sign-in. Sign in there, then run gcloud-reauth-refresh."
     continue
   fi
   refresh_one "$cred"
+  # Keyed on what the browser actually did (a tab raised for the human), not
+  # on the mapped outcome: e2e.mjs can raise the tab and then still end in
+  # `error`, which maps to no_authcode.
   if [ "$cred" = cli ]; then
-    cli_outcome="$LAST_OUTCOME"
+    if [ "$LAST_OUTCOME" = human_required ] || python3 -c '
+import json,sys
+sys.exit(0 if json.load(open(sys.argv[1])).get("awaiting_human") else 1)' "$WORK/cli/e2e-result.json" 2>/dev/null; then
+      cli_handed_off=yes
+    fi
   fi
 done
 
