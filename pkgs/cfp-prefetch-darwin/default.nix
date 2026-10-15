@@ -87,7 +87,23 @@ writeShellApplication {
     want_hash="$(eval_attr outputHash)"
     url="$(eval_attr url)"
 
+    # Pin the seed with a GC root. Without one, the seeded path is garbage the
+    # moment it lands: nothing references it until darwin-rebuild finishes, so
+    # any GC in between -- e.g. the nightly home-manager autoExpire store
+    # cleanup at 00:00 firing while `sudo` waits for a password -- deletes it,
+    # and the rebuild falls back to the un-authenticated fetch and 404s.
+    # One fixed link, overwritten each run, so only the current version is
+    # pinned; once a rebuild succeeds, the system closure roots it anyway.
+    root_link="''${XDG_STATE_HOME:-$HOME/.local/state}/cfp-prefetch-darwin/seed"
+    pin() {
+      mkdir -p "$(dirname "$root_link")"
+      nix-store --add-root "$root_link" --realise "$1" >/dev/null
+    }
+
     if nix path-info "$want_path" >/dev/null 2>&1; then
+      # Also pin here: the path may be valid but unrooted (seeded by an older
+      # version of this helper), and so still collectable.
+      pin "$want_path"
       echo "cfp-prefetch-darwin: already seeded: $want_path"
       exit 0
     fi
@@ -134,7 +150,8 @@ writeShellApplication {
       exit 1
     fi
 
-    echo "cfp-prefetch-darwin: seeded $got_path"
+    pin "$got_path"
+    echo "cfp-prefetch-darwin: seeded $got_path (GC root: $root_link)"
   '';
 
   meta = with lib; {
