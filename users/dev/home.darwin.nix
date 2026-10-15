@@ -356,7 +356,8 @@ lib.mkIf isDarwin {
         ];
         RunAtLoad = false;  # do not fire a browser flow during a rebuild
         # Minute 7 / keepalive minute 37: apart in steady state. On wake both
-        # fire together; the shared reauth.lock serialises them.
+        # fire together; the shared reauth.lock serialises them (each waits
+        # for the other rather than skipping).
         StartCalendarInterval = [ { Minute = 7; } ];
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.err.log";

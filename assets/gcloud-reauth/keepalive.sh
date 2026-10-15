@@ -73,12 +73,22 @@ for _ in $(seq 1 2880); do full_wake && break; sleep 30; done
 
 # Defer to a refresh in progress: it drives the same browser and closes IdP
 # tabs, and it pokes the IdP session itself, so skipping is correct rather than
-# merely safe. TAKE the lock rather than only checking for it: both agents fire
-# together on wake, and a check-then-probe would race the refresh's tab cleanup.
-# The refresh waits for this lock (seconds) instead of skipping.
+# merely safe -- but only once it has had a chance to finish. TAKE the lock
+# rather than only checking for it: both agents fire together on wake, and a
+# check-then-probe would race the refresh's tab cleanup. Wait up to 5 min first:
+# a browser refresh takes ~80s and usually never touches the IdP, so skipping
+# on sight would cost this run's slot, and after a 1-2h lid-closed gap that is
+# the difference between a warm session and a dead one. A refresh still
+# holding it after 5 min is in its wait-for-sign-in loop, which probes the IdP
+# every 20s itself.
 LOCK="$STATE/reauth.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  record "skipped" "A refresh is running; it keeps the session warm on its own"
+have_lock=no
+for _ in $(seq 1 60); do
+  if mkdir "$LOCK" 2>/dev/null; then have_lock=yes; break; fi
+  sleep 5
+done
+if [ "$have_lock" != yes ]; then
+  record "skipped" "A refresh has held the lock for 5 min (waiting for a sign-in); it probes the IdP session itself meanwhile"
   exit 0
 fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT

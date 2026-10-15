@@ -59,6 +59,7 @@ set -uo pipefail
 # raise SIGPIPE and kill this script mid-flight -- silently, before it could log
 # or notify. Ignore it so the write merely fails and we handle it below.
 trap '' PIPE
+have_lock=no
 
 REMOTE="${REAUTH_REMOTE:?set REAUTH_REMOTE to the remote ssh host alias}"
 CDP_URL="${REAUTH_CDP_URL:-http://127.0.0.1:9223}"
@@ -91,27 +92,6 @@ full_wake() {
   [ -z "$caps" ] || [ $(( caps & 2 )) -ne 0 ]
 }
 for _ in $(seq 1 2880); do full_wake && break; sleep 30; done
-
-# --- one run at a time ------------------------------------------------------
-# This run and the keepalive drive the same browser, and this one closes IdP
-# tabs as it starts, which would make a concurrent keepalive probe report a
-# session that is actually fine as missing -- a false "go and sign in"
-# notification. Both agents fire on wake, so they DO start together. mkdir is
-# the atomic primitive here; macOS has no flock(1). The keepalive holds the
-# lock for seconds, so wait for it rather than skip.
-LOCK="$STATE/reauth.lock"
-have_lock=no
-for _ in $(seq 1 36); do
-  if mkdir "$LOCK" 2>/dev/null; then have_lock=yes; break; fi
-  # Stale lock from a killed run should not wedge the refresher forever.
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
-    rmdir "$LOCK" 2>/dev/null
-    continue
-  fi
-  sleep 5
-done
-# Release only a lock we took: removing another run's would let a third start.
-trap '[ "$have_lock" = yes ] && rmdir "$LOCK" 2>/dev/null' EXIT
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -148,6 +128,9 @@ PY
   echo "credential=$cred outcome=$outcome ${detail:+detail=$detail}"
   case "$outcome" in
     refreshed|not_due|skipped) ;;
+    # Already notified when the failure happened; a reminder every hour would
+    # train the human to ignore these.
+    backing_off) failed=yes ;;
     # Quiet but not fine: the human was told when the wait began, and the
     # keepalive repeats that every hour. Re-raising here would be a second,
     # hourly, focus-stealing copy of the same message.
@@ -176,47 +159,66 @@ notify() {
 failed=no
 LAST_OUTCOME=""
 
-if [ "$have_lock" != yes ]; then
-  for cred in "${ALL_CREDENTIALS[@]}"; do
-    record "$cred" "skipped" "Another refresh has held $LOCK for over 3 minutes"
-  done
-  exit 0
-fi
-
 # --- which credentials are due ----------------------------------------------
 # Due = no `refreshed` row in the last REAUTH_REFRESH_AFTER_SECONDS. The
-# session-control policy has killed these credentials ~16h after minting, so
-# 6h leaves two more hourly-checked chances inside one lifetime even across a
-# night's sleep, without stealing browser focus more than a few times a day.
+# session-control policy has killed these credentials ~16h after minting.
+# 6h is a trade, not a derivation: each refresh steals browser focus for ~30s,
+# and while the Mac is awake 6h gives two retries inside one lifetime. Across
+# a night it cannot help -- a credential up to 6h old at lid-close dies after
+# ~10h of sleep, and the morning run needs a human at the IdP anyway. A
+# smaller value only moves that overnight death later, at the cost of more
+# focus steals by day.
 # Per credential: if ADC failed and CLI did not, the next run retries only ADC.
 # Rows written before credentials were split out count as cli.
+#
+# BACKOFF. A failure that is not a human stop (verify_failed, no_authcode, a
+# changed consent page...) usually fails the same way again, and each attempt
+# steals focus and notifies. So after one, wait RETRY_AFTER before the next.
+# Human stops are handled by the waiting gate below instead.
 REFRESH_AFTER="${REAUTH_REFRESH_AFTER_SECONDS:-21600}"
-# Prints, per credential: "<cred> <due|fresh> <age-seconds|never> <last-outcome>"
+RETRY_AFTER="${REAUTH_RETRY_AFTER_SECONDS:-7200}"
+# Prints, per credential:
+#   "<cred> <due|fresh|backoff> <age-seconds|never> <last-outcome> <since-last-attempt-seconds>"
 cred_status() {
-  python3 - "$LOG" "$REFRESH_AFTER" "${ALL_CREDENTIALS[@]}" <<'PY'
+  python3 - "$LOG" "$REFRESH_AFTER" "$RETRY_AFTER" "${ALL_CREDENTIALS[@]}" <<'PY'
 import json, sys, datetime
-log, after, creds = sys.argv[1], int(sys.argv[2]), sys.argv[3:]
-last_ok, last_outcome = {}, {}
+log, after, retry, creds = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
+QUIET = ("not_due", "skipped", "backing_off")
+HUMAN = ("human_required", "waiting_for_human")
+last_ok, last_outcome, last_attempt = {}, {}, {}
+parse = datetime.datetime.fromisoformat
 try:
     lines = open(log).read().splitlines()
 except FileNotFoundError:
     lines = []
 for line in lines:
+    # One bad row must not take the whole history down with it: that would
+    # make everything look due, forever.
     try:
         r = json.loads(line)
+        c = r.get("credential") or "cli"
+        o = r.get("outcome")
+        ts = parse(r["ts"])
+        if o == "refreshed":
+            last_ok[c] = ts
+        if o not in QUIET:
+            last_outcome[c] = o
+            last_attempt[c] = ts
     except Exception:
         continue
-    c = r.get("credential") or "cli"
-    if r.get("outcome") == "refreshed":
-        last_ok[c] = r["ts"]
-    if r.get("outcome") not in ("not_due", "skipped"):
-        last_outcome[c] = r.get("outcome")
 now = datetime.datetime.now(datetime.timezone.utc)
 for c in creds:
-    ts = last_ok.get(c)
-    age = int((now - datetime.datetime.fromisoformat(ts)).total_seconds()) if ts else None
-    due = age is None or age >= after
-    print(c, "due" if due else "fresh", "never" if age is None else age, last_outcome.get(c) or "none")
+    ok = last_ok.get(c)
+    age = int((now - ok).total_seconds()) if ok else None
+    o = last_outcome.get(c) or "none"
+    since = int((now - last_attempt[c]).total_seconds()) if c in last_attempt else 10**9
+    if age is not None and age < after:
+        state = "fresh"
+    elif o not in ("refreshed", "none") + HUMAN and since < retry:
+        state = "backoff"
+    else:
+        state = "due"
+    print(c, state, "never" if age is None else age, o, since)
 PY
 }
 
@@ -226,17 +228,48 @@ status="$(cred_status)"
 if [ "$(grep -c . <<<"$status")" -ne "${#ALL_CREDENTIALS[@]}" ]; then
   # Cannot tell what is due: treat everything as due rather than exit rowless.
   echo "WARNING: could not read refresh history from $LOG; refreshing everything" >&2
-  status="$(printf '%s due never unknown\n' "${ALL_CREDENTIALS[@]}")"
+  status="$(printf '%s due never unknown 0\n' "${ALL_CREDENTIALS[@]}")"
 fi
-while read -r cred due age last; do
+while read -r cred due age last since; do
   if [ "$FORCE" = yes ] || [ "$due" = due ]; then
     CREDENTIALS+=("$cred")
     case "$last" in human_required|waiting_for_human) ;; *) waiting_on_human=no ;; esac
+  elif [ "$due" = backoff ]; then
+    record "$cred" "backing_off" "Last attempt failed ($last) $((since / 60)) min ago; next try after $((RETRY_AFTER / 60)) min, or run gcloud-reauth-refresh --force"
   else
     record "$cred" "not_due" "Refreshed $((age / 60)) min ago; due after $((REFRESH_AFTER / 60)) min"
   fi
 done <<<"$status"
 if [ "${#CREDENTIALS[@]}" -eq 0 ]; then
+  [ "$failed" = no ] && exit 0   # backing_off is not "fine"
+  exit 1
+fi
+
+# --- one run at a time ------------------------------------------------------
+# This run and the keepalive drive the same browser, and this one closes IdP
+# tabs as it starts, which would make a concurrent keepalive probe report a
+# session that is actually fine as missing -- a false "go and sign in"
+# notification. Both agents fire on wake, so they DO start together. mkdir is
+# the atomic primitive here; macOS has no flock(1). The keepalive holds the
+# lock for seconds, so wait for it rather than skip. Taken only once something
+# is due: a `not_due` run must not make the keepalive wait on it.
+LOCK="$STATE/reauth.lock"
+for _ in $(seq 1 36); do
+  if mkdir "$LOCK" 2>/dev/null; then have_lock=yes; break; fi
+  # Stale lock from a killed run should not wedge the refresher forever.
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    rmdir "$LOCK" 2>/dev/null
+    continue
+  fi
+  sleep 5
+done
+# Release only a lock we took: removing another run's would let a third start.
+trap '[ "$have_lock" = yes ] && rmdir "$LOCK" 2>/dev/null' EXIT
+
+if [ "$have_lock" != yes ]; then
+  for cred in "${CREDENTIALS[@]}"; do
+    record "$cred" "skipped" "Another reauth run has held $LOCK for over 3 minutes"
+  done
   exit 0
 fi
 
@@ -253,7 +286,7 @@ idp_session() {
   local out
   out="$(IDP_LOG="$STATE/idp-session.jsonl" IDP_SESSION_PATH="$IDP_SESSION_PATH" \
          REAUTH_CDP_URL="$CDP_URL" \
-         timeout 60 "$NODE" "$LIB/idp-session-probe.mjs" "$IDP_ORIGIN" 2>/dev/null)"
+         timeout 120 "$NODE" "$LIB/idp-session-probe.mjs" "$IDP_ORIGIN" 2>/dev/null)"
   python3 -c '
 import json, sys
 try:
@@ -537,10 +570,14 @@ attempt() {
 import json,sys
 sys.exit(0 if json.load(open(sys.argv[1])).get("awaiting_human") else 1)' "$WORK/$cred/e2e-result.json" 2>/dev/null; then
       handed_off=yes
+      HANDOFF_REASON="$(python3 -c '
+import json,sys
+print(json.load(open(sys.argv[1])).get("outcome") or "unknown")' "$WORK/$cred/e2e-result.json" 2>/dev/null)"
     fi
   done
   HANDED_OFF="$handed_off"
 }
+HANDOFF_REASON=""
 
 HUMAN_WAIT="${REAUTH_HUMAN_WAIT_SECONDS:-900}"
 attempt "${CREDENTIALS[@]}"
@@ -551,13 +588,24 @@ attempt "${CREDENTIALS[@]}"
 # next hourly run: poll the IdP session (background tab; the raised sign-in tab
 # is left alone) and, once it is live, retry what is still pending. Exactly one
 # retry -- a second stop means something other than a missing sign-in.
-if [ "$HANDED_OFF" = yes ] && [ "${#PENDING[@]}" -gt 0 ] && [ "$HUMAN_WAIT" -gt 0 ]; then
+#
+# Only for a stop at the IdP's sign-in form. A Google-side stop (password, MFA,
+# bot check) happens WITH a live IdP session, so the first poll would say yes
+# and the retry would close the very tab the human is typing in. And a "yes"
+# counts only after a "no" has been seen, i.e. after the session state actually
+# changed, for the same reason.
+if [ "$HANDED_OFF" = yes ] && [ "$HANDOFF_REASON" = idp_login_required ] \
+   && [ "${#PENDING[@]}" -gt 0 ] && [ "$HUMAN_WAIT" -gt 0 ]; then
   echo "waiting up to ${HUMAN_WAIT}s for an IdP sign-in"
   deadline=$(( $(date +%s) + HUMAN_WAIT ))
   signed_in=no
+  seen_no=no
   while [ "$(date +%s)" -lt "$deadline" ]; do
     sleep 20
-    if [ "$(idp_session)" = yes ]; then signed_in=yes; break; fi
+    case "$(idp_session)" in
+      no) seen_no=yes ;;
+      yes) [ "$seen_no" = yes ] && { signed_in=yes; break; } ;;
+    esac
   done
   if [ "$signed_in" = yes ]; then
     # Let the human's tab finish its redirect before the retry closes it.
