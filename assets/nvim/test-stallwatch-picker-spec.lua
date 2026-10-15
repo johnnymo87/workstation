@@ -50,6 +50,24 @@ do
     "non-boolean falsey armed/enabled -> no markers")
   check(spec.program_display({ tag = "delta", armed = false, enabled = false }, NOW) == "delta · 0 open [log-only] [disabled]",
     "explicit false -> markers")
+  check(spec.WAKE_PENDING_MARK == "⏳", "WAKE_PENDING_MARK is ⏳")
+  check(spec.program_display({ tag = "p_wake", counts = { total = 0, by_kind = {} }, wake_pending = true }, NOW)
+    == "p_wake · 0 open ⏳", "wake_pending -> ⏳ marker")
+  check(spec.program_display({ tag = "p_run", counts = { total = 0, by_kind = {} }, last_run_ms = NOW - 3 * 3600000 }, NOW)
+    == "p_run · 0 open · ran 3h ago", "last_run_ms -> 'ran 3h ago'")
+  check(spec.program_display({
+    tag = "p_all",
+    counts = { total = 0, by_kind = {} },
+    last_tick_ms = NOW - 12 * 60000,
+    last_run_ms = NOW - 3 * 3600000,
+    wake_pending = true,
+  }, NOW) == "p_all · 0 open · checked 12m ago · ran 3h ago ⏳", "combined checked, ran, and wake_pending")
+  check(spec.program_display({ tag = "p_dis", counts = { total = 0, by_kind = {} }, armed = false, enabled = false, wake_pending = true }, NOW)
+    == "p_dis · 0 open [log-only] [disabled] ⏳", "wake_pending with disabled markers")
+  check(spec.program_display({ tag = "p_none", counts = { total = 0, by_kind = {} }, wake_pending = false, last_run_ms = nil }, NOW)
+    == "p_none · 0 open", "false wake_pending and nil last_run_ms unchanged")
+  check(spec.program_display({ tag = "p_nil", counts = { total = 0, by_kind = {} }, wake_pending = vim.NIL, last_run_ms = vim.NIL }, NOW)
+    == "p_nil · 0 open", "vim.NIL wake_pending and last_run_ms unchanged")
   check(spec.program_ordinal(nil) == "", "nil prow ordinal -> empty string")
   check(spec.program_ordinal(vim.NIL) == "", "vim.NIL prow ordinal -> empty string")
   check(spec.program_ordinal({ tag = vim.NIL }) == "", "vim.NIL tag ordinal -> empty string")

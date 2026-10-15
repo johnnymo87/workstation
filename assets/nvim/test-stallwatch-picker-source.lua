@@ -318,4 +318,36 @@ do
   check(doc.arr_with_null[1] == nil and doc.arr_with_null[2] == "val", "array null decodes to nil")
 end
 
+-- 17. WAKE: command path and spawn args.
+do
+  check(source.wake_cmd({ [source.WAKE_ENV] = "/x/wake.sh" }) == "/x/wake.sh", "wake env override wins")
+  check(source.wake_cmd({}) == vim.fn.expand("~/projects/eng-agent-platform/stallwatch/wake.sh"), "default wake path")
+  check(source.wake_cmd({ [source.WAKE_ENV] = "" }) == source.wake_cmd({}), "empty wake env var -> default")
+
+  local wake_calls = {}
+  local fake_sys = function(argv, _o, on_exit)
+    table.insert(wake_calls, argv)
+    vim.schedule(function()
+      on_exit({ code = 0, signal = 0, stdout = "wake queued for alpha\n", stderr = "" })
+    end)
+    return { pid = 1, kill = function() end }
+  end
+  local wake_out, wake_err
+  source.wake(fake_sys, "alpha", function(o, e) wake_out, wake_err = o, e end, { env = { [source.WAKE_ENV] = "/x/wake.sh" } })
+  vim.wait(500, function() return wake_out ~= nil end)
+  check(wake_err == nil and wake_out.code == 0, "wake exit 0")
+  check(#wake_calls == 1, "wake spawned once")
+  check(wake_calls[1][1] == "/x/wake.sh" and wake_calls[1][2] == "alpha" and wake_calls[1][3] == "--source" and wake_calls[1][4] == "picker",
+    "wake spawn args: cmd tag --source picker")
+
+  -- Timeout in source.wake
+  local hang_sys = function(_argv, _o, _on_exit)
+    return { pid = 1, kill = function() end }
+  end
+  local hang_out, hang_err
+  source.wake(hang_sys, "beta", function(o, e) hang_out, hang_err = o, e end, { timeout_ms = 50 })
+  vim.wait(500, function() return hang_err ~= nil end)
+  check(hang_err ~= nil and hang_err.kind == "timeout", "wake times out")
+end
+
 print("LUA_TEST_OK " .. N)

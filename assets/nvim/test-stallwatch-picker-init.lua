@@ -16,6 +16,8 @@ local ss_spec = loadfile("assets/nvim/lua/user/session_switcher/spec.lua")()
 package.preload["user.session_switcher.spec"] = function() return ss_spec end
 local flow = loadfile("assets/nvim/lua/user/session_switcher/flow.lua")()
 package.preload["user.session_switcher.flow"] = function() return flow end
+local cli = loadfile("assets/nvim/lua/user/session_switcher/cli.lua")()
+package.preload["user.session_switcher.cli"] = function() return cli end
 
 -- exec: only tmux_client and notify_warnings are reached from this layer.
 local tmux_calls = 0
@@ -37,8 +39,16 @@ local model = loadfile("assets/nvim/lua/user/stallwatch_picker/model.lua")()
 package.preload["user.stallwatch_picker.model"] = function() return model end
 local spec = loadfile("assets/nvim/lua/user/stallwatch_picker/spec.lua")()
 package.preload["user.stallwatch_picker.spec"] = function() return spec end
+local source = loadfile("assets/nvim/lua/user/stallwatch_picker/source.lua")()
 package.preload["user.stallwatch_picker.source"] = function()
-  return { fetch = function() error("tests inject opts.fetch") end }
+  return {
+    fetch = function() error("tests inject opts.fetch") end,
+    wake = source.wake,
+    wake_cmd = source.wake_cmd,
+    run = source.run,
+    WAKE_ENV = source.WAKE_ENV,
+    DEFAULT_WAKE_CMD = source.DEFAULT_WAKE_CMD,
+  }
 end
 
 -- ---- telescope stubs ------------------------------------------------------
@@ -142,6 +152,9 @@ end
 -- 2. <CR> on a program -> close, then (scheduled) Screen 2 flagged view.
 local m1 = mappings_of(s1, 11)
 check(m1["<C-d>"] ~= nil, "Screen 1 maps <C-d>")
+check(m1["<C-g>"] ~= nil, "Screen 1 maps <C-g>")
+check(vim.tbl_contains(m1["<C-g>"].modes, "i") and vim.tbl_contains(m1["<C-g>"].modes, "n"),
+  "Screen 1 maps <C-g> in insert and normal mode")
 selected_entry = { value = s1.defaults.finder.results[2] } -- beta
 select_default_fn()
 check(closed[#closed] == 11, "Screen 1 closed on <CR>")
@@ -254,6 +267,78 @@ do
   check(init.show_digest("/nonexistent/fixture/digest") == nil, "missing file -> 'no digest yet'")
   vim.notify = orig
   os.remove(path)
+end
+
+-- 8. <C-g> wakes the selected program, notifications, picker stays open.
+do
+  local wake_calls = {}
+  local fake_sys = function(argv, _o, on_exit)
+    table.insert(wake_calls, argv)
+    local code = 0
+    local stderr = ""
+    if argv[2] == "fail_prog" then
+      code = 2
+      stderr = "unknown program tag 'fail_prog'\n"
+    elseif argv[2] == "hang_prog" then
+      return { pid = 1, kill = function() end }
+    end
+    vim.schedule(function()
+      on_exit({ code = code, signal = 0, stdout = "", stderr = stderr })
+    end)
+    return { pid = 1, kill = function() end }
+  end
+
+  local notify_calls = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notify_calls, { msg = msg, level = level })
+  end
+
+  init.open({
+    flow = ctrl,
+    fetch = function(_o, cb) cb(SNAP, nil) end,
+    system = fake_sys,
+    wake_timeout_ms = 50,
+  })
+  local wake_picker = new_calls[#new_calls]
+  local wm = mappings_of(wake_picker, 99)
+  check(wm["<C-g>"] ~= nil, "Screen 1 maps <C-g>")
+
+  -- (a) Success: exit 0 -> INFO notification "stall-watch: waking <tag>", picker stays open
+  local closed_before = #closed
+  selected_entry = { value = { tag = "alpha" } }
+  wm["<C-g>"].fn()
+  vim.wait(200, function() return #wake_calls == 1 end)
+  check(#wake_calls == 1, "wake spawned")
+  check(wake_calls[1][2] == "alpha" and wake_calls[1][3] == "--source" and wake_calls[1][4] == "picker",
+    "wake argv: tag --source picker")
+  vim.wait(200, function() return #notify_calls == 1 end)
+  check(#notify_calls == 1, "notify called on exit 0")
+  check(notify_calls[1].msg == "stall-watch: waking alpha" and notify_calls[1].level == vim.log.levels.INFO,
+    "exit 0 -> INFO 'stall-watch: waking alpha'")
+  check(#closed == closed_before, "picker stays open on wake")
+
+  -- (b) Error: exit non-zero -> WARN notification with trimmed stderr
+  selected_entry = { value = { tag = "fail_prog" } }
+  wm["<C-g>"].fn()
+  vim.wait(200, function() return #wake_calls == 2 end)
+  vim.wait(200, function() return #notify_calls == 2 end)
+  check(#notify_calls == 2, "notify called on exit 2")
+  check(notify_calls[2].msg == "unknown program tag 'fail_prog'" and notify_calls[2].level == vim.log.levels.WARN,
+    "exit non-zero -> WARN with trimmed stderr")
+  check(#closed == closed_before, "picker stays open on wake error")
+
+  -- (c) Timeout -> WARN notification "timed out"
+  selected_entry = { value = { tag = "hang_prog" } }
+  wm["<C-g>"].fn()
+  vim.wait(200, function() return #wake_calls == 3 end)
+  vim.wait(300, function() return #notify_calls == 3 end)
+  check(#notify_calls == 3, "notify called on timeout")
+  check(notify_calls[3].msg == "timed out" and notify_calls[3].level == vim.log.levels.WARN,
+    "timeout -> WARN 'timed out'")
+  check(#closed == closed_before, "picker stays open on timeout")
+
+  vim.notify = orig_notify
 end
 
 print("LUA_TEST_OK " .. N)

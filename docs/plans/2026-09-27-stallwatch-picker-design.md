@@ -76,6 +76,10 @@ waits on I/O or races an in-flight callback.
   filled with `readfile`, never `:edit`, so the private path does not land in
   shada/oldfiles). "No digest yet" if null or missing. The title shows the
   digest's age. Digests are the only place resolved items appear, since the read command returns open items only.
+- `<C-g>` wakes the selected program: spawns `$STALLWATCH_WAKE_CMD` (default
+  `~/projects/eng-agent-platform/stallwatch/wake.sh`) with args
+  `{tag, "--source", "picker"}`. On exit 0, notifies `stall-watch: waking <tag>` at INFO;
+  otherwise notifies trimmed stderr or "timed out" at WARN. The picker stays open.
 
 ### Screen 2 -- Sessions of one program
 
