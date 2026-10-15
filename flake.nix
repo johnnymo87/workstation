@@ -24,8 +24,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    # Pinned to a release tag. Unpinned, this input followed devenv `main` and
+    # once locked an unreleased 2.1.3 snapshot that printed nix log lines to
+    # stdout, breaking `use devenv` under direnv. Keep it on the same release
+    # as eternal-machinery's devenv.yaml `devenv` modules input and its
+    # hosted-CI devenv pin (bead eternal-machinery-njrvv.2).
     devenv = {
-      url = "github:cachix/devenv";
+      url = "github:cachix/devenv/v2.4.0";
     };
 
     # Used ONLY by gamebox, for Sunshine: 25.11 ships Sunshine 2025.924,
