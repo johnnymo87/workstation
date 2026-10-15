@@ -131,6 +131,26 @@ do
   check(#c.by_kind == 2 and c.by_kind[1].kind == "decision" and c.by_kind[1].n == 1
     and c.by_kind[2].kind == "unknown" and c.by_kind[2].n == 1,
     "by_kind counts only table items")
+
+  -- Optional last_run_at and wake_pending carried into program rows.
+  check(prows[1].last_run_at == nil and prows[1].last_run_ms == nil, "missing last_run_at -> nil")
+  check(prows[1].wake_pending == false, "missing wake_pending -> false")
+
+  local wake_test = model.program_rows({ programs = {
+    { tag = "p1", last_run_at = "2026-01-01T09:00:00+00:00", wake_pending = true },
+    { tag = "p2", last_run_at = vim.NIL, wake_pending = vim.NIL },
+    { tag = "p3", last_run_at = "invalid", wake_pending = false },
+    { tag = "p4", last_run_at = "", wake_pending = "true" },
+  } })
+  check(wake_test[1].last_run_at == "2026-01-01T09:00:00+00:00", "p1 last_run_at string carried")
+  check(wake_test[1].last_run_ms == 1767258000000, "p1 last_run_ms parsed to epoch ms")
+  check(wake_test[1].wake_pending == true, "p1 wake_pending true")
+  check(wake_test[2].last_run_at == nil and wake_test[2].last_run_ms == nil, "vim.NIL last_run_at -> nil")
+  check(wake_test[2].wake_pending == false, "vim.NIL wake_pending -> false")
+  check(wake_test[3].last_run_at == "invalid" and wake_test[3].last_run_ms == nil, "invalid last_run_at -> ms nil")
+  check(wake_test[3].wake_pending == false, "false wake_pending -> false")
+  check(wake_test[4].last_run_at == nil and wake_test[4].last_run_ms == nil, "empty string last_run_at -> nil")
+  check(wake_test[4].wake_pending == false, "non-boolean wake_pending -> false")
 end
 
 -- 5. FLAGGED ROWS: item-driven, deduped, most urgent badge, left-join.

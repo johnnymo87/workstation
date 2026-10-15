@@ -24,9 +24,12 @@ local M = {}
 
 M.ENV = "STALLWATCH_ITEMS_CMD"
 M.DEFAULT_CMD = "~/projects/eng-agent-platform/stallwatch/items.sh"
+M.WAKE_ENV = "STALLWATCH_WAKE_CMD"
+M.DEFAULT_WAKE_CMD = "~/projects/eng-agent-platform/stallwatch/wake.sh"
 M.ITEMS_TIMEOUT_MS = 5000
 M.TAGS_TIMEOUT_MS = 5000
 M.LIST_TIMEOUT_MS = 5000
+M.WAKE_TIMEOUT_MS = 5000
 M.BUSY_MESSAGE = "stall-watch busy, retry"
 
 --- Absolute path of the read command: $STALLWATCH_ITEMS_CMD, else the default.
@@ -40,9 +43,33 @@ function M.items_cmd(env)
   return vim.fn.expand(M.DEFAULT_CMD)
 end
 
+--- Absolute path of the wake command: $STALLWATCH_WAKE_CMD, else the default.
+--- @param env table|nil injection seam (defaults to vim.env)
+function M.wake_cmd(env)
+  env = env or vim.env
+  local v = env[M.WAKE_ENV]
+  if type(v) == "string" and v ~= "" then
+    return vim.fn.expand(v)
+  end
+  return vim.fn.expand(M.DEFAULT_WAKE_CMD)
+end
+
 --- Whether the read command is executable (gates the <leader>fp keymap).
 function M.available(env)
   return vim.fn.executable(M.items_cmd(env)) == 1
+end
+
+--- Spawn the wake command for a program tag.
+--- @param system function vim.system seam
+--- @param tag string program tag
+--- @param cb function(out, err) called via vim.schedule
+--- @param opts table|nil { env?: table, timeout_ms?: integer }
+function M.wake(system, tag, cb, opts)
+  opts = opts or {}
+  local cmd = M.wake_cmd(opts.env)
+  local argv = { cmd, tag, "--source", "picker" }
+  local timeout = opts.timeout_ms or M.WAKE_TIMEOUT_MS
+  M.run(system, argv, timeout, cb)
 end
 
 local function trim(s)

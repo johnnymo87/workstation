@@ -16,6 +16,7 @@ local M = {}
 M.SEP = "│"
 M.NOT_ARMED_MARK = "[log-only]"
 M.NOT_ENABLED_MARK = "[disabled]"
+M.WAKE_PENDING_MARK = "⏳"
 
 local function oneline(s)
   if type(s) == "string" then
@@ -65,15 +66,19 @@ function M.counts_text(counts)
   return s
 end
 
---- Screen 1 row: `name · N open (k decision, m blocker) · checked 12m ago`,
---- plus a marker when the program is not armed (log-only) or not enabled.
+--- Screen 1 row: `name · N open (k decision, m blocker) · checked 12m ago · ran 3h ago`,
+--- plus a marker when the program is not armed (log-only), not enabled, or has a wake pending.
 --- A missing last_tick_activity drops the "checked" part rather than lying.
+--- A missing last_run_at drops the "ran" part.
 function M.program_display(prow, now_ms)
   prow = type(prow) == "table" and prow or {}
   local tag = nonempty(prow.tag) or "(unnamed)"
   local parts = { tag, M.counts_text(prow.counts) }
   if type(prow.last_tick_ms) == "number" then
     table.insert(parts, "checked " .. ss_spec.idle_age(prow.last_tick_ms, now_ms) .. " ago")
+  end
+  if type(prow.last_run_ms) == "number" then
+    table.insert(parts, "ran " .. ss_spec.idle_age(prow.last_run_ms, now_ms) .. " ago")
   end
   local s = table.concat(parts, " · ")
   -- `== false`, not `~= true`: a MISSING field is "tolerated; that part of
@@ -83,6 +88,9 @@ function M.program_display(prow, now_ms)
   end
   if prow.enabled == false then
     s = s .. " " .. M.NOT_ENABLED_MARK
+  end
+  if prow.wake_pending == true then
+    s = s .. " " .. M.WAKE_PENDING_MARK
   end
   return s
 end

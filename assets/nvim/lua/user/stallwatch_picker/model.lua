@@ -173,11 +173,15 @@ function M.program_rows(doc)
       if type(p.enabled) == "boolean" then
         enabled = p.enabled
       end
+      local last_run_at = nonempty(p.last_run_at)
       table.insert(out, {
         tag = nonempty(p.tag) or "(unnamed)",
         armed = armed,
         enabled = enabled,
         last_tick_ms = M.iso_ms(p.last_tick_activity),
+        last_run_at = last_run_at,
+        last_run_ms = M.iso_ms(last_run_at),
+        wake_pending = p.wake_pending == true,
         items = list(p.items),
         counts = M.counts(p),
         top = M.top_item(p.items, p.top_fingerprint),

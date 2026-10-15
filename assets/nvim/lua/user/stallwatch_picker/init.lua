@@ -7,11 +7,11 @@
 -- does I/O, so there is no in-flight callback to race.
 --
 -- Keys:
---   Screen 1: <CR> drill into a program, <C-d> latest digest.
+--   Screen 1: <CR> drill into a program, <C-d> latest digest, <C-g> wake program.
 --   Screen 2: <CR> jump, <C-f> flagged/all, <C-b> back (cursor restored).
 -- <C-d> (Screen 1) and <C-f> (Screen 2) shadow telescope's
 -- preview_scrolling_down/_left defaults in those pickers only; the session
--- switcher already shadows <C-f> the same way.
+-- switcher already shadows <C-f> the same way. <C-g> is free in telescope.
 --
 -- Jumping is the session switcher's own path, not a copy of it:
 -- flow:accept (fresh discovery re-resolve + act.decide) and then
@@ -92,6 +92,48 @@ local function digest_mapping(state, prompt_bufnr)
   end
 end
 
+local function trim(s)
+  if type(s) ~= "string" then
+    return nil
+  end
+  local t = s:match("^%s*(.-)%s*$")
+  return t ~= "" and t or nil
+end
+
+local function wake_mapping(state, _prompt_bufnr)
+  return function()
+    local entry = action_state.get_selected_entry()
+    if not entry or not entry.value or not entry.value.tag then
+      return true
+    end
+    local tag = entry.value.tag
+    local system = (state.opts and (state.opts.system or (state.opts.source_opts and state.opts.source_opts.system))) or vim.system
+    local env = state.opts and (state.opts.env or (state.opts.source_opts and state.opts.source_opts.env))
+    local timeout = state.opts and (state.opts.wake_timeout_ms or (state.opts.source_opts and state.opts.source_opts.wake_timeout_ms))
+    source.wake(system, tag, function(out, err)
+      if not err and out and out.code == 0 and (not out.signal or out.signal == 0) then
+        vim.notify("stall-watch: waking " .. tag, vim.log.levels.INFO)
+      else
+        local msg
+        if err and err.kind == "timeout" then
+          msg = "timed out"
+        else
+          local err_txt = trim(out and out.stderr)
+          if err_txt then
+            msg = err_txt
+          elseif err and err.kind == "timeout" then
+            msg = "timed out"
+          else
+            msg = (err and trim(err.message)) or "timed out"
+          end
+        end
+        vim.notify(msg, vim.log.levels.WARN)
+      end
+    end, { env = env, timeout_ms = timeout })
+    return true
+  end
+end
+
 --- Screen 1.
 --- @param state table { snap, prows, by_id, client, controller, opts }
 --- @param select_tag string|nil program to put the cursor on (after <C-b>)
@@ -125,6 +167,7 @@ function M.programs(state, select_tag)
         end)
       end)
       map({ "i", "n" }, "<C-d>", digest_mapping(state, prompt_bufnr))
+      map({ "i", "n" }, "<C-g>", wake_mapping(state, prompt_bufnr))
       return true
     end,
   })
