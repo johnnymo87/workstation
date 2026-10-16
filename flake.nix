@@ -568,6 +568,20 @@
         touch $out
       '';
 
+      # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
+      # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
+      credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        bash hosts/devbox/test-credo-diff-sweep.sh 2>&1 | tee "$TMPDIR/c.txt"
+        grep -q '^ALL PASS (9 assertions)' "$TMPDIR/c.txt" || {
+          echo "GATE FAILURE: credo-diff-sweep suite did not reach ALL PASS (9 assertions)." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Disk-triggered dead-path GC (devbox nix-gc-floor).
       # Pinned assertion count; see hosts/devbox/test-nix-gc-floor.sh.
       nix-gc-floor-tests = devboxPkgs.runCommand "nix-gc-floor-tests" {
@@ -2591,6 +2605,7 @@
         ./hosts/devbox/em-ci-monitor.nix
         ./hosts/devbox/em-ci-failover.nix
         ./hosts/devbox/nix-gc-floor.nix
+        ./hosts/devbox/credo-diff-sweep.nix
       ];
     };
 
