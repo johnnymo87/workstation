@@ -14,8 +14,10 @@
 # Same failure class as users/dev/disk-cleanup.nix's tmp-scratch-sweep notes.
 # This sweep ages by the UTC timestamp credo writes into the name instead.
 #
-# 6h is far above a credo diff's runtime (minutes), so a live run is never
-# swept; steady state is a few hours of checkouts, ~2G.
+# 6h is far above a credo diff's normal runtime (minutes). It is an age
+# check, not a liveness check: a run hung for over 6h loses its checkout and
+# has to be re-run, which is accepted for a disposable lint baseline.
+# Steady state is a few hours of checkouts, ~2G.
 #
 # The CI runner containers have their own /tmp, cleaned by
 # eternal-machinery's .github/ci/prepare-workspace.sh; this is the host only.

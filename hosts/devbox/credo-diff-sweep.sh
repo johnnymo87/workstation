@@ -21,14 +21,20 @@ created_at() {
   stat -c %Y "$1"
 }
 
-removed=0; kib=0
+removed=0; kib=0; failed=0
 shopt -s nullglob
 for d in "$dir"/credo-diff-*; do
-  # Real directories only; never follow a symlink out of /tmp.
-  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  # Real directories we own only; never follow a symlink out of /tmp.
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || continue
   [ "$(created_at "$d")" -lt "$cutoff" ] || continue
-  size=$(du -sk "$d" | cut -f1)
-  rm -rf -- "$d"
-  removed=$(( removed + 1 )); kib=$(( kib + size ))
+  size=$(du -sk "$d" 2>/dev/null | cut -f1) || size=0
+  # One undeletable checkout must not stop the rest of the sweep.
+  if rm -rf -- "$d" 2>/dev/null; then
+    removed=$(( removed + 1 )); kib=$(( kib + ${size:-0} ))
+  else
+    failed=$(( failed + 1 )); echo "<4>credo-diff-sweep: could not fully remove $d"
+  fi
 done
 echo "credo-diff-sweep: removed $removed checkout(s) older than ${max_age_min} min, $(( kib / 1024 )) MiB"
+# Non-zero so a persistently stuck checkout shows as a failed unit.
+[ "$failed" -eq 0 ]

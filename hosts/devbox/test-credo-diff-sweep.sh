@@ -38,6 +38,16 @@ check "non-matching dir kept" '[ -d "$S/unrelated-20261001000000" ]'
 check "symlink not followed or removed" '[ -L "$S/credo-diff-20261001000000000000" ] && [ -f "$S/target/f" ]'
 check "summary counts 3" 'grep -q "removed 3 checkout" <<<"$out"'
 
+# An undeletable old checkout is reported and does not stop the rest.
+F=$(mktemp -d)
+mkdir -p "$F/credo-diff-20261001000000000000/locked" "$F/credo-diff-20261002000000000000"
+echo x >"$F/credo-diff-20261001000000000000/locked/f"; chmod 555 "$F/credo-diff-20261001000000000000/locked"
+if CREDO_SWEEP_DIR=$F "$bin" >/dev/null; then rc=0; else rc=$?; fi
+chmod 755 "$F/credo-diff-20261001000000000000/locked"
+check "undeletable checkout: non-zero exit" '[ "$rc" -ne 0 ]'
+check "undeletable checkout: later checkout still removed" '[ ! -e "$F/credo-diff-20261002000000000000" ]'
+rm -rf "$F"
+
 # Empty directory: no error.
 E=$(mktemp -d)
 if CREDO_SWEEP_DIR=$E "$bin" >/dev/null; then rc=0; else rc=$?; fi

@@ -575,8 +575,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-credo-diff-sweep.sh 2>&1 | tee "$TMPDIR/c.txt"
-        grep -q '^ALL PASS (9 assertions)' "$TMPDIR/c.txt" || {
-          echo "GATE FAILURE: credo-diff-sweep suite did not reach ALL PASS (9 assertions)." >&2
+        grep -q '^ALL PASS (11 assertions)' "$TMPDIR/c.txt" || {
+          echo "GATE FAILURE: credo-diff-sweep suite did not reach ALL PASS (11 assertions)." >&2
           exit 1
         }
         touch $out
