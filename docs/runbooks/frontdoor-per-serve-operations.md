@@ -29,7 +29,7 @@ every directory, and SIGTERMs its stdio MCP children. Expect a cold-boot latency
 afterwards. Do it in a quiet window.
 
 The server password is at the path given by the `opencode_server_password` sops secret
-(see `.opencode/skills/managing-secrets/SKILL.md`); read it from that file rather than
+(see `.agents/skills/managing-secrets/SKILL.md`); read it from that file rather than
 pasting it into a shell history.
 
 ## 2. MCP OAuth (`POST|DELETE /mcp/{name}/auth`, `.../auth/authenticate`, `.../auth/callback`)

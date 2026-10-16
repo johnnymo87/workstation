@@ -48,9 +48,7 @@ workstation/
 │
 ├── scripts/                  # Helper scripts
 │
-└── .opencode/                # THIS REPO's OpenCode documentation
-    ├── skills/               # How to understand/modify this config
-    └── commands/             # Repo-specific slash commands
+└── .agents/skills/           # THIS REPO's skills: how to understand/modify this config
 ```
 
 ## Key Concepts
@@ -114,10 +112,10 @@ How each platform uses it:
 | Cloudbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
 | macOS | `home.activation.ensureProjects` in `home.darwin.nix` | `~/Code/` | `darwin-rebuild switch` |
 
-### assets/ vs .opencode/
+### assets/ vs .agents/
 
-- `assets/opencode/` — Skills, agents, plugins, base config deployed TO the user's `~/.config/opencode/`
-- `.opencode/` — Skills/commands for working WITH this repo (auto-discovered by OpenCode)
+- `assets/opencode/` — Skills, agents, plugins, base config deployed TO the user's home (skills to `~/.agents/skills/`, the rest to `~/.config/opencode/`)
+- `.agents/skills/` — Skills for working WITH this repo (auto-discovered). `.opencode/` is gitignored: a skill written there loads but is never committed.
 
 ### pkgsFor Pattern
 

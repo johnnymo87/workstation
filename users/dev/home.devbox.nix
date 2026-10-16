@@ -978,7 +978,7 @@ ${serveIdCase}
   # minute; after 3 consecutive failures it dumps cheap owner-readable
   # forensics (/proc status/wchan/syscall + cgroup memory.*) to
   # /tmp/opencode-serve-canary/ and restarts that one instance. Design notes
-  # in .opencode/skills/monitoring-serve-pool/SKILL.md; full post-mortem in
+  # in .agents/skills/monitoring-serve-pool/SKILL.md; full post-mortem in
   # docs/investigations/2026-07-03-serve-4096-wedge.md.
   systemd.user.services.opencode-serve-canary = {
     Unit.Description = "OpenCode serve pool liveness canary (restart wedged serves)";

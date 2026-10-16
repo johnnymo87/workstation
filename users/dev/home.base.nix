@@ -24,7 +24,7 @@ let
   #
   # Darwin gotcha: the darwin-*.zip assets must be ad-hoc codesigned by the
   # upstream CI or macOS kernels will SIGKILL the binary with "Killed: 9".
-  # See opencode-patched/.opencode/skills/darwin-signing.md for the full
+  # See opencode-patched/.agents/skills/signing-darwin-binaries/SKILL.md for the full
   # story (Bun 1.3.12 #29120 regression + the BUN_NO_CODESIGN_MACHO_BINARY
   # workaround in build-release.yml). If a hash bump here lands a binary
   # that dies on launch, the upstream workflow has regressed.

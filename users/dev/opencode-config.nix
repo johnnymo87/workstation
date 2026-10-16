@@ -319,7 +319,7 @@ let
   # pressure-tests and the standing pre-PR diff review alike. Deliberately wider than the pre-PR skill alone: two defaults
   # that differ by review mode is a seam nobody holds at dispatch time. The
   # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
-  # .opencode/skills/opencode-agents/SKILL.md (host policy).
+  # .agents/skills/opencode-agents/SKILL.md (host policy).
   #
   # Cloudbox's twins keep the opt-in CAUTION. The `-opus` twin is the base
   # default on every host, and devbox's astra preference falls back to it
