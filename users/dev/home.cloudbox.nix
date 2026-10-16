@@ -325,6 +325,13 @@ lib.mkIf isCloudbox {
   # opencode sessions and devenv services when tests run in watch mode.
   home.sessionVariables.VITEST_MAX_WORKERS = "2";  # 4-core box, keep 50% free
 
+  # `honk chat --new` registers the session it creates with the local pigeon
+  # daemon, which gives it a Telegram topic (honk PR #13, bead honk-9qf.11).
+  # The token file is pigeon's daemon bearer token (sops, readable by dev).
+  # Shells opened before a switch don't have these until they are reopened.
+  home.sessionVariables.HONK_PIGEON_URL = "http://127.0.0.1:4731";
+  home.sessionVariables.HONK_PIGEON_TOKEN_FILE = "/run/secrets/pigeon_daemon_auth_token";
+
   # Guard: abort activation if running on the wrong machine.
   # Devbox and cloudbox share arch, user, and home dir -- applying the wrong
   # flake target silently deploys incorrect config (wrong secrets, /persist
