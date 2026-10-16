@@ -84,6 +84,7 @@ here rather than patched into their files:
 | `finishing-a-development-branch` → run `gh pr create` with its own body template | Load `shepherding-pull-requests` **first** and follow it: its pre-PR checks (rebase, stowaway commits, adversarial review), its title/description format, and its post-PR monitoring loop. There must be exactly one route to opening a PR, and this is it. |
 | `finishing-a-development-branch` Step 5 → `git worktree remove` after Option 2 (push + PR) | **Do not.** An open PR is not finished work — you still owe it the monitoring loop, and fixes have to land from somewhere. Removing the worktree you are sitting in kills this session silently (see `reviving-worktree-orphaned-sessions`) and any shepherd wake arrives in a corpse. Keep the worktree until the PR is merged or closed. Step 5 is correct for Options 1 and 4, which are terminal. |
 | `Task tool (general-purpose)` for implementation or review | The named agents — see the `<subagent-routing>` block, where deployed |
+| The injected bootstrap: "Superpowers skills are in `~/.config/opencode/skills/superpowers/`" | They are in `~/.agents/skills/superpowers/`, where every system-wide skill now lives. The plugin hardcodes the old path. Load skills with the `skill` tool; don't browse that path, and don't add a compatibility symlink there, because opencode would scan it and see every skill twice. |
 
 Two routes to `gh pr create` means two sets of pre-PR checks, one of which is
 nobody's. If you find a third, add a row here rather than following it.
