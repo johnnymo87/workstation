@@ -18,7 +18,7 @@
     externalInterface = "enp1s0";
   };
 
-  # Local `mix credo` diff runs leave /tmp/credo-diff-<ts> checkouts behind
-  # (~2 GB/day). Age out their contents after a day; the empty dirs remain.
-  systemd.tmpfiles.rules = [ "e /tmp/credo-diff-* - - - 1d" ];
+  # /tmp/credo-diff-<ts> checkouts left by local `mix credo diff` runs are
+  # removed by hosts/devbox/credo-diff-sweep.nix (it replaced a tmpfiles rule
+  # here that atime kept from firing).
 }
