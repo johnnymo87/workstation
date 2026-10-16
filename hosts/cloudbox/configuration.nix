@@ -131,6 +131,12 @@ let
   # /run/secrets/opencode_server_password, trimmed, empty == auth off).
   opencode-serve-auth-sh = pkgs.callPackage ../../pkgs/opencode-serve-auth-sh { };
 
+  # CLI/tool credentials (gh, Atlassian, BuildBuddy, Datadog, Jenkins, ...) for
+  # agent shells that have no opencode shell-env plugin -- goose-serve sources
+  # it so goose's tool shells see what opencode's bash tool sees. The table is
+  # asserted equal to shell-env.ts's by pkgs/agent-secret-env-sh/test.sh.
+  agent-secret-env-sh = pkgs.callPackage ../../pkgs/agent-secret-env-sh { };
+
   # Store-path reduction for the serve-canary's staleness comparison. Extracted
   # 2026-08-01 (workstation-jj5x) so the comparison is unit-testable: the logic
   # was correct but untested, and an untested comparison is one refactor away
@@ -713,6 +719,26 @@ in
         # caller's identity, so goose's token must carry the email scope as gcloud's
         # does; with cloud-platform alone the gateway answers 503.
         "GCP_AUTH_SCOPES=https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email"
+
+        # ---- Tool-shell environment, NOT goose's provider config. ----
+        # Everything below exists for the shells goose's developer extension
+        # spawns (they inherit this unit's env and nothing else), so they get the
+        # CLI credentials and git defaults an opencode bash tool call gets. NOT
+        # covered: OPENCODE_HOSTNAME and the per-session KUBECONFIG overlay
+        # (goose shells use ~/.kube/config directly). goose reads none of these: its
+        # provider is pinned by the GOOSE_*/GCP_* lines above. The secrets half
+        # is sourced in ExecStart (agent-secret-env-sh).
+        #
+        # Same non-interactive git defaults as shell-env.ts, so a `git commit`
+        # without -m or a `git rebase --continue` cannot hang a turn on an editor.
+        "GIT_EDITOR=:"
+        "GIT_SEQUENCE_EDITOR=:"
+        "EDITOR=:"
+        "GIT_PAGER=cat"
+        # Same values opencode-serve@ sets for its children (gcloud/Vertex SDK
+        # tooling, dd-cli).
+        "GOOGLE_CLOUD_LOCATION=global"
+        "DD_SITE=us3.datadoghq.com"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
@@ -741,6 +767,27 @@ in
         GOOSE_SERVER__SECRET_KEY="$(read_secret /run/secrets/pigeon_goose_acp_token)"
         GCP_PROJECT_ID="$(read_secret /run/secrets/google_cloud_project)"
         export GOOSE_SERVER__SECRET_KEY GCP_PROJECT_ID
+
+        # CLI/tool credentials for goose's tool shells: the same table opencode's
+        # shell-env plugin injects into every bash tool call (GH_TOKEN, Atlassian,
+        # BuildBuddy, DD_PAT, Jenkins, Cloudflare, GOOGLE_CLOUD_PROJECT, ...).
+        # All optional; a missing secret exports nothing and never fails start.
+        #
+        # SKIPPED: model-provider credentials. goose's provider is Vertex via ADC
+        # (above) and no tool a goose shell runs needs them, so this is least
+        # privilege (goose itself reads none of these three names).
+        #
+        # READ ONCE, AT START. opencode re-reads /run/secrets on every bash call;
+        # goose shells get what was there when this unit last started. A rotated
+        # or newly added secret reaches goose only after
+        # `sudo systemctl restart goose-serve`.
+        #
+        # REACH: every goose session on this serve gets these -- pigeon's goose
+        # launches, the stall-watch coordinator and the maven-renovate recipe
+        # lanes alike -- the same exposure every opencode session already has.
+        source ${agent-secret-env-sh}
+        AGENT_SECRET_ENV_SKIP="CLAUDE_CODE_OAUTH_TOKEN GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY" \
+          agent_secret_env_export
 
         # Preflight for the imperative state this unit CANNOT generate. Each
         # check is here because its absence fails late -- on the first real
