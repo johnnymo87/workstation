@@ -226,7 +226,7 @@ Cloudbox's pre-commit hook refuses the first kind at commit time (`--no-verify` 
 
 Dispatch `adversarial-reviewer-opus` on the diff before `gh pr create`. This is a standing default like the post-PR ones: the user should never have to ask for it, and "the change looks straightforward to me" is not a reason to skip — that judgement is exactly what the review exists to check.
 
-**The handle named above is the one for this host — in the deployed copy.** It is rendered per host at deploy time (`users/dev/opencode-skills.nix`), so the copy under `~/.config/opencode/skills/` names the reviewer this machine actually defaults to, and loading the skill normally gets you that copy. **The workstation repo's source asset is not rendered** and always names the opus twin; if you are reading this out of a checkout (grep, code search, a PR diff), it is telling you the majority-host default, not necessarily yours. Check the deployed file, or `~/.config/opencode/agents/adversarial-reviewer-astra.md`, whose description states whether astra is the default on this host. What is banned on every host is substituting the other twin because you prefer it.
+**The handle named above is the one for this host — in the deployed copy.** It is rendered per host at deploy time (`users/dev/opencode-skills.nix`), so the copy under `~/.agents/skills/` names the reviewer this machine actually defaults to, and loading the skill normally gets you that copy. **The workstation repo's source asset is not rendered** and always names the opus twin; if you are reading this out of a checkout (grep, code search, a PR diff), it is telling you the majority-host default, not necessarily yours. Check the deployed file, or `~/.config/opencode/agents/adversarial-reviewer-astra.md`, whose description states whether astra is the default on this host. What is banned on every host is substituting the other twin because you prefer it.
 
 **If the reviewer named above is unavailable, the fallback depends on which twin it is.** The opus twin is the base default on every host; astra is a devbox preference layered on top of it.
 
@@ -293,7 +293,7 @@ After creating the PR, enter the monitoring loop. There is no maximum number of 
 A companion script bundled with this skill does steps 1-4 of the loop body (sleep, check CI, fetch reviews, fetch inline comments) in one invocation, and prints the exact action to take next:
 
 ```bash
-python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py [PR]
+python ~/.agents/skills/shepherding-pull-requests/monitor-pr.py [PR]
 ```
 
 Each invocation has a wall-clock budget of 60 seconds. That cap is deliberate -- Anthropic's prompt-cache TTL is 5 minutes, and a single bash call that blocks the model longer than that expires the warm cache. **While CI is still moving you are expected to re-invoke the script in a loop**; the script owns the within-60s pacing, you own the loop and the fix step. Once CI is green and only the reviewer is outstanding, stop looping, report the state and end the turn.

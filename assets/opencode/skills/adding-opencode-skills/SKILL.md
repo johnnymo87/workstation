@@ -14,7 +14,9 @@ For generic skill-authoring discipline (TDD-for-skills, frontmatter rules, struc
 | Skill is about... | Put it in | Deploy |
 |---|---|---|
 | **One specific repo** (its config, its workflows, its conventions) | `<repo>/.opencode/skills/<name>/SKILL.md` | None — auto-discovered when CWD is inside that repo |
-| **A workflow usable from any project** (creating PRs, using gws, fetching Atlassian content, etc.) | `~/projects/workstation/assets/opencode/skills/<name>/` + register in `users/dev/opencode-skills.nix` | home-manager switch — symlinks into `~/.config/opencode/skills/` |
+| **A workflow usable from any project** (creating PRs, using gws, fetching Atlassian content, etc.) | `~/projects/workstation/assets/opencode/skills/<name>/` + register in `users/dev/opencode-skills.nix` | home-manager switch — symlinks into `~/.agents/skills/` |
+
+System-wide skills deploy to `~/.agents/skills/` because it is the cross-tool root: opencode scans it (as an "external" root, alongside `~/.claude/skills/`) and goose treats it as its canonical global skills directory. **Deploy each skill to exactly one root.** opencode keys skills by frontmatter `name`, and on a collision the winner is whichever file finished parsing last (parsing is concurrent), so a second copy under `~/.config/opencode/skills/` gives an undefined winner, not an override. `~/.config/agents/skills/` is scanned by goose but not by opencode, so don't use it either.
 
 **Rule of thumb:** if the skill mentions paths inside one specific repo, it belongs in that repo's `.opencode/skills/`. If it could just as well be invoked from any project, it goes system-wide via workstation.
 
@@ -55,9 +57,9 @@ That's it.
 3. **For extra files (REFERENCE.md, scripts):** add a custom attrset alongside `atlassianExtras` / `beadsReferences`. Executable scripts need `executable = true`:
    ```nix
    yourSkillExtras = {
-     ".config/opencode/skills/your-new-skill/REFERENCE.md".source =
+     "${skillsDir}/your-new-skill/REFERENCE.md".source =
        "${assetsPath}/opencode/skills/your-new-skill/REFERENCE.md";
-     ".config/opencode/skills/your-new-skill/helper.sh" = {
+     "${skillsDir}/your-new-skill/helper.sh" = {
        source = "${assetsPath}/opencode/skills/your-new-skill/helper.sh";
        executable = true;
      };
@@ -74,7 +76,7 @@ That's it.
    - **macOS:** `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2`
 6. **Verify the deployment is symlinks**, not regular files (see Gotchas §1):
    ```bash
-   ls -la ~/.config/opencode/skills/your-new-skill/
+   ls -la ~/.agents/skills/your-new-skill/
    # Each entry should be lrwxrwxrwx → /nix/store/.../...
    ```
 
@@ -84,7 +86,7 @@ That's it.
 |---|---|
 | `<repo>/.opencode/skills/<name>/SKILL.md` | Edit, commit. Effective immediately for any new OpenCode session run from that repo. |
 | `workstation/assets/opencode/skills/<name>/` | Edit the source, then `nix run home-manager -- switch --flake .#<host>` to refresh the symlink target. |
-| `~/.config/opencode/skills/<name>/` directly | **Don't.** It's either a Nix store symlink (read-only) or it'll be skipped/clobbered on next switch. Edit the source in workstation. |
+| `~/.agents/skills/<name>/` directly | **Don't.** It's either a Nix store symlink (read-only) or it'll be skipped/clobbered on next switch. Edit the source in workstation. |
 | `~/projects/superpowers/skills/<name>/` | That's the upstream superpowers repo (deployed via `mkOutOfStoreSymlink`). Commit and push there separately; live immediately on next session. |
 
 ## Workflow D: Renaming or Removing a Skill
@@ -93,31 +95,31 @@ That's it.
 2. **If system-wide:** also update `users/dev/opencode-skills.nix` — remove from `crossPlatformSkills`/`workOnlySkills`, drop any custom `*Extras` attrset, drop the merge into `home.file`.
 3. **If repo-local:** also remove any `AGENTS.md` table row.
 4. Apply home-manager (system-wide only). Stale symlinks get cleaned automatically.
-5. **Manually delete any non-symlink leftovers** at `~/.config/opencode/skills/<old-name>/` — see Gotchas §1.
+5. **Manually delete any non-symlink leftovers** at `~/.agents/skills/<old-name>/` — see Gotchas §1.
 
 ## Gotchas
 
 ### 1. "Existing file ... will be skipped since they are the same"
 
-If you prototyped a skill manually under `~/.config/opencode/skills/<name>/` *before* mirroring to `assets/opencode/skills/`, home-manager will detect that the deployed file already exists with identical content and **skip writing the symlink**. The skill works, but it's not actually under home-manager's management — next time the source changes, the deployed file will be stale.
+If you prototyped a skill manually under `~/.agents/skills/<name>/` *before* mirroring to `assets/opencode/skills/`, home-manager will detect that the deployed file already exists with identical content and **skip writing the symlink**. The skill works, but it's not actually under home-manager's management — next time the source changes, the deployed file will be stale.
 
 **Symptom:**
 ```bash
-ls -la ~/.config/opencode/skills/your-skill/
+ls -la ~/.agents/skills/your-skill/
 # Files are regular -rw-r--r-- with old timestamps
 # (managed files are lrwxrwxrwx → /nix/store/...)
 ```
 **Activation log shows:**
 ```
-Existing file '~/.config/opencode/skills/your-skill/SKILL.md' is in the way of
+Existing file '~/.agents/skills/your-skill/SKILL.md' is in the way of
 '/nix/store/.../SKILL.md', will be skipped since they are the same
 ```
 
 **Fix:** delete the regular files and re-activate:
 ```bash
-rm ~/.config/opencode/skills/your-skill/{SKILL.md,REFERENCE.md,...}
+rm ~/.agents/skills/your-skill/{SKILL.md,REFERENCE.md,...}
 nix run home-manager -- switch --flake .#<host>
-ls -la ~/.config/opencode/skills/your-skill/   # should now be symlinks
+ls -la ~/.agents/skills/your-skill/   # should now be symlinks
 ```
 
 ### 2. Wrong flake target
@@ -134,13 +136,13 @@ Conversely, a generally-useful workflow stuck in one repo's `.opencode/skills/` 
 
 ### 5. Don't duplicate superpowers content
 
-Generic skill-writing discipline lives in `superpowers:writing-skills` (deployed via symlink at `~/.config/opencode/skills/superpowers/`). Focus your skill on **what's specific to its domain**, not on TDD-for-skills theory or frontmatter validation rules.
+Generic skill-writing discipline lives in `superpowers:writing-skills` (deployed via symlink at `~/.agents/skills/superpowers/`). Focus your skill on **what's specific to its domain**, not on TDD-for-skills theory or frontmatter validation rules.
 
 ### 6. Executable bit is opt-in
 
 Default `home.file."path".source = ...` deploys read-only and **not executable**. Helper scripts need:
 ```nix
-".config/opencode/skills/your-skill/helper.sh" = {
+"${skillsDir}/your-skill/helper.sh" = {
   source = "${assetsPath}/...";
   executable = true;
 };
@@ -158,13 +160,13 @@ get a deployed symlink pointing at a store path that lacks the file — a dangli
 link — and OpenCode logs:
 
 ```
-level=ERROR message="failed to load skill" skill=~/.config/opencode/skills/<name>/SKILL.md
+level=ERROR message="failed to load skill" skill=~/.agents/skills/<name>/SKILL.md
   error="Error: ENOENT: no such file or directory, open '.../SKILL.md'"
 ```
 
 It looks like a parse error but it's a *missing-file* error. Confirm with:
 ```bash
-f=~/.config/opencode/skills/<name>/SKILL.md
+f=~/.agents/skills/<name>/SKILL.md
 readlink "$f"; [ -e "$f" ] && echo PRESENT || echo "DANGLING"
 ```
 
@@ -183,8 +185,8 @@ new generation copies real content and the symlink resolves.
 | Apply system-wide changes (devbox) | `nix run home-manager -- switch --flake .#dev` |
 | Apply system-wide changes (cloudbox) | `nix run home-manager -- switch --flake .#cloudbox` |
 | Apply system-wide changes (macOS) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` |
-| Verify deployment | `ls -la ~/.config/opencode/skills/<name>/` (must be symlinks) |
-| List all deployed skills | `ls ~/.config/opencode/skills/` |
+| Verify deployment | `ls -la ~/.agents/skills/<name>/` (must be symlinks) |
+| List all deployed skills | `ls ~/.agents/skills/` |
 
 ## Further Reading
 

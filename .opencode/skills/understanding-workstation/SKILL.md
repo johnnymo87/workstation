@@ -35,7 +35,7 @@ workstation/
 │       ├── home.cloudbox.nix  # Cloudbox-only: identity, sops secrets, work tools
 │       ├── home.darwin.nix    # macOS-only: launchd, ensure-projects activation, dotfiles migration
 │       ├── opencode-config.nix # OpenCode managed config
-│       ├── opencode-skills.nix # OpenCode skills deployed to ~/.config/opencode/skills/
+│       ├── opencode-skills.nix # OpenCode skills deployed to ~/.agents/skills/
 │       ├── tmux.devbox.nix    # Devbox tmux extras
 │       ├── tmux.cloudbox.nix  # Cloudbox tmux extras
 │       └── tmux.darwin.nix    # macOS tmux extras

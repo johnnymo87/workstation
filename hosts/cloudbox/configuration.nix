@@ -1348,6 +1348,13 @@ in
         # An absent file disables the feature and logs loudly rather than
         # silently watching nothing.
         "LGTM_ROLLOUT_CONFIG=/home/dev/.config/lgtm/rollout.yml"
+        # The watcher script, deployed by users/dev/opencode-skills.nix. Stated
+        # explicitly because lgtm's built-in default (src/rollout.ts
+        # ROLLOUT_SCRIPT) is the pre-2026-10 ~/.config/opencode/skills/ path,
+        # which no longer exists once skills moved to ~/.agents/skills/. The
+        # path is also quoted into wake payloads, so a stale default would both
+        # fail the sweep (exit 2 -> BLIND) and tell agents to run a dead path.
+        "LGTM_ROLLOUT_SCRIPT=/home/dev/.agents/skills/monitoring-deployments/monitor-rollout.py"
         # kubectl resolves this from HOME by default; stated explicitly so the
         # dependency is visible. The file itself is IMPERATIVE state, created
         # by `az aks get-credentials`, and is not managed by nix -- if it is
