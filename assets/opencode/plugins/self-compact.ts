@@ -30,8 +30,8 @@ const plugin: Plugin = async (ctx) => {
 
   const toolImpl = createSelfCompactTool({
     pending,
-    lookupModel: ({ sessionID }) =>
-      lookupActiveModel({ fetch: callCtx.fetch, serverUrl: ctx.serverUrl, sessionID }),
+    lookupModel: ({ sessionID, signal }) =>
+      lookupActiveModel({ fetch: callCtx.fetch, serverUrl: ctx.serverUrl, sessionID, signal }),
   })
 
   // v2 split-phase architecture:
@@ -71,7 +71,7 @@ const plugin: Plugin = async (ctx) => {
             .describe("The resumption prompt to send after compaction completes."),
         },
         async execute(args, toolCtx) {
-          return toolImpl.execute(args, { sessionID: toolCtx.sessionID })
+          return toolImpl.execute(args, { sessionID: toolCtx.sessionID, abort: toolCtx.abort })
         },
       }),
     },

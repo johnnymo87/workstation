@@ -19,25 +19,64 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+type JsonResult = { ok: true; body: unknown; res: Response } | { ok: false; reason: string }
+
+/**
+ * GET + JSON decode under an independently enforced deadline.
+ *
+ * The AbortSignal is passed for cooperative cancellation, but the deadline does
+ * NOT depend on the transport honouring it: the whole exchange (headers AND
+ * body) is raced against a timer. This runs inside a tool's execute, so a hung
+ * request must not hang the agent's turn -- and opencode's in-process web
+ * handler can miss an abort that arrives during its cold initialisation.
+ */
 async function getJson(
   fetchFn: typeof fetch,
   url: URL,
   timeoutMs: number,
-): Promise<{ ok: true; body: unknown; res: Response } | { ok: false; reason: string }> {
-  // The signal bounds the whole exchange (headers AND body): this runs inside
-  // a tool's execute, so a hung request would otherwise hang the agent's turn.
-  const signal = AbortSignal.timeout(Math.max(1, timeoutMs))
-  let res: Response
+  outer?: AbortSignal,
+): Promise<JsonResult> {
+  if (outer?.aborted) return { ok: false, reason: "cancelled" }
+  const ac = new AbortController()
+  const budget = Math.max(1, timeoutMs)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onOuter: (() => void) | undefined
+
+  // Arm the deadline and the cancel hook BEFORE starting the request: a
+  // transport may observe (or trigger) the abort synchronously.
+  const deadline = new Promise<JsonResult>((resolve) => {
+    timer = setTimeout(() => {
+      ac.abort(new Error("deadline"))
+      resolve({ ok: false, reason: `timed out after ${budget}ms (deadline)` })
+    }, budget)
+  })
+  const cancelled = new Promise<JsonResult>((resolve) => {
+    if (!outer) return
+    onOuter = () => {
+      ac.abort(outer.reason)
+      resolve({ ok: false, reason: "cancelled" })
+    }
+    outer.addEventListener("abort", onOuter, { once: true })
+  })
+  const work = (async (): Promise<JsonResult> => {
+    let res: Response
+    try {
+      res = await fetchFn(new Request(url.toString(), { method: "GET", signal: ac.signal }))
+    } catch (err) {
+      return { ok: false, reason: `fetch threw: ${errText(err)}` }
+    }
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` }
+    try {
+      return { ok: true, body: await res.json(), res }
+    } catch (err) {
+      return { ok: false, reason: `bad JSON: ${errText(err)}` }
+    }
+  })()
   try {
-    res = await fetchFn(new Request(url.toString(), { method: "GET", signal }))
-  } catch (err) {
-    return { ok: false, reason: `fetch threw: ${errText(err)}` }
-  }
-  if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` }
-  try {
-    return { ok: true, body: await res.json(), res }
-  } catch (err) {
-    return { ok: false, reason: `bad JSON: ${errText(err)}` }
+    return await Promise.race([work, deadline, cancelled])
+  } finally {
+    clearTimeout(timer)
+    if (outer && onOuter) outer.removeEventListener("abort", onOuter)
   }
 }
 
@@ -83,6 +122,8 @@ export async function lookupActiveModel(input: {
   maxPages?: number
   deadlineMs?: number
   now?: () => number
+  /** The tool's abort signal: a cancelled turn stops the lookup. */
+  signal?: AbortSignal
 }): Promise<ModelLookup> {
   const pageLimit = input.pageLimit ?? DEFAULT_LOOKUP_PAGE_LIMIT
   const maxPages = input.maxPages ?? DEFAULT_LOOKUP_MAX_PAGES
@@ -93,7 +134,8 @@ export async function lookupActiveModel(input: {
   const reasons: string[] = []
   const remaining = () => deadlineMs - (now() - started)
 
-  const session = await getJson(input.fetch, new URL(sessionPath, input.serverUrl), remaining())
+  const session = await getJson(input.fetch, new URL(sessionPath, input.serverUrl), remaining(), input.signal)
+  if (!session.ok && input.signal?.aborted) return { ok: false, reason: "cancelled" }
   if (session.ok) {
     const body = asRecord(session.body)
     const model = asRecord(body?.model)
@@ -118,7 +160,8 @@ export async function lookupActiveModel(input: {
     const url = new URL(`${sessionPath}/message`, input.serverUrl)
     url.searchParams.set("limit", String(pageLimit))
     if (before) url.searchParams.set("before", before)
-    const res = await getJson(input.fetch, url, remaining())
+    const res = await getJson(input.fetch, url, remaining(), input.signal)
+    if (!res.ok && input.signal?.aborted) return { ok: false, reason: "cancelled" }
     if (!res.ok) {
       reasons.push(`message page ${page} ${res.reason}`)
       return { ok: false, reason: reasons.join("; ") }
@@ -262,10 +305,13 @@ export function getSharedPendingResumes(): Map<string, PendingResume> {
  */
 export function createSelfCompactTool(deps: {
   pending: Map<string, PendingResume>
-  lookupModel: (input: { sessionID: string }) => Promise<ModelLookup>
+  lookupModel: (input: { sessionID: string; signal?: AbortSignal }) => Promise<ModelLookup>
 }) {
   return {
-    async execute(args: { prompt: string }, toolCtx: { sessionID: string }): Promise<string> {
+    async execute(
+      args: { prompt: string },
+      toolCtx: { sessionID: string; abort?: AbortSignal },
+    ): Promise<string> {
       const now = Date.now()
       // Evict stale entries so the Map doesn't grow without bound across the
       // process lifetime. 30 minutes is generous; a real compaction takes
@@ -276,16 +322,31 @@ export function createSelfCompactTool(deps: {
 
       let lookup: ModelLookup
       try {
-        lookup = await deps.lookupModel({ sessionID: toolCtx.sessionID })
+        lookup = await deps.lookupModel({ sessionID: toolCtx.sessionID, signal: toolCtx.abort })
       } catch (err) {
         lookup = { ok: false, reason: `lookup threw: ${errText(err)}` }
       }
+      // A turn cancelled while the lookup was in flight has already gone idle.
+      // Arming an entry now would fire on some LATER, unrelated idle.
+      if (toolCtx.abort?.aborted) {
+        debug("tool.execute cancelled", { sessionID: toolCtx.sessionID, elapsedMs: Date.now() - now })
+        return "Compaction NOT queued: the turn was cancelled."
+      }
       if (!lookup.ok) {
+        const earlier = deps.pending.get(toolCtx.sessionID)
         debug("tool.execute lookup FAILED", {
           sessionID: toolCtx.sessionID,
           reason: lookup.reason,
           elapsedMs: Date.now() - now,
+          earlierEntry: earlier ? earlier.phase : "none",
         })
+        if (earlier) {
+          return (
+            `This replacement was NOT queued (${lookup.reason}). ` +
+            "The previously queued compaction and its earlier resumption prompt are still armed " +
+            "and will run when this turn ends."
+          )
+        }
         return (
           "Compaction NOT queued: could not determine this session's model " +
           `(${lookup.reason}). Nothing will happen when this turn ends. ` +

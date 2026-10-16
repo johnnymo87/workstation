@@ -261,6 +261,43 @@ describe("lookupActiveModel", () => {
     if (!r.ok) expect(r.reason).toMatch(/aborted|timeout|deadline/i)
   })
 
+  it("enforces the deadline even when the transport ignores the abort signal", async () => {
+    const f = vi.fn(() => new Promise<Response>(() => {}))
+    const t0 = Date.now()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", deadlineMs: 50 })
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/deadline|timed out/i)
+  })
+
+  it("enforces the deadline on a body that stalls after the headers", async () => {
+    const stalled = () =>
+      new Response(new ReadableStream({ start() {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    const f = vi.fn(async () => stalled())
+    const t0 = Date.now()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", deadlineMs: 50 })
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    expect(r.ok).toBe(false)
+  })
+
+  it("stops immediately when the caller's signal is aborted", async () => {
+    const ac = new AbortController()
+    const f = vi.fn(
+      (input: string | URL | Request) =>
+        new Promise<Response>((_, reject) => {
+          ;(input as Request).signal.addEventListener("abort", () => reject(new Error("aborted")))
+          ac.abort()
+        }),
+    )
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", signal: ac.signal })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/cancel|abort/i)
+    expect(f).toHaveBeenCalledOnce()
+  })
+
   it("names the HTTP status when a message page fails", async () => {
     const f = routedFetch({
       session: () => json({ id: "s1" }),
@@ -329,7 +366,7 @@ describe("createSelfCompactTool (v4: resolve the model at tool time, then stash)
     const lookupModel = okLookup()
     const tool = createSelfCompactTool({ pending, lookupModel })
     const result = await tool.execute({ prompt: "resume here" }, { sessionID: "ses_abc" })
-    expect(lookupModel).toHaveBeenCalledWith({ sessionID: "ses_abc" })
+    expect(lookupModel).toHaveBeenCalledWith({ sessionID: "ses_abc", signal: undefined })
     expect(result).toMatch(/queued/i)
     expect(pending.get("ses_abc")).toMatchObject({
       prompt: "resume here",
@@ -372,6 +409,46 @@ describe("createSelfCompactTool (v4: resolve the model at tool time, then stash)
     await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
     await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
     expect(pending.get("ses_x")?.prompt).toBe("first")
+  })
+
+  it("a failed replacement says the EARLIER queued compaction is still armed", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, source: "session", model: MODEL })
+      .mockResolvedValueOnce({ ok: false, reason: "nope" })
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
+    const result = await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
+    expect(result).toMatch(/previously queued/i)
+    expect(result).not.toMatch(/Nothing will happen/)
+    expect(result).not.toMatch(/\/compact/)
+  })
+
+  it("a turn cancelled during the lookup does not queue a compaction", async () => {
+    // Abort -> runner goes idle -> lookup resolves late. Without the check, the
+    // entry would be armed and fire on some LATER, unrelated idle.
+    const pending = new Map<string, PendingResume>()
+    let resolveLookup!: (v: unknown) => void
+    const lookupModel = vi.fn(() => new Promise((r) => (resolveLookup = r)))
+    const tool = createSelfCompactTool({ pending, lookupModel: lookupModel as any })
+    const ac = new AbortController()
+    const running = tool.execute({ prompt: "p" }, { sessionID: "ses_c", abort: ac.signal })
+    ac.abort()
+    resolveLookup({ ok: true, source: "session", model: MODEL })
+    const result = await running
+    expect(pending.has("ses_c")).toBe(false)
+    expect(result).toMatch(/cancel/i)
+    expect(result).not.toMatch(/^Compaction queued/)
+  })
+
+  it("passes the tool's abort signal through to the lookup", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = okLookup()
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    const ac = new AbortController()
+    await tool.execute({ prompt: "p" }, { sessionID: "ses_s", abort: ac.signal })
+    expect(lookupModel).toHaveBeenCalledWith({ sessionID: "ses_s", signal: ac.signal })
   })
 
   it("evicts stale entries (>30min) before stashing", async () => {
