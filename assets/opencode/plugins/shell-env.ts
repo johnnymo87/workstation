@@ -38,6 +38,10 @@ function loadSecretEnv(read: (path: string) => string | undefined): Record<strin
   // distinct consumers expect distinct names for the same value:
   // github_api_token (gh CLI uses GH_TOKEN; the ba CLI uses GITHUB_API_TOKEN)
   // and gemini_api_key (see below).
+  //
+  // pkgs/agent-secret-env-sh/agent-secret-env.sh carries the SAME table for
+  // goose-serve (no plugin hook there); its test fails `nix flake check` if the
+  // two differ, so add or remove a row in both files.
   const simple: ReadonlyArray<readonly [string, string]> = [
     ["github_api_token", "GH_TOKEN"],
     ["github_api_token", "GITHUB_API_TOKEN"],

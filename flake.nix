@@ -1386,6 +1386,22 @@
         touch $out
       '';
 
+      # agent-secret-env.sh: goose-serve's tool-credential exporter. Sources the
+      # production file and asserts its table equals shell-env.ts's `simple`
+      # table, so the two agents' shells cannot drift apart silently.
+      agent-secret-env-sh-tests = devboxPkgs.runCommand "agent-secret-env-sh-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnused devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.diffutils ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/agent-secret-env-sh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^all agent-secret-env-sh tests passed' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: agent-secret-env suite did not reach its final pass line." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # lgtm-gh, REAL BINARY. default.nix takes `{ pkgs }` and reads `pkgs.gh`,
       # so overriding just that attribute yields the shipped wrapper with a
       # stub CLI underneath it. The binary under test is the one that ships;
