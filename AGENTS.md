@@ -170,9 +170,7 @@ workstation/
 │   ├── opencode/          # OpenCode agents, skills, plugins, base config
 │   └── nvim/              # Neovim Lua config
 ├── secrets/               # sops-nix encrypted secrets
-└── .opencode/             # Documentation and config for THIS repo
-    ├── skills/            # Repo-specific skills (auto-discovered by OpenCode)
-    └── commands/          # Repo-specific slash commands
+└── .agents/skills/        # Repo-specific skills for THIS repo (auto-discovered; .opencode/ is gitignored)
 ```
 
 ## Fresh Devbox Setup
