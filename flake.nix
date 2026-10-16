@@ -2432,7 +2432,7 @@
       # replaced by a fixture cluster -- no kubectl, no gh, no network).
       #
       # Wired the moment the suite was written, rather than after the fact: the
-      # script is deployed to ~/.config/opencode/skills by home-manager and is
+      # script is deployed to ~/.agents/skills by home-manager and is
       # what lgtm's rollout watcher shells out to (LGTM_ROLLOUT_SCRIPT), so a
       # regression here is invisible until a merge silently ages out at the
       # watcher's 30h horizon -- which is exactly how the bug it fixes was

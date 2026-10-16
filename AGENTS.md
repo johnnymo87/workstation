@@ -160,7 +160,7 @@ workstation/
 │   ├── home.cloudbox.nix  # Cloudbox-only (identity, sops secrets, work tools)
 │   ├── home.darwin.nix    # macOS-only (launchd, ensure-projects, dotfiles migration)
 │   ├── opencode-config.nix  # OpenCode managed config + agents
-│   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.config/opencode/skills/
+│   └── opencode-skills.nix  # System-wide OpenCode skills deployed to ~/.agents/skills/
 ├── pkgs/                  # Self-packaged tools (auto-updated by nix-update)
 │   ├── dd-cli/            # Datadog CLI (installed as editable Python tool via home.activation.installDdCli in home.base.nix)
 │   ├── beads/             # Distributed issue tracker

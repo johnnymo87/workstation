@@ -48,7 +48,7 @@ expires warm cache), so **you re-invoke it in a loop** — the script owns the
 within-60s pacing, you own the loop and the fix step.
 
 ```bash
-python ~/.config/opencode/skills/monitoring-deployments/monitor-rollout.py \
+python ~/.agents/skills/monitoring-deployments/monitor-rollout.py \
   --pr <PR> \
   --target <ENV:CTX:NS:DEPLOY> [--target ...]
 ```

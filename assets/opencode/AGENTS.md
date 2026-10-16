@@ -5,7 +5,7 @@ machine. Repo-specific instructions live in each project's `AGENTS.md`.
 
 Skills sources for this AGENTS.md live in `assets/opencode/skills/` of the
 [workstation](https://github.com/johnnymo87/workstation) repo. They're deployed
-to `~/.config/opencode/skills/` by `users/dev/opencode-skills.nix` so OpenCode
+to `~/.agents/skills/` by `users/dev/opencode-skills.nix` so OpenCode
 auto-discovers them.
 
 ## Skills

@@ -1,9 +1,24 @@
-# OpenCode system-wide skills deployment
-# Deploys skills to ~/.config/opencode/skills/ where OpenCode auto-discovers them
-# Skills are tool-agnostic workflows usable from any project
+# System-wide agent skills deployment
+# Deploys skills to ~/.agents/skills/, the cross-tool location: opencode scans it
+# as an "external" skill root (packages/opencode/src/skill/index.ts, the
+# AGENTS_EXTERNAL_DIR scan) and goose treats it as its canonical global root.
+# Skills are tool-agnostic workflows usable from any project.
+#
+# ONE location only. opencode keys skills by frontmatter `name` and, on a
+# collision, keeps whichever SKILL.md finishes parsing last (the parse runs with
+# unbounded concurrency), so deploying the same skill to two roots gives an
+# undefined winner rather than a precedence. Do not re-add a copy under
+# ~/.config/opencode/skills/.
+#
+# Not ~/.config/agents/skills: goose scans it, but opencode 1.18 does not.
 { config, lib, pkgs, localPkgs, assetsPath, isDarwin, isDevbox, isCloudbox, ... }:
 
 let
+  # Relative to $HOME, for home.file keys.
+  skillsDir = ".agents/skills";
+  # Pre-2026-10 deploy location; only referenced by the cleanup below.
+  legacySkillsDir = ".config/opencode/skills";
+
   # Devbox defaults its adversarial reviewer to the astra twin (gpt-6-astra via
   # codex-lb) rather than the opus one — see the matching caution rewrite in
   # opencode-config.nix and the host policy in
@@ -44,7 +59,7 @@ let
     else "${assetsPath}/opencode/skills/${name}/SKILL.md";
 
   mkSkill = name: {
-    ".config/opencode/skills/${name}/SKILL.md".source = mkSkillSource name;
+    "${skillsDir}/${name}/SKILL.md".source = mkSkillSource name;
   };
 
   mkSkills = names:
@@ -98,21 +113,21 @@ let
 
   # beads has additional reference files
   beadsReferences = {
-    ".config/opencode/skills/beads/references/BOUNDARIES.md".source =
+    "${skillsDir}/beads/references/BOUNDARIES.md".source =
       "${assetsPath}/opencode/skills/beads/references/BOUNDARIES.md";
-    ".config/opencode/skills/beads/references/CLI_REFERENCE.md".source =
+    "${skillsDir}/beads/references/CLI_REFERENCE.md".source =
       "${assetsPath}/opencode/skills/beads/references/CLI_REFERENCE.md";
-    ".config/opencode/skills/beads/references/DEPENDENCIES.md".source =
+    "${skillsDir}/beads/references/DEPENDENCIES.md".source =
       "${assetsPath}/opencode/skills/beads/references/DEPENDENCIES.md";
-    ".config/opencode/skills/beads/references/WORKFLOWS.md".source =
+    "${skillsDir}/beads/references/WORKFLOWS.md".source =
       "${assetsPath}/opencode/skills/beads/references/WORKFLOWS.md";
   };
 
   # using-atlassian has a reference file and an executable helper script
   atlassianExtras = {
-    ".config/opencode/skills/using-atlassian/REFERENCE.md".source =
+    "${skillsDir}/using-atlassian/REFERENCE.md".source =
       "${assetsPath}/opencode/skills/using-atlassian/REFERENCE.md";
-    ".config/opencode/skills/using-atlassian/confluence-to-md.sh" = {
+    "${skillsDir}/using-atlassian/confluence-to-md.sh" = {
       source = "${assetsPath}/opencode/skills/using-atlassian/confluence-to-md.sh";
       executable = true;
     };
@@ -122,19 +137,19 @@ let
   # reference files. SKILL.md links to the references, so omitting one here
   # ships a skill whose links dangle at runtime -- mkSkill deploys SKILL.md only.
   shepherdingExtras = {
-    ".config/opencode/skills/shepherding-pull-requests/monitor-pr.py" = {
+    "${skillsDir}/shepherding-pull-requests/monitor-pr.py" = {
       source = "${assetsPath}/opencode/skills/shepherding-pull-requests/monitor-pr.py";
       executable = true;
     };
-    ".config/opencode/skills/shepherding-pull-requests/reference/lgtm-review-mechanics.md".source =
+    "${skillsDir}/shepherding-pull-requests/reference/lgtm-review-mechanics.md".source =
       "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/lgtm-review-mechanics.md";
-    ".config/opencode/skills/shepherding-pull-requests/reference/retired-wake-scheduling.md".source =
+    "${skillsDir}/shepherding-pull-requests/reference/retired-wake-scheduling.md".source =
       "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/retired-wake-scheduling.md";
   };
 
   # monitoring-deployments has an executable rollout-monitoring python script
   monitoringDeploymentsExtras = {
-    ".config/opencode/skills/monitoring-deployments/monitor-rollout.py" = {
+    "${skillsDir}/monitoring-deployments/monitor-rollout.py" = {
       source = "${assetsPath}/opencode/skills/monitoring-deployments/monitor-rollout.py";
       executable = true;
     };
@@ -143,7 +158,7 @@ let
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
-    ".config/opencode/skills/superpowers".source =
+    "${skillsDir}/superpowers".source =
       config.lib.file.mkOutOfStoreSymlink (
         if isDarwin
         then "${config.home.homeDirectory}/Code/superpowers/skills"
@@ -161,7 +176,7 @@ let
   # To add a new Confluence-fetched file:
   #   1. Create the Confluence page with the content in markdown
   #   2. Add an entry: { pageId = "1234567890"; skillName = "my-skill"; fileName = "INTERNAL.md"; }
-  #   3. The activation script writes to ~/.config/opencode/skills/<skillName>/<fileName>
+  #   3. The activation script writes to ~/.agents/skills/<skillName>/<fileName>
   #   4. The public SKILL.md can reference the companion file
   confluenceSkills = [
     # Add entries as pages are created:
@@ -240,7 +255,7 @@ let
       local page_id="$1"
       local skill_name="$2"
       local file_name="$3"
-      local skill_dir="${config.home.homeDirectory}/.config/opencode/skills/$skill_name"
+      local skill_dir="${config.home.homeDirectory}/${skillsDir}/$skill_name"
       local skill_file="$skill_dir/$file_name"
 
       mkdir -p "$skill_dir"
@@ -355,8 +370,54 @@ in
       // monitoringDeploymentsExtras
     );
 
+  # One-time tidy of the legacy ~/.config/opencode/skills/ tree after the move
+  # to ~/.agents/skills/. linkGeneration already removes the old home-manager
+  # symlinks; what it cannot remove is what activation and tools wrote there
+  # themselves: the Confluence INTERNAL.md companions (and their temp/log
+  # files) and python __pycache__ dirs next to deployed scripts. Those carry no
+  # SKILL.md, so they never duplicate a skill; this only stops them lingering
+  # as stale copies of internal content. Removes only those known files, then
+  # prunes directories left EMPTY — anything else is left in place.
+  #
+  # A SKILL.md still present there afterwards is not ours (home-manager would
+  # have removed its own link) and WOULD make opencode see that skill twice with
+  # an undefined winner, so it is reported rather than deleted.
+  home.activation.cleanupLegacySkillsDir =
+    lib.hm.dag.entryAfter ["linkGeneration"] ''
+      legacy="${config.home.homeDirectory}/${legacySkillsDir}"
+      if [ -d "$legacy" ]; then
+        # Companions are MOVED, not deleted, when the new location has none:
+        # the Confluence fetch can fail (VPN down, dead token) and leaves the
+        # previous copy in place by design, so deleting here would lose it.
+        ${lib.concatMapStringsSep "\n" (s: ''
+          old="$legacy/${s.skillName}/${s.fileName}"
+          new="${config.home.homeDirectory}/${skillsDir}/${s.skillName}/${s.fileName}"
+          if [ -f "$old" ] && [ ! -L "$old" ] && [ ! -e "$new" ]; then
+            run mkdir -p "$(dirname "$new")"
+            run mv "$old" "$new"
+          fi
+          run rm -f "$old" \
+                    "$legacy/${s.skillName}/.${s.fileName}.tmp."* \
+                    "$legacy/${s.skillName}/.${s.fileName}.fetchlog."*
+        '') confluenceSkills}
+        for d in "$legacy"/*/; do
+          # if/then, not `[ ] && run`: a false test would end the loop with
+          # status 1 and abort activation under set -e.
+          if [ -d "$d/__pycache__" ]; then run rm -rf "$d/__pycache__"; fi
+        done
+        run find "$legacy" -mindepth 1 -depth -type d -empty -delete
+        run rmdir "$legacy" 2>/dev/null || true
+        for f in "$legacy"/*/SKILL.md; do
+          [ -e "$f" ] || [ -L "$f" ] || continue
+          echo "cleanupLegacySkillsDir: WARNING: $f is not managed by home-manager and shadows ~/${skillsDir}/ (opencode sees the skill twice, winner undefined). Move it or delete it." >&2
+        done
+      fi
+    '';
+
   # Fetch Confluence-based skills during activation (macOS + cloudbox only)
   home.activation.fetchConfluenceSkills = lib.mkIf
     ((isDarwin || isCloudbox) && confluenceSkills != [])
-    (lib.hm.dag.entryAfter ["writeBoundary"] fetchConfluenceSkillsScript);
+    # After the legacy cleanup, so a companion migrated from the old location
+    # is then refreshed in place rather than racing it.
+    (lib.hm.dag.entryAfter ["writeBoundary" "cleanupLegacySkillsDir"] fetchConfluenceSkillsScript);
 }

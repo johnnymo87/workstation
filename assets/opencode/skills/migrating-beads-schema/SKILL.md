@@ -35,7 +35,7 @@ are blocked. So the swarm can keep reading beads; it just can't file new ones.
   just one repo. Expect to sweep all of them (`mono`, `workstation`, `pigeon`,
   and the other DoltHub trackers; see the `beads` skill for the full list).
 - **Canonical remote is DoltHub** (`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>`)
-  for the shared trackers. See the `beads` skill (`~/.config/opencode/skills/beads/SKILL.md`)
+  for the shared trackers. See the `beads` skill (`~/.agents/skills/beads/SKILL.md`)
   for the wiring, credentials, and the "do NOT use git-backed dolt" anti-pattern.
 - Repo path is `~/projects/<repo>` on NixOS, `~/Code/<repo>` on macOS.
 - **A stale `bd` daemon can hold a repo's DB open** and make the move-aside /
@@ -384,5 +384,5 @@ git push git@github.com:<org>/<repo>.git --delete refs/dolt/data \
 
 ## Related
 
-- `beads` skill (`~/.config/opencode/skills/beads/SKILL.md`) — DoltHub wiring,
+- `beads` skill (`~/.agents/skills/beads/SKILL.md`) — DoltHub wiring,
   credentials, git-free/stealth mode, and the git-backed-dolt anti-pattern.

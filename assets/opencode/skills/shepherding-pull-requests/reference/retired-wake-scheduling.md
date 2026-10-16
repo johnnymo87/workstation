@@ -41,7 +41,7 @@ So the order on every wake is: **schedule the next wake first, then do the work,
 **Then run one pass and branch on the exit code:**
 
 ```bash
-python ~/.config/opencode/skills/shepherding-pull-requests/monitor-pr.py --once <PR>
+python ~/.agents/skills/shepherding-pull-requests/monitor-pr.py --once <PR>
 ```
 
 | Exit | Meaning | Action |
