@@ -210,8 +210,14 @@ const result = {
 const textOf = async (h) => {
   try { return ((await h.evaluate((e) => e.innerText || '')) || ''); } catch { return ''; }
 };
+// page.$$ itself can land mid-navigation too (2026-10-16: an IdP login page
+// redirecting under the account-chooser query). No elements found is the
+// honest answer for a page that is going away.
+const queryAll = async (sel) => {
+  try { return await page.$$(sel); } catch { return []; }
+};
 const clickByText = async (patterns) => {
-  const hs = await page.$$('button, div[role="button"], li, div[role="link"], span[jsname]');
+  const hs = await queryAll('button, div[role="button"], li, div[role="link"], span[jsname]');
   for (const h of hs) {
     const t = (await textOf(h)).trim();
     if (patterns.some((p) => p.test(t))) {
@@ -249,7 +255,7 @@ try {
   await inspect('01-landing');
 
   // Step: account chooser
-  const hs = await page.$$('li, div[role="link"], div[data-identifier]');
+  const hs = await queryAll('li, div[role="link"], div[data-identifier]');
   for (const h of hs) {
     const t = await textOf(h);
     if (t.includes(ACCT)) {
@@ -301,9 +307,24 @@ try {
   else if (result.captcha || result.bot_blocked) result.outcome = 'bot_blocked';
   else result.outcome = 'stalled';
 } catch (e) {
-  result.outcome = 'error';
   result.error = e.message;
   log('ERROR', e.stack || e.message);
+  // A credential prompt seen BEFORE the crash is still the answer: a human has
+  // to sign in. Reporting `error` instead sent refresh.sh down its 2h
+  // non-human backoff on 2026-10-16, rather than raising the page and waiting
+  // for the sign-in. Same precedence as the normal path above.
+  const challenge = result.idp_login_required ? 'idp_login_required'
+    : result.password_demanded ? 'password_demanded'
+    : result.mfa_demanded ? 'mfa_demanded'
+    : (result.captcha || result.bot_blocked) ? 'bot_blocked'
+    : null;
+  if (challenge) {
+    result.outcome = challenge;
+    handoffToHuman = true;
+    result.awaiting_human = true;
+  } else {
+    result.outcome = 'error';
+  }
 } finally {
   console.log('RESULT:', JSON.stringify(result));
   const LOG = process.env.GCLOUD_REAUTH_PROBE_LOG
