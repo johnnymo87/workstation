@@ -1883,7 +1883,7 @@ ${serveIdCase}
   # minute; after 7 consecutive failures it dumps cheap root-readable forensics
   # (/proc status/wchan/syscall + cgroup memory.*) to /var/lib/opencode-serve-canary/
   # and restarts that one instance. Runs as root (system service), so no privilege elevation helper is needed.
-  # Design notes in .opencode/skills/monitoring-serve-pool/SKILL.md;
+  # Design notes in .agents/skills/monitoring-serve-pool/SKILL.md;
   # full post-mortem in docs/investigations/2026-07-03-serve-4096-wedge.md.
   systemd.services.opencode-serve-canary = {
     description = "OpenCode serve pool liveness canary (restart wedged serves)";
@@ -5335,7 +5335,7 @@ To fix, run:
 sudo systemctl restart opencode-frontdoor
 
 IMPORTANT: Also check the serve pool! Restarting only the front door creates dangerous version skew if serves remain on old code.
-See Deploy Runbook: .opencode/skills/rebuilding/SKILL.md
+See Deploy Runbook: .agents/skills/rebuilding/SKILL.md
 
 Running store path: $RUNNING_VER
 Installed store path: $EXECSTART_PATH

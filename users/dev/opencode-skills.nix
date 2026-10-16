@@ -22,7 +22,7 @@ let
   # Devbox defaults its adversarial reviewer to the astra twin (gpt-6-astra via
   # codex-lb) rather than the opus one — see the matching caution rewrite in
   # opencode-config.nix and the host policy in
-  # .opencode/skills/opencode-agents/SKILL.md. The pre-PR dispatch instruction
+  # .agents/skills/opencode-agents/SKILL.md. The pre-PR dispatch instruction
   # lives in prose, so it is rendered per host HERE rather than written as an
   # "if you are on devbox..." conditional in the source. Each host's deployed
   # file then names exactly one agent and the reader never evaluates a

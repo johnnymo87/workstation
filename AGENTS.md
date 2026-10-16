@@ -12,7 +12,7 @@ NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS), all shari
 | `cloudbox` | NixOS on GCP ARM | `sudo nixos-rebuild switch --flake .#cloudbox` | `nix run home-manager -- switch --flake .#cloudbox` |
 | `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (covers both) | (combined) |
 
-Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`. See the [Rebuilding](.opencode/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
+Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`. See the [Rebuilding](.agents/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
 
 ## Quick Start
 
@@ -120,28 +120,28 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 
 | Skill | Description |
 |-------|-------------|
-| [Understanding Workstation](.opencode/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
-| [Setting Up Hetzner](.opencode/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
-| [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
-| [Rebuilding](.opencode/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
-| [Troubleshooting NixOS Host](.opencode/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
-| [Automated Updates](.opencode/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
-| [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
-| [Growing Neovim Config](.opencode/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
-| [Clipboard (gclpr & OSC 52)](.opencode/skills/clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
-| [Screenshot to Remote OpenCode](.opencode/skills/screenshot-to-remote-opencode/SKILL.md) | Sharing screenshots with remote OpenCode (devbox/cloudbox over SSH) |
-| [OpenCode Agents](.opencode/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
-| [Tracking Cache Costs](.opencode/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
-| [Measuring Session Context](.opencode/skills/measuring-session-context/SKILL.md) | `oc-context`: per-session context size / % of window, for deciding who compacts |
-| [Configuring GWS](.opencode/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
-| [Scrubbing Company References](.opencode/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
-| [Atlassian Multi-Instance](.opencode/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
-| [Setting Up Notion MCP](.opencode/skills/setting-up-notion-mcp/SKILL.md) | First-time OAuth + headless devbox SSH-L dance for Notion's hosted MCP |
-| [Setting Up DevCycle MCP](.opencode/skills/setting-up-devcycle-mcp/SKILL.md) | Local dvc-mcp + client-credentials (sops/Keychain) for DevCycle's feature-flag MCP; hosted remote is unusable (no dynamic client registration) |
-| [Resetting Workspace](.opencode/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
-| [Monitoring Serve Pool](.opencode/skills/monitoring-serve-pool/SKILL.md) | Wedged-serve detection/recovery (canary timer), "alive but frozen" failure mode, serve memory-limit rationale |
-| [Auditing OpenCode LLM Calls](.opencode/skills/auditing-opencode-llm-calls/SKILL.md) | Durable LLM-call capture on cloudbox; attribute surges by agent/model/session |
-| [Operating the aigateway](.opencode/skills/operating-aigateway/SKILL.md) | Deploy/route/debug the LLM cost-capture proxy on cloudbox; query the ledger; add prices; roll back |
+| [Understanding Workstation](.agents/skills/understanding-workstation/SKILL.md) | Repo structure, concepts, navigation |
+| [Setting Up Hetzner](.agents/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
+| [Setting Up Cloudbox](.agents/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
+| [Rebuilding](.agents/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
+| [Troubleshooting NixOS Host](.agents/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
+| [Automated Updates](.agents/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
+| [Managing Secrets](.agents/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
+| [Growing Neovim Config](.agents/skills/growing-nvim-config/SKILL.md) | How to incrementally add nvim config |
+| [Clipboard (gclpr & OSC 52)](.agents/skills/clipboard/SKILL.md) | Copy/paste over mosh/SSH via gclpr TCP bridge |
+| [Screenshot to Remote OpenCode](.agents/skills/screenshot-to-remote-opencode/SKILL.md) | Sharing screenshots with remote OpenCode (devbox/cloudbox over SSH) |
+| [OpenCode Agents](.agents/skills/opencode-agents/SKILL.md) | Agent set rationale, what was kept/removed and why |
+| [Tracking Cache Costs](.agents/skills/tracking-cache-costs/SKILL.md) | Measuring OpenCode prompt caching efficiency |
+| [Measuring Session Context](.agents/skills/measuring-session-context/SKILL.md) | `oc-context`: per-session context size / % of window, for deciding who compacts |
+| [Configuring GWS](.agents/skills/configuring-gws/SKILL.md) | Adding, debugging gws accounts and OAuth credentials |
+| [Scrubbing Company References](.agents/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
+| [Atlassian Multi-Instance](.agents/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
+| [Setting Up Notion MCP](.agents/skills/setting-up-notion-mcp/SKILL.md) | First-time OAuth + headless devbox SSH-L dance for Notion's hosted MCP |
+| [Setting Up DevCycle MCP](.agents/skills/setting-up-devcycle-mcp/SKILL.md) | Local dvc-mcp + client-credentials (sops/Keychain) for DevCycle's feature-flag MCP; hosted remote is unusable (no dynamic client registration) |
+| [Resetting Workspace](.agents/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
+| [Monitoring Serve Pool](.agents/skills/monitoring-serve-pool/SKILL.md) | Wedged-serve detection/recovery (canary timer), "alive but frozen" failure mode, serve memory-limit rationale |
+| [Auditing OpenCode LLM Calls](.agents/skills/auditing-opencode-llm-calls/SKILL.md) | Durable LLM-call capture on cloudbox; attribute surges by agent/model/session |
+| [Operating the aigateway](.agents/skills/operating-aigateway/SKILL.md) | Deploy/route/debug the LLM cost-capture proxy on cloudbox; query the ledger; add prices; roll back |
 
 ## Structure
 
@@ -186,7 +186,7 @@ After `nixos-anywhere`:
 
 ## Fresh Cloudbox Setup
 
-See [Setting Up Cloudbox](.opencode/skills/setting-up-cloudbox/SKILL.md) for the full nixos-anywhere flow on a GCP ARM instance. Post-provisioning home-manager command is `nix run home-manager -- switch --flake .#cloudbox` (note the target name, not `.#dev`).
+See [Setting Up Cloudbox](.agents/skills/setting-up-cloudbox/SKILL.md) for the full nixos-anywhere flow on a GCP ARM instance. Post-provisioning home-manager command is `nix run home-manager -- switch --flake .#cloudbox` (note the target name, not `.#dev`).
 
 ## Fresh macOS Setup
 
@@ -315,7 +315,7 @@ The count is per-file *because* a single scalar merges clean-but-wrong across co
 
 ## Secrets
 
-**Devbox/Cloudbox:** Secrets at `/run/secrets/<name>` via sops-nix (NixOS module). Env vars auto-exported in bash. See [Managing Secrets](.opencode/skills/managing-secrets/SKILL.md).
+**Devbox/Cloudbox:** Secrets at `/run/secrets/<name>` via sops-nix (NixOS module). Env vars auto-exported in bash. See [Managing Secrets](.agents/skills/managing-secrets/SKILL.md).
 
 **macOS:** macOS Keychain. Secrets populated via helper scripts (e.g. `pigeon-setup-secrets`).
 

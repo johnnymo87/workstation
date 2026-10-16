@@ -34,7 +34,7 @@ permission:
 # google-vertex/gemini-3.8-flash (users/dev/opencode-config.nix, patchAgent),
 # so ANY session with either MCP connected made every dispatch of this agent
 # fail — reported by opencode as a completed task with an empty result. See
-# mono-2l1rq and .opencode/skills/opencode-agents/SKILL.md. This agent needs
+# mono-2l1rq and .agents/skills/opencode-agents/SKILL.md. This agent needs
 # neither server, so denying the tools is free.
 tools:
   datadog*: false

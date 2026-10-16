@@ -13,25 +13,27 @@ For generic skill-authoring discipline (TDD-for-skills, frontmatter rules, struc
 
 | Skill is about... | Put it in | Deploy |
 |---|---|---|
-| **One specific repo** (its config, its workflows, its conventions) | `<repo>/.opencode/skills/<name>/SKILL.md` | None — auto-discovered when CWD is inside that repo |
+| **One specific repo** (its config, its workflows, its conventions) | `<repo>/.agents/skills/<name>/SKILL.md` | None — auto-discovered when CWD is inside that repo |
 | **A workflow usable from any project** (creating PRs, using gws, fetching Atlassian content, etc.) | `~/projects/workstation/assets/opencode/skills/<name>/` + register in `users/dev/opencode-skills.nix` | home-manager switch — symlinks into `~/.agents/skills/` |
 
 System-wide skills deploy to `~/.agents/skills/` because it is the cross-tool root: opencode scans it (as an "external" root, alongside `~/.claude/skills/`) and goose treats it as its canonical global skills directory. **Deploy each skill to exactly one root.** opencode keys skills by frontmatter `name`, and on a collision the winner is whichever file finished parsing last (parsing is concurrent), so a second copy under `~/.config/opencode/skills/` gives an undefined winner, not an override. `~/.config/agents/skills/` is scanned by goose but not by opencode, so don't use it either.
 
-**Rule of thumb:** if the skill mentions paths inside one specific repo, it belongs in that repo's `.opencode/skills/`. If it could just as well be invoked from any project, it goes system-wide via workstation.
+Repo-local skills go in `<repo>/.agents/skills/` for the same reason: opencode, goose and Codex all read it, while `.opencode/skills/` is opencode-only (it still works; `.claude/skills/` is the one Claude Code reads). Only skills belong there — opencode commands, agents, plugins and `opencode.json` must stay under `.opencode/`. One root per skill applies here too: the same `name` in `.agents/skills/` and `.opencode/skills/` (or the global set) is a random winner. A flat `foo.md` in a skills dir is never loaded; it must be `<name>/SKILL.md`.
+
+**Rule of thumb:** if the skill mentions paths inside one specific repo, it belongs in that repo's `.agents/skills/`. If it could just as well be invoked from any project, it goes system-wide via workstation.
 
 ## Workflow A: Repo-Local Skill (most common, simplest)
 
 **Use when:** the skill documents *one* repo's setup or workflows.
 
-1. Create `<repo>/.opencode/skills/<gerund-name>/SKILL.md` with valid frontmatter:
+1. Create `<repo>/.agents/skills/<gerund-name>/SKILL.md` with valid frontmatter:
    ```yaml
    ---
    name: gerund-name-with-hyphens
    description: Use when [specific triggering conditions, third person, no workflow summary]
    ---
    ```
-2. Commit. **No rebuild needed.** OpenCode auto-discovers `.opencode/skills/` when CWD is inside the repo.
+2. Commit. **No rebuild needed.** OpenCode auto-discovers `.agents/skills/` when CWD is inside the repo.
 3. Optionally add a row to that repo's `AGENTS.md` skills table for human discoverability.
 
 That's it.
@@ -84,7 +86,7 @@ That's it.
 
 | Skill location | What to do |
 |---|---|
-| `<repo>/.opencode/skills/<name>/SKILL.md` | Edit, commit. Effective immediately for any new OpenCode session run from that repo. |
+| `<repo>/.agents/skills/<name>/SKILL.md` | Edit, commit. Effective immediately for any new OpenCode session run from that repo. |
 | `workstation/assets/opencode/skills/<name>/` | Edit the source, then `nix run home-manager -- switch --flake .#<host>` to refresh the symlink target. |
 | `~/.agents/skills/<name>/` directly | **Don't.** It's either a Nix store symlink (read-only) or it'll be skipped/clobbered on next switch. Edit the source in workstation. |
 | `~/projects/superpowers/skills/<name>/` | That's the upstream superpowers repo (deployed via `mkOutOfStoreSymlink`). Commit and push there separately; live immediately on next session. |
@@ -128,11 +130,11 @@ ls -la ~/.agents/skills/your-skill/   # should now be symlinks
 
 ### 3. Wrong placement: repo-local content deployed system-wide
 
-If you put a repo-specific skill in `assets/opencode/skills/` by mistake, it deploys system-wide and fires in projects where it doesn't apply — confusing scope and noise in `<available_skills>`. Test: would this skill make sense if I were working in some other repo? If no, it belongs in `<repo>/.opencode/skills/`.
+If you put a repo-specific skill in `assets/opencode/skills/` by mistake, it deploys system-wide and fires in projects where it doesn't apply — confusing scope and noise in `<available_skills>`. Test: would this skill make sense if I were working in some other repo? If no, it belongs in `<repo>/.agents/skills/`.
 
 ### 4. Wrong placement: general workflow buried in one repo
 
-Conversely, a generally-useful workflow stuck in one repo's `.opencode/skills/` only fires when CWD is inside that repo — invisible elsewhere. If you ever wish "I had this skill available right now in another project," promote it system-wide.
+Conversely, a generally-useful workflow stuck in one repo's `.agents/skills/` only fires when CWD is inside that repo — invisible elsewhere. If you ever wish "I had this skill available right now in another project," promote it system-wide.
 
 ### 5. Don't duplicate superpowers content
 
@@ -179,7 +181,7 @@ new generation copies real content and the symlink resolves.
 
 | Action | Where |
 |--------|-------|
-| Repo-local skill source | `<repo>/.opencode/skills/<name>/` |
+| Repo-local skill source | `<repo>/.agents/skills/<name>/` |
 | System-wide skill source | `~/projects/workstation/assets/opencode/skills/<name>/` |
 | System-wide registration | `~/projects/workstation/users/dev/opencode-skills.nix` |
 | Apply system-wide changes (devbox) | `nix run home-manager -- switch --flake .#dev` |
@@ -192,5 +194,5 @@ new generation copies real content and the symlink resolves.
 
 - **Generic skill-authoring:** `superpowers:writing-skills` (TDD-for-skills, RED-GREEN-REFACTOR, search optimization, structure)
 - **Anthropic's official guidance:** https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
-- **Workstation repo structure:** `understanding-workstation` (repo-local skill in `~/projects/workstation/.opencode/skills/`)
+- **Workstation repo structure:** `understanding-workstation` (repo-local skill in `~/projects/workstation/.agents/skills/`)
 - **Worked example of a skill merge:** `~/projects/workstation` commit `348be81` (merged `using-atlassian-cli` + `fetching-atlassian-content` into `using-atlassian`)

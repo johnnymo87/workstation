@@ -87,4 +87,4 @@ sudo systemctl start nightly-restart-background.service
 ## Related
 
 - Original design: `docs/plans/2026-04-24-reset-workspace-design.md`
-- Companion skill: `.opencode/skills/automated-updates/SKILL.md` (other timer-driven jobs).
+- Companion skill: `.agents/skills/automated-updates/SKILL.md` (other timer-driven jobs).

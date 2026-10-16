@@ -4,7 +4,7 @@ Report OpenCode token usage and API cost from the local SQLite database
 (`~/.local/share/opencode/opencode.db`).
 
 Replaces the older `analyze.mjs` script under
-`.opencode/skills/tracking-cache-costs/`.
+`.agents/skills/tracking-cache-costs/`.
 
 ## Usage
 

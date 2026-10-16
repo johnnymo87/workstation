@@ -16,9 +16,9 @@ secrets/*.dec.*
 # .beads/ here so that config.yaml and other non-ignored config files
 # remain tracked, while data files are kept git-free.
 
-# OpenCode user configuration (managed per-machine)
-.opencode/*
-!.opencode/skills/
+# OpenCode per-machine state (plugin deps opencode installs here). Repo-local
+# skills live in .agents/skills/, the cross-tool location.
+.opencode/
 session-ses_*.md
 
 # Worktrees

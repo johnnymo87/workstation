@@ -36,7 +36,7 @@ This directory uses sops-nix with age encryption for secrets.
 ## Removing a Secret
 
 Use `sops unset`, never decrypt/edit/re-encrypt — see the
-[Managing Secrets](../.opencode/skills/managing-secrets/SKILL.md) skill.
+[Managing Secrets](../.agents/skills/managing-secrets/SKILL.md) skill.
 
 **Removing a secret is not revoking it.** The value stays valid at the
 provider, and the ciphertext stays in this repo's git history, which is
