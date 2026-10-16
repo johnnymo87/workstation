@@ -18,7 +18,15 @@ For generic skill-authoring discipline (TDD-for-skills, frontmatter rules, struc
 
 System-wide skills deploy to `~/.agents/skills/` because it is the cross-tool root: opencode scans it (as an "external" root, alongside `~/.claude/skills/`) and goose treats it as its canonical global skills directory. **Deploy each skill to exactly one root.** opencode keys skills by frontmatter `name`, and on a collision the winner is whichever file finished parsing last (parsing is concurrent), so a second copy under `~/.config/opencode/skills/` gives an undefined winner, not an override. `~/.config/agents/skills/` is scanned by goose but not by opencode, so don't use it either.
 
-Repo-local skills go in `<repo>/.agents/skills/` for the same reason: opencode and Codex read it from anywhere in the repo (they walk up to the repo root), goose reads it when launched at the repo root, while `.opencode/skills/` is opencode-only (`.claude/skills/` is the one Claude Code reads). Check the repo's `.gitignore` too: some (workstation included) ignore `.opencode/`, so a skill written there loads in the session and is silently never committed. Only skills belong there — opencode commands, agents, plugins and `opencode.json` must stay under `.opencode/`. One root per skill applies here too: the same `name` in `.agents/skills/` and `.opencode/skills/` (or the global set) is a random winner. A flat `foo.md` in a skills dir is never loaded; it must be `<name>/SKILL.md`.
+Repo-local skills go in `<repo>/.agents/skills/`, and **only** there. opencode and Codex read it from anywhere in the repo (they walk up to the repo root); goose reads it when launched at the repo root. Do not keep skills in `.claude/skills/` or `.opencode/skill(s)/` — not as the primary copy, not as a mirror, not as a symlink. A mirror is a second root for the same `name`, which in opencode is a random winner, and copies drift. When consolidating:
+
+- **Diff duplicate copies first** and merge real differences before deleting one; then `git mv` into `.agents/skills/`.
+- **Grep for the old path** (inside the skill, in commands, AGENTS.md/CLAUDE.md, scripts) and update every reference; a skill's own docs and helper scripts often hardcode it.
+- **Only skills move.** opencode commands, agents, plugins and `opencode.json` stay under `.opencode/`; `.claude/commands` and `settings*` stay under `.claude/`.
+- **Generators recreate the dirs.** Nx `configure-ai-agents` and `bd init`/`bd setup codex` write skill dirs under `.claude/skills`, `.opencode/skills` or `.agents/skills/beads`; delete those skill dirs after running them (leave whatever else they write).
+- **Scope.** Repos the human owns: just do it. Shared team repos: only as a PR the team reviews, and say in it that Claude Code reads only `.claude/skills/`, so teammates on Claude Code lose those skills. Third-party upstream clones (opencode, goose, ccusage, ...): never.
+
+Some repos (workstation included) gitignore `.opencode/`, so a skill written there loads in the session and is silently never committed. A flat `foo.md` in a skills dir is never loaded; it must be `<name>/SKILL.md`.
 
 **Rule of thumb:** if the skill mentions paths inside one specific repo, it belongs in that repo's `.agents/skills/`. If it could just as well be invoked from any project, it goes system-wide via workstation.
 
