@@ -2,35 +2,192 @@ import type { EventSessionCompacted } from "@opencode-ai/sdk"
 import { appendFileSync, mkdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 
-export async function findActiveModel(input: {
+export type ModelRef = { providerID: string; modelID: string }
+
+export type ModelLookup =
+  | { ok: true; model: ModelRef; source: "session" | "messages" }
+  | { ok: false; reason: string }
+
+const DEFAULT_LOOKUP_PAGE_LIMIT = 50
+// 10 x 50 = 500 messages. A real session (cartographer, 2026-10) has a run of
+// 213 consecutive assistant messages between model-bearing user messages, so a
+// three- or four-page budget would be too small.
+const DEFAULT_LOOKUP_MAX_PAGES = 10
+const DEFAULT_LOOKUP_DEADLINE_MS = 20_000
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+type JsonResult = { ok: true; body: unknown; res: Response } | { ok: false; reason: string }
+
+/**
+ * GET + JSON decode under an independently enforced deadline.
+ *
+ * The AbortSignal is passed for cooperative cancellation, but the deadline does
+ * NOT depend on the transport honouring it: the whole exchange (headers AND
+ * body) is raced against a timer. This runs inside a tool's execute, so a hung
+ * request must not hang the agent's turn -- and opencode's in-process web
+ * handler can miss an abort that arrives during its cold initialisation.
+ */
+async function getJson(
+  fetchFn: typeof fetch,
+  url: URL,
+  timeoutMs: number,
+  outer?: AbortSignal,
+): Promise<JsonResult> {
+  if (outer?.aborted) return { ok: false, reason: "cancelled" }
+  const ac = new AbortController()
+  const budget = Math.max(1, timeoutMs)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onOuter: (() => void) | undefined
+
+  // Arm the deadline and the cancel hook BEFORE starting the request: a
+  // transport may observe (or trigger) the abort synchronously.
+  const deadline = new Promise<JsonResult>((resolve) => {
+    timer = setTimeout(() => {
+      ac.abort(new Error("deadline"))
+      resolve({ ok: false, reason: `timed out after ${budget}ms (deadline)` })
+    }, budget)
+  })
+  const cancelled = new Promise<JsonResult>((resolve) => {
+    if (!outer) return
+    onOuter = () => {
+      ac.abort(outer.reason)
+      resolve({ ok: false, reason: "cancelled" })
+    }
+    outer.addEventListener("abort", onOuter, { once: true })
+  })
+  const work = (async (): Promise<JsonResult> => {
+    let res: Response
+    try {
+      res = await fetchFn(new Request(url.toString(), { method: "GET", signal: ac.signal }))
+    } catch (err) {
+      return { ok: false, reason: `fetch threw: ${errText(err)}` }
+    }
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` }
+    try {
+      return { ok: true, body: await res.json(), res }
+    } catch (err) {
+      return { ok: false, reason: `bad JSON: ${errText(err)}` }
+    }
+  })()
+  try {
+    return await Promise.race([work, deadline, cancelled])
+  } finally {
+    clearTimeout(timer)
+    if (outer && onOuter) outer.removeEventListener("abort", onOuter)
+  }
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
+}
+
+function userModelOf(entry: unknown): ModelRef | undefined {
+  const info = asRecord(asRecord(entry)?.info)
+  if (!info || info.role !== "user") return undefined
+  const model = asRecord(info.model)
+  if (typeof model?.providerID === "string" && model.providerID && typeof model.modelID === "string" && model.modelID) {
+    return { providerID: model.providerID, modelID: model.modelID }
+  }
+  return undefined
+}
+
+/**
+ * Resolve the model a session is running on, WITHOUT downloading its history.
+ *
+ * 1. `GET /session/:id` -- the session row's own `model` metadata, which is
+ *    what upstream's `SessionPrompt.currentModel()` consults first. Note the
+ *    field is `model.id`, not `model.modelID`.
+ * 2. Only if that is missing or unreadable: newest-first pages of
+ *    `GET /session/:id/message?limit=N`, following `X-Next-Cursor` via
+ *    `before=`, scanning each page backwards for a user message with a model.
+ *    The latest *assistant* is deliberately not used: it may be a compaction
+ *    summary produced by the separately configured compaction model.
+ *
+ * Never issues an unbounded `/message` request. That request is what broke
+ * here: 313 MB for a 20k-message session, fetched by the serve from itself,
+ * failing intermittently with the error swallowed.
+ *
+ * Every failure carries a reason, and "history exhausted" (there really is no
+ * model) is kept distinct from "budget exhausted" / "deadline" (we stopped
+ * looking).
+ */
+export async function lookupActiveModel(input: {
   fetch: typeof fetch
   serverUrl: URL
   sessionID: string
-}): Promise<{ providerID: string; modelID: string } | null> {
-  const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/message`, input.serverUrl)
-  let messages: Array<{
-    info: { role: string; model?: { providerID?: string; modelID?: string } }
-  }>
-  try {
-    const res = await input.fetch(new Request(url.toString(), { method: "GET" }))
-    if (!res.ok) return null
-    const parsed = await res.json()
-    if (!Array.isArray(parsed)) return null
-    messages = parsed
-  } catch {
-    return null
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    if (
-      m.info.role === "user" &&
-      m.info.model?.providerID &&
-      m.info.model?.modelID
-    ) {
-      return { providerID: m.info.model.providerID, modelID: m.info.model.modelID }
+  pageLimit?: number
+  maxPages?: number
+  deadlineMs?: number
+  now?: () => number
+  /** The tool's abort signal: a cancelled turn stops the lookup. */
+  signal?: AbortSignal
+}): Promise<ModelLookup> {
+  const pageLimit = input.pageLimit ?? DEFAULT_LOOKUP_PAGE_LIMIT
+  const maxPages = input.maxPages ?? DEFAULT_LOOKUP_MAX_PAGES
+  const deadlineMs = input.deadlineMs ?? DEFAULT_LOOKUP_DEADLINE_MS
+  const now = input.now ?? Date.now
+  const started = now()
+  const sessionPath = `/session/${encodeURIComponent(input.sessionID)}`
+  const reasons: string[] = []
+  const remaining = () => deadlineMs - (now() - started)
+
+  const session = await getJson(input.fetch, new URL(sessionPath, input.serverUrl), remaining(), input.signal)
+  if (!session.ok && input.signal?.aborted) return { ok: false, reason: "cancelled" }
+  if (session.ok) {
+    const body = asRecord(session.body)
+    const model = asRecord(body?.model)
+    if (body?.id !== input.sessionID) {
+      reasons.push("session GET returned a different session")
+    } else if (typeof model?.providerID === "string" && model.providerID && typeof model.id === "string" && model.id) {
+      return { ok: true, source: "session", model: { providerID: model.providerID, modelID: model.id } }
+    } else {
+      reasons.push("session has no model metadata")
     }
+  } else {
+    reasons.push(`session GET ${session.reason}`)
   }
-  return null
+
+  const seen = new Set<string>()
+  let before: string | undefined
+  for (let page = 1; page <= maxPages; page++) {
+    if (remaining() <= 0) {
+      reasons.push(`deadline ${deadlineMs}ms reached after ${page - 1} page(s)`)
+      return { ok: false, reason: reasons.join("; ") }
+    }
+    const url = new URL(`${sessionPath}/message`, input.serverUrl)
+    url.searchParams.set("limit", String(pageLimit))
+    if (before) url.searchParams.set("before", before)
+    const res = await getJson(input.fetch, url, remaining(), input.signal)
+    if (!res.ok && input.signal?.aborted) return { ok: false, reason: "cancelled" }
+    if (!res.ok) {
+      reasons.push(`message page ${page} ${res.reason}`)
+      return { ok: false, reason: reasons.join("; ") }
+    }
+    if (!Array.isArray(res.body)) {
+      reasons.push(`message page ${page} is not an array`)
+      return { ok: false, reason: reasons.join("; ") }
+    }
+    for (let i = res.body.length - 1; i >= 0; i--) {
+      const model = userModelOf(res.body[i])
+      if (model) return { ok: true, source: "messages", model }
+    }
+    const cursor = res.res.headers.get("X-Next-Cursor") ?? undefined
+    if (!cursor) {
+      reasons.push(`history exhausted after ${page} page(s): no user message carries a model`)
+      return { ok: false, reason: reasons.join("; ") }
+    }
+    if (seen.has(cursor)) {
+      reasons.push(`repeated cursor at page ${page}`)
+      return { ok: false, reason: reasons.join("; ") }
+    }
+    seen.add(cursor)
+    before = cursor
+  }
+  reasons.push(`budget exhausted: ${maxPages} page(s) of ${pageLimit} without a user model`)
+  return { ok: false, reason: reasons.join("; ") }
 }
 
 const STALE_MS = 30 * 60 * 1000
@@ -102,6 +259,8 @@ const debug = createDebugLogger({
 
 export interface PendingResume {
   prompt: string
+  /** Resolved by the tool at execute time (see createSelfCompactTool). */
+  model: ModelRef
   /**
    * State machine discriminator.
    *
@@ -129,22 +288,30 @@ export function getSharedPendingResumes(): Map<string, PendingResume> {
 }
 
 /**
- * v2 tool: stash-and-return.
+ * v4 tool: resolve the model, then stash-and-return.
  *
- * The tool's only job is to record the resumption prompt under the current
- * session's ID and return immediately. The actual `POST /summarize` trigger
- * lives in `createOnStatus`, which fires when the session goes idle (i.e.,
- * after this turn — and any nested tool calls — closes).
+ * The tool records the resumption prompt under the session's ID and returns.
+ * The actual `POST /summarize` trigger lives in `createOnStatus`, which fires
+ * when the session goes idle (after this turn closes). Calling `/summarize`
+ * from inside `execute` deadlocks with the outer prompt loop (v1), so it must
+ * stay out of here.
  *
- * This is the deadlock fix from v1: calling `POST /summarize` from inside a
- * tool's `execute` causes mutual await with the outer prompt loop. By doing
- * nothing but a Map insert here, we cannot deadlock.
+ * What `execute` DOES do since v4 is the model lookup: two small read-only GETs
+ * at most (session metadata, then bounded message pages), which never touch the
+ * session runner, so they cannot deadlock. Doing it here rather than at idle
+ * time is what makes a failure visible: the reason comes back as this tool's
+ * result, to the agent that can tell the human, instead of the old "queued"
+ * followed by a silent eviction.
  */
 export function createSelfCompactTool(deps: {
   pending: Map<string, PendingResume>
+  lookupModel: (input: { sessionID: string; signal?: AbortSignal }) => Promise<ModelLookup>
 }) {
   return {
-    async execute(args: { prompt: string }, toolCtx: { sessionID: string }): Promise<string> {
+    async execute(
+      args: { prompt: string },
+      toolCtx: { sessionID: string; abort?: AbortSignal },
+    ): Promise<string> {
       const now = Date.now()
       // Evict stale entries so the Map doesn't grow without bound across the
       // process lifetime. 30 minutes is generous; a real compaction takes
@@ -152,10 +319,47 @@ export function createSelfCompactTool(deps: {
       for (const [sid, entry] of deps.pending) {
         if (now - entry.createdAt > STALE_MS) deps.pending.delete(sid)
       }
+
+      let lookup: ModelLookup
+      try {
+        lookup = await deps.lookupModel({ sessionID: toolCtx.sessionID, signal: toolCtx.abort })
+      } catch (err) {
+        lookup = { ok: false, reason: `lookup threw: ${errText(err)}` }
+      }
+      // A turn cancelled while the lookup was in flight has already gone idle.
+      // Arming an entry now would fire on some LATER, unrelated idle.
+      if (toolCtx.abort?.aborted) {
+        debug("tool.execute cancelled", { sessionID: toolCtx.sessionID, elapsedMs: Date.now() - now })
+        return "Compaction NOT queued: the turn was cancelled."
+      }
+      if (!lookup.ok) {
+        const earlier = deps.pending.get(toolCtx.sessionID)
+        debug("tool.execute lookup FAILED", {
+          sessionID: toolCtx.sessionID,
+          reason: lookup.reason,
+          elapsedMs: Date.now() - now,
+          earlierEntry: earlier ? earlier.phase : "none",
+        })
+        if (earlier) {
+          return (
+            `This replacement was NOT queued (${lookup.reason}). ` +
+            "The previously queued compaction and its earlier resumption prompt are still armed " +
+            "and will run when this turn ends."
+          )
+        }
+        return (
+          "Compaction NOT queued: could not determine this session's model " +
+          `(${lookup.reason}). Nothing will happen when this turn ends. ` +
+          "Tell the user, and ask them to run /compact and then send your resumption prompt " +
+          "(or call this tool again if the cause looks transient)."
+        )
+      }
+
       // Last-write-wins on duplicate calls within a session (acceptable for
       // MVP — see design doc "Risks for v2").
       deps.pending.set(toolCtx.sessionID, {
         prompt: args.prompt,
+        model: lookup.model,
         phase: "awaitingTurnEnd",
         createdAt: now,
       })
@@ -163,6 +367,8 @@ export function createSelfCompactTool(deps: {
         sessionID: toolCtx.sessionID,
         promptChars: args.prompt.length,
         pendingSize: deps.pending.size,
+        modelSource: lookup.source,
+        lookupMs: Date.now() - now,
       })
       return "Compaction queued; will run when this turn ends."
     },
@@ -291,7 +497,7 @@ export function createOnCompacted(deps: {
 }
 
 /**
- * v2 idle-triggered summarize handler.
+ * Idle-triggered summarize handler.
  *
  * When the session that just went idle has a pending entry in
  * `awaitingTurnEnd` phase, this handler:
@@ -299,20 +505,17 @@ export function createOnCompacted(deps: {
  *   1. Promotes the entry to `summarizing` synchronously (BEFORE awaiting
  *      anything) so a re-entrant idle event for the same session can't
  *      double-trigger.
- *   2. Looks up the session's active model.
- *   3. Fires `POST /summarize` from the now-idle session.
+ *   2. Fires `POST /summarize` with the model the tool resolved at execute
+ *      time (v4; no HTTP model lookup here any more).
  *
- * On model lookup failure or summarize throw, the entry is evicted (no
- * retry; the user re-invokes the skill). On success, the entry is left in
- * `summarizing` phase for `createOnCompacted` to pop when the
- * `session.compacted` bus event arrives.
+ * On summarize throw the entry is evicted (no retry; the user re-invokes the
+ * skill). On success, the entry is left in `summarizing` phase for
+ * `createOnCompacted` to pop when the `session.compacted` bus event arrives.
  *
  * This is the deadlock-free path: by the time `SessionStatus.set(..., idle)`
  * publishes its bus event, the outer prompt loop has already cleared its
- * `prompt.ts` state (`prompt.ts:265-267`), so our subsequent `loop()` call
- * via `POST /summarize` gets a fresh `start(sessionID)` signal rather than
- * joining an existing loop's callback queue. See addendum to v1 design doc
- * for the full RCA.
+ * state, so our `loop()` call via `POST /summarize` gets a fresh start rather
+ * than joining an existing loop's callback queue.
  */
 export function createOnStatus(deps: {
   pending: Map<string, PendingResume>
@@ -321,9 +524,6 @@ export function createOnStatus(deps: {
     providerID: string
     modelID: string
   }) => Promise<void>
-  findActiveModel: (input: {
-    sessionID: string
-  }) => Promise<{ providerID: string; modelID: string } | null>
 }) {
   return async ({ event }: { event: PluginBusEvent }) => {
     if (!isSessionIdle(event)) return
@@ -340,10 +540,10 @@ export function createOnStatus(deps: {
     entry.phase = "summarizing"
     debug("onStatus idle promote", { sessionID, pendingSize: deps.pending.size })
 
-    const model = await deps.findActiveModel({ sessionID })
-    if (!model) {
-      // No model means we can't proceed; evict the entry. User will re-invoke
-      // the skill if they still want to compact.
+    const model = entry.model
+    if (!model?.providerID || !model?.modelID) {
+      // Only reachable for an entry stashed by a pre-v4 tool in the same
+      // process; never guess a model.
       debug("onStatus no-model evict", { sessionID })
       deps.pending.delete(sessionID)
       return
@@ -368,7 +568,7 @@ export function createOnStatus(deps: {
       // re-invokes the skill if they still want to compact.
       debug("onStatus summarize FAILED evict", {
         sessionID,
-        error: err instanceof Error ? err.message : String(err),
+        error: errText(err),
       })
       deps.pending.delete(sessionID)
     }

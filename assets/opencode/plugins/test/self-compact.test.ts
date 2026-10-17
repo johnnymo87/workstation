@@ -4,7 +4,7 @@ import { invalidateServeAuthHeader } from "../serve-auth"
 import {
   createDebugLogger,
   getSharedPendingResumes,
-  findActiveModel,
+  lookupActiveModel,
   createSelfCompactTool,
   createOnCompacted,
   createOnStatus,
@@ -59,86 +59,284 @@ describe("createDebugLogger", () => {
   })
 })
 
-describe("findActiveModel", () => {
-  it("returns the model from the most recent user message that has model info", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify([
-          { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-old" } } },
-          { info: { role: "assistant" } },
-          { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-new" } } },
-          { info: { role: "assistant" } },
-        ]),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    )
-    const serverUrl = new URL("http://localhost:4096")
-    const result = await findActiveModel({ fetch: mockFetch, serverUrl, sessionID: "s1" })
-    expect(result).toEqual({ providerID: "anthropic", modelID: "claude-new" })
-    expect(mockFetch).toHaveBeenCalledOnce()
-    const req = mockFetch.mock.calls[0][0] as Request
-    expect(req.url).toBe("http://localhost:4096/session/s1/message")
+// ---------------------------------------------------------------------------
+// lookupActiveModel: session metadata first, bounded message pages second.
+//
+// Regression (workstation, 2026-10-16): the old findActiveModel did an
+// UNBOUNDED GET /session/:id/message. For a 20k-message session that was a
+// 313 MB response fetched by the serve from itself; it intermittently failed,
+// every failure was collapsed into `null`, and the queued resumption prompt
+// was silently evicted ("onStatus no-model evict").
+// ---------------------------------------------------------------------------
+
+const json = (body: unknown, init: ResponseInit = {}) =>
+  new Response(JSON.stringify(body), {
+    status: 200,
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+  })
+
+const userMsg = (modelID: string, providerID = "anthropic") => ({
+  info: { role: "user", model: { providerID, modelID } },
+})
+const assistantMsg = () => ({ info: { role: "assistant", providerID: "anthropic", modelID: "summary-model" } })
+
+/** Routes /session/:id and /session/:id/message?limit&before to canned answers. */
+function routedFetch(routes: {
+  session?: () => Response | Promise<Response>
+  page?: (q: { limit: string | null; before: string | null }) => Response | Promise<Response>
+}) {
+  return vi.fn(async (input: string | URL | Request) => {
+    const url = new URL((input as Request).url)
+    if (/^\/session\/[^/]+$/.test(url.pathname)) {
+      if (!routes.session) throw new Error("unexpected session GET")
+      return routes.session()
+    }
+    if (/^\/session\/[^/]+\/message$/.test(url.pathname)) {
+      if (!routes.page) throw new Error("unexpected message GET")
+      return routes.page({
+        limit: url.searchParams.get("limit"),
+        before: url.searchParams.get("before"),
+      })
+    }
+    throw new Error(`unexpected request ${url.pathname}`)
+  })
+}
+
+const serverUrl = new URL("http://localhost:4096")
+const messageRequests = (f: { mock: { calls: unknown[][] } }) =>
+  f.mock.calls
+    .map((c) => new URL((c[0] as Request).url))
+    .filter((u) => u.pathname.endsWith("/message"))
+
+describe("lookupActiveModel", () => {
+  it("uses the session's own model metadata and never touches message history", async () => {
+    const f = routedFetch({
+      session: () =>
+        json({ id: "s1", model: { id: "claude-opus-5-5", providerID: "anthropic", variant: "default" } }),
+    })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r).toEqual({
+      ok: true,
+      source: "session",
+      model: { providerID: "anthropic", modelID: "claude-opus-5-5" },
+    })
+    expect(f).toHaveBeenCalledOnce()
+    const req = f.mock.calls[0][0] as Request
     expect(req.method).toBe("GET")
+    expect(req.url).toBe("http://localhost:4096/session/s1")
   })
 
-  it("returns null when no user message has model info", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify([{ info: { role: "user" } }]), { status: 200 }),
+  it("falls back to a bounded newest page when the session has no model metadata", async () => {
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => json([userMsg("old"), assistantMsg(), userMsg("new"), assistantMsg()]),
+    })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r).toEqual({ ok: true, source: "messages", model: { providerID: "anthropic", modelID: "new" } })
+    const [first] = messageRequests(f)
+    expect(first.searchParams.get("limit")).toBe("50")
+    expect(first.searchParams.get("before")).toBeNull()
+  })
+
+  it("falls back to messages when the session GET fails or returns another session", async () => {
+    for (const session of [
+      () => new Response("boom", { status: 500 }),
+      () => json({ id: "someone-else", model: { id: "wrong", providerID: "x" } }),
+      () => Promise.reject(new Error("socket hang up")),
+      () => new Response("not json", { status: 200 }),
+    ]) {
+      const f = routedFetch({ session, page: () => json([userMsg("from-history")]) })
+      const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+      expect(r).toEqual({
+        ok: true,
+        source: "messages",
+        model: { providerID: "anthropic", modelID: "from-history" },
+      })
+    }
+  })
+
+  it("never issues an unbounded message request", async () => {
+    let n = 0
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => json([assistantMsg()], { headers: { "X-Next-Cursor": `c${++n}` } }),
+    })
+    await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", maxPages: 4 })
+    const reqs = messageRequests(f)
+    expect(reqs.length).toBe(4)
+    for (const u of reqs) expect(u.searchParams.get("limit")).toBe("50")
+  })
+
+  it("pages backwards via X-Next-Cursor, keeping limit on every request", async () => {
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: ({ before }) =>
+        before === null
+          ? json([assistantMsg(), assistantMsg()], { headers: { "X-Next-Cursor": "cur1" } })
+          : json([userMsg("older-user"), assistantMsg()]),
+    })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r).toMatchObject({ ok: true, model: { modelID: "older-user" } })
+    const reqs = messageRequests(f)
+    expect(reqs.map((u) => [u.searchParams.get("limit"), u.searchParams.get("before")])).toEqual([
+      ["50", null],
+      ["50", "cur1"],
+    ])
+  })
+
+  it("finds a user model behind more than 200 consecutive assistant messages with the defaults", async () => {
+    // cartographer (ses_0da8...) really has a run of 213 assistant messages.
+    const history = [userMsg("behind-the-run"), ...Array.from({ length: 213 }, assistantMsg)]
+    const pageOf = (before: string | null) => {
+      const end = before === null ? history.length : Number(before)
+      const start = Math.max(0, end - 50)
+      return json(history.slice(start, end), start > 0 ? { headers: { "X-Next-Cursor": String(start) } } : {})
+    }
+    const f = routedFetch({ session: () => json({ id: "s1" }), page: ({ before }) => pageOf(before) })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r).toMatchObject({ ok: true, source: "messages", model: { modelID: "behind-the-run" } })
+  })
+
+  it("reports history exhausted (not an error) when no user message carries a model", async () => {
+    const f = routedFetch({ session: () => json({ id: "s1" }), page: () => json([assistantMsg()]) })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/history exhausted/i)
+  })
+
+  it("stops on a repeated cursor instead of looping", async () => {
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => json([assistantMsg()], { headers: { "X-Next-Cursor": "same" } }),
+    })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/repeated cursor/i)
+    expect(messageRequests(f).length).toBe(2)
+  })
+
+  it("reports budget exhausted (distinct from history exhausted) at maxPages", async () => {
+    let n = 0
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => json([assistantMsg()], { headers: { "X-Next-Cursor": `c${++n}` } }),
+    })
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", maxPages: 3 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/budget exhausted/i)
+    expect(messageRequests(f).length).toBe(3)
+  })
+
+  it("stops at the deadline", async () => {
+    let t = 0
+    let n = 0
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => {
+        t += 6_000
+        return json([assistantMsg()], { headers: { "X-Next-Cursor": `c${++n}` } })
+      },
+    })
+    const r = await lookupActiveModel({
+      fetch: f,
+      serverUrl,
+      sessionID: "s1",
+      deadlineMs: 10_000,
+      now: () => t,
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/deadline/i)
+    expect(messageRequests(f).length).toBe(2)
+  })
+
+  it("aborts a single hung request at the deadline (the tool turn must not hang)", async () => {
+    const hang = (req: Request) =>
+      new Promise<Response>((_, reject) => {
+        req.signal.addEventListener("abort", () => reject(new Error("aborted by deadline")))
+      })
+    const f = vi.fn((input: string | URL | Request) => hang(input as Request))
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", deadlineMs: 50 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/aborted|timeout|deadline/i)
+  })
+
+  it("enforces the deadline even when the transport ignores the abort signal", async () => {
+    const f = vi.fn(() => new Promise<Response>(() => {}))
+    const t0 = Date.now()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", deadlineMs: 50 })
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/deadline|timed out/i)
+  })
+
+  it("enforces the deadline on a body that stalls after the headers", async () => {
+    const stalled = () =>
+      new Response(new ReadableStream({ start() {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    const f = vi.fn(async () => stalled())
+    const t0 = Date.now()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", deadlineMs: 50 })
+    expect(Date.now() - t0).toBeLessThan(1_000)
+    expect(r.ok).toBe(false)
+  })
+
+  it("stops immediately when the caller's signal is aborted", async () => {
+    const ac = new AbortController()
+    const f = vi.fn(
+      (input: string | URL | Request) =>
+        new Promise<Response>((_, reject) => {
+          ;(input as Request).signal.addEventListener("abort", () => reject(new Error("aborted")))
+          ac.abort()
+        }),
     )
-    const result = await findActiveModel({
-      fetch: mockFetch,
-      serverUrl: new URL("http://localhost:4096"),
-      sessionID: "s1",
-    })
-    expect(result).toBeNull()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1", signal: ac.signal })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/cancel|abort/i)
+    expect(f).toHaveBeenCalledOnce()
   })
 
-  it("returns null when the fetch fails", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(new Response("err", { status: 500 }))
-    const result = await findActiveModel({
-      fetch: mockFetch,
-      serverUrl: new URL("http://localhost:4096"),
-      sessionID: "s1",
+  it("names the HTTP status when a message page fails", async () => {
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => new Response("nope", { status: 503 }),
     })
-    expect(result).toBeNull()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/503/)
   })
 
-  it("returns null when the fetch itself throws (network error)", async () => {
-    const mockFetch = vi.fn().mockRejectedValue(new Error("network down"))
-    const result = await findActiveModel({
-      fetch: mockFetch,
-      serverUrl: new URL("http://localhost:4096"),
-      sessionID: "s1",
-    })
-    expect(result).toBeNull()
+  it("names the exception when every request throws", async () => {
+    const f = vi.fn().mockRejectedValue(new Error("network down"))
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/network down/)
   })
 
-  it("returns null when the response body is not valid JSON", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response("not json at all", { status: 200 }),
-    )
-    const result = await findActiveModel({
-      fetch: mockFetch,
-      serverUrl: new URL("http://localhost:4096"),
-      sessionID: "s1",
-    })
-    expect(result).toBeNull()
+  it("tolerates malformed pages and entries without throwing", async () => {
+    for (const body of [{ unexpected: "shape" }, [null, 3, { nope: 1 }, { info: null }]]) {
+      const f = routedFetch({ session: () => json({ id: "s1" }), page: () => json(body) })
+      const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+      expect(r.ok).toBe(false)
+    }
   })
 
-  it("returns null when the parsed JSON is not an array", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ unexpected: "shape" }), { status: 200 }),
-    )
-    const result = await findActiveModel({
-      fetch: mockFetch,
-      serverUrl: new URL("http://localhost:4096"),
-      sessionID: "s1",
+  it("ignores a latest assistant (e.g. a compaction summary on another model)", async () => {
+    const f = routedFetch({
+      session: () => json({ id: "s1" }),
+      page: () => json([userMsg("the-user-model"), assistantMsg()]),
     })
-    expect(result).toBeNull()
+    const r = await lookupActiveModel({ fetch: f, serverUrl, sessionID: "s1" })
+    expect(r).toMatchObject({ ok: true, model: { modelID: "the-user-model" } })
   })
 })
 
-describe("createSelfCompactTool (v2: stash-and-return)", () => {
+const MODEL = { providerID: "anthropic", modelID: "claude" }
+const okLookup = () => vi.fn().mockResolvedValue({ ok: true, source: "session", model: MODEL })
+
+describe("createSelfCompactTool (v4: resolve the model at tool time, then stash)", () => {
   it("shares pending entries across plugin instances in the same process", async () => {
     const pendingA = getSharedPendingResumes()
     pendingA.clear()
@@ -146,7 +344,7 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
 
     expect(pendingB).toBe(pendingA)
 
-    const tool = createSelfCompactTool({ pending: pendingA })
+    const tool = createSelfCompactTool({ pending: pendingA, lookupModel: okLookup() })
     await tool.execute({ prompt: "resume across instances" }, { sessionID: "ses_shared" })
     pendingA.get("ses_shared")!.phase = "summarizing"
 
@@ -163,31 +361,94 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
     expect(pendingA.has("ses_shared")).toBe(false)
   })
 
-  it("stashes pending entry with phase 'awaitingTurnEnd' and returns instantly", async () => {
+  it("stashes the prompt WITH the resolved model, phase 'awaitingTurnEnd'", async () => {
     const pending = new Map<string, PendingResume>()
-    const tool = createSelfCompactTool({ pending })
-    const result = await tool.execute(
-      { prompt: "resume here" },
-      { sessionID: "ses_abc" },
-    )
+    const lookupModel = okLookup()
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    const result = await tool.execute({ prompt: "resume here" }, { sessionID: "ses_abc" })
+    expect(lookupModel).toHaveBeenCalledWith({ sessionID: "ses_abc", signal: undefined })
     expect(result).toMatch(/queued/i)
     expect(pending.get("ses_abc")).toMatchObject({
       prompt: "resume here",
       phase: "awaitingTurnEnd",
+      model: MODEL,
     })
     expect(typeof pending.get("ses_abc")?.createdAt).toBe("number")
   })
 
-  it("does NOT perform any HTTP work from execute (deadlock vector removed)", async () => {
-    // The factory should not even accept findActiveModel/callSummarize as deps anymore.
-    // If this test compiles AND passes, the API surface is correct: execute
-    // takes only a `pending` Map as a dependency, so there is no path by which
-    // it could reach into HTTP/SDK calls during a tool turn.
+  it("on lookup failure: stashes nothing and TELLS the agent, with the reason", async () => {
+    // The old behaviour returned "queued" and evicted silently at idle, so the
+    // agent told the human "compacting next" and nothing ever happened.
     const pending = new Map<string, PendingResume>()
-    const tool = createSelfCompactTool({ pending })
-    const result = await tool.execute({ prompt: "x" }, { sessionID: "ses_abc" })
-    expect(result).toMatch(/queued/i)
-    expect(pending.has("ses_abc")).toBe(true)
+    const lookupModel = vi.fn().mockResolvedValue({ ok: false, reason: "session GET HTTP 503; page 1 HTTP 503" })
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    const result = await tool.execute({ prompt: "resume here" }, { sessionID: "ses_abc" })
+    expect(pending.has("ses_abc")).toBe(false)
+    expect(result).toMatch(/NOT queued/)
+    expect(result).toContain("session GET HTTP 503; page 1 HTTP 503")
+    expect(result).not.toMatch(/^Compaction queued/)
+  })
+
+  it("on a lookup that throws: same visible failure, nothing stashed", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = vi.fn().mockRejectedValue(new Error("kaboom"))
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    const result = await tool.execute({ prompt: "p" }, { sessionID: "ses_abc" })
+    expect(pending.has("ses_abc")).toBe(false)
+    expect(result).toMatch(/NOT queued/)
+    expect(result).toContain("kaboom")
+  })
+
+  it("a failed retry does not clobber an earlier successfully queued entry", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, source: "session", model: MODEL })
+      .mockResolvedValueOnce({ ok: false, reason: "nope" })
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
+    await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
+    expect(pending.get("ses_x")?.prompt).toBe("first")
+  })
+
+  it("a failed replacement says the EARLIER queued compaction is still armed", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, source: "session", model: MODEL })
+      .mockResolvedValueOnce({ ok: false, reason: "nope" })
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
+    const result = await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
+    expect(result).toMatch(/previously queued/i)
+    expect(result).not.toMatch(/Nothing will happen/)
+    expect(result).not.toMatch(/\/compact/)
+  })
+
+  it("a turn cancelled during the lookup does not queue a compaction", async () => {
+    // Abort -> runner goes idle -> lookup resolves late. Without the check, the
+    // entry would be armed and fire on some LATER, unrelated idle.
+    const pending = new Map<string, PendingResume>()
+    let resolveLookup!: (v: unknown) => void
+    const lookupModel = vi.fn(() => new Promise((r) => (resolveLookup = r)))
+    const tool = createSelfCompactTool({ pending, lookupModel: lookupModel as any })
+    const ac = new AbortController()
+    const running = tool.execute({ prompt: "p" }, { sessionID: "ses_c", abort: ac.signal })
+    ac.abort()
+    resolveLookup({ ok: true, source: "session", model: MODEL })
+    const result = await running
+    expect(pending.has("ses_c")).toBe(false)
+    expect(result).toMatch(/cancel/i)
+    expect(result).not.toMatch(/^Compaction queued/)
+  })
+
+  it("passes the tool's abort signal through to the lookup", async () => {
+    const pending = new Map<string, PendingResume>()
+    const lookupModel = okLookup()
+    const tool = createSelfCompactTool({ pending, lookupModel })
+    const ac = new AbortController()
+    await tool.execute({ prompt: "p" }, { sessionID: "ses_s", abort: ac.signal })
+    expect(lookupModel).toHaveBeenCalledWith({ sessionID: "ses_s", signal: ac.signal })
   })
 
   it("evicts stale entries (>30min) before stashing", async () => {
@@ -196,9 +457,10 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
     pending.set("ses_old", {
       prompt: "ancient",
       phase: "awaitingTurnEnd",
+      model: MODEL,
       createdAt: Date.now() - STALE_MS - 1,
     })
-    const tool = createSelfCompactTool({ pending })
+    const tool = createSelfCompactTool({ pending, lookupModel: okLookup() })
     await tool.execute({ prompt: "fresh" }, { sessionID: "ses_new" })
     expect(pending.has("ses_old")).toBe(false)
     expect(pending.has("ses_new")).toBe(true)
@@ -206,7 +468,7 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
 
   it("overwrites a prior pending entry for the same session (last-write-wins)", async () => {
     const pending = new Map<string, PendingResume>()
-    const tool = createSelfCompactTool({ pending })
+    const tool = createSelfCompactTool({ pending, lookupModel: okLookup() })
     await tool.execute({ prompt: "first" }, { sessionID: "ses_x" })
     await tool.execute({ prompt: "second" }, { sessionID: "ses_x" })
     expect(pending.get("ses_x")?.prompt).toBe("second")
@@ -216,7 +478,7 @@ describe("createSelfCompactTool (v2: stash-and-return)", () => {
 describe("createOnCompacted event handler", () => {
   it("ignores events that are not session.compacted", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "x", phase: "summarizing", createdAt: Date.now() })
+    pending.set("s1", { prompt: "x", phase: "summarizing", model: MODEL, createdAt: Date.now() })
     const callPromptAsync = vi.fn()
     const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({ event: { type: "session.idle", properties: { sessionID: "s1" } } })
@@ -234,7 +496,7 @@ describe("createOnCompacted event handler", () => {
 
   it("calls callPromptAsync with the stashed prompt and clears state", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume now", phase: "summarizing", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume now", phase: "summarizing", model: MODEL, createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await handler({
@@ -246,7 +508,7 @@ describe("createOnCompacted event handler", () => {
 
   it("clears state even if callPromptAsync throws", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() })
     const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
     const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => true })
     await expect(
@@ -257,7 +519,7 @@ describe("createOnCompacted event handler", () => {
 
   it("removes the pending entry before awaiting callPromptAsync (no double-delivery race)", async () => {
     const pending = new Map<string, PendingResume>()
-    pending.set("s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() })
+    pending.set("s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() })
     let observedDuringCall: boolean | undefined
     const callPromptAsync = vi.fn().mockImplementation(async () => {
       // While callPromptAsync is in-flight, the pending entry must already
@@ -318,23 +580,21 @@ describe("callPromptAsyncHttp", () => {
   })
 })
 
-describe("createOnStatus (v2: idle-triggered summarize)", () => {
+describe("createOnStatus (v4: idle-triggered summarize with the stashed model)", () => {
   it("ignores non-status events", async () => {
     const pending = new Map<string, PendingResume>()
     const callSummarize = vi.fn()
-    const findActiveModel = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({ event: { type: "session.compacted", properties: { sessionID: "ses_x" } } })
     expect(callSummarize).not.toHaveBeenCalled()
   })
 
   it("ignores non-idle status events", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn()
-    const findActiveModel = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -347,8 +607,7 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
   it("ignores idle status for sessions without a pending entry", async () => {
     const pending = new Map<string, PendingResume>()
     const callSummarize = vi.fn()
-    const findActiveModel = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -360,11 +619,10 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
 
   it("ignores idle status for entries already in 'summarizing' phase (no double-trigger)", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "summarizing", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn()
-    const findActiveModel = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -376,35 +634,31 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
 
   it("on idle for awaitingTurnEnd entry: promotes to summarizing then fires summarize", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn().mockResolvedValue(undefined)
-    const findActiveModel = vi
-      .fn()
-      .mockResolvedValue({ providerID: "anthropic", modelID: "claude" })
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
         properties: { sessionID: "ses_x", status: { type: "idle" } },
       },
     })
-    expect(findActiveModel).toHaveBeenCalledWith({ sessionID: "ses_x" })
     expect(callSummarize).toHaveBeenCalledWith({
       sessionID: "ses_x",
       providerID: "anthropic",
       modelID: "claude",
     })
+    // No HTTP model lookup at idle time any more: the model was resolved by the tool.
     expect(pending.get("ses_x")?.phase).toBe("summarizing")
   })
 
-  it("evicts pending entry if findActiveModel returns null (no model means no compaction)", async () => {
+  it("evicts a (legacy) entry that carries no model instead of guessing one", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() } as unknown as PendingResume],
     ])
     const callSummarize = vi.fn()
-    const findActiveModel = vi.fn().mockResolvedValue(null)
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -417,11 +671,10 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
 
   it("evicts pending entry if callSummarize throws (no retry; user re-invokes the skill)", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn().mockRejectedValue(new Error("boom"))
-    const findActiveModel = vi.fn().mockResolvedValue({ providerID: "a", modelID: "m" })
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -433,7 +686,7 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
 
   it("phase promotion happens BEFORE await — re-entrant idle event for same session does not double-trigger", async () => {
     const pending = new Map<string, PendingResume>([
-      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() }],
+      ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     let summarizeCalls = 0
     const callSummarize = vi.fn().mockImplementation(async () => {
@@ -446,8 +699,7 @@ describe("createOnStatus (v2: idle-triggered summarize)", () => {
         },
       })
     })
-    const findActiveModel = vi.fn().mockResolvedValue({ providerID: "a", modelID: "m" })
-    const handler = createOnStatus({ pending, callSummarize, findActiveModel })
+    const handler = createOnStatus({ pending, callSummarize })
     await handler({
       event: {
         type: "session.status",
@@ -465,7 +717,7 @@ describe("createOnCompacted (v3: wait for the runner to go idle before resuming)
   // but never processed. The fix waits until the session reports idle before firing.
   it("does NOT fire prompt_async until waitForIdle resolves", async () => {
     const pending = new Map<string, PendingResume>([
-      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+      ["s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     let releaseIdle!: (v: boolean) => void
@@ -486,7 +738,7 @@ describe("createOnCompacted (v3: wait for the runner to go idle before resuming)
 
   it("does NOT fire prompt_async if the session never goes idle (waitForIdle false)", async () => {
     const pending = new Map<string, PendingResume>([
-      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+      ["s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     const waitForIdle = vi.fn().mockResolvedValue(false)
@@ -498,7 +750,7 @@ describe("createOnCompacted (v3: wait for the runner to go idle before resuming)
 
   it("removes the pending entry before awaiting waitForIdle (no double-delivery on re-entrant compacted)", async () => {
     const pending = new Map<string, PendingResume>([
-      ["s1", { prompt: "resume", phase: "summarizing", createdAt: Date.now() }],
+      ["s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     let observedDuringWait: boolean | undefined
@@ -600,11 +852,10 @@ describe("self-compact plugin auth integration", () => {
     process.env.OPENCODE_SERVER_USERNAME = "opencode"
 
     const mockFetch = vi.fn().mockImplementation(async (req: Request) => {
-      if (req.url.endsWith("/message")) {
+      if (/\/session\/[^/]+$/.test(new URL(req.url).pathname)) {
+        const id = new URL(req.url).pathname.split("/")[2]
         return new Response(
-          JSON.stringify([
-            { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-3-5" } } },
-          ]),
+          JSON.stringify({ id, model: { id: "claude-3-5", providerID: "anthropic" } }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         )
       }
@@ -625,7 +876,7 @@ describe("self-compact plugin auth integration", () => {
     pending.clear()
     await p.tool!.self_compact_and_resume.execute({ prompt: "resume prompt" }, { sessionID: "s_auth_1" } as any)
 
-    // Trigger onStatus idle event which calls findActiveModel and callSummarizeHttp
+    // Trigger onStatus idle event which calls callSummarizeHttp with the stashed model
     await p.event!({
       event: {
         type: "session.status",
@@ -633,7 +884,12 @@ describe("self-compact plugin auth integration", () => {
       },
     })
 
-    expect(mockFetch).toHaveBeenCalled()
+    const paths = mockFetch.mock.calls.map((c) => new URL((c[0] as Request).url).pathname)
+    // End-to-end: the tool resolved the model from session metadata (no
+    // history download) and the idle handler fired summarize with it.
+    expect(paths).toEqual(["/session/s_auth_1", "/session/s_auth_1/summarize"])
+    const summarizeBody = await (mockFetch.mock.calls[1][0] as Request).clone().json()
+    expect(summarizeBody).toEqual({ providerID: "anthropic", modelID: "claude-3-5", auto: false })
     for (const call of mockFetch.mock.calls) {
       const req = call[0] as Request
       expect(req.headers.get("Authorization")).toBe(
@@ -644,11 +900,10 @@ describe("self-compact plugin auth integration", () => {
 
   it("plugin fetch remains inert with NO Authorization header key when no password set", async () => {
     const mockFetch = vi.fn().mockImplementation(async (req: Request) => {
-      if (req.url.endsWith("/message")) {
+      if (/\/session\/[^/]+$/.test(new URL(req.url).pathname)) {
+        const id = new URL(req.url).pathname.split("/")[2]
         return new Response(
-          JSON.stringify([
-            { info: { role: "user", model: { providerID: "anthropic", modelID: "claude-3-5" } } },
-          ]),
+          JSON.stringify({ id, model: { id: "claude-3-5", providerID: "anthropic" } }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         )
       }

@@ -8,8 +8,8 @@ import {
   createOnCompacted,
   createOnStatus,
   createSelfCompactTool,
-  findActiveModel,
   getSharedPendingResumes,
+  lookupActiveModel,
   waitForSessionIdleHttp,
 } from "./self-compact-impl"
 
@@ -28,19 +28,22 @@ const plugin: Plugin = async (ctx) => {
   const callCtx: CallContext = { fetch: authenticatedFetch, serverUrl: ctx.serverUrl }
   const pending = getSharedPendingResumes()
 
-  const toolImpl = createSelfCompactTool({ pending })
+  const toolImpl = createSelfCompactTool({
+    pending,
+    lookupModel: ({ sessionID, signal }) =>
+      lookupActiveModel({ fetch: callCtx.fetch, serverUrl: ctx.serverUrl, sessionID, signal }),
+  })
 
   // v2 split-phase architecture:
-  //   1. Tool execute → stash entry, return instantly (no deadlock).
-  //   2. onStatus (idle) → fire POST /summarize from outside the turn.
+  //   1. Tool execute → resolve the model (read-only GETs), stash entry, return.
+  //      A failed lookup is returned to the agent instead of being stashed.
+  //   2. onStatus (idle) → fire POST /summarize with that model, outside the turn.
   //   3. onCompacted → enqueue resumption prompt via POST /prompt_async.
   // The plugin SDK accepts a single `event` hook per plugin; we dispatch
   // internally by event type. Each handler filters its own events.
   const onStatus = createOnStatus({
     pending,
     callSummarize: (input) => callSummarizeHttp(callCtx, input),
-    findActiveModel: ({ sessionID }) =>
-      findActiveModel({ fetch: callCtx.fetch, serverUrl: ctx.serverUrl, sessionID }),
   })
 
   const onCompacted = createOnCompacted({
@@ -68,7 +71,7 @@ const plugin: Plugin = async (ctx) => {
             .describe("The resumption prompt to send after compaction completes."),
         },
         async execute(args, toolCtx) {
-          return toolImpl.execute(args, { sessionID: toolCtx.sessionID })
+          return toolImpl.execute(args, { sessionID: toolCtx.sessionID, abort: toolCtx.abort })
         },
       }),
     },

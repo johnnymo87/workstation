@@ -36,7 +36,8 @@ Compaction has two parts, and understanding both keeps you from doing redundant 
 4. **Draft and apply a resumption prompt.** Draft a concise message for the post-compaction session and pass it as the `prompt` argument to the `self_compact_and_resume` tool. See "Resumption Prompt Shape" below.
 
    **How the tool behaves:**
-   - Returns INSTANTLY with a "Compaction queued" message — no waiting.
+   - Returns almost instantly with a "Compaction queued" message — no waiting.
+   - **Read the result.** If it says "Compaction NOT queued", nothing will happen when the turn ends, and the result says why. Don't tell the user you're compacting. Say it failed and give the reason, then either call the tool again (if the cause looks transient) or fall back to printing the prompt for them to paste after `/compact`. If it says the *replacement* was not queued, an earlier call's compaction is still armed with that earlier prompt.
    - Compaction begins automatically after THIS turn closes (i.e., once you stop responding). Do NOT call other tools or generate more text trying to "wait for" or "verify" compaction — that just delays it.
    - The TUI streams the retrospective summary token-by-token once it starts.
    - When compaction completes, your resumption prompt arrives as the next user message — a fresh turn begins automatically.
