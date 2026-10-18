@@ -1591,6 +1591,8 @@ in
           esac
         done <<< "$SHOW"
         [ -n "$RESULT" ] || RESULT=unknown
+        NEXT="This alert found no breadcrumb for the run. If lgtm left one, its next
+cycle alerts naming the PR or cycle phase and defers that PR."
         # Which PR was in flight when the run died: lgtm's breadcrumb
         # (<state>/inflight/<runId>.json, lgtm-jeyw.1), matched on the failed
         # run's InvocationID. It must be read BEFORE the next cycle, which
@@ -1602,11 +1604,26 @@ in
         elif [ -z "$INV" ]; then
           INFLIGHT="unknown: lgtm-run's InvocationID was unreadable"
         else
-          INFLIGHT="no in-flight breadcrumb for this run (it died between PRs, or outside per-PR work)"
+          # Since lgtm-jeyw.7 a run keeps a crumb for the whole cycle, so a
+          # missing one means it died before arming it, or crashed and removed
+          # it on the way out.
+          INFLIGHT="no in-flight breadcrumb for this run (it died at startup, before lgtm armed one, or crashed and removed it -- the journal has the error)"
           for f in /home/dev/.local/state/lgtm/inflight/*.json; do
             [ -e "$f" ] || continue
             if [ "$(jq -r '.invocationId // empty' "$f" 2>/dev/null)" = "$INV" ]; then
-              INFLIGHT="$(jq -r '"\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown"))"' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
+              # repo is null while no PR is in flight (a cycle-phase crumb).
+              INFLIGHT="$(jq -r 'if .repo == null
+                then "no PR: cycle phase \(.cyclePhase // .phase)\(if .cycleDetail then " (\(.cycleDetail))" else "" end) since \(.cyclePhaseSince // .phaseSince // .since)"
+                else "\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown")\(if .cyclePhase then ", cycle phase \(.cyclePhase)" else "" end))"
+                end' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
+              if [ "$(jq -r '.repo // empty' "$f" 2>/dev/null)" != "" ]; then
+                NEXT="lgtm acts on the PR named above itself: next cycle it runs it last, and a
+second death at the same head and phase quarantines it for 6 cycles; the
+quarantine alert says how to clear it."
+              else
+                NEXT="No PR was in flight, so lgtm defers or quarantines nothing: it alerts
+naming the cycle phase, and escalates if the same phase dies again."
+              fi
               break
             fi
           done
@@ -1624,9 +1641,8 @@ assume a burst: on 2026-10-16 a stalled bazel server hung 8 consecutive cycles
 looks like phase gather/dispatch after several dispatches in the journal.
 Result=exit-code means it crashed; the journal has the error.
 
-lgtm acts on the PR named above itself: next cycle it runs it last, and a
-second death at the same head and phase quarantines it for 6 cycles; the
-quarantine alert says how to clear it. If lgtm's OWN bazel timeout fired
+''$NEXT
+If lgtm's OWN bazel timeout fired
 before the kill, it saved the server's thread dump under
 ~/.local/state/lgtm/bazel-dumps/ (lgtm#182); otherwise any dump is still in
 the output base's server/jvm.out, until that server restarts.
