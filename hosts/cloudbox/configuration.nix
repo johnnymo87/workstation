@@ -1163,8 +1163,83 @@ in
       # it kept systemd from SIGKILLing detached `opencode run` review children
       # when the oneshot ExecStart exited. Serve mode spawns no such children —
       # opencode-launch is pure HTTP to the serve pool and the sessions run in
-      # opencode-serve-pool.target's own cgroup — so nothing needs to outlive
-      # the cycle. (lgtm-j6k)
+      # opencode-serve-pool.target's own cgroup. (lgtm-j6k)
+      #
+      # But the control-group kill does NOT reach everything the cycle starts,
+      # and the gap is exactly the one that turned one stall into a 3h outage
+      # on 2026-10-16 (lgtm-jeyw). The bazel shim runs every bazel client in its
+      # own `systemd-run --scope` under bazel.slice, OUTSIDE this cgroup. When a
+      # timeout killed the cycle, its stuck bazel clients survived, kept their
+      # server busy, and every later cycle queued behind them. Nothing the cycle
+      # starts is MEANT to outlive it; the bazel clients are the processes that
+      # do anyway. lgtm forwards SIGTERM to them itself (lgtm#181), and
+      # ExecStopPost below is the backstop for when it could not.
+      #
+      # ExecStopPost: SIGTERM each bazel client process group that THIS run
+      # recorded in lgtm's registry (<state>/bazel-pgids/<pgid>.json, written by
+      # lgtm's src/bazelRun.ts), matched on this unit's INVOCATION_ID. TERM and
+      # NOT KILL, deliberately: on SIGTERM the client tells its server to cancel
+      # the command, while a SIGKILLed client leaves the server running the
+      # abandoned command with nothing left to prove whose it was. A client
+      # that survives the TERM stays a LIVE orphan, which lgtm's next call on
+      # that output base can attribute and clean up (lgtm-jeyw.5). Never by
+      # scope: the scope also holds the server, which review sessions and
+      # humans share. A group is signalled only if its leader is alive and is
+      # the very process recorded (start time), so a reused pgid is left alone.
+      # It runs on every stop and is a no-op when the registry has nothing for
+      # this run, which is the normal case. Its wait for survivors (<=10s) runs
+      # inside the stop phase, i.e. out of the ~60s between TimeoutStartSec=1140
+      # and the next fire that the comment above relies on; keep it short.
+      ExecStopPost = "${pkgs.writeShellScript "lgtm-run-stop-post" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.jq ]}
+        reg="''${LGTM_STATE_DIR:-$HOME/.local/state/lgtm}/bazel-pgids"
+        [ -d "$reg" ] || exit 0
+        if [ -z "''${INVOCATION_ID:-}" ]; then
+          echo "lgtm-run stop-post: no INVOCATION_ID; leaving bazel client groups alone" >&2
+          exit 0
+        fi
+        # /proc/<pid>/stat field 22 (start time). comm (field 2) can contain
+        # spaces and parens, so count from the LAST ") ".
+        starttime() {
+          local s
+          s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+          s="''${s##*) }"
+          set -- $s
+          [ -n "''${20:-}" ] || return 1
+          echo "''${20}"
+        }
+        signalled=()
+        for f in "$reg"/*.json; do
+          [ -e "$f" ] || continue
+          line="$(jq -r '[.pgid, .leaderPid, .leaderStartTime, .invocationId, .cwd] | map(tostring) | join("\t")' "$f" 2>/dev/null)" || continue
+          IFS=$'\t' read -r pgid leader lstart inv cwd <<< "$line"
+          [ "$inv" = "$INVOCATION_ID" ] || continue
+          case "$pgid" in "" | *[!0-9]*) continue ;; esac
+          if [ "$pgid" -le 1 ] || [ "$leader" != "$pgid" ]; then continue; fi
+          if ! now="$(starttime "$pgid")"; then
+            echo "lgtm-run stop-post: bazel group $pgid ($cwd): leader gone, leaving it alone" >&2
+            continue
+          fi
+          if [ "$now" != "$lstart" ]; then
+            echo "lgtm-run stop-post: bazel group $pgid ($cwd): leader start time changed (pgid reused), leaving it alone" >&2
+            continue
+          fi
+          if kill -TERM -- "-$pgid" 2>/dev/null; then
+            echo "lgtm-run stop-post: SIGTERMed bazel client group $pgid left running by this cycle ($cwd)" >&2
+            signalled+=("$pgid")
+          fi
+        done
+        [ "''${#signalled[@]}" -gt 0 ] || exit 0
+        for _ in $(seq 1 50); do
+          left=()
+          for g in "''${signalled[@]}"; do kill -0 -- "-$g" 2>/dev/null && left+=("$g"); done
+          [ "''${#left[@]}" -eq 0 ] && exit 0
+          sleep 0.2
+        done
+        echo "lgtm-run stop-post: WARNING bazel client group(s) ''${left[*]} survived SIGTERM; left for lgtm to attribute as orphans (lgtm-jeyw.5)" >&2
+        exit 0
+      ''}";
       User = "dev";
       Group = "dev";
       WorkingDirectory = "/home/dev/projects/lgtm";
@@ -1502,17 +1577,83 @@ in
       ExecStart = "${pkgs.writeShellScript "lgtm-run-failure" ''
         set -u
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
-        RESULT="$(systemctl show lgtm-run -p Result --value 2>/dev/null || echo unknown)"
+        # ONE systemctl call, so Result and InvocationID describe the same run.
+        # If the next timer fire was queued while the unit was stopping, it
+        # starts the moment the unit goes failed, with a NEW InvocationID; read
+        # separately, the alert could name the new run's PR as the one that died.
+        SHOW="$(systemctl show lgtm-run -p ActiveState -p Result -p InvocationID 2>/dev/null || true)"
+        STATE=""; RESULT=""; INV=""
+        while IFS='=' read -r k v; do
+          case "$k" in
+            ActiveState) STATE="$v" ;;
+            Result) RESULT="$v" ;;
+            InvocationID) INV="$v" ;;
+          esac
+        done <<< "$SHOW"
+        [ -n "$RESULT" ] || RESULT=unknown
+        NEXT="This alert found no breadcrumb for the run. If lgtm left one, its next
+cycle alerts naming the PR or cycle phase and, if it names a PR, defers it."
+        # Which PR was in flight when the run died: lgtm's breadcrumb
+        # (<state>/inflight/<runId>.json, lgtm-jeyw.1), matched on the failed
+        # run's InvocationID. It must be read BEFORE the next cycle, which
+        # claims and deletes a dead run's crumb when it records the strike.
+        if [ -z "$STATE" ]; then
+          INFLIGHT="unknown: systemctl show lgtm-run failed"
+        elif [ "$STATE" != failed ]; then
+          INFLIGHT="unknown: lgtm-run is already '$STATE' again, so its InvocationID is no longer the failed run's"
+        elif [ -z "$INV" ]; then
+          INFLIGHT="unknown: lgtm-run's InvocationID was unreadable"
+        else
+          # Since lgtm-jeyw.7 a run keeps a crumb for the whole cycle, so a
+          # missing one means it died before arming it, or crashed and removed
+          # it on the way out.
+          if [ "$RESULT" = exit-code ]; then
+            INFLIGHT="no in-flight breadcrumb for this run (it crashed, and lgtm removes its crumb on the way out -- the journal has the error)"
+          else
+            INFLIGHT="no in-flight breadcrumb for this run (killed before lgtm armed one, outside per-PR work on an lgtm older than lgtm-jeyw.7, or after lgtm dropped one it could not rewrite, e.g. a full disk)"
+          fi
+          for f in /home/dev/.local/state/lgtm/inflight/*.json; do
+            [ -e "$f" ] || continue
+            if [ "$(jq -r '.invocationId // empty' "$f" 2>/dev/null)" = "$INV" ]; then
+              # repo is null while no PR is in flight (a cycle-phase crumb).
+              INFLIGHT="$(jq -r 'if .repo == null
+                then "no PR: cycle phase \(.cyclePhase // .phase)\(if .cycleDetail then " (\(.cycleDetail))" else "" end) since \(.cyclePhaseSince // .phaseSince // .since)"
+                else "\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown")\(if .cyclePhase then ", cycle phase \(.cyclePhase)" else "" end))"
+                end' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
+              # From the string already read: a second read races the next
+              # cycle claiming the crumb.
+              case "$INFLIGHT" in
+                "no PR:"*)
+                  NEXT="No PR was in flight, so lgtm defers or quarantines nothing: it alerts
+naming the cycle phase, and escalates if the same phase dies again." ;;
+                "unreadable breadcrumb"*) ;;
+                *)
+                  NEXT="lgtm acts on the PR named above itself: next cycle it runs it last, and a
+second death at the same head and phase quarantines it for 6 cycles; the
+quarantine alert says how to clear it." ;;
+              esac
+              break
+            fi
+          done
+        fi
         ${driftAlert} /var/lib/lgtm-failure/alert-run "lgtm-run:''$RESULT" \
           "LGTM review cycle FAILED (Result=''$RESULT).
+In flight when it died: ''$INFLIGHT
 
 While it is failing, no PR is being reviewed.
 
-Result=timeout means the cycle hit TimeoutStartSec=1140 -- either a genuine hang
-or a legitimate dispatch burst (~190s each; observed max is 4 per cycle). Check
-which before raising the bound. gh calls are individually bounded, so a hang is
-more likely to be a burst than a stall.
+Result=timeout means the cycle hit TimeoutStartSec=1140 -- a STALL or a
+legitimate dispatch burst (~190s each; observed max is 4 per cycle). Do not
+assume a burst: on 2026-10-16 a stalled bazel server hung 8 consecutive cycles
+(lgtm-jeyw), and a PR stuck in phase context or owners is that shape. A burst
+looks like phase gather/dispatch after several dispatches in the journal.
 Result=exit-code means it crashed; the journal has the error.
+
+''$NEXT
+If lgtm's OWN bazel timeout fired
+before the kill, it saved the server's thread dump under
+~/.local/state/lgtm/bazel-dumps/ (lgtm#182); otherwise any dump is still in
+the output base's server/jvm.out, until that server restarts.
 
 Check:
   systemctl status lgtm-run.service --no-pager
