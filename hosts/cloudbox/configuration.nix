@@ -1187,7 +1187,9 @@ in
       # humans share. A group is signalled only if its leader is alive and is
       # the very process recorded (start time), so a reused pgid is left alone.
       # It runs on every stop and is a no-op when the registry has nothing for
-      # this run, which is the normal case.
+      # this run, which is the normal case. Its wait for survivors (<=10s) runs
+      # inside the stop phase, i.e. out of the ~60s between TimeoutStartSec=1140
+      # and the next fire that the comment above relies on; keep it short.
       ExecStopPost = "${pkgs.writeShellScript "lgtm-run-stop-post" ''
         set -u
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.jq ]}
@@ -1575,21 +1577,40 @@ in
       ExecStart = "${pkgs.writeShellScript "lgtm-run-failure" ''
         set -u
         export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
-        RESULT="$(systemctl show lgtm-run -p Result --value 2>/dev/null || echo unknown)"
+        # ONE systemctl call, so Result and InvocationID describe the same run.
+        # If the next timer fire was queued while the unit was stopping, it
+        # starts the moment the unit goes failed, with a NEW InvocationID; read
+        # separately, the alert could name the new run's PR as the one that died.
+        SHOW="$(systemctl show lgtm-run -p ActiveState -p Result -p InvocationID 2>/dev/null || true)"
+        STATE=""; RESULT=""; INV=""
+        while IFS='=' read -r k v; do
+          case "$k" in
+            ActiveState) STATE="$v" ;;
+            Result) RESULT="$v" ;;
+            InvocationID) INV="$v" ;;
+          esac
+        done <<< "$SHOW"
+        [ -n "$RESULT" ] || RESULT=unknown
         # Which PR was in flight when the run died: lgtm's breadcrumb
         # (<state>/inflight/<runId>.json, lgtm-jeyw.1), matched on the failed
-        # run's InvocationID. Read BEFORE the next cycle, which claims and
-        # deletes a dead run's crumb when it records the strike.
-        INV="$(systemctl show lgtm-run -p InvocationID --value 2>/dev/null || true)"
-        INFLIGHT="no in-flight breadcrumb for this run (it died between PRs, or outside per-PR work)"
-        for f in /home/dev/.local/state/lgtm/inflight/*.json; do
-          [ -e "$f" ] || continue
-          [ -n "$INV" ] || break
-          if [ "$(jq -r '.invocationId // empty' "$f" 2>/dev/null)" = "$INV" ]; then
-            INFLIGHT="$(jq -r '"\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown"))"' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
-            break
-          fi
-        done
+        # run's InvocationID. It must be read BEFORE the next cycle, which
+        # claims and deletes a dead run's crumb when it records the strike.
+        if [ -z "$STATE" ]; then
+          INFLIGHT="unknown: systemctl show lgtm-run failed"
+        elif [ "$STATE" != failed ]; then
+          INFLIGHT="unknown: lgtm-run is already '$STATE' again, so its InvocationID is no longer the failed run's"
+        elif [ -z "$INV" ]; then
+          INFLIGHT="unknown: lgtm-run's InvocationID was unreadable"
+        else
+          INFLIGHT="no in-flight breadcrumb for this run (it died between PRs, or outside per-PR work)"
+          for f in /home/dev/.local/state/lgtm/inflight/*.json; do
+            [ -e "$f" ] || continue
+            if [ "$(jq -r '.invocationId // empty' "$f" 2>/dev/null)" = "$INV" ]; then
+              INFLIGHT="$(jq -r '"\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown"))"' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
+              break
+            fi
+          done
+        fi
         ${driftAlert} /var/lib/lgtm-failure/alert-run "lgtm-run:''$RESULT" \
           "LGTM review cycle FAILED (Result=''$RESULT).
 In flight when it died: ''$INFLIGHT
@@ -1605,8 +1626,10 @@ Result=exit-code means it crashed; the journal has the error.
 
 lgtm acts on the PR named above itself: next cycle it runs it last, and a
 second death at the same head and phase quarantines it for 6 cycles; the
-quarantine alert says how to clear it. A bazel timeout saves the server's
-thread dump under ~/.local/state/lgtm/bazel-dumps/.
+quarantine alert says how to clear it. If lgtm's OWN bazel timeout fired
+before the kill, it saved the server's thread dump under
+~/.local/state/lgtm/bazel-dumps/ (lgtm#182); otherwise any dump is still in
+the output base's server/jvm.out, until that server restarts.
 
 Check:
   systemctl status lgtm-run.service --no-pager
