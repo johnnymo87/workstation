@@ -1592,7 +1592,7 @@ in
         done <<< "$SHOW"
         [ -n "$RESULT" ] || RESULT=unknown
         NEXT="This alert found no breadcrumb for the run. If lgtm left one, its next
-cycle alerts naming the PR or cycle phase and defers that PR."
+cycle alerts naming the PR or cycle phase and, if it names a PR, defers it."
         # Which PR was in flight when the run died: lgtm's breadcrumb
         # (<state>/inflight/<runId>.json, lgtm-jeyw.1), matched on the failed
         # run's InvocationID. It must be read BEFORE the next cycle, which
@@ -1607,7 +1607,11 @@ cycle alerts naming the PR or cycle phase and defers that PR."
           # Since lgtm-jeyw.7 a run keeps a crumb for the whole cycle, so a
           # missing one means it died before arming it, or crashed and removed
           # it on the way out.
-          INFLIGHT="no in-flight breadcrumb for this run (it died at startup, before lgtm armed one, or crashed and removed it -- the journal has the error)"
+          if [ "$RESULT" = exit-code ]; then
+            INFLIGHT="no in-flight breadcrumb for this run (it crashed, and lgtm removes its crumb on the way out -- the journal has the error)"
+          else
+            INFLIGHT="no in-flight breadcrumb for this run (killed before lgtm armed one, outside per-PR work on an lgtm older than lgtm-jeyw.7, or after lgtm dropped one it could not rewrite, e.g. a full disk)"
+          fi
           for f in /home/dev/.local/state/lgtm/inflight/*.json; do
             [ -e "$f" ] || continue
             if [ "$(jq -r '.invocationId // empty' "$f" 2>/dev/null)" = "$INV" ]; then
@@ -1616,14 +1620,18 @@ cycle alerts naming the PR or cycle phase and defers that PR."
                 then "no PR: cycle phase \(.cyclePhase // .phase)\(if .cycleDetail then " (\(.cycleDetail))" else "" end) since \(.cyclePhaseSince // .phaseSince // .since)"
                 else "\(.repo)#\(.number), phase \(.phase) since \(.phaseSince // .since) (lane \(.lane), head \(.head // "unknown")\(if .cyclePhase then ", cycle phase \(.cyclePhase)" else "" end))"
                 end' "$f" 2>/dev/null || echo "unreadable breadcrumb $f")"
-              if [ "$(jq -r '.repo // empty' "$f" 2>/dev/null)" != "" ]; then
-                NEXT="lgtm acts on the PR named above itself: next cycle it runs it last, and a
+              # From the string already read: a second read races the next
+              # cycle claiming the crumb.
+              case "$INFLIGHT" in
+                "no PR:"*)
+                  NEXT="No PR was in flight, so lgtm defers or quarantines nothing: it alerts
+naming the cycle phase, and escalates if the same phase dies again." ;;
+                "unreadable breadcrumb"*) ;;
+                *)
+                  NEXT="lgtm acts on the PR named above itself: next cycle it runs it last, and a
 second death at the same head and phase quarantines it for 6 cycles; the
-quarantine alert says how to clear it."
-              else
-                NEXT="No PR was in flight, so lgtm defers or quarantines nothing: it alerts
-naming the cycle phase, and escalates if the same phase dies again."
-              fi
+quarantine alert says how to clear it." ;;
+              esac
               break
             fi
           done
