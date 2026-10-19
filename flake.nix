@@ -1783,8 +1783,8 @@
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.cli unit tests (39 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.cli did not report expected 39 assertions." >&2
+        grep -q '^PASS  session_switcher\.cli unit tests (41 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.cli did not report expected 41 assertions." >&2
           exit 1
         }
         grep -q '^PASS  session_switcher\.discovery + \.rpc unit tests (69 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -1795,8 +1795,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 114 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (870 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 870 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (882 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 882 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (136 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -1807,8 +1807,8 @@
           echo "GATE FAILURE: stallwatch_picker.spec did not report expected 121 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.source unit tests (90 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.source did not report expected 90 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.source unit tests (91 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.source did not report expected 91 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.init unit tests (65 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -2346,7 +2346,12 @@
           expects=''${expects:-0}
           case "$f" in
             test/oc-session-list.spec.ts)
-              expected_expects=384
+              expected_expects=386
+              expected_skips=1
+              ;;
+            test/oc-session-list-goose.spec.ts)
+              expected_expects=61
+              expected_skips=0
               ;;
             *)
               echo "GATE FAILURE: unrecognised spec file $f has no pinned expect() count in flake.nix." >&2
@@ -2361,8 +2366,9 @@
           fi
 
           # Skips are counted, not ignored -- same reasoning as the vitest gate.
-          # EXACTLY ONE is expected and it is a known, reviewed degradation: the
-          # "against the REAL routing DB" case in oc-session-list.spec.ts, which
+          # The count is pinned PER FILE in the case block above. oc-session-list.spec.ts
+          # expects EXACTLY ONE, a known, reviewed degradation: the
+          # "against the REAL routing DB" case, which
           # needs a live pigeon daemon DB under $HOME and can never run in a
           # sandbox. It is marked `it.skipIf` rather than early-returning so it
           # lands in this count instead of masquerading as a pass.
@@ -2372,9 +2378,9 @@
           # that could have run; make that a decision, not a default.
           skips=$(sed -nE 's/^ *([0-9]+) skip.*/\1/p' "$TMPDIR/bun-out.txt" | head -1)
           skips=''${skips:-0}
-          if [ "$skips" -ne 1 ]; then
-            echo "GATE FAILURE: $f reported $skips skipped test(s); exactly 1 is expected" >&2
-            echo "(the REAL-routing-DB case). A new skip is a coverage loss that must be" >&2
+          if [ "$skips" -ne "$expected_skips" ]; then
+            echo "GATE FAILURE: $f reported $skips skipped test(s); exactly $expected_skips is expected" >&2
+            echo "(oc-session-list.spec.ts: the REAL-routing-DB case). A new skip is a coverage loss that must be" >&2
             echo "reviewed -- justify it here or un-skip the test." >&2
             exit 1
           fi
@@ -2519,6 +2525,10 @@
           echo "GATE FAILURE: the --ids stage did not run." >&2
           exit 1
         }
+        grep -q '^PASS: --with-state merges goose sessions from honk' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the goose stage did not run." >&2
+          exit 1
+        }
         grep -q '^ALL PASS (oc-session-list)' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: the suite did not reach its final ALL PASS line." >&2
           exit 1
@@ -2526,7 +2536,7 @@
         touch $out
       '';
 
-      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is an 87-assertion
+      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 97-assertion
       # suite covering project_key/window_name derivation, pool-aware serve
       # resolution, the tmux window/session name collision that once leaked
       # `main`'s panes into confined sessions, and an `nvim -l` unit test of the
@@ -2571,8 +2581,8 @@
         # Assert the assertions RAN, not merely that the script exited 0 -- the
         # store-prefix / oc-session-list-bin lesson. The count is the gate: any
         # block that goes dark changes it.
-        grep -q '^ALL PASS (oc-auto-attach): 87 assertions' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: the suite did not report its full 87-assertion tally." >&2
+        grep -q '^ALL PASS (oc-auto-attach): 97 assertions' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not report its full 97-assertion tally." >&2
           echo "If you deliberately changed coverage, update EXPECTED_ASSERTIONS in" >&2
           echo "pkgs/oc-auto-attach/test-project-key.sh and this gate together." >&2
           exit 1

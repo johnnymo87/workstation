@@ -366,6 +366,38 @@ do
   check(formatted.ordinal == "Orphan Session deleted_dir", "ordinal has title and basename only")
 end
 
+-- 8b. FORMAT: a goose row says it opens in honk (honk-9qf.15.11).
+--
+-- Keyed on the `goose:` id prefix, not on `harness`: a stall-watch row built
+-- from item data alone (unjoined) carries only an id, and it still opens in honk.
+do
+  local now = 1000000
+  check(spec.HONK_MARK == "[honk]", "HONK_MARK equals '[honk]'")
+  local row = {
+    id = "goose:20261016_222",
+    title = "Honk TUI",
+    directory = "/work/honk",
+    effective_state = "working",
+    unread_state = "counted",
+    unread = 2,
+    lastActivity = now - 5000,
+  }
+  local formatted = spec.format(row, { now = now })
+  check(formatted.display == "● (2) Honk TUI │ honk │ 5s [honk]",
+    "goose row display ends with [honk]; got: " .. tostring(formatted.display))
+  check(formatted.ordinal == "Honk TUI honk", "goose row ordinal is title + basename only")
+
+  row.dir_missing = true
+  check(spec.format(row, { now = now }).display == "● (2) Honk TUI │ honk │ 5s [honk] [dir gone]",
+    "[honk] comes before [dir gone]; got: " .. tostring(spec.format(row, { now = now }).display))
+
+  local oc = spec.format({ id = "ses_x", title = "T", directory = "/d", effective_state = "idle",
+    unread_state = "counted", unread = 0, lastActivity = now }, { now = now })
+  check(not oc.display:find("%[honk%]"), "an opencode row has no [honk] mark; got: " .. oc.display)
+  local unjoined = spec.format({ id = "goose:20261019_2", title = "x" }, { now = now })
+  check(unjoined.display:find("%[honk%]$") ~= nil, "an id-only goose row is marked too; got: " .. unjoined.display)
+end
+
 -- 9. FORMAT: digits in badge PROVE ordinal exclusion.
 -- If ordinal mistakenly contained the badge, typing '42' would match unread count instead of titles.
 do
@@ -711,6 +743,15 @@ do
     "mark_read_watermark returns sid from row.id")
   check(act.mark_read_watermark({ id = "ses_1", last_event_id = 10 }).last_event_id == 10,
     "mark_read_watermark returns last_event_id from row.last_event_id")
+
+  -- A goose row's ledger lives under pigeon's own id (gse_...), not the picker id.
+  local g = act.mark_read_watermark({ id = "goose:20261016_222", pigeon_session_id = "gse_abc", last_event_id = 7 })
+  check(g.sid == "gse_abc", "mark_read_watermark uses pigeon_session_id when present")
+  check(g.last_event_id == 7, "mark_read_watermark keeps last_event_id for a goose row")
+  check(act.mark_read_watermark({ id = "ses_1", pigeon_session_id = vim.NIL, last_event_id = 10 }).sid == "ses_1",
+    "mark_read_watermark falls back to row.id when pigeon_session_id is vim.NIL")
+  check(act.mark_read_watermark({ id = "ses_1", pigeon_session_id = "", last_event_id = 10 }).sid == "ses_1",
+    "mark_read_watermark falls back to row.id when pigeon_session_id is empty")
 
   -- Same guards as act.watermark, asserted independently rather than assumed by
   -- shared implementation: a refactor could silently unshare them.
@@ -2658,6 +2699,7 @@ do
   ctrl:refresh("all", function() end)
   check(seen_fetch.limit == 200, "with no overrides the controller's own fetch_opts are used")
   check(seen_fetch.fold == true, "fold is still forced on")
+  check(seen_fetch.goose == true, "goose sessions are asked for by default (honk-9qf.15.11)")
   check(seen_build.hide_automated == nil, "with no overrides build gets no hide_automated")
 
   ctrl:refresh("attached", function() end, {
@@ -2672,6 +2714,7 @@ do
   check(seen_fetch.limit == 100000, "an override replaces the limit, got " .. tostring(seen_fetch.limit))
   check(seen_fetch.custom == "kept", "unrelated controller fetch_opts survive the override")
   check(seen_fetch.fold == true, "an override asking for fold=false is REFUSED, got " .. tostring(seen_fetch.fold))
+  check(seen_fetch.goose == true, "goose stays on through an override that does not mention it")
   check(seen_build.hide_automated == false, "build_opts reach model.build")
   check(seen_build.facet == "attached", "the facet still reaches build alongside the overrides")
 

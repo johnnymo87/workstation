@@ -48,6 +48,17 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 TEST_DB="$TMP_DIR/test.db"
 
+# Every stage gets a fake honk that lists NO goose sessions. Goose rows are
+# opt-in (--goose) and no earlier stage passes it, so this is belt and braces:
+# a real honk on the caller's PATH (cloudbox) must never reach the fixtures.
+# Stage 7 swaps in fakes that do list sessions.
+fake_honk() { # fake_honk <path> <bash body>
+  printf '#!%s\n%s\n' "$(command -v bash)" "$2" >"$1"
+  chmod +x "$1"
+}
+fake_honk "$TMP_DIR/honk-empty" "echo '[]'"
+export OC_SESSION_LIST_HONK="$TMP_DIR/honk-empty"
+
 bun -e '
 import { Database } from "bun:sqlite";
 const db = new Database("'$TEST_DB'");
@@ -215,5 +226,77 @@ JSON_EMPTY_OUT="$("$BIN" --db "$TEST_DB" --ids "" 2>/dev/null)" || fail "--ids '
 [ "$(tr -d '[:space:]' <<<"$JSON_EMPTY_OUT")" = "[]" ] \
   || fail "--ids with an empty list must print [] -- not fall back to the recency window"
 pass "--ids resolves child->root, drops archived/unknown, ignores --limit"
+
+# --- Stage 7: goose sessions (honk-9qf.15.11), through the BUILT binary. -------
+#
+# The bun tests cover the mapping; this proves the shipped artifact runs honk
+# only when asked (--goose), merges goose rows into the fold, honours
+# --ids goose:<id>, and degrades to a WARNING (exit 0, opencode rows intact)
+# when honk fails.
+fake_honk "$TMP_DIR/honk-two" "[ \"\$1 \$2\" = 'list --json' ] || exit 9
+cat <<'EOF'
+[{\"sessionId\":\"20261019_7\",\"title\":\"Goose chat\",\"cwd\":\"/proj\",\"held\":true,\"running\":true,
+  \"updatedAt\":\"2026-10-19T22:00:00Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"acp\",\"hasRecipe\":false},
+ {\"sessionId\":\"20261019_8\",\"title\":\"Lane run\",\"cwd\":\"/proj\",\"held\":false,\"running\":false,
+  \"updatedAt\":\"2026-10-19T22:01:00Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"user\",\"hasRecipe\":true},
+ {\"sessionId\":\"20261019_9\",\"title\":\"Ancient chat\",\"cwd\":\"/proj\",\"held\":false,\"running\":false,
+  \"updatedAt\":\"1970-01-01T00:00:00.500Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"acp\",\"hasRecipe\":false}]
+EOF"
+GOOSE_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold --goose --limit 10 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list failed with a goose-listing honk"
+bun -e '
+const rows = JSON.parse(process.argv[1]);
+const g = rows.find(r => r.id === "goose:20261019_7");
+if (!g) { console.error("goose row missing"); process.exit(1); }
+if (g.harness !== "goose" || g.effective_state !== "working" || g.directory !== "/proj") {
+  console.error("goose row has the wrong shape:", g); process.exit(1);
+}
+if (rows.some(r => r.id === "goose:20261019_8")) { console.error("browse mode listed a recipe run"); process.exit(1); }
+// The opencode window is not full (2 roots, --limit 10), so it has no floor.
+if (!rows.some(r => r.id === "goose:20261019_9")) { console.error("an unfull window dropped an old goose row"); process.exit(1); }
+if (!rows.some(r => r.id === "root_1")) { console.error("opencode rows lost"); process.exit(1); }
+// Newest first: the goose row (2026) is newer than every fixture row (epoch 1970).
+if (rows[0].id !== "goose:20261019_7") { console.error("goose row not placed by the fold sort:", rows.map(r => r.id)); process.exit(1); }
+' "$GOOSE_OUT" || fail "goose rows not merged into the fold correctly"
+
+GOOSE_IDS_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold --goose \
+  --ids goose:20261019_8,child_1 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --ids goose:<id> failed"
+bun -e '
+const rows = JSON.parse(process.argv[1]);
+const ids = rows.map(r => r.id).sort();
+if (JSON.stringify(ids) !== JSON.stringify(["goose:20261019_8", "root_1"])) {
+  console.error("--ids goose:<id> returned", ids); process.exit(1);
+}
+const g = rows.find(r => r.id === "goose:20261019_8");
+if (g.automated !== true || JSON.stringify(g.matched_ids) !== JSON.stringify(["goose:20261019_8"])) {
+  console.error("--ids goose row:", g); process.exit(1);
+}
+' "$GOOSE_IDS_OUT" || fail "--ids did not resolve goose:<id> (recipe runs included, matched_ids set)"
+
+# With --limit 1 the opencode window IS full; its oldest root (root_1's tree,
+# max time 3000 ms) becomes the floor, and the 500 ms goose session falls below it.
+FLOOR_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold --goose --limit 1 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --goose --limit 1 failed"
+grep -q '"id": "goose:20261019_7"' <<<"$FLOOR_OUT" || fail "a goose row newer than the floor was dropped"
+grep -q '"id": "goose:20261019_9"' <<<"$FLOOR_OUT" && fail "a goose row older than the full opencode window was kept"
+
+NO_GOOSE_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "--with-state without --goose failed"
+grep -q '"id": "goose:' <<<"$NO_GOOSE_OUT" && fail "goose sessions listed without --goose (they are opt-in)"
+
+fake_honk "$TMP_DIR/honk-down" "echo 'connection failed: refused' >&2; exit 1"
+DOWN_ERR="$TMP_DIR/down.err"
+DOWN_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-down" "$BIN" --db "$TEST_DB" --with-state --fold --goose \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>"$DOWN_ERR")" \
+  || fail "a failing honk must not fail oc-session-list"
+grep -q '"id": "root_1"' <<<"$DOWN_OUT" || fail "a failing honk lost the opencode rows"
+grep -q 'goose sessions unavailable: honk list exited 1: connection failed: refused' "$DOWN_ERR" \
+  || fail "a failing honk must warn on stderr"
+pass "--with-state merges goose sessions from honk (--goose only, window floor), --ids goose:<id>, warns when honk fails"
 
 echo "ALL PASS (oc-session-list)"

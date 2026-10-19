@@ -237,6 +237,11 @@ describe("parseCliArgs", () => {
     const opts = parseCliArgs(["--help"]);
     expect(opts.help).toBe(true);
   });
+
+  it("goose sessions are opt-in with --goose", () => {
+    expect(parseCliArgs([]).goose).toBe(false);
+    expect(parseCliArgs(["--with-state", "--goose"]).goose).toBe(true);
+  });
 });
 
 describe("buildOwnersMap", () => {

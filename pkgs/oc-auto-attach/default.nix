@@ -16,6 +16,11 @@ pkgs.writeShellApplication {
     # Auto-attach a launched OpenCode session to the right project's nvim,
     # inside tmux. See docs/plans/2026-04-22-launch-auto-attach-design.md.
     #
+    # Also accepts a goose session as goose:<goose-id> (honk-9qf.15.11, design
+    # in docs/plans/2026-10-19-goose-sessions-in-pickers.md): the directory comes
+    # from `honk list --json` instead of steps 1 and 1.5, and the tab runs
+    # `honk chat <goose-id>`. Everything from step 2 on is shared.
+    #
     # Behavior:
     #   1. Wait for the session to be visible at GET /session/<id> with
     #      a non-empty .directory.
@@ -264,13 +269,16 @@ ${builtins.readFile ./canonical-path.sh}
     target_session="''${target_session:-main}"
 
     if [ $# -ne 1 ]; then
-      log "usage: oc-auto-attach [--tmux-session <name>] [--retry[=N]] <session-id>"
+      log "usage: oc-auto-attach [--tmux-session <name>] [--retry[=N]] <session-id | goose:<goose-id>>"
       exit 1
     fi
     sid="$1"
 
     # Hard-validate session id before any shell interpolation.
-    if ! [[ "$sid" =~ ^ses_[A-Za-z0-9]+$ ]]; then
+    harness=opencode
+    if [[ "$sid" =~ ^goose:[0-9]+_[0-9]+$ ]]; then
+      harness=goose
+    elif ! [[ "$sid" =~ ^ses_[A-Za-z0-9]+$ ]]; then
       log "invalid session id: $sid"
       exit 1
     fi
@@ -293,7 +301,10 @@ ${builtins.readFile ./canonical-path.sh}
     # picked up by an attach it was never meant for -- a jump in the wrong
     # transcript, which is a silent wrong answer rather than a visible miss.
     scroll_to=""
-    if [ -n "''${OPENCODE_SCROLL_TO:-}" ]; then
+    if [ -n "''${OPENCODE_SCROLL_TO:-}" ] && [ "$harness" = goose ]; then
+      # honk has no scroll-to-message; the target names an opencode message.
+      log "ignoring OPENCODE_SCROLL_TO for a goose session"
+    elif [ -n "''${OPENCODE_SCROLL_TO:-}" ]; then
       if ! [[ "$OPENCODE_SCROLL_TO" =~ ^ses_[A-Za-z0-9]+:msg_[A-Za-z0-9]+$ ]]; then
         log "ignoring malformed OPENCODE_SCROLL_TO"
       elif [ "''${OPENCODE_SCROLL_TO%%:*}" != "$sid" ]; then
@@ -338,123 +349,151 @@ ${builtins.readFile ./canonical-path.sh}
     # body, no apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool
     # single-serve behavior, so this is strictly safe.
 
-    # Step 1: wait for session to be visible with a non-empty directory.
-    #
-    # Timeout is generous (30s, not 5s): cloudbox runs many concurrent
-    # sessions on one `opencode serve` event loop and routinely sits at
-    # load ~5. Under contention that event loop stalls in a binary way --
-    # GET /session/<id> either returns in ~20ms or blocks for 5-15s+ until
-    # the loop frees -- even though the session exists. A tight 5s window
-    # made the launcher (and manual re-runs) intermittently log "not ready"
-    # for perfectly healthy sessions; 5-15s stalls were observed live.
-    #
-    # BUT a stall and a genuinely-absent session look DIFFERENT on the wire,
-    # and we must not treat them the same. A stall returns no HTTP response
-    # (curl --max-time abort -> http_code 000); a deleted/never-existed
-    # session returns a real HTTP 404. Because the door forwards GET /session/{sid}
-    # to a pool serve (or degrades the read to the anchor) and all serves share
-    # one opencode.db, a 404 through the door is still CONCLUSIVE -- no amount
-    # of waiting makes the session appear. So we classify each probe
-    # (classify_session_probe) and give up FAST on a definitive 404 (after
-    # OC_AA_404_GRACE_SECS of grace for the launch-commit race), while still
-    # polling the full 30s through transient 000/5xx stalls. Pre-fix this loop
-    # swallowed the 404 with `curl -sf ... || true` and hung the whole 30s on
-    # phantom sids -- e.g. a manual attach of a stale id (workstation-ovqu).
-    session_dir=""
-    probe_rc=0
-    probe_body_file="$(mktemp)"
-    # classify_session_probe is consumed inside the timeout subshell below;
-    # export it so the fresh `bash -c` inherits it via the environment.
-    export -f classify_session_probe
-    # shellcheck disable=SC2016
-    session_dir="$(timeout 30 bash -c '
-      sid="$1"
-      url="$2"
-      bodyf="$3"
-      grace="''${OC_AA_404_GRACE_SECS:-3}"
-      # When the current run of consecutive 404s began (-1 = no active run).
-      miss_since=-1
-      # Pace the loop with a fractional `sleep` so we re-probe ~5x/sec without
-      # busy-spinning curl -- the worst thing to do while the server is already
-      # slow under load. (A plain fractional `sleep` is portable: coreutils
-      # sleep is a runtimeInput, and it paces the same on Linux and macOS,
-      # unlike the fd-9 process-substitution pipe trick we used to use, which
-      # Darwin rejects with EACCES.)
-      while :; do
-        # -o <file> captures the body; -w %{http_code} prints the status so we
-        # can tell a real 404 from a connect/timeout (000). --connect-timeout
-        # fails fast if the serve is not listening; --max-time caps a single
-        # hung request so a wedged event loop cannot consume the whole window.
-        # Note: NO -f -- we WANT to see the 404 status, not swallow it.
-        code="$(curl -s -o "$bodyf" -w "%{http_code}" --connect-timeout 2 --max-time 3 "$url/session/$sid" 2>/dev/null || true)"
-        body="$(cat "$bodyf" 2>/dev/null || true)"
-        verdict="$(classify_session_probe "$code" "$body")"
-        case "$verdict" in
-          "FOUND "*)
-            printf "%s" "''${verdict#FOUND }"
-            exit 0
-            ;;
-          MISS)
-            # Definitive absence. Tolerate a brief launch-commit race, then
-            # give up with a DISTINCT exit code (3) so the caller can log it as
-            # "not found" rather than the misleading "not ready after 30s".
-            if [ "$miss_since" -lt 0 ]; then miss_since="$SECONDS"; fi
-            if [ "$(( SECONDS - miss_since ))" -ge "$grace" ]; then exit 3; fi
-            ;;
-          *)
-            # WAIT: transient (000 connect/timeout, 5xx, or 200-without-dir).
-            # Reset the 404 streak and keep polling the full window.
-            miss_since=-1
-            ;;
-        esac
-        sleep 0.2
-      done
-    ' _ "$sid" "$FRONTDOOR_URL" "$probe_body_file")" || probe_rc=$?
-    rm -f "$probe_body_file"
+    # Goose (honk-9qf.15.11): honkd's session list is the truth for whether the
+    # session exists and where it lives. Same exit codes as the opencode probe:
+    # 3 = definitively not there, 2 = could not find out.
+    if [ "$harness" = goose ]; then
+      honk_bin="''${OC_AA_HONK_BIN:-honk}"
+      goose_id="''${sid#goose:}"
+      honk_err="$(mktemp)"
+      list_rc=0
+      list_json="$(timeout 10 "$honk_bin" list --json 2>"$honk_err")" || list_rc=$?
+      if [ "$list_rc" -ne 0 ]; then
+        log "honk list --json failed (exit $list_rc): $(head -n 3 "$honk_err" | tr '\n' ' ')"
+        rm -f "$honk_err"
+        exit 2
+      fi
+      rm -f "$honk_err"
+      session_dir="$(printf '%s' "$list_json" | jq -r --arg id "$goose_id" \
+        'if type == "array" then (map(select(.sessionId == $id and .archivedAt == null)) | .[0].cwd // empty) else error("not an array") end' \
+        2>/dev/null)" || {
+        log "honk list --json printed something that is not a JSON array"
+        exit 2
+      }
+      if [ -z "$session_dir" ]; then
+        log "goose session $goose_id not found in honk list (or archived, or no directory); giving up"
+        exit 3
+      fi
+      log "goose session $goose_id dir=$session_dir"
+    else
+      # Step 1: wait for session to be visible with a non-empty directory.
+      #
+      # Timeout is generous (30s, not 5s): cloudbox runs many concurrent
+      # sessions on one `opencode serve` event loop and routinely sits at
+      # load ~5. Under contention that event loop stalls in a binary way --
+      # GET /session/<id> either returns in ~20ms or blocks for 5-15s+ until
+      # the loop frees -- even though the session exists. A tight 5s window
+      # made the launcher (and manual re-runs) intermittently log "not ready"
+      # for perfectly healthy sessions; 5-15s stalls were observed live.
+      #
+      # BUT a stall and a genuinely-absent session look DIFFERENT on the wire,
+      # and we must not treat them the same. A stall returns no HTTP response
+      # (curl --max-time abort -> http_code 000); a deleted/never-existed
+      # session returns a real HTTP 404. Because the door forwards GET /session/{sid}
+      # to a pool serve (or degrades the read to the anchor) and all serves share
+      # one opencode.db, a 404 through the door is still CONCLUSIVE -- no amount
+      # of waiting makes the session appear. So we classify each probe
+      # (classify_session_probe) and give up FAST on a definitive 404 (after
+      # OC_AA_404_GRACE_SECS of grace for the launch-commit race), while still
+      # polling the full 30s through transient 000/5xx stalls. Pre-fix this loop
+      # swallowed the 404 with `curl -sf ... || true` and hung the whole 30s on
+      # phantom sids -- e.g. a manual attach of a stale id (workstation-ovqu).
+      session_dir=""
+      probe_rc=0
+      probe_body_file="$(mktemp)"
+      # classify_session_probe is consumed inside the timeout subshell below;
+      # export it so the fresh `bash -c` inherits it via the environment.
+      export -f classify_session_probe
+      # shellcheck disable=SC2016
+      session_dir="$(timeout 30 bash -c '
+        sid="$1"
+        url="$2"
+        bodyf="$3"
+        grace="''${OC_AA_404_GRACE_SECS:-3}"
+        # When the current run of consecutive 404s began (-1 = no active run).
+        miss_since=-1
+        # Pace the loop with a fractional `sleep` so we re-probe ~5x/sec without
+        # busy-spinning curl -- the worst thing to do while the server is already
+        # slow under load. (A plain fractional `sleep` is portable: coreutils
+        # sleep is a runtimeInput, and it paces the same on Linux and macOS,
+        # unlike the fd-9 process-substitution pipe trick we used to use, which
+        # Darwin rejects with EACCES.)
+        while :; do
+          # -o <file> captures the body; -w %{http_code} prints the status so we
+          # can tell a real 404 from a connect/timeout (000). --connect-timeout
+          # fails fast if the serve is not listening; --max-time caps a single
+          # hung request so a wedged event loop cannot consume the whole window.
+          # Note: NO -f -- we WANT to see the 404 status, not swallow it.
+          code="$(curl -s -o "$bodyf" -w "%{http_code}" --connect-timeout 2 --max-time 3 "$url/session/$sid" 2>/dev/null || true)"
+          body="$(cat "$bodyf" 2>/dev/null || true)"
+          verdict="$(classify_session_probe "$code" "$body")"
+          case "$verdict" in
+            "FOUND "*)
+              printf "%s" "''${verdict#FOUND }"
+              exit 0
+              ;;
+            MISS)
+              # Definitive absence. Tolerate a brief launch-commit race, then
+              # give up with a DISTINCT exit code (3) so the caller can log it as
+              # "not found" rather than the misleading "not ready after 30s".
+              if [ "$miss_since" -lt 0 ]; then miss_since="$SECONDS"; fi
+              if [ "$(( SECONDS - miss_since ))" -ge "$grace" ]; then exit 3; fi
+              ;;
+            *)
+              # WAIT: transient (000 connect/timeout, 5xx, or 200-without-dir).
+              # Reset the 404 streak and keep polling the full window.
+              miss_since=-1
+              ;;
+          esac
+          sleep 0.2
+        done
+      ' _ "$sid" "$FRONTDOOR_URL" "$probe_body_file")" || probe_rc=$?
+      rm -f "$probe_body_file"
 
-    if [ "$probe_rc" -eq 3 ]; then
-      log "session $sid not found (404 from $FRONTDOOR_URL) -- absent from opencode.db; giving up"
-      exit 3
-    fi
-    if [ "$probe_rc" -ne 0 ] || [ -z "$session_dir" ]; then
-      log "session $sid not ready after 30s; giving up"
-      exit 2
-    fi
+      if [ "$probe_rc" -eq 3 ]; then
+        log "session $sid not found (404 from $FRONTDOOR_URL) -- absent from opencode.db; giving up"
+        exit 3
+      fi
+      if [ "$probe_rc" -ne 0 ] || [ -z "$session_dir" ]; then
+        log "session $sid not ready after 30s; giving up"
+        exit 2
+      fi
 
-    log "session $sid dir=$session_dir"
+      log "session $sid dir=$session_dir"
 
-    # Step 1.5: resolve the owning serve for the attach TUI (workstation-iwpj +
-    # fable M2 #1). Try a read-only GET /route FIRST: a session created THROUGH
-    # the door (opencode-launch / oc-pool-attach cutover) is already placed at
-    # create, so no client-side placement is needed. But a session minted some
-    # OTHER way that never traversed the door -- notably one created via the
-    # in-TUI "new session" keybind, which goes direct to a serve until the Phase
-    # 8 TUI-on-door move -- is NEVER placed: pigeon /route 404s and nothing else
-    # will place it (attach traffic is direct and never promotes). Left unplaced,
-    # this TUI would pin to the anchor while the session's first prompt later
-    # promotes it onto a different serve -> silently-stale TUI (the yl00 symptom).
-    # So on a /route MISS -- and only then -- POST /place. The session is CONFIRMED
-    # to exist (Step 1 FOUND), so this cannot manufacture a phantom assignment
-    # (the pigeon-eup hazard). /place is idempotent (ensureRouted). Any failure
-    # degrades serve_url to $OPENCODE_URL -- never worse. (Phase 9 KEEPS this
-    # pre-place -- not for the attach target, which is now the door, but so the
-    # door's first /event?session_ids= resolve lands on the real owner instead of
-    # degrading to the anchor and needing an immediate drift-reconnect.)
-    resolve_pigeon_auth
-    route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-      ''${place_auth[@]+"''${place_auth[@]}"} \
-      "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
-    serve_url="$(parse_serve_url "$route_body" "")"
-    if [ -z "$serve_url" ]; then
-      place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
-        -X POST "$PIGEON_DAEMON_URL/place" \
-        -H "Content-Type: application/json" \
+      # Step 1.5: resolve the owning serve for the attach TUI (workstation-iwpj +
+      # fable M2 #1). Try a read-only GET /route FIRST: a session created THROUGH
+      # the door (opencode-launch / oc-pool-attach cutover) is already placed at
+      # create, so no client-side placement is needed. But a session minted some
+      # OTHER way that never traversed the door -- notably one created via the
+      # in-TUI "new session" keybind, which goes direct to a serve until the Phase
+      # 8 TUI-on-door move -- is NEVER placed: pigeon /route 404s and nothing else
+      # will place it (attach traffic is direct and never promotes). Left unplaced,
+      # this TUI would pin to the anchor while the session's first prompt later
+      # promotes it onto a different serve -> silently-stale TUI (the yl00 symptom).
+      # So on a /route MISS -- and only then -- POST /place. The session is CONFIRMED
+      # to exist (Step 1 FOUND), so this cannot manufacture a phantom assignment
+      # (the pigeon-eup hazard). /place is idempotent (ensureRouted). Any failure
+      # degrades serve_url to $OPENCODE_URL -- never worse. (Phase 9 KEEPS this
+      # pre-place -- not for the attach target, which is now the door, but so the
+      # door's first /event?session_ids= resolve lands on the real owner instead of
+      # degrading to the anchor and needing an immediate drift-reconnect.)
+      resolve_pigeon_auth
+      route_body="$(curl -sf --connect-timeout 2 --max-time 3 \
         ''${place_auth[@]+"''${place_auth[@]}"} \
-        -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
-      serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
-      log "never-placed sid; placed via POST /place -> serve_url=$serve_url"
+        "$PIGEON_DAEMON_URL/route?session_id=$sid" 2>/dev/null || true)"
+      serve_url="$(parse_serve_url "$route_body" "")"
+      if [ -z "$serve_url" ]; then
+        place_body="$(curl -sf --connect-timeout 2 --max-time 3 \
+          -X POST "$PIGEON_DAEMON_URL/place" \
+          -H "Content-Type: application/json" \
+          ''${place_auth[@]+"''${place_auth[@]}"} \
+          -d "{\"session_id\":\"$sid\"}" 2>/dev/null || true)"
+        serve_url="$(parse_serve_url "$place_body" "$OPENCODE_URL")"
+        log "never-placed sid; placed via POST /place -> serve_url=$serve_url"
+      fi
+      log "owner serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
     fi
-    log "owner serve_url=$serve_url (pigeon=$PIGEON_DAEMON_URL)"
 
     # Step 2: compute project key for editor routing.
     # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.
@@ -804,9 +843,11 @@ ${builtins.readFile ./canonical-path.sh}
       --arg dir "$session_dir" \
       --arg url "$FRONTDOOR_URL" \
       --arg scroll_to "$scroll_to" \
+      --arg harness "$harness" \
       --argjson settle "$settle_secs" \
       '{sid:$sid, dir:$dir, url:$url, settle_ms:($settle * 1000)}
-       + (if $scroll_to == "" then {} else {scroll_to_message_id:$scroll_to} end)') "
+       + (if $scroll_to == "" then {} else {scroll_to_message_id:$scroll_to} end)
+       + (if $harness == "goose" then {harness:"goose"} else {} end)') "
 
     expr_open="luaeval(\"require('user.oc_auto_attach').open(vim.json.decode(_A))\", $(printf '%s' "$payload" | jq -Rs '.'))"
     expr_status="luaeval(\"require('user.oc_auto_attach').status(_A)\", \"$sid\")"
@@ -832,17 +873,30 @@ ${builtins.readFile ./canonical-path.sh}
       # idempotent, so retrying could stack a second attach on the first.
       # Only a confirmed failure (RPC refused, or status "failed") retries.
       open_rc=0
-      timeout 10 nvim --server "$sock" --remote-expr "$expr_open" </dev/null >/dev/null || open_rc=$?
+      open_out="$(timeout 10 nvim --server "$sock" --remote-expr "$expr_open" </dev/null)" || open_rc=$?
       if [ "$open_rc" -eq 124 ]; then
         log "open RPC to $sock timed out; outcome unknown (a tab may have opened), not retrying"
         exit 8
       fi
       if [ "$open_rc" -ne 0 ]; then
         log "nvim RPC call failed; attempt $attempt/$max_attempts"
+        if [ "$harness" = goose ]; then
+          # Measured: a pre-goose oc_auto_attach.lua raises "invalid sid" here.
+          log "(an nvim started before goose sessions were supported rejects goose:<id>; restart it)"
+        fi
         if [ "$attempt" -ge "$max_attempts" ]; then
           exit 5
         fi
         continue
+      fi
+
+      # open() returns 0 when it refuses. An nvim started before goose support
+      # landed refuses every goose:<id>, and its status() would then read
+      # "unknown" for the whole wait below, ending in a misleading exit 8. Say
+      # what happened instead. (Goose only: the opencode path keeps its old flow.)
+      if [ "$harness" = goose ] && [ "$(printf '%s' "$open_out" | tr -d '[:space:]')" = "0" ]; then
+        log "nvim at $sock refused to open $sid (its oc_auto_attach.lua predates goose sessions?); restart that nvim and retry"
+        exit 10
       fi
 
       log "tab RPC sent to pane $pane_id for $sid"

@@ -19,6 +19,12 @@
 -- no-`--dir` attach). Without `--dir`, every TUI for a session OUTSIDE
 -- /home/dev freezes. See docs/plans/2026-04-28-attach-tui-frozen-fix-design.md
 -- for the full causal chain. (Tracked: workstation-gsi.)
+--
+-- GOOSE SESSIONS (honk-9qf.15.11). With harness="goose" the sid is the picker id
+-- `goose:<goose-id>` and the tab runs `honk chat <goose-id>` instead; url is not
+-- used (honk finds honkd itself). The buffer variable and `statuses` key stay
+-- the PICKER id, so session_switcher discovery matches the tab to its row and
+-- the next pick jumps here instead of opening a second honk.
 
 local M = {}
 
@@ -59,13 +65,22 @@ function M.status(sid)
   return statuses[sid] or "unknown"
 end
 
---- Open a new tab with `opencode attach` running in a terminal buffer.
---- @param opts table  { sid: string, dir: string, url: string, settle_ms?: number, scroll_to_message_id?: string }
+--- Open a new tab with `opencode attach` (or, for a goose session,
+--- `honk chat`) running in a terminal buffer.
+--- @param opts table  { sid: string, dir: string, url: string, settle_ms?: number, scroll_to_message_id?: string, harness?: "goose" }
 --- @return integer 1  (so --remote-expr has something to print)
 function M.open(opts)
   -- Validate synchronously so --remote-expr returns a meaningful status.
   if type(opts) ~= "table" then return 0 end
-  if type(opts.sid) ~= "string" or not opts.sid:match("^ses_[A-Za-z0-9]+$") then
+  local goose = opts.harness == "goose"
+  local sid_ok
+  if goose then
+    -- Digits and one underscore only: the remainder becomes an argv element.
+    sid_ok = type(opts.sid) == "string" and opts.sid:match("^goose:[0-9]+_[0-9]+$") ~= nil
+  else
+    sid_ok = type(opts.sid) == "string" and opts.sid:match("^ses_[A-Za-z0-9]+$") ~= nil
+  end
+  if not sid_ok then
     safe_notify("oc_auto_attach: invalid sid", vim.log.levels.ERROR)
     return 0
   end
@@ -73,10 +88,11 @@ function M.open(opts)
     safe_notify("oc_auto_attach: invalid or missing dir", vim.log.levels.ERROR)
     return 0
   end
-  if type(opts.url) ~= "string" or opts.url == "" then
+  if not goose and (type(opts.url) ~= "string" or opts.url == "") then
     safe_notify("oc_auto_attach: invalid url", vim.log.levels.ERROR)
     return 0
   end
+  local label = goose and "honk chat" or "oc attach"
 
   local settle_threshold_ms = tonumber(opts.settle_ms) or 8000
 
@@ -103,7 +119,7 @@ function M.open(opts)
     -- Shape-checked again rather than trusted: this crosses a process boundary, and
     -- the previous validator is in a different language in a different package.
     local job_env = nil
-    if type(opts.scroll_to_message_id) == "string"
+    if not goose and type(opts.scroll_to_message_id) == "string"
       and opts.scroll_to_message_id:match("^msg_[A-Za-z0-9]+$")
     then
       job_env = { OPENCODE_SCROLL_TO = opts.sid .. ":" .. opts.scroll_to_message_id }
@@ -115,12 +131,20 @@ function M.open(opts)
     -- address (ws://127.0.0.1:1<port>/debug); it leaks into tmux servers
     -- started from an opencode bash tool, and an attach that inherits it dies
     -- with EADDRINUSE on that port (workstation-u8xx).
-    local job_id = vim.fn.jobstart({
-      "env", "-u", "BUN_INSPECT",
-      "opencode", "attach", opts.url,
-      "--session", opts.sid,
-      "--dir", opts.dir,
-    }, {
+    local argv
+    if goose then
+      -- honk exits at once when honkd is unreachable; the settle window below
+      -- then reports a failed attach, as it does for opencode.
+      argv = { "honk", "chat", opts.sid:sub(#"goose:" + 1) }
+    else
+      argv = {
+        "env", "-u", "BUN_INSPECT",
+        "opencode", "attach", opts.url,
+        "--session", opts.sid,
+        "--dir", opts.dir,
+      }
+    end
+    local job_id = vim.fn.jobstart(argv, {
       term = true,
       cwd = opts.dir,
       -- Merges into the inherited environment (clear_env unset): replacing it would
@@ -135,10 +159,10 @@ function M.open(opts)
           end
           M.errors[opts.sid] = "attach job exited prematurely for " .. opts.sid
             .. " (code " .. tostring(exit_code) .. "); see the [FAILED] tab"
-          safe_notify("oc attach failed (code " .. tostring(exit_code) .. "): " .. opts.sid, vim.log.levels.ERROR)
+          safe_notify(label .. " failed (code " .. tostring(exit_code) .. "): " .. opts.sid, vim.log.levels.ERROR)
         else
           statuses[opts.sid] = "exited"
-          safe_notify("oc attach ended: " .. opts.sid, vim.log.levels.INFO)
+          safe_notify(label .. " ended: " .. opts.sid, vim.log.levels.INFO)
         end
       end,
     })
@@ -149,7 +173,7 @@ function M.open(opts)
         pcall(vim.api.nvim_buf_set_name, buf, "[FAILED] " .. opts.sid)
       end
       M.errors[opts.sid] = "failed to start attach job for " .. opts.sid .. " (jobstart=" .. tostring(job_id) .. ")"
-      safe_notify("oc attach did not start: " .. opts.sid, vim.log.levels.ERROR)
+      safe_notify(label .. " did not start: " .. opts.sid, vim.log.levels.ERROR)
     end
   end)
 

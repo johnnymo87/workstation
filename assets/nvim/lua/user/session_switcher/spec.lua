@@ -35,6 +35,20 @@ M.GLYPHS = {
 --- Visible marker for a row whose target directory no longer exists on disk.
 M.DIR_MISSING_MARK = "[dir gone]"
 
+--- Visible marker for a goose session, which opens in `honk chat` rather than
+--- `opencode attach` (honk-9qf.15.11). Keyed on the `goose:` id prefix rather
+--- than on `harness`, because a stall-watch row built from item data alone
+--- carries nothing but its id -- and it still opens in honk.
+M.HONK_MARK = "[honk]"
+
+--- Whether a row (or id) names a goose session.
+--- @param row table|string|nil
+--- @return boolean
+function M.is_goose(row)
+  local id = type(row) == "table" and row.id or row
+  return type(id) == "string" and id:sub(1, 6) == "goose:"
+end
+
 --- Get the presentation glyph for a session row based on its effective_state.
 --- Degrades safely to the `unknown` glyph ("~") on missing, nil, vim.NIL, or
 --- unrecognised states. Never errors.
@@ -159,6 +173,10 @@ function M.format(row, opts)
   table.insert(parts, basename)
   table.insert(parts, SEP)
   table.insert(parts, age)
+
+  if M.is_goose(safe_row) then
+    table.insert(parts, M.HONK_MARK)
+  end
 
   if safe_row.dir_missing == true then
     table.insert(parts, M.DIR_MISSING_MARK)
