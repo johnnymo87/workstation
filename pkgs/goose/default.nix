@@ -52,6 +52,16 @@
 #      subagents, or providers that manage their own context.
 #  12. Rolling memory (off unless configured per session or by env): folds
 #      older history into a first-person memory at turn start.
+#  13. GOOSE_GLOBAL_SKILLS=false limits skill discovery to project skill dirs:
+#      it also drops the config dir's skills/ and user-scope plugin skill dirs.
+#      Any value other than true/false counts as false; unset is upstream
+#      behaviour. The maven-renovate lane relies on it.
+#  14. MCP extension startup is bounded by GOOSE_EXTENSION_STARTUP_TIMEOUT
+#      (default 25s; upstream waited forever for `initialize`), a failed start
+#      kills the server's whole process group, and session/load starts stored
+#      extensions in parallel. honk's per-session `/mcp` (honk#18) relies on it:
+#      a hung server (e.g. mcp-remote waiting for OAuth) no longer freezes the
+#      session's tool calls or every later reload.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -71,6 +81,8 @@
 # goose-launch and goose-id-split probes passed and a real-model self-compaction
 # ran as one run; goose-runner-probe crashes before reaching goose (it predates
 # the adapter's allowedSenderIds option) identically against .5.
+# patched-1.54.0.7 adds patch 13 (johnnymo87/goose#6); patched-1.54.0.8
+# (2026-10-19) adds patch 14 (johnnymo87/goose#7); no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -83,8 +95,8 @@
 }:
 
 let
-  version = "1.54.0-patched.6";
-  tag = "patched-1.54.0.6";
+  version = "1.54.0-patched.8";
+  tag = "patched-1.54.0.8";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -96,11 +108,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-boIyZBzb8jlbFtXR/+YB/joUifCYkg2+PqmjluNGQdg=";
+      hash = "sha256-xPnZRFkeXB8H0sP0r5JDrMiYGlte9Y/cBqLLxqLzFLA=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-YYtUfJGTQ+2ADF03AHHtEYPbus9gZr0zhL5I7CAGRgQ=";
+      hash = "sha256-STPypZklTkDkTEePWEHuABI1wx+6+AqAJu045Faqj7s=";
     };
   };
 
