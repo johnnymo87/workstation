@@ -1111,8 +1111,8 @@ lib.mkIf isCloudbox {
   #   honkd reads the generated opencode.json `mcp` block fresh on every request (one source
   #   of truth; secrets stay {file:} refs, read by the server's wrapper at spawn). Every
   #   server needs `/mcp on!` except the --mcp-no-confirm list (slack-ro cannot post; figma
-  #   is read-only). Needs honk
-  #   with honk#18 (an older honkd refuses the unknown flags and fails to start).
+  #   is read-only). Needs honk with honk#18: an older honkd refuses the unknown flags
+  #   and fails to start.
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
