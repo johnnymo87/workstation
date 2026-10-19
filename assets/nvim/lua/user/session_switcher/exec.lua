@@ -184,11 +184,38 @@ function M.attach(desc, opts)
     env = { OPENCODE_SCROLL_TO = desc.sid .. ":" .. target }
   end
 
+  -- A GOOSE open (honk-9qf.15.11) reports its failure. It has failure modes the
+  -- opencode path rarely meets -- honkd down, a project nvim still running
+  -- pre-goose Lua until its next restart -- and without this Enter would do
+  -- nothing visible. The opencode spawn stays fire-and-forget, as it was.
+  local is_goose = desc.sid:sub(1, 6) == "goose:"
+  local spawn_opts = { stdin = false, env = env }
+  local on_exit = nil
+  if is_goose then
+    spawn_opts.text = true
+    on_exit = function(out)
+      if type(out) ~= "table" or out.code == 0 then
+        return
+      end
+      local last = nil
+      for line in tostring(out.stderr or ""):gmatch("[^\r\n]+") do
+        last = line
+      end
+      local reason = last and last:gsub("^%[oc%-auto%-attach%]%s*", "") or "no output"
+      vim.schedule(function()
+        vim.notify(
+          string.format("could not open %s in honk (oc-auto-attach exit %s): %s", desc.sid, tostring(out.code), reason),
+          vim.log.levels.WARN
+        )
+      end)
+    end
+  end
+
   local ok, err_or_handle = pcall(function()
     local sys = opts.system or vim.system
     -- `env` MERGES into the inherited environment here (clear_env is not set);
     -- replacing it would strip PATH and the attach would not find its binaries.
-    return sys({ "oc-auto-attach", desc.sid }, { stdin = false, env = env })
+    return sys({ "oc-auto-attach", desc.sid }, spawn_opts, on_exit)
   end)
   if not ok then
     vim.notify(string.format("could not run oc-auto-attach: %s", tostring(err_or_handle)), vim.log.levels.WARN)

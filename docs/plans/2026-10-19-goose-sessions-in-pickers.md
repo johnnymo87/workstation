@@ -110,7 +110,7 @@ one exception:
 | `activity` | `"working"` if `_meta.honk.running`, else `"idle"` |
 | `pendingPermissions` | one `"honk"` entry per pending request **(review)**, so the fold makes the row `blocked` (pinned, pierces the facet) |
 | `error`, `pendingQuestions` | `false`, `[]` |
-| `automated` | `true` when `hasRecipe` (lanes, stall-watch coordinators, probes) |
+| `automated` | `true` when `hasRecipe` (lanes, stall-watch coordinators, some test runs; NOT the `/tmp` probe sessions, which have no recipe) |
 | `origin` | `"goose-recipe"` when automated, else `null` |
 | `unread`, `unread_state`, `last_event_id` | from pigeon, see below |
 | `anchor_msg_id` | always `null` (honk has no scroll-to yet) |
@@ -136,7 +136,9 @@ roots, applied only when the opencode window is full). Without it the two
 harnesses had different horizons: the 200th opencode root was 3.9 days old,
 and 100 of 103 listable goose sessions were older -- mostly `/tmp` probe
 sessions, which have no recipe. Measured with the floor: 3 goose rows join
-200 opencode rows. `--ids` mode keeps exactly the requested `goose:` ids that
+200 opencode rows. A session that is running or parked on a prompt is kept
+regardless of floor and limit, the goose counterpart of opencode's
+overlay-truth union. `--ids` mode keeps exactly the requested `goose:` ids that
 honk listed (recipe runs included, marked `automated`), ignores the floor, and
 sets `matched_ids` to the requested form.
 
@@ -171,7 +173,9 @@ goose id it:
    Measured: the old `open()` raises "invalid sid" and the RPC fails (exit 5);
    the goose path now logs that the nvim needs a restart. If `open()` instead
    returns 0 quietly, the goose path exits 10 with the same hint rather than
-   waiting 15 s for an "unknown" status. The opencode path is unchanged.
+   waiting 15 s for an "unknown" status. A goose session whose directory is
+   gone exits 3 before routing, so it is never mistaken for that refusal. The
+   opencode path is unchanged.
 
 **oc_auto_attach.lua** `open()` accepts the goose id when
 `harness == "goose"`, and runs `honk chat <goose-id>` (cwd = session dir)
@@ -212,8 +216,13 @@ the follow-up that makes `,fp` useful for goose.
 - `,fs` id-search mode for goose ids (`spec.id_query` only knows `ses_`).
 - `honk chat --new --tag <tag>`, without which `,fp` lists no goose sessions.
 - Scroll-to-message for honk (M4 backlog, honk-9qf.15).
-- `exec.attach` ignores oc-auto-attach's exit code (for opencode too), so a
-  failed open is silent in the picker; the reason is only in the log.
+- A failed GOOSE open now shows a warning with oc-auto-attach's last log line
+  (`exec.attach` watches the exit for `goose:` ids). The opencode open stays
+  fire-and-forget, so its failures are still only in the log.
+- On cloudbox, every `,fs` open now also waits for `honk list` (in parallel
+  with the opencode DB work). Normally that adds nothing; on a busy
+  goose-serve it can delay the whole list up to 2.5 s and add a timeout
+  warning. That is the one visible change for opencode rows.
 - Each pick holds the session in honkd while its tab is open. honkd caps held
   sessions at 64 (idle TTL 900 s); opening many old sessions can reach it.
 - Not verified: whether pigeon clears a goose session's unread count when you

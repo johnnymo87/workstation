@@ -374,6 +374,12 @@ ${builtins.readFile ./canonical-path.sh}
         log "goose session $goose_id not found in honk list (or archived, or no directory); giving up"
         exit 3
       fi
+      # Checked here so a deleted cwd is not later misread as a refusing nvim
+      # (oc_auto_attach.lua's open() returns 0 for a missing dir as well).
+      if [ ! -d "$session_dir" ]; then
+        log "goose session $goose_id directory $session_dir no longer exists; giving up"
+        exit 3
+      fi
       log "goose session $goose_id dir=$session_dir"
     else
       # Step 1: wait for session to be visible with a non-empty directory.

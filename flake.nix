@@ -1795,8 +1795,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 114 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (882 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 882 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (893 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 893 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (136 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -2350,7 +2350,7 @@
               expected_skips=1
               ;;
             test/oc-session-list-goose.spec.ts)
-              expected_expects=61
+              expected_expects=62
               expected_skips=0
               ;;
             *)
@@ -2536,7 +2536,7 @@
         touch $out
       '';
 
-      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 97-assertion
+      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 99-assertion
       # suite covering project_key/window_name derivation, pool-aware serve
       # resolution, the tmux window/session name collision that once leaked
       # `main`'s panes into confined sessions, and an `nvim -l` unit test of the
@@ -2581,8 +2581,8 @@
         # Assert the assertions RAN, not merely that the script exited 0 -- the
         # store-prefix / oc-session-list-bin lesson. The count is the gate: any
         # block that goes dark changes it.
-        grep -q '^ALL PASS (oc-auto-attach): 97 assertions' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: the suite did not report its full 97-assertion tally." >&2
+        grep -q '^ALL PASS (oc-auto-attach): 99 assertions' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not report its full 99-assertion tally." >&2
           echo "If you deliberately changed coverage, update EXPECTED_ASSERTIONS in" >&2
           echo "pkgs/oc-auto-attach/test-project-key.sh and this gate together." >&2
           exit 1

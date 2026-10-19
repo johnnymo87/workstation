@@ -1157,6 +1157,43 @@ do
   vim.system = orig_system
 end
 
+-- 44b. EXEC: a goose open that fails says so (honk-9qf.15.11). The opencode path
+--      keeps its fire-and-forget spawn: no on_exit, nothing new shown.
+do
+  local notifications = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level) table.insert(notifications, { msg = msg, level = level }) end
+  local calls = {}
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    table.insert(calls, { cmd = cmd, opts = opts, on_exit = on_exit })
+    return { pid = 1 }
+  end
+
+  check(exec.attach({ sid = "ses_plain" }) == true, "opencode attach still spawns")
+  check(calls[1].on_exit == nil, "opencode attach registers no on_exit (unchanged)")
+
+  check(exec.attach({ sid = "goose:20261019_1" }) == true, "goose attach spawns")
+  check(calls[2].cmd[2] == "goose:20261019_1", "goose attach passes the picker id to oc-auto-attach")
+  check(calls[2].opts.text == true, "goose attach captures text output")
+  check(type(calls[2].on_exit) == "function", "goose attach watches the exit")
+
+  calls[2].on_exit({ code = 0, stderr = "[oc-auto-attach] tab opened\n" })
+  vim.wait(50, function() return false end)
+  check(#notifications == 0, "a successful goose open shows nothing")
+
+  calls[2].on_exit({ code = 3, stderr = "[oc-auto-attach] confining\n[oc-auto-attach] goose session 20261019_1 not found in honk list\n" })
+  vim.wait(100, function() return #notifications > 0 end)
+  check(#notifications == 1, "a failed goose open notifies once")
+  check(notifications[1].level == vim.log.levels.WARN, "at WARN")
+  check(notifications[1].msg:find("not found in honk list", 1, true) ~= nil,
+    "the notification carries oc-auto-attach's last log line; got: " .. tostring(notifications[1].msg))
+  check(notifications[1].msg:find("exit 3", 1, true) ~= nil, "and its exit code")
+
+  vim.system = orig_system
+  vim.notify = orig_notify
+end
+
 -- 45. EXEC: attach handles missing binary (vim.system error) with notification without throwing.
 do
   local notifications = {}

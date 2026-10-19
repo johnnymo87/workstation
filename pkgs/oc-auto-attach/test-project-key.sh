@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=97
+EXPECTED_ASSERTIONS=99
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -574,6 +574,14 @@ if [ -n "$oc_aa" ]; then
   assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session honk does not list is not found (exit 3, no front-door probe)'
   fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/x\",\"archivedAt\":\"2026-10-19T00:00:00Z\"}]'"
   assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: an archived session is not found (exit 3)'
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session whose directory is gone is exit 3'
+  if grep -q 'no longer exists' "$goose_tmp/err"; then
+    pass 'goose: a gone directory is named in the log'
+  else
+    printf 'FAIL  goose: a gone directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
   fake_honk "echo 'connection failed: refused' >&2; exit 1"
   assert_exit 2 "$(run_goose 'goose:20261019_7')" 'goose: honk failing is "could not find out" (exit 2)'
   if grep -q 'connection failed: refused' "$goose_tmp/err"; then

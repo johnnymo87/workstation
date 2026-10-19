@@ -301,7 +301,7 @@ export interface GooseRowsOptions {
  * Turn honk's list into picker rows.
  *
  * Browse mode keeps the `limit` most recent NON-recipe sessions. Recipe runs
- * (lanes, stall-watch coordinators, probes) are 70% of goose sessions and
+ * (lanes, stall-watch coordinators, some test runs) are 70% of goose sessions and
  * arrive every few minutes, so counting them against the window would push
  * every human chat out of it; they are reachable through `--ids`, where the
  * stall-watch picker names them. In `--ids` mode recipe rows are kept and
@@ -315,13 +315,18 @@ export function gooseRows(sessions: HonkSession[], opts: GooseRowsOptions): Goos
     picked = live.filter((s) => wanted.has(s.sessionId));
   } else {
     const floor = opts.floorMs ?? null;
-    picked = live
-      .filter((s) => !s.hasRecipe)
+    const human = live.filter((s) => !s.hasRecipe);
+    // A session mid-turn or parked on a prompt is never windowed out -- the
+    // goose counterpart of opencode's overlay-truth union.
+    const needsYou = (s: HonkSession) => s.running || (s.pendingRequests ?? 0) > 0;
+    const windowed = human
+      .filter((s) => !needsYou(s))
       .map((s) => ({ s, t: recency(s) }))
       .filter((x) => floor === null || x.t >= floor)
       .sort((a, b) => b.t - a.t || (a.s.sessionId < b.s.sessionId ? -1 : 1))
       .slice(0, Math.max(0, opts.limit))
       .map((x) => x.s);
+    picked = [...human.filter(needsYou), ...windowed];
   }
 
   return picked.map((s): GooseRow => {

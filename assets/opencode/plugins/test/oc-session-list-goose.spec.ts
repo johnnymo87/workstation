@@ -210,6 +210,20 @@ describe("gooseRows", () => {
       .toEqual(["goose:20261019_1"]);
   });
 
+  it("browse mode keeps a running or blocked session past the floor and the limit", () => {
+    // Like opencode's overlay union: the row that needs you must not age out.
+    const s = [
+      session({ sessionId: "20261019_1", updatedAt: "2026-10-10T00:00:00Z", running: true }),
+      session({ sessionId: "20261019_2", updatedAt: "2026-10-10T00:00:00Z", pendingRequests: 1 }),
+      session({ sessionId: "20261019_3", updatedAt: "2026-10-19T03:00:00Z" }),
+      session({ sessionId: "20261019_4", updatedAt: "2026-10-19T04:00:00Z" }),
+      session({ sessionId: "20261019_5", updatedAt: "2026-10-10T00:00:00Z" }),
+    ];
+    const floorMs = Date.parse("2026-10-19T00:00:00Z");
+    const rows = gooseRows(s, { limit: 1, ids: null, unread: null, pigeonIds: null, floorMs });
+    expect(rows.map((r) => r.id).sort()).toEqual(["goose:20261019_1", "goose:20261019_2", "goose:20261019_4"]);
+  });
+
   it("drops archived sessions in both modes", () => {
     const s = [session({ sessionId: "20261019_1", archivedAt: "2026-10-19T00:00:00Z" })];
     expect(gooseRows(s, { limit: 50, ids: null, unread: null, pigeonIds: null })).toEqual([]);
