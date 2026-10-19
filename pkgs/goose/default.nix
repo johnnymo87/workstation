@@ -48,7 +48,8 @@
 #  11. self_compact_and_resume: an agent compacts its own context and continues
 #      the same run with a resume prompt it wrote (delivered as a steer-flagged
 #      user message, so ACP clients see one run). Off with GOOSE_SELF_COMPACT=false;
-#      never offered to recipe sessions with final_output/response schema.
+#      never offered to recipe sessions (response schema/final_output or retry),
+#      subagents, or providers that manage their own context.
 #  12. Rolling memory (off unless configured per session or by env): folds
 #      older history into a first-person memory at turn start.
 #
@@ -65,8 +66,11 @@
 # patched-1.54.0.4 (2026-10-13) adds patches 7-9 on the same base (fork PR
 # johnnymo87/goose#2); no schema change.
 # patched-1.54.0.5 (2026-10-15) adds patch 10 (fork PR johnnymo87/goose#3).
-# patched-1.54.0.6 (2026-10-19) adds patches 11-12 (fork PRs johnnymo87/goose#5,
-# #4); no schema change.
+# patched-1.54.0.6 (2026-10-18) adds patches 11-12 (fork PRs johnnymo87/goose#5,
+# #4); no schema change. On an isolated serve of this store path the pigeon
+# goose-launch and goose-id-split probes passed and a real-model self-compaction
+# ran as one run; goose-runner-probe crashes before reaching goose (it predates
+# the adapter's allowedSenderIds option) identically against .5.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
