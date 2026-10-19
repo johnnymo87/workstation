@@ -39,7 +39,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 |-------|-------|---------|
 | [adding-opencode-skills](skills/adding-opencode-skills/SKILL.md) | cross | Add, edit, or move an OpenCode skill; debug why a newly-added skill is not picked up. |
 | [attributing-causes](skills/attributing-causes/SKILL.md) | cross | Treat a memorable event (deploy, nightly job, restart) as a suspect, not evidence. The "could X even reach that state?" test, re-measuring inherited counts before destructive action, and interrogating the instrument itself — what entity it measures, snapshot-vs-series, and the correct-instrument-aimed-wrong failure that fails no check on its own output. |
-| [preparing-for-compaction](skills/preparing-for-compaction/SKILL.md) | cross | Persist durable context before compaction so work survives. Beads + plan files + resumption prompt. |
+| [preparing-for-compaction](skills/preparing-for-compaction/SKILL.md) | cross | Persist durable context before compaction so work survives. Beads + plan files + resumption prompt, then `self_compact_and_resume` (opencode and goose). |
 | [searching-sessions](skills/searching-sessions/SKILL.md) | cross | `oc-search` patterns for grepping past session transcripts (PRs, Jira tickets, commands, payloads). |
 | [tagging-sessions](skills/tagging-sessions/SKILL.md) | cross | `oc-tags` spend attribution: tags name programs of work (not worktrees, systems, or ticket keys), one tag per tracker epic, don't guess a tag, snapshot before bulk retag, spend is a coverage detector not a ranking. The org tag list is in its Confluence-fetched `INTERNAL.md` (work hosts). |
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
