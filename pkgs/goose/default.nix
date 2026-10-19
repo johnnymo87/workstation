@@ -45,6 +45,12 @@
 #  10. ACP session/list sorts and limits on session ids before fetching full
 #      rows (recipe_json etc.), so a page takes ~0.01s instead of ~1.5s with
 #      500+ sessions. Same rows, same order.
+#  11. self_compact_and_resume: an agent compacts its own context and continues
+#      the same run with a resume prompt it wrote (delivered as a steer-flagged
+#      user message, so ACP clients see one run). Off with GOOSE_SELF_COMPACT=false;
+#      never offered to recipe sessions with final_output/response schema.
+#  12. Rolling memory (off unless configured per session or by env): folds
+#      older history into a first-person memory at turn start.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -59,6 +65,8 @@
 # patched-1.54.0.4 (2026-10-13) adds patches 7-9 on the same base (fork PR
 # johnnymo87/goose#2); no schema change.
 # patched-1.54.0.5 (2026-10-15) adds patch 10 (fork PR johnnymo87/goose#3).
+# patched-1.54.0.6 (2026-10-19) adds patches 11-12 (fork PRs johnnymo87/goose#5,
+# #4); no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -71,8 +79,8 @@
 }:
 
 let
-  version = "1.54.0-patched.5";
-  tag = "patched-1.54.0.5";
+  version = "1.54.0-patched.6";
+  tag = "patched-1.54.0.6";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -84,11 +92,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-ll3Y0T/l8YjBvoqhggQi0WRrW6fY6ZgdD/y3Kiw0LVY=";
+      hash = "sha256-boIyZBzb8jlbFtXR/+YB/joUifCYkg2+PqmjluNGQdg=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-MwGgLGndJzsoUpaw1dCTpwautP3iS2mPCRuHkMFnLwQ=";
+      hash = "sha256-YYtUfJGTQ+2ADF03AHHtEYPbus9gZr0zhL5I7CAGRgQ=";
     };
   };
 
