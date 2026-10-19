@@ -1107,6 +1107,11 @@ lib.mkIf isCloudbox {
   #   registered goose session's Telegram topic shows turns from every client (honk chat,
   #   coordinator wakes), not only pigeon's own. Loopback only; the token is pigeon's daemon
   #   token (honkd -> pigeon). Requires a pigeon daemon that has the route (pigeon#181).
+  # - --mcp-catalog: honk chat's `/mcp` turns opencode's MCP servers on per goose session.
+  #   honkd reads the generated opencode.json `mcp` block fresh on every request (one source
+  #   of truth; secrets stay {file:} refs, read by the server's wrapper at spawn). Every
+  #   server needs `/mcp on!` except the --mcp-no-confirm list (read-only ones). Needs honk
+  #   with honk#18 (an older honkd refuses the unknown flags and fails to start).
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
@@ -1116,7 +1121,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;

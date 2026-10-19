@@ -71,6 +71,7 @@ let
     "ask-question"
     "attributing-causes"
     "beads"
+    "enabling-mcp-servers"
     "formatting-slack-messages"
     "migrating-beads-schema"
     "opencode-launch"
