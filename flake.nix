@@ -922,15 +922,15 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
-        grep -q '^=== 59 passed, 0 failed ===' "$TMPDIR/br.txt" || {
-          echo "GATE FAILURE: bazel-reap suite did not reach its 59/0 tally." >&2
+        grep -q '^=== 60 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 60/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as its neighbours: the tally is printed by the
         # suite, so a suite gutted to three assertions still prints a truthful
         # "3 passed, 0 failed". The count is what makes deletion visible.
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 59 ] || {
-          echo "GATE FAILURE: expected 59 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 60 ] || {
+          echo "GATE FAILURE: expected 60 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
           exit 1
         }
@@ -947,12 +947,12 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-cargo-reaper.sh 2>&1 | tee "$TMPDIR/cr.txt"
-        grep -q '^=== 51 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
-          echo "GATE FAILURE: cargo-reap suite did not reach its 51/0 tally." >&2
+        grep -q '^=== 52 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
+          echo "GATE FAILURE: cargo-reap suite did not reach its 52/0 tally." >&2
           exit 1
         }
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 51 ] || {
-          echo "GATE FAILURE: expected 51 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 52 ] || {
+          echo "GATE FAILURE: expected 52 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")." >&2
           exit 1
         }

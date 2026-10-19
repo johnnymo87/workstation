@@ -59,9 +59,12 @@ script="$tmpdir/cargo-reap"
 if [ -n "${CARGO_REAP_SRC:-}" ]; then
   cp "$CARGO_REAP_SRC" "$script"
 else
-  nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/cargo-reap\".text" \
-    > "$script"
+  # BUILD .source rather than eval .text: the script references other store
+  # paths (its python probes), and eval alone never realises them -- every
+  # probe then fails and the suite tests a script that is not what ships.
+  src="$(nix --extra-experimental-features 'nix-command flakes' build --no-link --print-out-paths \
+    "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/cargo-reap\".source")"
+  cp "$src" "$script"
 fi
 [ -s "$script" ] || { echo "FAIL: empty cargo-reap source"; exit 1; }
 chmod +x "$script"
@@ -485,9 +488,21 @@ test_session_stale_in_workspace_reaped_under_pressure() {
     "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
 }
 
+test_script_is_directly_executable() {
+  echo "TEST: the deployed script starts with #! at byte 0 (systemd execs it directly)"
+  # 2026-10-13..19: a column-0 heredoc inside the Nix '' string disabled
+  # indentation stripping, so bazel-reap's #! line was indented. systemd
+  # refused it ("Exec format error") on every pass for six days, while this
+  # suite stayed green because it ran the file as `bash "$script"`, and
+  # `env`/execvp falls back to /bin/sh on ENOEXEC. systemd has no fallback.
+  check "cargo-reap begins with #!" \
+    "$([ "$(head -c2 "$script")" = '#!' ] && echo yes || echo no)"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== cargo-reap regression tests ==="
+test_script_is_directly_executable
 test_idle_8d_low_pressure_reaped
 test_idle_49h_low_pressure_kept
 test_idle_4h_low_pressure_kept

@@ -78,9 +78,12 @@ script="$tmpdir/bazel-reap"
 if [ -n "${BAZEL_REAP_SRC:-}" ]; then
   cp "$BAZEL_REAP_SRC" "$script"
 else
-  nix --extra-experimental-features 'nix-command flakes dynamic-derivations' \
-    eval --raw "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/bazel-reap\".text" \
-    > "$script"
+  # BUILD .source rather than eval .text: the script references other store
+  # paths (its python probes), and eval alone never realises them -- every
+  # probe then fails and the suite tests a script that is not what ships.
+  src="$(nix --extra-experimental-features 'nix-command flakes' build --no-link --print-out-paths \
+    "git+file:$repo_root#homeConfigurations.cloudbox.config.home.file.\".local/bin/bazel-reap\".source")"
+  cp "$src" "$script"
 fi
 [ -s "$script" ] || { echo "FAIL: empty bazel-reap source"; exit 1; }
 chmod +x "$script"
@@ -120,7 +123,7 @@ new_root() {
 
 run_reaper() {
   local root="$1"; shift
-  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" bash "$script" 2>&1
+  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" "$script" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -260,7 +263,7 @@ test_resumes_staged_leftover() {
 test_missing_base_dir_is_not_an_error() {
   echo "TEST: absent bazel cache dir exits clean (a host that never ran bazel)"
   local rc
-  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" bash "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$tmpdir/definitely-not-here" "$script" >/dev/null 2>&1
   rc=$?
   check "exits 0" "$([ "$rc" = 0 ] && echo yes || echo no)"
 }
@@ -273,7 +276,7 @@ test_never_exits_nonzero() {
   # Make the base itself unremovable by taking write permission off its PARENT,
   # so even the rename fails. The script must log and move on.
   chmod a-w "$root"
-  env BAZEL_REAP_BASE="$root" bash "$script" >/dev/null 2>&1
+  env BAZEL_REAP_BASE="$root" "$script" >/dev/null 2>&1
   rc=$?
   chmod u+w "$root"
   check "exits 0 despite being unable to act" "$([ "$rc" = 0 ] && echo yes || echo no)"
@@ -574,9 +577,21 @@ test_proc_error_keeps_base_under_pressure() {
     "$(grep -q 'keep 10000000.*error probing /proc' <<<"$out" && echo yes || echo no)"
 }
 
+test_script_is_directly_executable() {
+  echo "TEST: the deployed script starts with #! at byte 0 (systemd execs it directly)"
+  # 2026-10-13..19: a column-0 heredoc inside the Nix '' string disabled
+  # indentation stripping, so bazel-reap's #! line was indented. systemd
+  # refused it ("Exec format error") on every pass for six days, while this
+  # suite stayed green because it ran the file as `bash "$script"`, and
+  # `env`/execvp falls back to /bin/sh on ENOEXEC. systemd has no fallback.
+  check "bazel-reap begins with #!" \
+    "$([ "$(head -c2 "$script")" = '#!' ] && echo yes || echo no)"
+}
+
 # ---------------------------------------------------------------------------
 
 echo "=== bazel-reap regression tests ==="
+test_script_is_directly_executable
 test_keeps_live_workspace_without_server
 test_keeps_live_server_despite_missing_workspace
 test_keeps_base_without_marker
