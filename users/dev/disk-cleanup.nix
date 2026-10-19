@@ -177,6 +177,45 @@ let
   # deleted that should not have been, and two copies of them drift.
   #
   # Reads argv: <age_days> <min_mb> [root ...].
+  # bazel-reap's python probes live in their OWN store files, not in heredocs
+  # inside the script. A heredoc body must start at column 0, and a single
+  # column-0 line inside a Nix '' string disables the string's indentation
+  # stripping -- which indented bazel-reap's #! line and made every run since
+  # #679 fail with "Exec format error" (2026-10-13..19, unnoticed for 6 days).
+  bazelReapSessionPy = pkgs.writeText "bazel-reap-session.py" ''
+    import os, sqlite3, sys, time
+
+    ${sessionOwnsPy}
+
+    ws = sys.argv[1]
+    db = sys.argv[2]
+    active_sec = float(sys.argv[3])
+    print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+  '';
+
+  bazelReapInUsePy = pkgs.writeText "bazel-reap-in-use.py" ''
+    import os, sys
+
+    ${pathsInUsePy}
+
+    proc = sys.argv[1]
+    entry = sys.argv[2]
+    paths = [entry]
+    try:
+        paths.append(os.path.realpath(entry))
+    except OSError:
+        pass
+
+    try:
+        in_use = paths_in_use(paths, proc=proc)
+        if in_use:
+            print("in_use")
+        else:
+            print("free")
+    except Exception:
+        print("error")
+  '';
+
   tmpScratchSweepPy = ''
     import os, shutil, sqlite3, subprocess, sys, time
 
@@ -2736,19 +2775,11 @@ lib.mkMerge [
 
           # Session guard: keep if opencode session updated workspace within window
           session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-          session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
-import os, sqlite3, sys, time
-
-${sessionOwnsPy}
-
-ws = sys.argv[1]
-db = sys.argv[2]
-active_sec = float(sys.argv[3])
-print(session_owns(ws, db, missing="free", active_seconds=active_sec))
-PYEOF
-)
+          session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" 2>/dev/null)
           case "$session_verdict" in
-            session|unknown)
+            free) ;;
+            # session, unknown, or empty (probe crashed): keep.
+            *)
               if [ "$req_idle_min" -ge 60 ]; then
                 window_desc="$((req_idle_min / 60))h"
               else
@@ -2877,19 +2908,11 @@ PYEOF
 
         # Session guard re-check before action
         session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-        session_verdict=$(${pkgs.python3}/bin/python3 - "$workspace" "$session_db" "$((req_idle_min * 60))" <<'PYEOF'
-import os, sqlite3, sys, time
-
-${sessionOwnsPy}
-
-ws = sys.argv[1]
-db = sys.argv[2]
-active_sec = float(sys.argv[3])
-print(session_owns(ws, db, missing="free", active_seconds=active_sec))
-PYEOF
-)
+        session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" 2>/dev/null)
         case "$session_verdict" in
-          session|unknown)
+          free) ;;
+          # session, unknown, or empty (probe crashed): keep.
+          *)
             log "keep $name (opencode session became active before action: $workspace)"
             continue
             ;;
@@ -2897,29 +2920,7 @@ PYEOF
 
         # /proc probe immediately before rename
         proc_dir="''${BAZEL_REAP_PROC:-/proc}"
-        in_use_verdict=$(${pkgs.python3}/bin/python3 - "$proc_dir" "$entry" <<'PYEOF'
-import os, sys
-
-${pathsInUsePy}
-
-proc = sys.argv[1]
-entry = sys.argv[2]
-paths = [entry]
-try:
-    paths.append(os.path.realpath(entry))
-except OSError:
-    pass
-
-try:
-    in_use = paths_in_use(paths, proc=proc)
-    if in_use:
-        print("in_use")
-    else:
-        print("free")
-except Exception:
-    print("error")
-PYEOF
-)
+        in_use_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapInUsePy} "$proc_dir" "$entry" 2>/dev/null)
         case "$in_use_verdict" in
           in_use)
             log "keep $name (in use by a live process)"
