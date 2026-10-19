@@ -2775,17 +2775,23 @@ lib.mkMerge [
 
           # Session guard: keep if opencode session updated workspace within window
           session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-          session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" 2>/dev/null)
+          session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))")
           case "$session_verdict" in
             free) ;;
-            # session, unknown, or empty (probe crashed): keep.
-            *)
+            session)
               if [ "$req_idle_min" -ge 60 ]; then
                 window_desc="$((req_idle_min / 60))h"
               else
                 window_desc="''${req_idle_min}m"
               fi
               log "keep $name (opencode session active in $workspace within $window_desc)"
+              continue
+              ;;
+            # unknown, or empty because the probe crashed (its stderr is in
+            # the journal): keep, but SAY so -- a probe that silently fails
+            # must not masquerade as "a session is active".
+            *)
+              log "WARN: keep $name (session probe failed or unknown: '$session_verdict')"
               continue
               ;;
           esac
@@ -2908,12 +2914,15 @@ lib.mkMerge [
 
         # Session guard re-check before action
         session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-        session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" 2>/dev/null)
+        session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))")
         case "$session_verdict" in
           free) ;;
-          # session, unknown, or empty (probe crashed): keep.
-          *)
+          session)
             log "keep $name (opencode session became active before action: $workspace)"
+            continue
+            ;;
+          *)
+            log "WARN: keep $name (session probe failed or unknown before action: '$session_verdict')"
             continue
             ;;
         esac
