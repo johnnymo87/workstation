@@ -2350,7 +2350,7 @@
               expected_skips=1
               ;;
             test/oc-session-list-goose.spec.ts)
-              expected_expects=63
+              expected_expects=77
               expected_skips=0
               ;;
             *)

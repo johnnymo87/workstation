@@ -309,6 +309,32 @@ NO_GOOSE_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" 
   || fail "--with-state without --goose failed"
 grep -q '"id": "goose:' <<<"$NO_GOOSE_OUT" && fail "goose sessions listed without --goose (they are opt-in)"
 
+# A failed last turn (honkd's lastError, honk-9qf.15.11.3) is an `error` row,
+# unless the session is running again. The session is older than --limit 1's
+# floor but failed after it, so it also stays in the list.
+fake_honk "$TMP_DIR/honk-errored" "cat <<'EOF'
+[{\"sessionId\":\"20261019_11\",\"title\":\"Failed chat\",\"cwd\":\"/proj\",\"held\":false,\"running\":false,
+  \"updatedAt\":\"1970-01-01T00:00:00.500Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"acp\",\"hasRecipe\":false,
+  \"pendingRequests\":0,\"lastError\":{\"kind\":\"network\",\"message\":\"connection reset\",\"at\":1760000000}},
+ {\"sessionId\":\"20261019_12\",\"title\":\"Retrying chat\",\"cwd\":\"/proj\",\"held\":true,\"running\":true,
+  \"updatedAt\":\"2026-10-19T22:00:00Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"acp\",\"hasRecipe\":false,
+  \"pendingRequests\":0,\"lastError\":{\"kind\":\"network\",\"message\":\"connection reset\",\"at\":1760000000}}]
+EOF"
+ERRORED_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-errored" "$BIN" --db "$TEST_DB" --with-state --fold --goose --limit 1 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list failed with an errored goose session"
+bun -e '
+const rows = JSON.parse(process.argv[1]);
+const failed = rows.find(r => r.id === "goose:20261019_11");
+if (!failed || failed.error !== true || failed.effective_state !== "error") {
+  console.error("errored goose session not an error row:", failed); process.exit(1);
+}
+const retrying = rows.find(r => r.id === "goose:20261019_12");
+if (!retrying || retrying.error !== false || retrying.effective_state !== "working") {
+  console.error("running goose session with a stale error not working:", retrying); process.exit(1);
+}
+' "$ERRORED_OUT" || fail "goose lastError not mapped to the error state"
+
 fake_honk "$TMP_DIR/honk-down" "echo 'connection failed: refused' >&2; exit 1"
 DOWN_ERR="$TMP_DIR/down.err"
 DOWN_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-down" "$BIN" --db "$TEST_DB" --with-state --fold --goose \
@@ -317,6 +343,6 @@ DOWN_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-down" "$BIN" --db "$TEST_DB" --w
 grep -q '"id": "root_1"' <<<"$DOWN_OUT" || fail "a failing honk lost the opencode rows"
 grep -q 'goose sessions unavailable: honk list exited 1: connection failed: refused' "$DOWN_ERR" \
   || fail "a failing honk must warn on stderr"
-pass "--with-state merges goose sessions from honk (--goose only, window floor), --ids goose:<id>, warns when honk fails"
+pass "--with-state merges goose sessions from honk (--goose only, window floor, failed last turn = error), --ids goose:<id>, warns when honk fails"
 
 echo "ALL PASS (oc-session-list)"

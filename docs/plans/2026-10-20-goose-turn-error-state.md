@@ -152,8 +152,10 @@ through honkd, and `goose run` recipe runs are hidden from the picker.
   read-time TTL of 48 h (review: an abandoned errored session, e.g. after a
   refusal that says "start a new session", must not stay pinned). Boot prune
   drops entries older than 7 days. Any new turn on the session also clears.
-- The turn hook's `turn.ended` gains an optional `turn_error` (same shape)
-  for pigeon to use later; pigeon ignores unknown fields. (Not used here.)
+- (Dropped in implementation: an optional `turn_error` on the turn hook's
+  `turn.ended`. Nothing would read it yet.)
+- `at` is Unix seconds (honkd has no date library; nothing else in the
+  entry is a timestamp the pickers parse).
 
 ### 3. honk client
 
@@ -217,9 +219,23 @@ malformed -> no error; a stale error outside the floor is not unioned in.
 - workstation: bun mapping (lastError -> error, running wins), built-binary
   stage 7 fixture, nvim-lua unchanged pins unless rows change.
 
+## Shipped (2026-10-20)
+
+- goose: johnnymo87/goose#8 (patch 15, tag `patched-1.54.0.9`).
+- honk: honkd `State.turn_errors`, `turn::turn_outcome`, `session/list`
+  `_meta.honk.error`, `honk list --json` `lastError`.
+- workstation: this PR (goose bump, honk flake bump, oc-session-list
+  mapping).
+
 ## Known limits
 
 - Turns not run through honkd (`goose run` CLI) are not tracked.
 - Tool failures are not turn errors (the turn itself succeeded).
 - `kind`/`message` come from goose's ProviderError Display; wording is not
   a contract, `kind` is.
+- State machine (`GOOSE_STATE_MACHINE`, off here): only a trailing error
+  message is reported, so proactive compaction failure, an empty response and
+  unsupported structured output end without `turnError` there, and refusals
+  and network errors report `provider`.
+- A turn whose provider call failed, then continued (a steer or a nudge) and
+  hit max turns before any provider call succeeded, reports that failure.
