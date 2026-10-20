@@ -45,6 +45,12 @@ first). Tracking bead: `honk-9qf` child "goose subagent roles" (run
     `// Modified by Jonathan Mohrbacher, 2026: <what>.` notice at the top of
     each upstream file you modify (Apache-2.0 §4(b); see `526b1f468`). If the
     file already has a notice, extend its line.
+  - The goose lib tests only compile with the CI feature list
+    (`code-mode,tree-sitter,aws-providers,telemetry,otel,rustls-tls,live-voice,system-keyring,platform-apps,chat-recall,scheduler,acp-http,online-model-meta`;
+    `scheduler` is feature-gated). Also pass
+    `--setenv=GOOSE_PATH_ROOT=<fresh tmp dir>`, or the tests read the real
+    `~/.config/goose/config.yaml` (after Part C, policy tests would fail
+    locally; CI is unaffected).
   - Cargo builds exceed the bash tool's 120s limit. Run them as a capped user
     unit that writes a log, then poll the log:
     ```bash
@@ -1554,6 +1560,11 @@ unscoped delegation.
 2. **Check the deploy:**
    `readlink ~/.config/goose/subagent-roles` (store dir) and
    `goose --version` (`1.54.0`; the store path contains `patched.9`).
+   goose-serve has `restartIfChanged = false`, so the RUNNING binary does not
+   change on rebuild. After the step-4 restart, and before trusting anything,
+   confirm `readlink /proc/$(systemctl show -p MainPID --value goose-serve)/exe`
+   contains `patched.9`. On `.8` or older the two keys are silently ignored and
+   delegates inherit every parent tool.
 3. **Edit `~/.config/goose/config.yaml`.** First copy it to
    `config.yaml.bak-<date>`. Then:
    - set `extensions.summon.enabled: true`
@@ -1589,6 +1600,48 @@ unscoped delegation.
          during a delegate.
    - [ ] A pigeon-launched goose session still has no `delegate` tool.
 6. **Close the bead** with the results. File follow-ups.
+
+## As built: changes from review (2026-10-20)
+
+Reviews (spec, code, adversarial) added the following beyond the tasks above.
+
+- **ro-shell**
+  - Refuses login and interactive shells (`bash -l`, `-i`, also nested in
+    quotes), `env -i` / `env -u PATH`, and `RO_SHELL_TMP_ROOTS=` assignments.
+  - Sets the NixOS / home-manager "profile already sourced" markers, so
+    sourcing `/etc/profile` cannot put the real git ahead of the shim.
+    Verified: before this, `bash -i -c "git stash"` really stashed.
+  - The real git path and the scratch-root prefix are baked into the shim at
+    build time, and the child env does not carry them.
+  - Commands time out after at most 540s, below the 600s extension timeout.
+    Child process groups are killed on stdin EOF, SIGTERM or SIGHUP, and the
+    child gets PDEATHSIG.
+  - Each ro-shell gets a private scratch dir `/tmp/ro-shell-XXXX`, exported as
+    `TMPDIR`. git is unrestricted only in repos whose common dir and top level
+    are inside a `/tmp/ro-shell-*` dir, and only when no `GIT_DIR`-family env
+    is set. Even there, pushes and remotes may only point at local paths
+    inside the scratch dir. `worktree add --detach` / `worktree remove`
+    are allowed only for scratch paths. Plain `/tmp` is NOT trusted: about 30
+    real linked worktrees and unpushed repos live in `/tmp/opencode`.
+  - The shim also refuses `grep -O`, `help -w`, and the mutating forms of
+    `reflog`. Read-only forms of `reflog <ref>`, `submodule --quiet status`
+    and bare `notes` are allowed.
+- **Fork**
+  - `~` is expanded in both keys. A roles dir that is not a directory logs a
+    warning.
+  - A roles-dir file that fails to parse still reserves its name (fail
+    closed against repo impostors).
+  - Unscoped delegates get the default recipe's instructions (the read-only
+    note) prepended.
+  - When the policy is on, the delegate tool description says that
+    sourceless delegates are read-only.
+  - One shared strict extension-start helper covers both the foreground path
+    and `get_agent_messages`, and each path has a test.
+- **Accepted**
+  - Session `sub_recipes` still precede the roles dir.
+  - Any token ending in `/git` is refused, even when it is not a command.
+  - Plumbing push (`send-pack`) is not gated in scratch repos.
+  - The scratch dir can be left behind if goose force-kills ro-shell.
 
 ## Follow-up beads (create at the end)
 
