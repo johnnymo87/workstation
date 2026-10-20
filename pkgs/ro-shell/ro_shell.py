@@ -24,6 +24,7 @@ _SEP = r"(?:^|[\s;&|(`'\"=])"
 ABS_GIT = re.compile(_SEP + r"[^\s;&|()`'\"]*/git(?=$|[\s;&|)`'\"])")
 PATH_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?PATH\+?=")
 COMMAND_P = re.compile(r"\bcommand\s+-p\b")
+TMP_ROOTS_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?RO_SHELL_TMP_ROOTS\+?=")
 LOGIN_SHELL = re.compile(
     r"(?:^|[\s;&|(`'\"])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
     r"(?:\s+-[a-bd-zA-BD-Z0-9]+)*"
@@ -36,8 +37,8 @@ def check_command(command: str):
     """Return a refusal message, or None if the command may run."""
     if ABS_GIT.search(command):
         return "ro-shell: refused: git by path bypasses the read-only git shim; call plain `git`."
-    if PATH_ASSIGN.search(command) or COMMAND_P.search(command):
-        return "ro-shell: refused: changing PATH (or `command -p`) bypasses the read-only git shim."
+    if PATH_ASSIGN.search(command) or COMMAND_P.search(command) or TMP_ROOTS_ASSIGN.search(command):
+        return "ro-shell: refused: changing PATH (or `command -p` or RO_SHELL_TMP_ROOTS) bypasses the read-only git shim."
     if LOGIN_SHELL.search(command):
         return "ro-shell: refused: login shell options bypass the read-only git shim via /etc/profile; run plain commands or non-login subshells."
     return None
@@ -45,6 +46,8 @@ def check_command(command: str):
 
 def run_command(command: str, cwd: str, timeout: int):
     env = dict(os.environ)
+    env.pop("RO_SHELL_REAL_GIT", None)
+    env.pop("RO_SHELL_TMP_ROOTS", None)
     env["PATH"] = os.environ["RO_SHELL_SHIM_DIR"] + os.pathsep + env.get("PATH", "")
     env.update(
         GIT_PAGER="cat",

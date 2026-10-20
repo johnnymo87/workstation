@@ -12,13 +12,30 @@ SHIM_DIR = os.environ["RO_SHELL_SHIM_DIR"]
 REAL_GIT = os.environ["RO_SHELL_REAL_GIT"]
 REFUSED = 3
 
+BASE_PARENT = os.path.join(os.environ.get("HOME", "/tmp"), ".cache", "ro-shell-tests")
+os.makedirs(BASE_PARENT, exist_ok=True)
+TEST_BASE = tempfile.mkdtemp(dir=BASE_PARENT)
+SHARED_ROOT = os.path.join(TEST_BASE, "shared")
+THROWAWAY_ROOT = os.path.join(TEST_BASE, "throwaway")
+os.makedirs(SHARED_ROOT, exist_ok=True)
+os.makedirs(THROWAWAY_ROOT, exist_ok=True)
+
+os.environ["TMPDIR"] = THROWAWAY_ROOT
+os.environ["RO_SHELL_TMP_ROOTS"] = THROWAWAY_ROOT
+
+
+def tearDownModule():
+    shutil.rmtree(TEST_BASE, ignore_errors=True)
+
 
 def real(repo, *args):
     return subprocess.run([REAL_GIT, "-C", repo, *args], capture_output=True, text=True, check=True).stdout
 
 
-def make_repo():
-    d = tempfile.mkdtemp()
+def make_repo(parent=None):
+    if parent is None:
+        parent = SHARED_ROOT
+    d = tempfile.mkdtemp(dir=parent)
     real(d, "init", "-q", "-b", "main")
     real(d, "config", "user.email", "t@example.com")
     real(d, "config", "user.name", "t")
@@ -44,7 +61,7 @@ def snapshot(repo):
 
 
 def shim(repo, args):
-    env = dict(os.environ, RO_SHELL_REAL_GIT=REAL_GIT)
+    env = dict(os.environ, RO_SHELL_REAL_GIT=REAL_GIT, RO_SHELL_TMP_ROOTS=THROWAWAY_ROOT)
     return subprocess.run([os.path.join(SHIM_DIR, "git"), *args], cwd=repo, env=env,
                           capture_output=True, text=True)
 
@@ -110,9 +127,55 @@ class ShimTest(unittest.TestCase):
     def test_misconfigured_shim_refuses(self):
         env = dict(os.environ)
         env.pop("RO_SHELL_REAL_GIT", None)
-        r = subprocess.run([os.path.join(SHIM_DIR, "git"), "status"], cwd=self.repo, env=env,
+        source_shim = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ro_git.py")
+        r = subprocess.run([sys.executable, source_shim, "status"], cwd=self.repo, env=env,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("misconfigured", r.stderr)
+
+    def test_throwaway_repo_allows_mutations(self):
+        t_repo = make_repo(parent=THROWAWAY_ROOT)
+        try:
+            for args in [["commit", "--allow-empty", "-m", "msg"], ["stash"], ["reset", "--hard"], ["checkout", "-b", "x"]]:
+                with self.subTest(args=args):
+                    r = shim(t_repo, args)
+                    self.assertNotEqual(r.returncode, REFUSED, r.stderr)
+                    self.assertNotIn("ro-shell: refused", r.stderr)
+        finally:
+            shutil.rmtree(t_repo, ignore_errors=True)
+
+    def test_init_and_clone_allowed(self):
+        new_repo = os.path.join(THROWAWAY_ROOT, "new_repo")
+        r = shim(self.repo, ["init", new_repo])
+        self.assertNotEqual(r.returncode, REFUSED, r.stderr)
+        self.assertNotIn("ro-shell: refused", r.stderr)
+
+    def test_worktree_operations(self):
+        wt_path = os.path.join(THROWAWAY_ROOT, "wt")
+        r = shim(self.repo, ["worktree", "add", "--detach", wt_path, "HEAD"])
+        self.assertNotEqual(r.returncode, REFUSED, r.stderr)
+        self.assertNotIn("ro-shell: refused", r.stderr)
+
+        # Inside that worktree, stash is REFUSED because common dir is shared repo
+        r_stash = shim(wt_path, ["stash"])
+        self.assertEqual(r_stash.returncode, REFUSED, r_stash.stderr)
+        self.assertIn("ro-shell: refused", r_stash.stderr)
+
+        # Worktree remove --force on temp path succeeds
+        r_rm = shim(self.repo, ["worktree", "remove", "--force", wt_path])
+        self.assertNotEqual(r_rm.returncode, REFUSED, r_rm.stderr)
+        self.assertNotIn("ro-shell: refused", r_rm.stderr)
+
+        # Worktree add with branch creation is refused
+        r_b = shim(self.repo, ["worktree", "add", "-b", "nb", os.path.join(THROWAWAY_ROOT, "wt2"), "HEAD"])
+        self.assertEqual(r_b.returncode, REFUSED, r_b.stderr)
+        self.assertIn("ro-shell: refused", r_b.stderr)
+
+        # Worktree add to non-temp path is refused
+        non_temp_wt = os.path.join(SHARED_ROOT, "wt_nontemp")
+        r_nt = shim(self.repo, ["worktree", "add", "--detach", non_temp_wt, "HEAD"])
+        self.assertEqual(r_nt.returncode, REFUSED, r_nt.stderr)
+        self.assertIn("ro-shell: refused", r_nt.stderr)
 
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -123,6 +186,7 @@ class CheckCommandTest(unittest.TestCase):
         import ro_shell
         for cmd in ["/nix/store/abc-git-2.50/bin/git stash", "/run/current-system/sw/bin/git reset --hard",
                     "PATH=/usr/bin git stash", "env PATH=/x git stash", "export PATH=/x; git stash",
+                    "RO_SHELL_TMP_ROOTS=/ git stash", "export RO_SHELL_TMP_ROOTS=/; git stash",
                     "command -p git stash", "x=1 PATH=/y git status",
                     "bash -lc 'command -v git'", "bash -lc 'git stash'", "bash -cl 'git stash'",
                     "bash -l -c 'git stash'", "bash -il 'git stash'",
@@ -189,6 +253,12 @@ class RunCommandTest(unittest.TestCase):
         self.assertIn("ro-shell: refused", out)
         self.assertEqual(snapshot(self.repo), before)
 
+    def test_child_env_lacks_sensitive_vars(self):
+        import ro_shell
+        code, out = ro_shell.run_command('echo "[$RO_SHELL_REAL_GIT][$RO_SHELL_TMP_ROOTS]"', self.repo, 30)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "[][]")
+
 
 @unittest.skipUnless(os.environ.get("RO_SHELL_BIN"), "packaged binary only")
 class McpStdioTest(unittest.TestCase):
@@ -225,6 +295,12 @@ class McpStdioTest(unittest.TestCase):
             r = self.rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                 "name": "shell", "arguments": {"command": "/nix/store/x-git/bin/git stash"}}})["result"]
             self.assertTrue(r.get("isError"), r)
+            r = self.rpc(proc, {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
+                "name": "shell", "arguments": {"command": 'echo "[$RO_SHELL_REAL_GIT]"; git status'},
+                "_meta": {"agent-working-dir": repo}}})["result"]
+            text = "".join(c.get("text", "") for c in r["content"])
+            self.assertIn("[]", text)
+            self.assertIn("On branch main", text)
         finally:
             proc.kill()
             if proc.stdin:

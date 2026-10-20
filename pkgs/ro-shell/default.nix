@@ -18,13 +18,14 @@ python3.pkgs.buildPythonApplication {
     mkdir -p $out/bin $out/libexec/ro-shell/bin
     cp ro_shell.py $out/bin/ro-shell
     cp ro_git.py $out/libexec/ro-shell/bin/git
+    substituteInPlace $out/libexec/ro-shell/bin/git \
+      --replace-fail '@realGit@' '${git}/bin/git'
     chmod +x $out/bin/ro-shell $out/libexec/ro-shell/bin/git
     runHook postInstall
   '';
 
   makeWrapperArgs = [
     "--set" "RO_SHELL_SHIM_DIR" "${placeholder "out"}/libexec/ro-shell/bin"
-    "--set" "RO_SHELL_REAL_GIT" "${git}/bin/git"
     "--set" "RO_SHELL_BASH" "${bash}/bin/bash"
   ];
 

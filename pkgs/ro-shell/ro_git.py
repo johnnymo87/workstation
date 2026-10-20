@@ -14,13 +14,14 @@ import subprocess
 import sys
 
 REFUSED = 3
+REAL_GIT_BAKED = "@realGit@"
 
 READ_ONLY = {
     "status", "diff", "log", "show", "blame", "annotate", "rev-parse", "rev-list",
     "ls-files", "ls-tree", "grep", "cat-file", "merge-base", "for-each-ref",
     "describe", "shortlog", "name-rev", "show-ref", "diff-tree", "diff-files",
     "diff-index", "range-diff", "whatchanged", "count-objects", "check-ignore",
-    "check-attr", "var", "help", "version", "cherry",
+    "check-attr", "var", "help", "version", "cherry", "init", "clone",
 }
 # Subcommands allowed only in list/show forms (see sub_ok).
 CONDITIONAL = {"branch", "tag", "worktree", "stash", "reflog", "config", "remote", "notes", "submodule"}
@@ -43,12 +44,40 @@ CONFIG_WRITE = {"--unset", "--unset-all", "--add", "--replace-all", "--rename-se
 REFLOG_MUTATING = {"delete", "drop", "expire", "write"}
 
 
+def get_real_git():
+    if not REAL_GIT_BAKED.startswith("@"):
+        return REAL_GIT_BAKED
+    real_git = os.environ.get("RO_SHELL_REAL_GIT", "")
+    if not real_git or not os.path.isabs(real_git):
+        refuse("RO_SHELL_REAL_GIT is not set to an absolute path (misconfigured ro-shell)")
+    return real_git
+
+
+def get_temp_roots():
+    if "RO_SHELL_TMP_ROOTS" in os.environ:
+        return [os.path.realpath(p) for p in os.environ["RO_SHELL_TMP_ROOTS"].split(":") if p]
+    roots = ["/tmp"]
+    if "TMPDIR" in os.environ and os.environ["TMPDIR"]:
+        roots.append(os.environ["TMPDIR"])
+    return [os.path.realpath(p) for p in roots if p]
+
+
+def under_root(path, roots):
+    real_p = os.path.realpath(path)
+    for r in roots:
+        real_r = os.path.realpath(r)
+        if real_p == real_r or real_p.startswith(real_r.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def refuse(why: str) -> "NoReturn":
     sys.stderr.write(
         f"ro-shell: refused: {why}\n"
         "This is a read-only role: git is limited to read-only subcommands "
         "(status, diff, log, show, blame, grep, rev-parse, ls-files, ... and list "
-        "forms of branch/tag/worktree/stash). Report what you need instead.\n"
+        "forms of branch/tag/worktree/stash; throwaway repos under /tmp are unrestricted). "
+        "Report what you need instead.\n"
     )
     sys.exit(REFUSED)
 
@@ -61,7 +90,7 @@ def positionals(args):
     return [a for a in args if not a.startswith("-")]
 
 
-def sub_ok(sub, rest):
+def sub_ok(sub, rest, effective_cwd, roots):
     f = flags(rest)
     if any(a == "--output" or a.startswith("--output=") for a in rest):
         return False
@@ -76,7 +105,45 @@ def sub_ok(sub, rest):
     if sub == "tag":
         return not (f & TAG_MUTATING) and (not positionals(rest) or bool(f & TAG_LISTING))
     if sub == "worktree":
-        return rest[:1] == ["list"]
+        if rest[:1] == ["list"]:
+            return True
+        if rest[:1] == ["add"]:
+            args = rest[1:]
+            for a in args:
+                if a in ("-b", "-B") or a.startswith("-b") or a.startswith("-B") or a == "--orphan" or a.startswith("--orphan="):
+                    return False
+            path = None
+            i = 0
+            while i < len(args):
+                a = args[i]
+                if a == "--reason":
+                    i += 2
+                    continue
+                if a.startswith("-"):
+                    i += 1
+                    continue
+                path = a
+                break
+            if not path:
+                return False
+            real_path = os.path.realpath(os.path.join(effective_cwd, path)) if not os.path.isabs(path) else os.path.realpath(path)
+            return under_root(real_path, roots)
+        if rest[:1] == ["remove"]:
+            args = rest[1:]
+            path = None
+            for a in args:
+                if a in ("-f", "--force"):
+                    continue
+                if a.startswith("-"):
+                    return False
+                if path is not None:
+                    return False
+                path = a
+            if not path:
+                return False
+            real_path = os.path.realpath(os.path.join(effective_cwd, path)) if not os.path.isabs(path) else os.path.realpath(path)
+            return under_root(real_path, roots)
+        return False
     if sub == "stash":
         return rest[:1] in (["list"], ["show"])
     if sub == "reflog":
@@ -96,9 +163,7 @@ def sub_ok(sub, rest):
 
 
 def main(argv):
-    real_git = os.environ.get("RO_SHELL_REAL_GIT", "")
-    if not real_git or not os.path.isabs(real_git):
-        refuse("RO_SHELL_REAL_GIT is not set to an absolute path (misconfigured ro-shell)")
+    real_git = get_real_git()
 
     globals_, i = [], 0
     while i < len(argv):
@@ -119,6 +184,24 @@ def main(argv):
     if not rest:
         os.execv(real_git, [real_git, *globals_])
 
+    # Determine effective cwd for resolving relative paths and checking common dir
+    cwd = os.getcwd()
+    for idx, arg in enumerate(globals_):
+        if arg == "-C" and idx + 1 < len(globals_):
+            cwd = os.path.realpath(os.path.join(cwd, globals_[idx + 1]))
+
+    roots = get_temp_roots()
+
+    # Check if the repository's common dir resolves under a temp root
+    r = subprocess.run([real_git, *globals_, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        common_dir = r.stdout.strip()
+        if under_root(common_dir, roots):
+            # Throwaway repo! Allow fully.
+            os.environ.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+            os.execv(real_git, [real_git, *globals_, *rest])
+
     sub, rest = rest[0], rest[1:]
     for _ in range(5):  # alias chains
         if sub in READ_ONLY or sub in CONDITIONAL:
@@ -134,7 +217,7 @@ def main(argv):
         if not words:
             refuse(f"empty alias `git {sub}`")
         sub, rest = words[0], words[1:] + rest
-    if not sub_ok(sub, rest):
+    if not sub_ok(sub, rest, cwd, roots):
         refuse(f"`git {sub} {' '.join(rest)}`".rstrip())
 
     os.environ.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
