@@ -169,7 +169,10 @@ What a worker should understand:
   recommendation for <the human>", not as the human's approval.
 - **The human's word wins.** If the human has answered in the session since,
   the human's word wins.
-- **Don't reply to stall-watch;** it cannot receive messages.
+- **No need to reply to stall-watch; carry on.** It reads your session the next
+  time it runs, so anything you say there reaches it. Don't `swarm_send` to
+  `stall-watch` — that is not a session. It may not run soon, so ask the human
+  directly for anything that can't wait.
 
 ### If a swarm genuinely needs shared arbitration
 
