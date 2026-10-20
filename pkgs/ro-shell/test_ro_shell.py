@@ -12,20 +12,36 @@ SHIM_DIR = os.environ["RO_SHELL_SHIM_DIR"]
 REAL_GIT = os.environ["RO_SHELL_REAL_GIT"]
 REFUSED = 3
 
-BASE_PARENT = os.path.join(os.environ.get("HOME", "/tmp"), ".cache", "ro-shell-tests")
-os.makedirs(BASE_PARENT, exist_ok=True)
-TEST_BASE = tempfile.mkdtemp(dir=BASE_PARENT)
-SHARED_ROOT = os.path.join(TEST_BASE, "shared")
-THROWAWAY_ROOT = os.path.join(TEST_BASE, "throwaway")
-os.makedirs(SHARED_ROOT, exist_ok=True)
-os.makedirs(THROWAWAY_ROOT, exist_ok=True)
 
-os.environ["TMPDIR"] = THROWAWAY_ROOT
+def _find_shared_base():
+    home = os.environ.get("HOME", "")
+    candidates = []
+    if home:
+        candidates.append(os.path.join(home, ".cache", "ro-shell-tests"))
+        candidates.append(home)
+    candidates.append(os.path.join(os.getcwd(), ".ro-shell-scratch"))
+    for c in candidates:
+        try:
+            os.makedirs(c, exist_ok=True)
+            real_c = os.path.realpath(c)
+            if os.access(c, os.W_OK) and not (real_c == "/tmp" or real_c.startswith("/tmp/")):
+                return tempfile.mkdtemp(dir=c, prefix="shared-base-")
+        except OSError:
+            continue
+    raise RuntimeError("No non-/tmp writable directory found for shared repo")
+
+
+SHARED_BASE = _find_shared_base()
+SHARED_ROOT = os.path.join(SHARED_BASE, "shared")
+os.makedirs(SHARED_ROOT, exist_ok=True)
+
+THROWAWAY_ROOT = tempfile.mkdtemp(dir="/tmp", prefix="ro-shell-throwaway-")
 os.environ["RO_SHELL_TMP_ROOTS"] = THROWAWAY_ROOT
 
 
 def tearDownModule():
-    shutil.rmtree(TEST_BASE, ignore_errors=True)
+    shutil.rmtree(SHARED_BASE, ignore_errors=True)
+    shutil.rmtree(THROWAWAY_ROOT, ignore_errors=True)
 
 
 def real(repo, *args):
@@ -36,21 +52,25 @@ def make_repo(parent=None):
     if parent is None:
         parent = SHARED_ROOT
     d = tempfile.mkdtemp(dir=parent)
-    real(d, "init", "-q", "-b", "main")
-    real(d, "config", "user.email", "t@example.com")
-    real(d, "config", "user.name", "t")
-    real(d, "config", "alias.st", "status")
-    real(d, "config", "alias.lg", "log --oneline")
-    real(d, "config", "alias.co", "checkout")
-    real(d, "config", "alias.ci", "commit")
-    real(d, "config", "alias.bang", "!rm -rf .")
-    with open(os.path.join(d, "f.txt"), "w") as fh:
-        fh.write("one\n")
-    real(d, "add", "f.txt")
-    real(d, "commit", "-qm", "init")
-    with open(os.path.join(d, "f.txt"), "a") as fh:
-        fh.write("uncommitted\n")  # the peer's precious uncommitted work
-    return d
+    try:
+        real(d, "init", "-q", "-b", "main")
+        real(d, "config", "user.email", "t@example.com")
+        real(d, "config", "user.name", "t")
+        real(d, "config", "alias.st", "status")
+        real(d, "config", "alias.lg", "log --oneline")
+        real(d, "config", "alias.co", "checkout")
+        real(d, "config", "alias.ci", "commit")
+        real(d, "config", "alias.bang", "!rm -rf .")
+        with open(os.path.join(d, "f.txt"), "w") as fh:
+            fh.write("one\n")
+        real(d, "add", "f.txt")
+        real(d, "commit", "-qm", "init")
+        with open(os.path.join(d, "f.txt"), "a") as fh:
+            fh.write("uncommitted\n")  # the peer's precious uncommitted work
+        return d
+    except Exception:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
 
 
 def snapshot(repo):
@@ -103,9 +123,10 @@ REFUSED_CASES = [
 class ShimTest(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo()
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
 
     def tearDown(self):
-        shutil.rmtree(self.repo, ignore_errors=True)
+        pass
 
     def test_allowed(self):
         for args in ALLOWED:
@@ -177,6 +198,66 @@ class ShimTest(unittest.TestCase):
         self.assertEqual(r_nt.returncode, REFUSED, r_nt.stderr)
         self.assertIn("ro-shell: refused", r_nt.stderr)
 
+    def test_tmpdir_ignored_for_throwaway(self):
+        before = snapshot(self.repo)
+        env = dict(os.environ, TMPDIR=self.repo, RO_SHELL_REAL_GIT=REAL_GIT, RO_SHELL_TMP_ROOTS=THROWAWAY_ROOT)
+        r = subprocess.run([os.path.join(SHIM_DIR, "git"), "reset", "--hard"], cwd=self.repo, env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+        self.assertEqual(snapshot(self.repo), before)
+
+    def test_git_env_vars_disable_throwaway(self):
+        before = snapshot(self.repo)
+        t_repo = make_repo(parent=THROWAWAY_ROOT)
+        self.addCleanup(shutil.rmtree, t_repo, ignore_errors=True)
+        env = dict(os.environ, GIT_DIR=os.path.join(t_repo, ".git"), GIT_WORK_TREE=self.repo,
+                   RO_SHELL_REAL_GIT=REAL_GIT, RO_SHELL_TMP_ROOTS=THROWAWAY_ROOT)
+        r = subprocess.run([os.path.join(SHIM_DIR, "git"), "checkout", "--", "."], cwd=self.repo, env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+        self.assertEqual(snapshot(self.repo), before)
+
+    def test_worktree_add_requires_detach(self):
+        r = shim(self.repo, ["worktree", "add", os.path.join(THROWAWAY_ROOT, "wt_nodetach")])
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+
+    def test_worktree_remove_refuses_shared_worktree_by_name(self):
+        shared_wt = os.path.join(SHARED_ROOT, "shared_wt")
+        real(self.repo, "worktree", "add", "--detach", shared_wt, "HEAD")
+        self.addCleanup(real, self.repo, "worktree", "remove", "--force", shared_wt)
+        r = shim(THROWAWAY_ROOT, ["-C", self.repo, "worktree", "remove", "--force", "shared_wt"])
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+
+    def test_init_separate_git_dir_refused(self):
+        r = shim(self.repo, ["init", f"--separate-git-dir={os.path.join(THROWAWAY_ROOT, 'x')}"])
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+
+    def test_path_component_matching_refuses_prefix_collision(self):
+        import ro_git
+        self.assertFalse(ro_git.under_root("/tmpfoo", ["/tmp"]))
+        self.assertFalse(ro_git.under_root("/tmpfoo/bar", ["/tmp"]))
+        self.assertTrue(ro_git.under_root("/tmp/foo", ["/tmp"]))
+        self.assertTrue(ro_git.under_root("/tmp", ["/tmp"]))
+
+        root_dir = os.path.join(SHARED_BASE, "collision_root")
+        os.makedirs(root_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, root_dir, ignore_errors=True)
+        coll_dir = f"{root_dir}foo"
+        os.makedirs(coll_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, coll_dir, ignore_errors=True)
+        wt_coll = os.path.join(coll_dir, "wt")
+        source_shim = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ro_git.py")
+        env = dict(os.environ, RO_SHELL_REAL_GIT=REAL_GIT, RO_SHELL_TMP_ROOTS=root_dir)
+        r = subprocess.run([sys.executable, source_shim, "-C", self.repo, "worktree", "add", "--detach", wt_coll, "HEAD"],
+                           env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, REFUSED)
+        self.assertIn("ro-shell: refused", r.stderr)
+
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -202,18 +283,28 @@ class CheckCommandTest(unittest.TestCase):
         import ro_shell
         for cmd in ["git diff | head", "rg -n foo src/", "cd sub && git log -1", "echo $PATH",
                     "ls ~/projects/git-tools", "cat .gitignore",
-                    "bash -c 'ls -l'", "ls -l", 'sh -c "wc -l"']:
+                    "bash -c 'ls -l'", "ls -l", 'sh -c "wc -l"',
+                    "env | grep FOO", "env FOO=1 make test"]:
             with self.subTest(cmd=cmd):
                 self.assertIsNone(ro_shell.check_command(cmd))
+
+    def test_env_unsetting_path_refused(self):
+        import ro_shell
+        for cmd in ["env -i git stash", "env --ignore-environment git stash",
+                    "env -u PATH git stash", "env -uPATH git stash",
+                    "env --unset=PATH git stash", "env --unset PATH git stash"]:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(ro_shell.check_command(cmd))
 
 
 class RunCommandTest(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo()
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
         os.environ["RO_SHELL_SHIM_DIR"] = SHIM_DIR
 
     def tearDown(self):
-        shutil.rmtree(self.repo, ignore_errors=True)
+        pass
 
     def test_indirect_git_hits_shim(self):
         import ro_shell
@@ -262,6 +353,15 @@ class RunCommandTest(unittest.TestCase):
     def test_max_timeout_constant(self):
         import ro_shell
         self.assertEqual(ro_shell.MAX_TIMEOUT, 540)
+
+    def test_env_unsetting_path_execution_refused(self):
+        import ro_shell
+        before = snapshot(self.repo)
+        for cmd in ["env -i git stash", "env -u PATH git stash"]:
+            with self.subTest(cmd=cmd):
+                code, out = ro_shell.run_command(cmd, self.repo, 30)
+                self.assertIn("ro-shell: refused", out)
+        self.assertEqual(snapshot(self.repo), before)
 
 
 @unittest.skipUnless(os.environ.get("RO_SHELL_BIN"), "packaged binary only")

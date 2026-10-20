@@ -27,20 +27,24 @@ DEFAULT_TIMEOUT = 300
 # Clamp tool timeout to at most 540s so commands timeout before goose aborts the extension.
 MAX_TIMEOUT = 540
 
+try:
+    try:
+        _LIBC = ctypes.CDLL(None)
+    except Exception:
+        _LIBC = ctypes.CDLL("libc.so.6")
+except Exception:
+    _LIBC = None
+
 _ACTIVE_PGIDS = set()
-_PGIDS_LOCK = threading.Lock()
+_PGIDS_LOCK = threading.RLock()
 
 
 def _preexec_child():
-    try:
+    if _LIBC is not None:
         try:
-            libc = ctypes.CDLL(None)
+            _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0)
         except Exception:
-            libc = ctypes.CDLL("libc.so.6")
-        # PR_SET_PDEATHSIG = 1
-        libc.prctl(1, signal.SIGKILL, 0, 0, 0)
-    except Exception:
-        pass
+            pass
 
 
 def cleanup_active_process_groups():
@@ -63,7 +67,8 @@ def _watch_stdin():
     p = select.poll()
     try:
         p.register(sys.stdin.fileno(), select.POLLHUP | select.POLLERR)
-    except (ValueError, OSError):
+    except Exception as exc:
+        sys.stderr.write(f"ro-shell: failed to register stdin with poll: {exc}\n")
         return
     while True:
         try:
@@ -72,14 +77,19 @@ def _watch_stdin():
                 if ev & (select.POLLHUP | select.POLLERR):
                     cleanup_active_process_groups()
                     os._exit(0)
-        except Exception:
+        except Exception as exc:
+            sys.stderr.write(f"ro-shell: stdin watcher error: {exc}\n")
             return
+
 
 _SEP = r"(?:^|[\s;&|(`'\"=])"
 ABS_GIT = re.compile(_SEP + r"[^\s;&|()`'\"]*/git(?=$|[\s;&|)`'\"])")
 PATH_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?PATH\+?=")
 COMMAND_P = re.compile(r"\bcommand\s+-p\b")
 TMP_ROOTS_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?RO_SHELL_TMP_ROOTS\+?=")
+ENV_CLEAR_PATH = re.compile(
+    _SEP + r"env\s+(?:[^\s;&|(`'\"]+\s+)*(?:-[a-zA-Z0-9]*i[a-zA-Z0-9]*|--ignore-environment|-u\s*PATH|--unset(?:=|\s+)PATH)(?=$|[\s;&|)`'\"])"
+)
 LOGIN_SHELL = re.compile(
     r"(?:^|[\s;&|(`'\"])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
     r"(?:\s+-[a-bd-zA-BD-Z0-9]+)*"
@@ -94,12 +104,17 @@ def check_command(command: str):
         return "ro-shell: refused: git by path bypasses the read-only git shim; call plain `git`."
     if PATH_ASSIGN.search(command) or COMMAND_P.search(command) or TMP_ROOTS_ASSIGN.search(command):
         return "ro-shell: refused: changing PATH (or `command -p` or RO_SHELL_TMP_ROOTS) bypasses the read-only git shim."
+    if ENV_CLEAR_PATH.search(command):
+        return "ro-shell: refused: clearing or unsetting PATH in env bypasses the read-only git shim."
     if LOGIN_SHELL.search(command):
         return "ro-shell: refused: login shell options bypass the read-only git shim via /etc/profile; run plain commands or non-login subshells."
     return None
 
 
 def run_command(command: str, cwd: str, timeout: int):
+    refusal = check_command(command)
+    if refusal:
+        return 3, refusal + "\n"
     env = dict(os.environ)
     env.pop("RO_SHELL_REAL_GIT", None)
     env.pop("RO_SHELL_TMP_ROOTS", None)
