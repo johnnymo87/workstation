@@ -229,7 +229,15 @@ malformed -> no error; a stale error outside the floor is not unioned in.
 
 ## Known limits
 
-- Turns not run through honkd (`goose run` CLI) are not tracked.
+- Turns not run through honkd (`goose run` CLI) are not tracked. A turn that
+  succeeds outside honkd does not clear an error honkd recorded either; the
+  row stays errored until the next honkd turn or the 48 h TTL.
+- The picker shows that the last turn failed, not why: `kind`/`message` are
+  parsed but not on the row. For honkd's `rpc` and `interrupted` kinds the
+  goose transcript has no error text. A preview line is a possible follow-up.
+- There is no dismiss: retry the session, or wait out the 48 h TTL.
+- When honkd restarts mid-turn and synthesizes the turn's end, that turn reads
+  as finished.
 - Tool failures are not turn errors (the turn itself succeeded).
 - `kind`/`message` come from goose's ProviderError Display; wording is not
   a contract, `kind` is.
