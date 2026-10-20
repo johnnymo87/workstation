@@ -6,7 +6,7 @@ Env:
   RO_SHELL_SHIM_DIR  dir containing the shim installed as `git`
   RO_SHELL_REAL_GIT  the real git binary
 """
-import json, os, shutil, subprocess, sys, tempfile, unittest
+import json, os, shutil, subprocess, sys, tempfile, time, unittest
 
 SHIM_DIR = os.environ["RO_SHELL_SHIM_DIR"]
 REAL_GIT = os.environ["RO_SHELL_REAL_GIT"]
@@ -259,6 +259,10 @@ class RunCommandTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out.strip(), "[][]")
 
+    def test_max_timeout_constant(self):
+        import ro_shell
+        self.assertEqual(ro_shell.MAX_TIMEOUT, 540)
+
 
 @unittest.skipUnless(os.environ.get("RO_SHELL_BIN"), "packaged binary only")
 class McpStdioTest(unittest.TestCase):
@@ -309,6 +313,61 @@ class McpStdioTest(unittest.TestCase):
                 proc.stdout.close()
             proc.wait()
             shutil.rmtree(repo, ignore_errors=True)
+
+    def test_server_shutdown_kills_running_children(self):
+        repo = make_repo()
+        proc = subprocess.Popen([os.environ["RO_SHELL_BIN"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        pid_file = os.path.join(THROWAWAY_ROOT, "child.pid")
+        try:
+            self.rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+            self.rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            cmd = f"sleep 300 & echo $! > {pid_file} ; wait"
+            proc.stdin.write(json.dumps({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "shell", "arguments": {"command": cmd},
+                           "_meta": {"agent-working-dir": repo}}
+            }) + "\n")
+            proc.stdin.flush()
+
+            child_pid = None
+            for _ in range(50):
+                if os.path.exists(pid_file) and os.path.getsize(pid_file) > 0:
+                    try:
+                        with open(pid_file) as fh:
+                            child_pid = int(fh.read().strip())
+                        break
+                    except (ValueError, OSError):
+                        pass
+                time.sleep(0.1)
+            self.assertIsNotNone(child_pid, "pid file was not written")
+
+            # Child process is alive
+            os.kill(child_pid, 0)
+
+            # Close stdin of the server to trigger shutdown
+            proc.stdin.close()
+            proc.wait(timeout=5)
+
+            # Assert child process is dead within a few seconds
+            dead = False
+            for _ in range(30):
+                try:
+                    os.kill(child_pid, 0)
+                    time.sleep(0.1)
+                except ProcessLookupError:
+                    dead = True
+                    break
+            self.assertTrue(dead, f"child process {child_pid} was not killed on server shutdown")
+        finally:
+            proc.kill()
+            if proc.stdout:
+                proc.stdout.close()
+            proc.wait()
+            shutil.rmtree(repo, ignore_errors=True)
+            if os.path.exists(pid_file):
+                os.unlink(pid_file)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,7 @@ def ro_extensions(ro_shell_cmd):
         {"type": "platform", "name": "developer", "available_tools": ["tree", "read_image"]},
         {"type": "platform", "name": "analyze"},
         {"type": "platform", "name": "skills"},
+        # timeout: 600 matches ro_shell.py MAX_TIMEOUT=540 (gives 60s headroom for clean timeout)
         {"type": "stdio", "name": "ro-shell", "cmd": ro_shell_cmd, "args": [], "timeout": 600,
          "description": "Read-only shell", "available_tools": ["shell"]},
     ]

@@ -12,13 +12,68 @@ An accident guard with parity to opencode's denylist, not a sandbox: `sed -i`
 and `echo >` still write. Env (set by the Nix wrapper): RO_SHELL_SHIM_DIR,
 RO_SHELL_REAL_GIT, RO_SHELL_BASH.
 """
+import ctypes
 import os
 import re
+import select
 import signal
 import subprocess
+import sys
+import threading
 
 MAX_OUTPUT = 100_000
 DEFAULT_TIMEOUT = 300
+# Goose extension timeout is 600s (gen_goose_roles.py ro_extensions).
+# Clamp tool timeout to at most 540s so commands timeout before goose aborts the extension.
+MAX_TIMEOUT = 540
+
+_ACTIVE_PGIDS = set()
+_PGIDS_LOCK = threading.Lock()
+
+
+def _preexec_child():
+    try:
+        try:
+            libc = ctypes.CDLL(None)
+        except Exception:
+            libc = ctypes.CDLL("libc.so.6")
+        # PR_SET_PDEATHSIG = 1
+        libc.prctl(1, signal.SIGKILL, 0, 0, 0)
+    except Exception:
+        pass
+
+
+def cleanup_active_process_groups():
+    with _PGIDS_LOCK:
+        pgids = list(_ACTIVE_PGIDS)
+        _ACTIVE_PGIDS.clear()
+    for pgid in pgids:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def _handle_signal(signum, frame):
+    cleanup_active_process_groups()
+    sys.exit(128 + signum)
+
+
+def _watch_stdin():
+    p = select.poll()
+    try:
+        p.register(sys.stdin.fileno(), select.POLLHUP | select.POLLERR)
+    except (ValueError, OSError):
+        return
+    while True:
+        try:
+            events = p.poll(250)
+            for fd, ev in events:
+                if ev & (select.POLLHUP | select.POLLERR):
+                    cleanup_active_process_groups()
+                    os._exit(0)
+        except Exception:
+            return
 
 _SEP = r"(?:^|[\s;&|(`'\"=])"
 ABS_GIT = re.compile(_SEP + r"[^\s;&|()`'\"]*/git(?=$|[\s;&|)`'\"])")
@@ -60,7 +115,10 @@ def run_command(command: str, cwd: str, timeout: int):
     )
     bash = os.environ.get("RO_SHELL_BASH", "bash")
     proc = subprocess.Popen([bash, "-c", command], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            start_new_session=True, preexec_fn=_preexec_child)
+    with _PGIDS_LOCK:
+        _ACTIVE_PGIDS.add(proc.pid)
     try:
         out, _ = proc.communicate(timeout=timeout)
         code = proc.returncode
@@ -81,6 +139,9 @@ def run_command(command: str, cwd: str, timeout: int):
             out = exc.stdout or b""
         code = -1
         text = out.decode("utf-8", "replace") + f"\n[ro-shell: timed out after {timeout}s]"
+    finally:
+        with _PGIDS_LOCK:
+            _ACTIVE_PGIDS.discard(proc.pid)
     if len(text) > MAX_OUTPUT:
         text = f"[ro-shell: output truncated to last {MAX_OUTPUT} chars]\n" + text[-MAX_OUTPUT:]
     return code, text
@@ -98,6 +159,13 @@ def working_dir_from(ctx):
 
 
 def main():
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGHUP, _handle_signal)
+
+    # Watch stdin in a background thread so if stdin closes (e.g. goose disconnects)
+    # during an in-flight tool execution, running child processes are killed immediately.
+    threading.Thread(target=_watch_stdin, daemon=True).start()
+
     from mcp.server.fastmcp import Context, FastMCP
 
     mcp = FastMCP("ro-shell")
@@ -105,17 +173,22 @@ def main():
     @mcp.tool()
     def shell(command: str, timeout_secs: int = DEFAULT_TIMEOUT, ctx: Context = None) -> str:
         """Run a bash command in the working directory and return combined stdout/stderr
-        and the exit code. git is limited to read-only subcommands (status, diff, log,
-        show, blame, grep, rev-parse, ls-files, list forms of branch/tag/worktree/stash);
-        anything else is refused. Use rg/cat/sed -n for reading files."""
+        and the exit code. timeout_secs is clamped to 1..540s (so ro-shell cleanly
+        times out before goose's 600s extension ceiling). git is limited to read-only
+        subcommands (status, diff, log, show, blame, grep, rev-parse, ls-files,
+        list forms of branch/tag/worktree/stash; throwaway repos under /tmp are
+        unrestricted); anything else is refused. Use rg/cat/sed -n for reading files."""
         refusal = check_command(command)
         if refusal:
             raise ValueError(refusal)
         cwd = working_dir_from(ctx) or os.getcwd()
-        code, out = run_command(command, cwd, max(1, min(timeout_secs, 3600)))
+        code, out = run_command(command, cwd, max(1, min(timeout_secs, MAX_TIMEOUT)))
         return f"{out.rstrip()}\n[exit code: {code}]"
 
-    mcp.run()  # stdio
+    try:
+        mcp.run()  # stdio
+    finally:
+        cleanup_active_process_groups()
 
 
 if __name__ == "__main__":
