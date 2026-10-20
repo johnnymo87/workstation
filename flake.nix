@@ -63,6 +63,8 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let
       p = pkgsFor system;
+      goose = p.callPackage ./pkgs/goose { };
+      ro-shell = p.callPackage ./pkgs/ro-shell { };
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
       # Named `bazel-scope` rather than `bazel`: the DERIVATION provides bin/bazel
@@ -94,7 +96,11 @@
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
-      goose = p.callPackage ./pkgs/goose { };
+      inherit goose;
+      goose-roles = p.callPackage ./pkgs/goose-roles {
+        agentsDir = ./assets/opencode/agents;
+        inherit ro-shell goose;
+      };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -125,6 +131,7 @@
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
+      inherit ro-shell;
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
       slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
@@ -1366,6 +1373,35 @@
           echo "GATE FAILURE: oc-tags suite did not report OK." >&2
           exit 1
         }
+        touch $out
+      '';
+
+      ro-shell-tests = let ro = (localPkgsFor devboxSystem).ro-shell; in
+        devboxPkgs.runCommand "ro-shell-tests" {
+          nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.mcp ])) devboxPkgs.git devboxPkgs.gnugrep ];
+          RO_SHELL_BIN = "${ro}/bin/ro-shell";
+          RO_SHELL_SHIM_DIR = "${ro}/libexec/ro-shell/bin";
+          RO_SHELL_REAL_GIT = "${devboxPkgs.git}/bin/git";
+        } ''
+          export HOME=$TMPDIR
+          cd ${self}
+          python3 pkgs/ro-shell/test_ro_shell.py 2>&1 | tee "$TMPDIR/ro.txt"
+          grep -q '^OK' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: ro-shell suite did not pass." >&2; exit 1; }
+          grep -q '^Ran 31 tests' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: expected 31 tests." >&2; exit 1; }
+          grep -q 'skipped' "$TMPDIR/ro.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
+          touch $out
+        '';
+
+      goose-roles-tests = devboxPkgs.runCommand "goose-roles-tests" {
+        nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.pyyaml ])) devboxPkgs.gnugrep ];
+        GOOSE_ROLES_AGENTS_DIR = "${self}/assets/opencode/agents";
+        ROLES_OUT = (localPkgsFor devboxSystem).goose-roles;   # forces the build + validate
+      } ''
+        cd ${self}
+        python3 pkgs/goose-roles/test_gen_goose_roles.py 2>&1 | tee "$TMPDIR/gr.txt"
+        grep -q '^OK' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: goose-roles suite did not pass." >&2; exit 1; }
+        grep -q '^Ran 9 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 9 tests." >&2; exit 1; }
+        grep -q 'skipped' "$TMPDIR/gr.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
         touch $out
       '';
 
