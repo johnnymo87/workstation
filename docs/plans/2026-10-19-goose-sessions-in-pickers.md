@@ -130,13 +130,16 @@ row reads `working`). Error state for goose is not reported.
 **Window.** Browse mode keeps the `limit` most recent non-archived, NON-recipe
 goose sessions. Recipe runs are ~70% of goose sessions and arrive every few
 minutes; counted against the window they would push every human chat out.
+(2026-10-20, honk-9qf.15.11.4: recipe runs are now returned too, in a second
+window of the same size and floor, marked `automated`. The ordinary picker
+hides them without counting them in `N hidden`; `,fs` id search finds them.)
 **(review)** It also drops goose sessions older than the opencode window's
 edge (`windowFloor`: the oldest tree-max `time_updated` among the opencode
 roots, applied only when the opencode window is full). Without it the two
 harnesses had different horizons: the 200th opencode root was 3.9 days old,
 and 100 of 103 listable goose sessions were older -- mostly `/tmp` probe
 sessions, which have no recipe. Measured with the floor: 3 goose rows join
-200 opencode rows. A session that is running or parked on a prompt is kept
+200 opencode rows (since honk-9qf.15.11.4, plus ~19 hidden recipe rows). A session that is running or parked on a prompt is kept
 regardless of floor and limit, the goose counterpart of opencode's
 overlay-truth union. `--ids` mode keeps exactly the requested `goose:` ids that
 honk listed (recipe runs included, marked `automated`), ignores the floor, and
@@ -213,8 +216,8 @@ the follow-up that makes `,fp` useful for goose.
 ## Known limits and follow-ups
 
 - Goose error state is not reported.
-- `,fs` id-search mode for goose ids (`spec.id_query` only knows `ses_`).
-- `honk chat --new --tag <tag>`, without which `,fp` lists no goose sessions.
+- `honk chat --new --tag <tag>`, without which `,fp` lists no goose sessions
+  (honk-9qf.15.11.5, in a honk PR).
 - Scroll-to-message for honk (M4 backlog, honk-9qf.15).
 - A failed GOOSE open now shows a warning with oc-auto-attach's last log line
   (`exec.attach` watches the exit for `goose:` ids). The opencode open stays
@@ -225,9 +228,29 @@ the follow-up that makes `,fp` useful for goose.
   warning. That is the one visible change for opencode rows.
 - Each pick holds the session in honkd while its tab is open. honkd caps held
   sessions at 64 (idle TTL 900 s); opening many old sessions can reach it.
-- Not verified: whether pigeon clears a goose session's unread count when you
-  type in `honk chat`. If it does not, `<M-r>` is the only way to clear it.
 - `/tmp` probe sessions newer than the opencode window's edge still show.
+- Id search matches goose ids only as `goose:<id>` or a bare `<YYYYMMDD>_<n>`.
+  pigeon's `gse_<uuid>` id for a goose session does not enter id mode, and
+  `goose: <id>` (with a space) is an id query that matches nothing.
+- Id search makes recipe runs easy to open, and honkd reports a run that
+  `goose run` is driving as idle even mid-turn. Opening one attaches a second
+  writer; whether honk or goose guards against that is not verified (the same
+  path existed through `,fp` and `--ids`).
+
+## Follow-ups done (2026-10-20)
+
+- Typing in `honk chat` clears a goose session's unread count, verified live
+  (honk-9qf.15.11.6). honkd's turn hook posts `turn.started` to pigeon's
+  `/goose/turn-event`, which runs the same `handleMirrorBody` -> `markAllRead`
+  path as opencode's `/mirror`; the pigeon log's `outcome=mirrored` second
+  matched `session_reads.updated_at` exactly. Telegram replies clear at
+  pigeon's `poller.dispatch`. No code change was needed.
+- `,fs` id search finds goose sessions (honk-9qf.15.11.4). `spec.id_query`
+  also enters id mode on a `goose:` prompt and on a bare goose id (8 digits,
+  `_`, digits), which it prefixes with `goose:`. `gooseRows` browse mode now
+  returns recipe runs too, marked `automated` and windowed separately from
+  human sessions: the ordinary picker hides them (they count in `N hidden`),
+  and id search, which fetches everything and shows automated rows, finds them.
 
 ## Plan
 

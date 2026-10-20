@@ -414,6 +414,23 @@ do
   check(hidden == 1, "hidden count reports the 1 dropped row, got " .. tostring(hidden))
 end
 
+-- 26b. Goose recipe runs are dropped like any automated row, but NOT counted
+-- as hidden: "N hidden" explains why the window is short, and goose recipe
+-- rows sit in a window of their own, so hiding them shortens nothing
+-- (honk-9qf.15.11.4).
+do
+  local recipe = make_row("goose:20261019_8", "idle")
+  recipe.automated = true
+  recipe.origin = "goose-recipe"
+  local oc_auto = make_row("ses_auto", "idle")
+  oc_auto.automated = true
+  local out, hidden = model.build({ recipe, oc_auto, make_row("goose:20261019_7", "idle") }, {})
+  check(#out == 1 and out[1].id == "goose:20261019_7", "the goose recipe row is dropped like any automated row")
+  check(hidden == 1, "only the opencode automated row counts as hidden, got " .. tostring(hidden))
+  local shown = model.build({ recipe }, {}, { hide_automated = false })
+  check(#shown == 1, "id search (hide_automated=false) shows the goose recipe row")
+end
+
 -- 27. THE ORDERING TEST: an errored automated row must NOT pierce through.
 -- The keep-chain starts with `if pierces then keep = true`. An automated row
 -- must be dropped ABOVE that check, enforcing the user's explicit no-exception

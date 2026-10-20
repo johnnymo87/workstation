@@ -212,6 +212,14 @@ end
 --- untouched.
 M.SESSION_ID_PREFIX = "ses_"
 
+--- Goose sessions are rows with id `goose:<YYYYMMDD>_<n>` (honk-9qf.15.11.4).
+--- A prompt beginning with this prefix is an id query too. So is a BARE goose
+--- id -- what `honk list` and `honk chat <id>` print -- but only when the
+--- whole prompt has that shape (8 digits, `_`, digits): nothing else a person
+--- types into a title search looks like it.
+M.GOOSE_ID_PREFIX = "goose:"
+local BARE_GOOSE_ID = "^%d%d%d%d%d%d%d%d_%d*$"
+
 --- Telescope's "filter this entry out" sentinel. Any score < 0 is dropped.
 M.ID_FILTERED = -1
 
@@ -220,7 +228,9 @@ M.ID_FILTERED = -1
 --- PREFIX, not substring: a prompt that merely contains `ses_` (a title search
 --- like "my ses_ notes") must not flip the mode and blank the user's search.
 --- Case-sensitive: real ids are literally lowercase `ses_`, so an
---- upper/mixed-case prompt is far more likely to be a title.
+--- upper/mixed-case prompt is far more likely to be a title. The same holds
+--- for `goose:`. A bare goose id is returned with `goose:` prepended, so it
+--- scores as a prefix match against the row id.
 ---
 --- @param prompt string|nil The raw telescope prompt
 --- @return string|nil The trimmed query, or nil if this is an ordinary prompt
@@ -229,10 +239,16 @@ function M.id_query(prompt)
     return nil
   end
   local trimmed = prompt:match("^%s*(.-)%s*$")
-  if trimmed:sub(1, #M.SESSION_ID_PREFIX) ~= M.SESSION_ID_PREFIX then
-    return nil
+  if trimmed:sub(1, #M.SESSION_ID_PREFIX) == M.SESSION_ID_PREFIX then
+    return trimmed
   end
-  return trimmed
+  if trimmed:sub(1, #M.GOOSE_ID_PREFIX) == M.GOOSE_ID_PREFIX then
+    return trimmed
+  end
+  if trimmed:match(BARE_GOOSE_ID) then
+    return M.GOOSE_ID_PREFIX .. trimmed
+  end
+  return nil
 end
 
 --- Extract the session id from a telescope entry (or a bare row).

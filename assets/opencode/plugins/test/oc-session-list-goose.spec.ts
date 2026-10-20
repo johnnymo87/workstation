@@ -230,15 +230,35 @@ describe("gooseRows", () => {
     expect(gooseRows(s, { limit: 50, ids: ["goose:20261019_1"], unread: null, pigeonIds: null })).toEqual([]);
   });
 
-  it("browse mode: keeps the `limit` most recent human sessions and leaves recipe runs out", () => {
+  it("browse mode: the `limit` most recent human sessions, then recipe runs windowed separately and marked automated", () => {
+    // Recipe runs are ~70% of goose sessions. Windowed together they would push
+    // every human chat out; left out entirely, ,fs id search (which fetches
+    // everything and lifts hide_automated) could never find one by id.
     const s = [
       session({ sessionId: "20261019_1", updatedAt: "2026-10-19T01:00:00Z" }),
       session({ sessionId: "20261019_2", updatedAt: "2026-10-19T03:00:00Z" }),
       session({ sessionId: "20261019_3", updatedAt: "2026-10-19T04:00:00Z", hasRecipe: true }),
       session({ sessionId: "20261019_4", updatedAt: "2026-10-19T02:00:00Z" }),
+      session({ sessionId: "20261019_5", updatedAt: "2026-10-19T05:00:00Z", hasRecipe: true }),
+      session({ sessionId: "20261019_6", updatedAt: "2026-10-19T00:30:00Z", hasRecipe: true }),
     ];
     const rows = gooseRows(s, { limit: 2, ids: null, unread: null, pigeonIds: null });
-    expect(rows.map((r) => r.id)).toEqual(["goose:20261019_2", "goose:20261019_4"]);
+    expect(rows.map((r) => [r.id, r.automated, r.origin, r.matched_ids])).toEqual([
+      ["goose:20261019_2", false, null, undefined],
+      ["goose:20261019_4", false, null, undefined],
+      ["goose:20261019_5", true, "goose-recipe", undefined],
+      ["goose:20261019_3", true, "goose-recipe", undefined],
+    ]);
+  });
+
+  it("browse mode: recipe runs obey the window floor too", () => {
+    const s = [
+      session({ sessionId: "20261019_1", updatedAt: "2026-10-19T01:00:00Z", hasRecipe: true }),
+      session({ sessionId: "20261019_2", updatedAt: "2026-10-19T03:00:00Z", hasRecipe: true }),
+    ];
+    const floorMs = Date.parse("2026-10-19T02:00:00Z");
+    expect(gooseRows(s, { limit: 50, ids: null, unread: null, pigeonIds: null, floorMs }).map((r) => r.id))
+      .toEqual(["goose:20261019_2"]);
   });
 
   it("ids mode: exactly the requested goose ids, recipe runs included, matched_ids set", () => {

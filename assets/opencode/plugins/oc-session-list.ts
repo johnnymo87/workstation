@@ -119,8 +119,9 @@ Options:
                        --limit is ignored and --fold adds no overlay union.
   --goose              With --with-state, also list goose sessions, from \`honk list --json\`
                        (\$OC_SESSION_LIST_HONK overrides the honk path), as rows with id
-                       goose:<goose-id>. Browse mode keeps human (non-recipe) sessions no older than
-                       the opencode window's oldest root; --ids accepts goose:<id>. Silently none
+                       goose:<goose-id>. Browse mode keeps human sessions, and separately recipe runs
+                       (marked automated), no older than the opencode window's oldest root;
+                       --ids accepts goose:<id>. Silently none
                        when honk is not installed; a warning on stderr when it is set up and fails.
   --help, -h           Show this help message
 `);
