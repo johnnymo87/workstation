@@ -180,7 +180,7 @@ cfg="$work/c15.yaml"; sample "$cfg"
 policy '{"extensions":{"extension_manager":false}}'
 out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
 check "15 exit 0" test "$rc" -eq 0
-check "15 warns about the unknown key" grep -q "WARNING: no entry for 'extension_manager'" <<<"$out"
+check "15 warns about the unknown key" grep -q "WARNING: no usable entry for 'extension_manager'" <<<"$out"
 policy '{"extensions":{"todo":true}}'
 out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"
 check "15 no warning for an existing key" bash -c '! grep -q WARNING <<<"$1"' _ "$out"
@@ -191,6 +191,13 @@ cfg="$work/c16.yaml"; printf 'extensions: nope
 bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
 check "16 non-zero exit" test "$rc" -ne 0
 check "16 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
+
+# 16b. extensions: false (a boolean, not a mapping) is refused too
+cfg="$work/c16b.yaml"; printf 'extensions: false\n' > "$cfg"; sha_before="$(sha256sum "$cfg")"
+policy '{"extensions":{"todo":true}}'
+bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+check "16b non-zero exit" test "$rc" -ne 0
+check "16b file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
 
 # 17. a multi-document file is refused, untouched
 cfg="$work/c17.yaml"; printf 'a: 1\n---\nb: 2\n' > "$cfg"; sha_before="$(sha256sum "$cfg")"
@@ -220,6 +227,26 @@ check "18 raced once" test -e "$work/raced"
 check "18 retried" grep -q 'retrying' <<<"$out"
 check "18 goose write kept" test "$(yq -r '.GOOSE_WROTE' "$cfg")" = yes
 check "18 policy applied" test "$(enabled_of "$cfg" todo)" = true
+
+# 19. a scalar entry (goose cannot read a flag from it and falls back to the
+#     extension's default) is rewritten even when the scalar equals the policy
+cfg="$work/c19.yaml"; printf 'extensions:\n  summon: false\n  todo: true\n' > "$cfg"
+policy '{"extensions":{"summon":false,"todo":true}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "19 exit 0" test "$rc" -eq 0
+check "19 summon is now a mapping" test "$(yq -r '.extensions.summon | tag' "$cfg")" = '!!map'
+check "19 summon enabled false" test "$(enabled_of "$cfg" summon)" = false
+check "19 todo is now a mapping" test "$(yq -r '.extensions.todo | tag' "$cfg")" = '!!map'
+check "19 not reported unchanged" bash -c '! grep -q unchanged <<<"$1"' _ "$out"
+
+# 20. policy keys are literal names: glob characters are refused
+cfg="$work/c20.yaml"; sample "$cfg"; sha_before="$(sha256sum "$cfg")"
+for key in 'a*' 'tod?' '*'; do
+  policy "{\"extensions\":{\"$key\":false}}"
+  bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+  check "20 '$key' refused" test "$rc" -ne 0
+done
+check "20 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
 
 # 12. no temp files left beside the config
 check "12 no temp leftovers" bash -c '! ls -A "$1" | grep -q "\.goose-config-enforce\."' _ "$work"

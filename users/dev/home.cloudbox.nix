@@ -81,8 +81,21 @@ let
     extensionmanager = false;
     scheduler = false;
   };
-  gooseExtensionPolicy = pkgs.writeText "goose-extension-policy.json"
-    (builtins.toJSON { extensions = gooseExtensionsEnabled; });
+  # The platform-extension keys goose 1.54 knows (PLATFORM_EXTENSIONS in
+  # crates/goose/src/agents/platform_extensions/mod.rs). goose ignores an
+  # unknown key, and several of these default to ON when absent, so a typo
+  # above would silently leave the real extension on: fail evaluation instead.
+  # A goose bump that adds or renames one should update this list.
+  gooseKnownExtensionKeys = [
+    "analyze" "apps" "chatrecall" "code_execution" "developer" "extensionmanager"
+    "orchestrator" "scheduler" "skills" "summarize" "summon" "todo" "tom"
+  ];
+  gooseExtensionPolicy =
+    let unknown = lib.subtractLists gooseKnownExtensionKeys (lib.attrNames gooseExtensionsEnabled);
+    in assert lib.assertMsg (unknown == [ ])
+      "gooseExtensionsEnabled has unknown goose extension key(s): ${lib.concatStringsSep ", " unknown}";
+    pkgs.writeText "goose-extension-policy.json"
+      (builtins.toJSON { extensions = gooseExtensionsEnabled; });
   gooseConfigEnforce = pkgs.callPackage ../../pkgs/goose-config-enforce { };
 
   # Shared alert helper (dedup by signature, exponential backoff, warning->error

@@ -46,8 +46,9 @@ policy="$2"
 if ! jq -e '
       (.extensions | type == "object")
       and (.extensions | to_entries | all(.value | type == "boolean"))
+      and (.extensions | keys | all(test("^[A-Za-z0-9_.-]+$")))
     ' "$policy" >/dev/null 2>&1; then
-  echo "$prog: $policy is not {\"extensions\": {name: true|false}}; nothing changed" >&2
+  echo "$prog: $policy is not {\"extensions\": {name: true|false}} with names in [A-Za-z0-9_.-]; nothing changed" >&2
   exit 65
 fi
 
@@ -61,49 +62,57 @@ if [ ! -f "$cfg" ]; then
   exit 65
 fi
 
+# check_shape <file>: a single YAML mapping (or empty) whose extensions: is a
+# mapping or absent. Separate yq calls on purpose: yq-go's `or`/`and`
+# mis-evaluate here (`or` binds tighter than `==`, and `and` is false when
+# `.extensions` is absent).
 check_shape() {
   local docs
-  docs="$(yq ea '[.] | length' "$cfg" 2>/dev/null)" || return 1
+  docs="$(yq ea '[.] | length' "$1" 2>/dev/null)" || return 1
   [ "$docs" = 1 ] || return 1
-  # Two separate calls on purpose: yq-go's `or`/`and` mis-evaluate here (`or`
-  # binds tighter than `==`, and `and` is false when `.extensions` is absent).
-  yq -e 'tag | test("^!!(map|null)$")' "$cfg" >/dev/null 2>&1 || return 1
-  yq -e '.extensions | tag | test("^!!(map|null)$")' "$cfg" >/dev/null 2>&1
+  yq -e 'tag | test("^!!(map|null)$")' "$1" >/dev/null 2>&1 || return 1
+  yq -e '.extensions | tag | test("^!!(map|null)$")' "$1" >/dev/null 2>&1
 }
-if ! check_shape; then
-  echo "$prog: $cfg is not a single YAML mapping with a mapping (or absent) extensions:; nothing changed" >&2
-  exit 65
-fi
-
-# Policy entries whose flag differs from the file: {"name": bool, ...}.
-# Not `.enabled // ...`: yq's `//` treats false as missing.
-current="$(yq -o=json '
-  .extensions // {} | with_entries(.value |= (select(tag == "!!map") | .enabled | select(tag == "!!bool")))
-' "$cfg")"
-# (jq's `//` treats false as missing too, hence the explicit type test.)
-changes="$(jq -c --argjson cur "$current" '
-  .extensions | with_entries(select(($cur[.key] | type) != "boolean" or $cur[.key] != .value))
-' "$policy")"
-created="$(jq -r --argjson cur "$current" '
-  .extensions | keys[] | select(($cur[.] | type) != "boolean")
-' "$policy")"
-
-if [ "$changes" = "{}" ]; then
-  echo "$prog: $cfg unchanged"
-  exit 0
-fi
-for name in $created; do
-  echo "$prog: WARNING: no entry for '$name' in $cfg; adding {enabled: ...}. If this is not a goose extension key it is a typo in the policy and has no effect." >&2
-done
 
 dir="$(dirname "$cfg")"
 mode="$(stat -c '%a' "$cfg")"
 tmp=""
 trap 'rm -f "$tmp"' EXIT
 for attempt in 1 2 3; do
-  before="$(sha256sum < "$cfg")"
+  # Everything below is decided from this one copy, so the change set always
+  # matches the bytes that were checked; the original is compared against it
+  # again just before the rename.
   tmp="$(mktemp "$dir/.goose-config-enforce.XXXXXX")"
   cat "$cfg" > "$tmp"
+  before="$(sha256sum < "$tmp")"
+
+  if ! check_shape "$tmp"; then
+    echo "$prog: $cfg is not a single YAML mapping with a mapping (or absent) extensions:; nothing changed" >&2
+    exit 65
+  fi
+
+  # {name: bool} for entries that are a mapping with a boolean `enabled`;
+  # anything else (scalar, null, typeless, non-boolean enabled) is null, i.e.
+  # "goose cannot read a flag here", so the policy rewrites it. yq only
+  # converts; jq decides, because yq's `//` and `|= empty` mishandle false.
+  current="$(yq -o=json '.extensions // {}' "$tmp" | jq -c '
+    with_entries(.value |= (if type == "object" and (.enabled | type) == "boolean" then .enabled else null end))
+  ')"
+  changes="$(jq -c --argjson cur "$current" '
+    .extensions | with_entries(select(($cur[.key] | type) != "boolean" or $cur[.key] != .value))
+  ' "$policy")"
+
+  if [ "$changes" = "{}" ]; then
+    echo "$prog: $cfg unchanged"
+    exit 0
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    echo "$prog: WARNING: no usable entry for '$name' in $cfg; writing {enabled: ...}. If this is not a goose extension key it is a typo in the policy and has no effect." >&2
+  done < <(jq -r --argjson cur "$current" '
+    .extensions | keys[] | select(($cur[.] | type) != "boolean")
+  ' "$policy")
+
   CH="$changes" yq -i '
     (strenv(CH) | from_json) as $ch
     | .extensions = (.extensions // {})
