@@ -62,20 +62,25 @@ def get_real_git():
 
 def get_temp_roots():
     if not TMP_ROOTS_BAKED.startswith("@"):
-        return [os.path.realpath(p) for p in TMP_ROOTS_BAKED.split(":") if p]
+        return [p for p in TMP_ROOTS_BAKED.split(":") if p]
     if "RO_SHELL_TMP_ROOTS" in os.environ:
-        return [os.path.realpath(p) for p in os.environ["RO_SHELL_TMP_ROOTS"].split(":") if p]
-    return [os.path.realpath("/tmp")]
+        return [p for p in os.environ["RO_SHELL_TMP_ROOTS"].split(":") if p]
+    return ["/tmp/ro-shell-"]
 
 
-def under_root(path, roots):
-    real_p = os.path.realpath(path)
-    for r in roots:
-        real_r = os.path.realpath(r)
-        if real_p == real_r:
-            return True
-        prefix = real_r if real_r == "/" else real_r.rstrip(os.sep) + os.sep
-        if real_p.startswith(prefix):
+def under_root(path, prefixes):
+    real_path = os.path.realpath(path)
+    for p in prefixes:
+        parent = os.path.realpath(os.path.dirname(p))
+        name_prefix = os.path.basename(p)
+        if real_path == parent:
+            continue
+        parent_prefix = parent if parent == "/" else parent.rstrip(os.sep) + os.sep
+        if not real_path.startswith(parent_prefix):
+            continue
+        rel = real_path[len(parent_prefix):]
+        top_comp = rel.split(os.sep, 1)[0]
+        if top_comp.startswith(name_prefix):
             return True
     return False
 
@@ -85,10 +90,107 @@ def refuse(why: str) -> "NoReturn":
         f"ro-shell: refused: {why}\n"
         "This is a read-only role: git is limited to read-only subcommands "
         "(status, diff, log, show, blame, grep, rev-parse, ls-files, ... and list "
-        "forms of branch/tag/worktree/stash; throwaway repos under /tmp are unrestricted). "
-        "Report what you need instead.\n"
+        "forms of branch/tag/worktree/stash; throwaway repos under $TMPDIR are "
+        "unrestricted, except pushing to non-local remotes). Report what you need instead.\n"
     )
     sys.exit(REFUSED)
+
+
+def is_non_local_url(url: str) -> bool:
+    if any(url.startswith(prefix) for prefix in ("http://", "https://", "ssh://", "git://", "ftp://", "ftps://")):
+        return True
+    if "@" in url and ":" in url and not url.startswith("/"):
+        return True
+    return False
+
+
+def check_push_allowed(rest, effective_cwd, roots, real_git, globals_):
+    i = 0
+    dest = None
+    PUSH_WITH_ARG = {"--repo", "--receive-pack", "--exec", "-o", "--push-option"}
+    while i < len(rest):
+        a = rest[i]
+        if a.startswith("--repo="):
+            dest = a.split("=", 1)[1]
+            i += 1
+            continue
+        if a in PUSH_WITH_ARG:
+            if a == "--repo" and i + 1 < len(rest):
+                dest = rest[i + 1]
+            i += 2
+            continue
+        if a.startswith("-"):
+            i += 1
+            continue
+        if dest is None:
+            dest = a
+        i += 1
+
+    if dest is None:
+        r = subprocess.run([real_git, *globals_, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                           capture_output=True, text=True)
+        upstream_remote = None
+        if r.returncode == 0:
+            upstream = r.stdout.strip()
+            if "/" in upstream:
+                upstream_remote = upstream.split("/", 1)[0]
+        dest = upstream_remote or "origin"
+
+    if is_non_local_url(dest):
+        return False
+
+    if dest.startswith("/") or dest.startswith("."):
+        real_dest = os.path.realpath(os.path.join(effective_cwd, dest))
+        return under_root(real_dest, roots)
+
+    r = subprocess.run([real_git, *globals_, "remote", "get-url", "--push", dest],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return False
+    url = r.stdout.strip()
+    if is_non_local_url(url):
+        return False
+    if url.startswith("file://"):
+        url = url[len("file://"):]
+    real_dest = os.path.realpath(os.path.join(effective_cwd, url)) if not os.path.isabs(url) else os.path.realpath(url)
+    return under_root(real_dest, roots)
+
+
+def check_remote_allowed(rest, effective_cwd, roots):
+    if not rest:
+        return True
+    action = rest[0]
+    if action in ("add", "set-url"):
+        args = rest[1:]
+        pos = [a for a in args if not a.startswith("-")]
+        if len(pos) < 2:
+            return False
+        url = pos[-1]
+        if is_non_local_url(url):
+            return False
+        if url.startswith("file://"):
+            url = url[len("file://"):]
+        real_url = os.path.realpath(os.path.join(effective_cwd, url)) if not os.path.isabs(url) else os.path.realpath(url)
+        return under_root(real_url, roots)
+    return True
+
+
+def check_submodule_allowed(rest, effective_cwd, roots):
+    if not rest:
+        return True
+    if rest[0] == "add":
+        args = rest[1:]
+        pos = [a for a in args if not a.startswith("-")]
+        if not pos:
+            return False
+        url = pos[0]
+        if is_non_local_url(url):
+            return False
+        if url.startswith("file://"):
+            url = url[len("file://"):]
+        real_url = os.path.realpath(os.path.join(effective_cwd, url)) if not os.path.isabs(url) else os.path.realpath(url)
+        return under_root(real_url, roots)
+    return True
 
 
 def flags(args):
@@ -290,25 +392,36 @@ def main(argv):
                 else:
                     is_throwaway = True
 
-    if is_throwaway:
-        os.environ.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
-        os.execv(real_git, [real_git, *globals_, *rest])
-
     sub, rest = rest[0], rest[1:]
     for _ in range(5):  # alias chains
-        if sub in READ_ONLY or sub in CONDITIONAL:
+        if not is_throwaway and (sub in READ_ONLY or sub in CONDITIONAL):
             break
         r = subprocess.run([real_git, *globals_, "config", "--get", f"alias.{sub}"],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            refuse(f"`git {sub}`")
+            if not is_throwaway:
+                refuse(f"`git {sub}`")
+            break
         expansion = r.stdout.strip()
         if expansion.startswith("!"):
-            refuse(f"shell alias `git {sub}`")
+            if not is_throwaway:
+                refuse(f"shell alias `git {sub}`")
+            break
         words = shlex.split(expansion)
         if not words:
             refuse(f"empty alias `git {sub}`")
         sub, rest = words[0], words[1:] + rest
+
+    if is_throwaway:
+        if sub == "push" and not check_push_allowed(rest, cwd, roots, real_git, globals_):
+            refuse("pushing to non-local or non-throwaway destination")
+        if sub == "remote" and not check_remote_allowed(rest, cwd, roots):
+            refuse("remote URL must be a local path under $TMPDIR")
+        if sub == "submodule" and not check_submodule_allowed(rest, cwd, roots):
+            refuse("submodule URL must be a local path under $TMPDIR")
+        os.environ.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+        os.execv(real_git, [real_git, *globals_, sub, *rest])
+
     if not sub_ok(sub, rest, cwd, roots, real_git, globals_):
         refuse(f"`git {sub} {' '.join(rest)}`".rstrip())
 

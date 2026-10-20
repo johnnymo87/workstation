@@ -16,9 +16,11 @@ import ctypes
 import os
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 
 MAX_OUTPUT = 100_000
@@ -26,6 +28,23 @@ DEFAULT_TIMEOUT = 300
 # Goose extension timeout is 600s (gen_goose_roles.py ro_extensions).
 # Clamp tool timeout to at most 540s so commands timeout before goose aborts the extension.
 MAX_TIMEOUT = 540
+
+SCRATCH_BASE = os.environ.get("RO_SHELL_SCRATCH_BASE", "/tmp")
+try:
+    _SCRATCH_DIR = tempfile.mkdtemp(prefix="ro-shell-", dir=SCRATCH_BASE)
+except Exception:
+    _SCRATCH_DIR = None
+
+SHELL_DOCSTRING = (
+    "Run a bash command in the working directory and return combined stdout/stderr "
+    "and the exit code. timeout_secs is clamped to 1..540s (so ro-shell cleanly "
+    "times out before goose's 600s extension ceiling). Use $TMPDIR for throwaway "
+    "repos; git is unrestricted only inside it. git is limited to read-only "
+    "subcommands (status, diff, log, show, blame, grep, rev-parse, ls-files, "
+    "list forms of branch/tag/worktree/stash; throwaway repos under $TMPDIR are "
+    "unrestricted, except pushing to non-local remotes); anything else is refused. "
+    "Use rg/cat/sed -n for reading files."
+)
 
 try:
     try:
@@ -58,8 +77,14 @@ def cleanup_active_process_groups():
             pass
 
 
-def _handle_signal(signum, frame):
+def cleanup_server():
     cleanup_active_process_groups()
+    if _SCRATCH_DIR and os.path.exists(_SCRATCH_DIR):
+        shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+
+
+def _handle_signal(signum, frame):
+    cleanup_server()
     sys.exit(128 + signum)
 
 
@@ -75,7 +100,7 @@ def _watch_stdin():
             events = p.poll(250)
             for fd, ev in events:
                 if ev & (select.POLLHUP | select.POLLERR):
-                    cleanup_active_process_groups()
+                    cleanup_server()
                     os._exit(0)
         except Exception as exc:
             sys.stderr.write(f"ro-shell: stdin watcher error: {exc}\n")
@@ -118,6 +143,8 @@ def run_command(command: str, cwd: str, timeout: int):
     env = dict(os.environ)
     env.pop("RO_SHELL_REAL_GIT", None)
     env.pop("RO_SHELL_TMP_ROOTS", None)
+    if _SCRATCH_DIR:
+        env["TMPDIR"] = _SCRATCH_DIR
     env["PATH"] = os.environ["RO_SHELL_SHIM_DIR"] + os.pathsep + env.get("PATH", "")
     env.update(
         GIT_PAGER="cat",
@@ -185,14 +212,8 @@ def main():
 
     mcp = FastMCP("ro-shell")
 
-    @mcp.tool()
+    @mcp.tool(description=SHELL_DOCSTRING)
     def shell(command: str, timeout_secs: int = DEFAULT_TIMEOUT, ctx: Context = None) -> str:
-        """Run a bash command in the working directory and return combined stdout/stderr
-        and the exit code. timeout_secs is clamped to 1..540s (so ro-shell cleanly
-        times out before goose's 600s extension ceiling). git is limited to read-only
-        subcommands (status, diff, log, show, blame, grep, rev-parse, ls-files,
-        list forms of branch/tag/worktree/stash; throwaway repos under /tmp are
-        unrestricted); anything else is refused. Use rg/cat/sed -n for reading files."""
         refusal = check_command(command)
         if refusal:
             raise ValueError(refusal)
@@ -200,10 +221,12 @@ def main():
         code, out = run_command(command, cwd, max(1, min(timeout_secs, MAX_TIMEOUT)))
         return f"{out.rstrip()}\n[exit code: {code}]"
 
+    shell.__doc__ = SHELL_DOCSTRING
+
     try:
         mcp.run()  # stdio
     finally:
-        cleanup_active_process_groups()
+        cleanup_server()
 
 
 if __name__ == "__main__":

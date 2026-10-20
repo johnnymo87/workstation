@@ -1387,7 +1387,7 @@
           cd ${self}
           python3 pkgs/ro-shell/test_ro_shell.py 2>&1 | tee "$TMPDIR/ro.txt"
           grep -q '^OK' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: ro-shell suite did not pass." >&2; exit 1; }
-          grep -q '^Ran 25 tests' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: expected 25 tests." >&2; exit 1; }
+          grep -q '^Ran 31 tests' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: expected 31 tests." >&2; exit 1; }
           grep -q 'skipped' "$TMPDIR/ro.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
           touch $out
         '';

@@ -22,8 +22,8 @@ READ_ONLY_NOTE = """
 You are a delegated goose subagent in a read-only role. You have no write or edit
 tool. Your `shell` tool is ro-shell: git is limited to read-only subcommands and
 anything else is refused. Do not try to work around the refusal.
-git is unrestricted only in throwaway repos under /tmp; test scripts that need git
-in other places may fail here — report that as an environment limitation, not as a test failure.
+throwaway repos you create under $TMPDIR (your private scratch dir) are unrestricted, except pushing to non-local remotes;
+test scripts that need git in other places may fail here — report that as an environment limitation, not as a test failure.
 You cannot ask the caller questions mid-task, so state your assumptions and proceed.
 Your final message is your whole report to the caller."""
 

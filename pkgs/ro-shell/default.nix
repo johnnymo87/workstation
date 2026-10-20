@@ -20,7 +20,7 @@ python3.pkgs.buildPythonApplication {
     cp ro_git.py $out/libexec/ro-shell/bin/git
     substituteInPlace $out/libexec/ro-shell/bin/git \
       --replace-fail '@realGit@' '${git}/bin/git' \
-      --replace-fail '@tmpRoots@' '/tmp'
+      --replace-fail '@tmpRoots@' '/tmp/ro-shell-'
     chmod +x $out/bin/ro-shell $out/libexec/ro-shell/bin/git
     runHook postInstall
   '';
