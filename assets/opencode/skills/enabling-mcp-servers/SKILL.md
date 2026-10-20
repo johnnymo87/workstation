@@ -28,10 +28,10 @@ session:
 
 | They type | Effect |
 |---|---|
-| `/mcp` | lists the servers: on/off, `!` = needs confirmation, unsupported ones with a reason |
-| `/mcp on slack-ro` | turns a server on |
-| `/mcp on! slack` | turns on a server marked `!` (it can write or act) |
-| `/mcp off slack-ro` | turns it off |
+| `/mcp list` | lists the servers: on/off, `!` = needs confirmation, unsupported ones with a reason |
+| `/mcp enable slack-ro` | turns a server on |
+| `/mcp enable slack!` | turns on a server marked `!` (it can write or act); the trailing `!` confirms |
+| `/mcp disable slack-ro` | turns it off |
 | `honk chat --new --mcp atlassian!` | starts a new session with a server on (`!` confirms) |
 
 Things to tell the human, and to plan around:
@@ -48,13 +48,13 @@ Things to tell the human, and to plan around:
 - **`!` servers** (anything not on honkd's `--mcp-no-confirm` list) can change things:
   Jira (atlassian), feature flags (devcycle), incidents (pagerduty), rollbar items, or a
   browser (chrome-devtools). Say what you will do with one before asking for it.
-- **Remote servers (datadog, notion) are not supported in goose yet.** `/mcp` lists them as
+- **Remote servers (datadog, notion) are not supported in goose yet.** `/mcp list` lists them as
   unsupported. Use their CLIs or ask the human.
 - The setting is **per session and persistent**. Every client of the session sees it (status
   bar `mcp:slack-ro,...`), and it survives honkd and goose-serve restarts, with one catch: when
   goose reloads a session, it silently drops a server that fails to start (for example after a
-  workstation update garbage-collected its old binary). If a tool vanished, ask for `/mcp`
-  and turn the server on again. Suggest `/mcp off <server>` when the work is done.
+  workstation update garbage-collected its old binary). If a tool vanished, ask for `/mcp list`
+  and turn the server on again. Suggest `/mcp disable <server>` when the work is done.
 - Errors from `/mcp` that are deploy matters for the human, not something you can fix from the
   session: "MCP catalog not configured" (honkd runs without `--mcp-catalog`), "method not
   found" (honkd is older than the honk CLI; restart honkd), "MCP catalog unreadable"
