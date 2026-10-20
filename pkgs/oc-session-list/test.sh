@@ -287,6 +287,22 @@ FLOOR_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --w
   || fail "oc-session-list --goose --limit 1 failed"
 grep -q '"id": "goose:20261019_7"' <<<"$FLOOR_OUT" || fail "a goose row newer than the floor was dropped"
 grep -q '"id": "goose:20261019_9"' <<<"$FLOOR_OUT" && fail "a goose row older than the full opencode window was kept"
+grep -q '"id": "goose:20261019_8"' <<<"$FLOOR_OUT" || fail "a recipe run newer than the floor was dropped"
+
+# Recipe runs have their own window, under the same floor. A honk listing ONE
+# old recipe run, so only the floor (not --limit 1) can leave it out.
+fake_honk "$TMP_DIR/honk-old-recipe" "cat <<'EOF'
+[{\"sessionId\":\"20261019_10\",\"title\":\"Ancient lane run\",\"cwd\":\"/proj\",\"held\":false,\"running\":false,
+  \"updatedAt\":\"1970-01-01T00:00:00.500Z\",\"lastMessageAt\":null,\"archivedAt\":null,\"sessionType\":\"user\",\"hasRecipe\":true}]
+EOF"
+OLD_RECIPE_FULL="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-old-recipe" "$BIN" --db "$TEST_DB" --with-state --fold --goose --limit 1 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --goose --limit 1 (old recipe) failed"
+grep -q '"id": "goose:20261019_10"' <<<"$OLD_RECIPE_FULL" && fail "a recipe run older than the full opencode window was kept"
+OLD_RECIPE_OPEN="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-old-recipe" "$BIN" --db "$TEST_DB" --with-state --fold --goose --limit 10 \
+  --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \
+  || fail "oc-session-list --goose --limit 10 (old recipe) failed"
+grep -q '"id": "goose:20261019_10"' <<<"$OLD_RECIPE_OPEN" || fail "an unfull window dropped an old recipe run"
 
 NO_GOOSE_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold \
   --overlay-dir "$LIVE_OVERLAY_DIR" --routing-db "$TMP_DIR/no-routing.db" 2>/dev/null)" \

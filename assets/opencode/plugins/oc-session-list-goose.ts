@@ -286,7 +286,7 @@ export function windowFloor(baseRows: SessionRow[], limit: number): number | nul
 }
 
 export interface GooseRowsOptions {
-  /** Browse mode: how many human (non-recipe) sessions to keep. */
+  /** Browse mode: the size of each window -- human sessions, and recipe runs separately. */
   limit: number;
   /** `--ids` mode: the requested ids (only `goose:` ones are used). null = browse. */
   ids: string[] | null;

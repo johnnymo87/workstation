@@ -60,6 +60,7 @@ M.ATTENTION = { error = true, blocked = true }
 ---   is_live?: fun(hit): boolean  -- injection seam; defaults to discovery.is_live
 --- @return table[] Array of annotated row shallow copies
 --- @return integer Count of automated rows dropped from the fetched window
+---         (goose recipe runs excluded: they use no slot in it)
 function M.build(rows, hits, opts)
   if type(rows) ~= "table" or not vim.islist(rows) then
     return {}, 0
@@ -105,7 +106,12 @@ function M.build(rows, hits, opts)
       -- Only `automated == true` drops. A missing or false field keeps the row,
       -- so an unreadable session_origin shows everything rather than hiding it.
       if hide_automated and row.automated == true then
-        hidden = hidden + 1
+        -- Goose recipe runs come in a window of their own (oc-session-list
+        -- --goose), so hiding them shortens nothing; "N hidden" explains a
+        -- short list, so they are not counted.
+        if row.origin ~= "goose-recipe" then
+          hidden = hidden + 1
+        end
       else
         local hit = safe_hits[row.id]
         local hit_table = type(hit) == "table" and hit or nil
