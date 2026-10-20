@@ -35,7 +35,7 @@ destroyed a peer's uncommitted data.
 - cfp (:8789, `GCP_VERTEX_HOST`) is Claude-only. goose has a single Vertex
   host, so goose roles must use Claude models. There is no Gemini rewrite.
 
-Research trail: `/tmp/research-goose-readonly-subagents-{question,answer}.md`
+Research trail: `docs/research/2026-10-20-goose-readonly-subagents-{question,answer}.md`
 (ChatGPT), plus upstream PRs #12802, #12938, #12430, #7160 (closed "reader"
 extension) and issue #12921.
 
