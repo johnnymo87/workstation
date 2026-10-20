@@ -56,6 +56,19 @@ export interface HonkSession {
   hasRecipe: boolean;
   /** goose->client requests (permission prompts) waiting; null from an older honk. */
   pendingRequests: number | null;
+  /**
+   * Why the last turn failed, if it did in honkd's 48 h window (bead
+   * honk-9qf.15.11.3); null otherwise and from an older honk. `at` is Unix
+   * seconds.
+   */
+  lastError: HonkTurnError | null;
+}
+
+export interface HonkTurnError {
+  /** goose's turnError kind (network, provider, ...), or honkd's rpc / interrupted. */
+  kind: string;
+  message: string;
+  at: number | null;
 }
 
 export interface GooseRow extends SessionWithStateRow {
@@ -75,6 +88,15 @@ export const HONK_TIMEOUT_MS = 2500;
 export const RECIPE_ORIGIN = "goose-recipe";
 
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+function parseTurnError(v: unknown): HonkTurnError | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const kind = str(o.kind);
+  if (kind === null) return null;
+  return { kind, message: str(o.message) ?? "", at: num(o.at) };
+}
 
 /** Parse `honk list --json` stdout. Throws unless it is a JSON array. */
 export function parseHonkList(stdout: string): HonkSession[] {
@@ -97,8 +119,8 @@ export function parseHonkList(stdout: string): HonkSession[] {
       archivedAt: str(o.archivedAt),
       sessionType: str(o.sessionType),
       hasRecipe: o.hasRecipe === true,
-      pendingRequests:
-        typeof o.pendingRequests === "number" && Number.isFinite(o.pendingRequests) ? o.pendingRequests : null,
+      pendingRequests: num(o.pendingRequests),
+      lastError: parseTurnError(o.lastError),
     });
   }
   return out;
@@ -254,6 +276,10 @@ export function buildGoosePigeonMap(routingDbPath: string): Map<string, string> 
   }
 }
 
+function errored(s: HonkSession): boolean {
+  return s.lastError !== null && !s.running;
+}
+
 function ms(v: string | null): number {
   if (!v) return 0;
   const t = Date.parse(v);
@@ -325,9 +351,13 @@ export function gooseRows(sessions: HonkSession[], opts: GooseRowsOptions): Goos
         .slice(0, Math.max(0, opts.limit))
         .map((x) => x.s);
     const human = live.filter((s) => !s.hasRecipe);
-    // A session mid-turn or parked on a prompt is never windowed out -- the
-    // goose counterpart of opencode's overlay-truth union.
-    const needsYou = (s: HonkSession) => s.running || (s.pendingRequests ?? 0) > 0;
+    // A session mid-turn, parked on a prompt, or whose last turn failed is
+    // never windowed out -- the goose counterpart of opencode's overlay-truth
+    // union. A failure older than the window's floor is not news, though: that
+    // session is windowed like any idle one.
+    const failedRecently = (s: HonkSession) =>
+      errored(s) && (floor === null || (s.lastError?.at ?? recency(s) / 1000) * 1000 >= floor);
+    const needsYou = (s: HonkSession) => s.running || (s.pendingRequests ?? 0) > 0 || failedRecently(s);
     // Recipe runs get a window of their own, so they never push a human chat
     // out of the human one. They are marked automated, so the ordinary picker
     // hides them; ,fs id search (everything fetched, hide_automated lifted)
@@ -369,7 +399,9 @@ export function gooseRows(sessions: HonkSession[], opts: GooseRowsOptions): Goos
       // honkd's view. A session driven outside honkd (the goose CLI) reads idle
       // even mid-turn; those are recipe runs, hidden from the browse list.
       activity: s.running ? "working" : "idle",
-      error: false,
+      // The picker ranks error above working, and honkd clears the error when
+      // a run starts, so a running session is never shown as errored.
+      error: errored(s),
       // A permission prompt parked in honkd makes the row `blocked`: pinned to
       // the attention group and piercing the facet, like an opencode one. honkd
       // counts them without ids, hence the placeholder entries.

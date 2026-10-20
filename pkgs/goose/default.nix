@@ -62,6 +62,11 @@
 #      extensions in parallel. honk's per-session `/mcp` (honk#18) relies on it:
 #      a hung server (e.g. mcp-remote waiting for OAuth) no longer freezes the
 #      session's tool calls or every later reload.
+#  15. ACP session/prompt reports a failed turn in `_meta.goose.turnError`
+#      {kind, message}: most provider failures otherwise end as assistant text
+#      with stopReason end_turn. honkd records it per session and the nvim
+#      pickers show the session as errored (honk-9qf.15.11.3). Absent on
+#      clean and cancelled turns; a client that ignores `_meta` sees no change.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -83,6 +88,8 @@
 # the adapter's allowedSenderIds option) identically against .5.
 # patched-1.54.0.7 adds patch 13 (johnnymo87/goose#6); patched-1.54.0.8
 # (2026-10-19) adds patch 14 (johnnymo87/goose#7); no schema change.
+# patched-1.54.0.9 (2026-10-20) adds patch 15 (johnnymo87/goose#8); no schema
+# change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -95,8 +102,8 @@
 }:
 
 let
-  version = "1.54.0-patched.8";
-  tag = "patched-1.54.0.8";
+  version = "1.54.0-patched.9";
+  tag = "patched-1.54.0.9";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -108,11 +115,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-xPnZRFkeXB8H0sP0r5JDrMiYGlte9Y/cBqLLxqLzFLA=";
+      hash = "sha256-cc6Bml7T12viBV9R8vLjQh0ot9ALpIrFXtLaQ3Er7gU=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-STPypZklTkDkTEePWEHuABI1wx+6+AqAJu045Faqj7s=";
+      hash = "sha256-8E03z7/aQ7/tHh4xg3w7UWCLsW7Amg7ftgdju+cTvuc=";
     };
   };
 

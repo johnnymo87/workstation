@@ -31,6 +31,7 @@ function session(over: Partial<HonkSession> = {}): HonkSession {
     sessionType: "acp",
     hasRecipe: false,
     pendingRequests: 0,
+    lastError: null,
     ...over,
   };
 }
@@ -117,8 +118,22 @@ describe("parseHonkList", () => {
         sessionType: null,
         hasRecipe: false,
         pendingRequests: null,
+        lastError: null,
       },
     ]);
+  });
+
+  it("reads lastError only as an object with a string kind", () => {
+    const err = { kind: "network", message: "connection reset", at: 1_760_000_000 };
+    const parsed = (lastError: unknown) =>
+      parseHonkList(JSON.stringify([{ sessionId: "20261019_2", lastError }]))[0].lastError;
+    expect(parsed(err)).toEqual(err);
+    expect(parsed({ kind: "rpc" })).toEqual({ kind: "rpc", message: "", at: null });
+    expect(parsed(null)).toBeNull();
+    expect(parsed(undefined)).toBeNull();
+    expect(parsed({ message: "no kind" })).toBeNull();
+    expect(parsed({ kind: 7 })).toBeNull();
+    expect(parsed("network")).toBeNull();
   });
 
   it("throws on output that is not a JSON array", () => {
@@ -222,6 +237,39 @@ describe("gooseRows", () => {
     const floorMs = Date.parse("2026-10-19T00:00:00Z");
     const rows = gooseRows(s, { limit: 1, ids: null, unread: null, pigeonIds: null, floorMs });
     expect(rows.map((r) => r.id).sort()).toEqual(["goose:20261019_1", "goose:20261019_2", "goose:20261019_4"]);
+  });
+
+  it("a failed last turn makes the row an error row, unless it is running again", () => {
+    const lastError = { kind: "network", message: "connection reset", at: 1_760_000_000 };
+    const opts = { limit: 50, ids: null, unread: null, pigeonIds: null };
+    const [errored] = gooseRows([session({ lastError })], opts);
+    expect(errored.error).toBe(true);
+    expect(errored.activity).toBe("idle");
+    // honkd clears the error when a run starts; until a stale list catches up,
+    // working wins, since the picker puts error ahead of working.
+    const [running] = gooseRows([session({ lastError, running: true })], opts);
+    expect(running.error).toBe(false);
+    expect(running.activity).toBe("working");
+    const [clean] = gooseRows([session()], opts);
+    expect(clean.error).toBe(false);
+  });
+
+  it("browse mode keeps an errored session past the limit and floor only if it failed after the floor", () => {
+    const floorMs = Date.parse("2026-10-19T00:00:00Z");
+    const failedAt = (iso: string) => ({ kind: "provider", message: "HTTP 500", at: Date.parse(iso) / 1000 });
+    const s = [
+      // Old session whose last turn failed after the floor: needs you.
+      session({ sessionId: "20261019_1", updatedAt: "2026-10-10T00:00:00Z", lastError: failedAt("2026-10-19T01:00:00Z") }),
+      // Its failure is older than the floor: windowed like any idle row.
+      session({ sessionId: "20261019_2", updatedAt: "2026-10-10T00:00:00Z", lastError: failedAt("2026-10-18T00:00:00Z") }),
+      session({ sessionId: "20261019_3", updatedAt: "2026-10-19T03:00:00Z" }),
+      session({ sessionId: "20261019_4", updatedAt: "2026-10-19T04:00:00Z" }),
+    ];
+    const rows = gooseRows(s, { limit: 1, ids: null, unread: null, pigeonIds: null, floorMs });
+    expect(rows.map((r) => r.id).sort()).toEqual(["goose:20261019_1", "goose:20261019_4"]);
+    // No floor (the opencode window is not full): every errored row stays.
+    const unfloored = gooseRows(s, { limit: 1, ids: null, unread: null, pigeonIds: null });
+    expect(unfloored.map((r) => r.id).sort()).toEqual(["goose:20261019_1", "goose:20261019_2", "goose:20261019_4"]);
   });
 
   it("drops archived sessions in both modes", () => {
