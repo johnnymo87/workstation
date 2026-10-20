@@ -50,12 +50,16 @@ def shim(repo, args):
 
 
 ALLOWED = [
-    ["status"], ["diff"], ["diff", "--stat", "HEAD"], ["log", "--oneline"], ["show", "HEAD"],
+    ["status"], ["diff"], ["diff", "--stat", "HEAD"], ["diff", "--output-indicator-new=>"],
+    ["log", "--oneline"], ["show", "HEAD"],
     ["blame", "f.txt"], ["rev-parse", "HEAD"], ["ls-files"], ["grep", "one"],
     ["branch"], ["branch", "-a"], ["branch", "--contains", "HEAD"], ["tag"], ["tag", "-l"],
-    ["worktree", "list"], ["stash", "list"], ["reflog"], ["config", "--get", "user.name"],
+    ["worktree", "list"], ["stash", "list"],
+    ["reflog"], ["reflog", "HEAD"], ["reflog", "main"], ["reflog", "show", "HEAD"], ["reflog", "-n", "3"],
+    ["config", "--get", "user.name"],
     ["config", "--list"], ["remote", "-v"], ["--no-pager", "log", "-1"], ["-C", ".", "status"],
     ["st"], ["lg"], ["--version"], ["merge-base", "HEAD", "HEAD"], ["cat-file", "-p", "HEAD"],
+    ["submodule", "--quiet", "status"], ["notes"],
 ]
 
 REFUSED_CASES = [
@@ -67,10 +71,15 @@ REFUSED_CASES = [
     ["checkout-index", "-a", "-f"], ["read-tree", "-u", "HEAD"], ["update-ref", "refs/heads/x", "HEAD"],
     ["branch", "-D", "main"], ["branch", "newbranch"], ["branch", "-m", "x"], ["tag", "v1"],
     ["tag", "-d", "v1"], ["worktree", "remove", "x"], ["worktree", "add", "x"],
-    ["submodule", "update"], ["gc"], ["reflog", "expire", "--all"], ["config", "user.name", "x"],
+    ["submodule", "update"], ["gc"], ["reflog", "expire", "--all"],
+    ["reflog", "-n", "1", "delete", "HEAD@{0}"],
+    ["config", "user.name", "x"],
     ["config", "--unset", "user.name"], ["diff", "--output=/tmp/ro-shell-test-out"],
+    ["log", "--output=/tmp/ro-shell-test-out"],
     ["-c", "alias.x=reset", "x", "--hard"], ["-c", "core.pager=sh", "log"],
     ["--exec-path=/tmp", "status"], ["bang"], ["stash", "pop"], ["notes", "add", "-m", "x"],
+    ["grep", "-Ols", "one"], ["grep", "--open-files-in-pager=sh", "one"],
+    ["help", "-w"], ["help", "--web"],
 ]
 
 
@@ -114,14 +123,19 @@ class CheckCommandTest(unittest.TestCase):
         import ro_shell
         for cmd in ["/nix/store/abc-git-2.50/bin/git stash", "/run/current-system/sw/bin/git reset --hard",
                     "PATH=/usr/bin git stash", "env PATH=/x git stash", "export PATH=/x; git stash",
-                    "command -p git stash", "x=1 PATH=/y git status"]:
+                    "command -p git stash", "x=1 PATH=/y git status",
+                    "bash -lc 'command -v git'", "bash -lc 'git stash'", "bash -cl 'git stash'",
+                    "bash -l -c 'git stash'", "bash -il 'git stash'",
+                    "bash --login -c 'git stash'", "sh -l -c 'git stash'",
+                    "/bin/bash -lc 'git stash'"]:
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(ro_shell.check_command(cmd))
 
     def test_normal_commands_pass(self):
         import ro_shell
         for cmd in ["git diff | head", "rg -n foo src/", "cd sub && git log -1", "echo $PATH",
-                    "ls ~/projects/git-tools", "cat .gitignore"]:
+                    "ls ~/projects/git-tools", "cat .gitignore",
+                    "bash -c 'ls -l'", "ls -l", 'sh -c "wc -l"']:
             with self.subTest(cmd=cmd):
                 self.assertIsNone(ro_shell.check_command(cmd))
 

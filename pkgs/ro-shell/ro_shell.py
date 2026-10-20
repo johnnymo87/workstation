@@ -5,6 +5,8 @@ Runs `bash -c <command>` with the ro-git shim first on PATH, so every git the
 command reaches -- directly, via sh -c, xargs, find -exec, scripts -- is
 filtered to read-only subcommands. check_command() refuses the few forms that
 would skip the shim (git by absolute path, PATH rewrites, `command -p`).
+Broad matching of paths ending in `/git` (including arguments like `cd /srv/git`)
+is a deliberate fail-closed policy: the refusal tells the agent to use plain git.
 
 An accident guard with parity to opencode's denylist, not a sandbox: `sed -i`
 and `echo >` still write. Env (set by the Nix wrapper): RO_SHELL_SHIM_DIR,
@@ -22,6 +24,12 @@ _SEP = r"(?:^|[\s;&|(`'\"=])"
 ABS_GIT = re.compile(_SEP + r"[^\s;&|()`'\"]*/git(?=$|[\s;&|)`'\"])")
 PATH_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?PATH\+?=")
 COMMAND_P = re.compile(r"\bcommand\s+-p\b")
+LOGIN_SHELL = re.compile(
+    r"(?:^|[\s;&|(`])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
+    r"(?:\s+-[a-bd-zA-BD-Z0-9]+)*"
+    r"\s+(?:--login|-[a-zA-Z]*l[a-zA-Z]*)"
+    r"(?=$|[\s;&|)`'\"])"
+)
 
 
 def check_command(command: str):
@@ -30,13 +38,15 @@ def check_command(command: str):
         return "ro-shell: refused: git by path bypasses the read-only git shim; call plain `git`."
     if PATH_ASSIGN.search(command) or COMMAND_P.search(command):
         return "ro-shell: refused: changing PATH (or `command -p`) bypasses the read-only git shim."
+    if LOGIN_SHELL.search(command):
+        return "ro-shell: refused: login shell options bypass the read-only git shim via /etc/profile; run plain commands or non-login subshells."
     return None
 
 
 def run_command(command: str, cwd: str, timeout: int):
     env = dict(os.environ)
     env["PATH"] = os.environ["RO_SHELL_SHIM_DIR"] + os.pathsep + env.get("PATH", "")
-    env.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
     bash = os.environ.get("RO_SHELL_BASH", "bash")
     proc = subprocess.Popen([bash, "-c", command], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
@@ -45,8 +55,19 @@ def run_command(command: str, cwd: str, timeout: int):
         code = proc.returncode
         text = out.decode("utf-8", "replace")
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            if proc.stdout:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+            out = exc.stdout or b""
         code = -1
         text = out.decode("utf-8", "replace") + f"\n[ro-shell: timed out after {timeout}s]"
     if len(text) > MAX_OUTPUT:

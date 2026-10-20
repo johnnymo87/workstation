@@ -40,6 +40,7 @@ CONFIG_READ = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list",
 CONFIG_WRITE = {"--unset", "--unset-all", "--add", "--replace-all", "--rename-section",
                 "--remove-section", "-e", "--edit", "set", "unset", "rename-section",
                 "remove-section", "edit"}
+REFLOG_MUTATING = {"delete", "drop", "expire", "write"}
 
 
 def refuse(why: str) -> "NoReturn":
@@ -62,7 +63,11 @@ def positionals(args):
 
 def sub_ok(sub, rest):
     f = flags(rest)
-    if any(a.startswith("--output") for a in rest):
+    if any(a == "--output" or a.startswith("--output=") for a in rest):
+        return False
+    if sub == "grep" and any(a == "-O" or a.startswith("-O") or a.startswith("--open-files-in-pager") for a in rest):
+        return False
+    if sub == "help" and bool(set(rest) & {"-w", "--web"} or any(a == "-w" or a.startswith("-w") for a in rest)):
         return False
     if sub in READ_ONLY:
         return True
@@ -75,16 +80,18 @@ def sub_ok(sub, rest):
     if sub == "stash":
         return rest[:1] in (["list"], ["show"])
     if sub == "reflog":
-        return not rest or rest[0] == "show" or rest[0].startswith("-")
+        return not bool(set(rest) & REFLOG_MUTATING)
     if sub == "config":
         return bool(f & CONFIG_READ or set(rest[:1]) & CONFIG_READ) and not (
             f & CONFIG_WRITE or set(rest[:1]) & CONFIG_WRITE)
     if sub == "remote":
         return not rest or set(rest) <= {"-v", "--verbose"} or rest[0] in ("get-url", "show")
     if sub == "notes":
-        return rest[:1] in (["list"], ["show"])
+        pos = positionals(rest)
+        return not pos or pos[0] in ("list", "show")
     if sub == "submodule":
-        return not rest or rest[0] in ("status", "summary")
+        pos = positionals(rest)
+        return not pos or pos[0] in ("status", "summary")
     return False
 
 
