@@ -53,6 +53,8 @@ class GenTest(unittest.TestCase):
         self.assertEqual(exts["ro-shell"]["available_tools"], ["shell"])
         self.assertTrue(r["instructions"].startswith("You advise."))
         self.assertIn("read-only", r["instructions"])
+        self.assertIn("git is unrestricted only in throwaway repos under /tmp", r["instructions"])
+        self.assertIn("environment limitation, not as a test failure", r["instructions"])
 
     def test_implementer_role(self):
         r = g.build_role("implementer", RW, **KW)
