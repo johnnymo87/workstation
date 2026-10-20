@@ -125,6 +125,7 @@
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
+      ro-shell = p.callPackage ./pkgs/ro-shell { };
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
       slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
@@ -1368,6 +1369,22 @@
         }
         touch $out
       '';
+
+      ro-shell-tests = let ro = (localPkgsFor devboxSystem).ro-shell; in
+        devboxPkgs.runCommand "ro-shell-tests" {
+          nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.mcp ])) devboxPkgs.git devboxPkgs.gnugrep ];
+          RO_SHELL_BIN = "${ro}/bin/ro-shell";
+          RO_SHELL_SHIM_DIR = "${ro}/libexec/ro-shell/bin";
+          RO_SHELL_REAL_GIT = "${devboxPkgs.git}/bin/git";
+        } ''
+          export HOME=$TMPDIR
+          cd ${self}
+          python3 pkgs/ro-shell/test_ro_shell.py 2>&1 | tee "$TMPDIR/ro.txt"
+          grep -q '^OK' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: ro-shell suite did not pass." >&2; exit 1; }
+          grep -q '^Ran 9 tests' "$TMPDIR/ro.txt" || { echo "GATE FAILURE: expected 9 tests." >&2; exit 1; }
+          grep -q 'skipped' "$TMPDIR/ro.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
+          touch $out
+        '';
 
       # opencode-serve-auth.sh: the serve pool's password/curl-args resolver.
       # `source`s the real production file (pkgs/opencode-serve-auth-sh's

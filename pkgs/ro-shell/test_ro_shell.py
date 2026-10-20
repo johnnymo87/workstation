@@ -194,6 +194,11 @@ class McpStdioTest(unittest.TestCase):
             self.assertTrue(r.get("isError"), r)
         finally:
             proc.kill()
+            if proc.stdin:
+                proc.stdin.close()
+            if proc.stdout:
+                proc.stdout.close()
+            proc.wait()
             shutil.rmtree(repo, ignore_errors=True)
 
 
