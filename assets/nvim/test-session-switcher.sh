@@ -177,6 +177,10 @@ cat >"$lua_file" <<'LUA'
   local folded = cli.build_argv({ fold = true })
   check(vim.tbl_contains(folded, "--fold"), "fold=true -> argv contains --fold")
   check(not vim.tbl_contains(cli.build_argv({}), "--fold"), "fold unset -> argv omits --fold")
+  -- 10b'. `--goose` (honk-9qf.15.11) is opt-in too: an older CLI caller (or an
+  --      nvim still running yesterday's Lua) must not get goose rows it cannot open.
+  check(vim.tbl_contains(cli.build_argv({ goose = true }), "--goose"), "goose=true -> argv contains --goose")
+  check(not vim.tbl_contains(cli.build_argv({}), "--goose"), "goose unset -> argv omits --goose")
 
   -- 10c. `--ids` (workstation-p8ch): comma-joined. When opts.ids is a table
   --      and no valid ids survive, emit `--ids=` so the CLI parses an empty set []

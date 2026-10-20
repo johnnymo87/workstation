@@ -103,8 +103,12 @@ function Controller:refresh(facet, cb, overrides)
   -- default to be tuned but the thing that makes rows carry `dir_missing` and
   -- `effective_state`. A flat fetch would leave act.decide's dir-gone guard
   -- reading a field that is not there, and attach into a deleted worktree.
+  -- `goose = true` is a DEFAULT, applied first so a caller can still turn it
+  -- off: goose sessions (honk-9qf.15.11) are an addition, not a correctness
+  -- requirement like fold.
   local fetch_opts = vim.tbl_extend(
     "force",
+    { goose = true },
     self.opts.fetch_opts or {},
     overrides.fetch_opts or {},
     { fold = true }

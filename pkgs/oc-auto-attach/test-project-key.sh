@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=87
+EXPECTED_ASSERTIONS=99
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -550,6 +550,57 @@ if [ -n "$oc_aa" ]; then
     printf 'FAIL  production script honors OC_NVIMS_BIN\n        OC_NVIMS_BIN never referenced in: %s\n' "$oc_aa"
     exit 1
   fi
+
+  # Goose sessions (honk-9qf.15.11), run against the BUILT script with a fake
+  # honk. Each case exits before tmux is touched. FRONTDOOR_URL points at a dead
+  # port: had a goose id fallen into the opencode probe it would poll for 30s
+  # and exit 2, so a fast exit 3 is proof the goose branch ran.
+  goose_tmp="$(mktemp -d)"
+  fake_honk() { # fake_honk <bash body>
+    printf '#!%s\n%s\n' "$(command -v bash)" "$1" >"$goose_tmp/honk"
+    chmod +x "$goose_tmp/honk"
+  }
+  run_goose() { # run_goose <sid>; prints the exit code
+    local rc=0
+    OC_AA_HONK_BIN="$goose_tmp/honk" FRONTDOOR_URL=http://127.0.0.1:1 \
+      timeout 20 "$oc_aa" "$1" >/dev/null 2>"$goose_tmp/err" || rc=$?
+    printf '%s' "$rc"
+  }
+  fake_honk "echo '[]'"
+  assert_exit 1 "$(run_goose 'goose:2026;rm')" 'goose: malformed goose id is rejected (exit 1)'
+  assert_exit 1 "$(run_goose 'goose:')" 'goose: empty goose id is rejected (exit 1)'
+  assert_exit 1 "$(run_goose 'goose:abc')" 'goose: non-numeric goose id is rejected (exit 1)'
+  fake_honk "[ \"\$1 \$2\" = 'list --json' ] || exit 9; echo '[{\"sessionId\":\"20261019_8\",\"cwd\":\"/x\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session honk does not list is not found (exit 3, no front-door probe)'
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/x\",\"archivedAt\":\"2026-10-19T00:00:00Z\"}]'"
+  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: an archived session is not found (exit 3)'
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session whose directory is gone is exit 3'
+  if grep -q 'no longer exists' "$goose_tmp/err"; then
+    pass 'goose: a gone directory is named in the log'
+  else
+    printf 'FAIL  goose: a gone directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
+  fake_honk "echo 'connection failed: refused' >&2; exit 1"
+  assert_exit 2 "$(run_goose 'goose:20261019_7')" 'goose: honk failing is "could not find out" (exit 2)'
+  if grep -q 'connection failed: refused' "$goose_tmp/err"; then
+    pass 'goose: honk failure text reaches the log'
+  else
+    printf 'FAIL  goose: honk failure text reaches the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
+  fake_honk "echo 'not json'"
+  assert_exit 2 "$(run_goose 'goose:20261019_7')" 'goose: unparseable honk output is exit 2'
+  rm -rf "$goose_tmp"
+  # An nvim running pre-goose Lua refuses the open (returns 0). Driving that
+  # needs a live tmux pane and nvim, so it is pinned by source instead.
+  if grep -q 'refused to open' "$oc_aa" && grep -q 'exit 10' "$oc_aa"; then
+    pass 'goose: a refused open (old nvim Lua) exits 10 with a reason'
+  else
+    printf 'FAIL  goose: a refused open (old nvim Lua) exits 10 with a reason\n        not found in: %s\n' "$oc_aa"
+    exit 1
+  fi
 elif [ -n "${OC_AA_REQUIRE_ALL_TOOLS:-}" ]; then
   # The runner promised oc-auto-attach on PATH; absence means mis-wiring.
   printf 'FAIL  production-script integration check: oc-auto-attach missing but OC_AA_REQUIRE_ALL_TOOLS is set (check is mis-wired)\n'
@@ -827,6 +878,47 @@ if [ -f "$lua_source" ]; then
     case "$lua_out" in
       *"LUA_TEST_OK"*) pass 'lua module unit test via nvim -l (pre/post-settle discriminator)' ;;
       *) printf 'FAIL  lua module unit test via nvim -l\n        out: %s\n' "$lua_out"; exit 1 ;;
+    esac
+
+    # Goose sessions (honk-9qf.15.11): harness="goose" opens `honk chat`.
+    lua_goose_out="$(OC_AA_LUA_SOURCE="$lua_source" nvim -l /dev/stdin <<< '
+      local M = loadfile(os.getenv("OC_AA_LUA_SOURCE"))()
+      vim.notify = function() end
+      local cmd, opts, buf
+      vim.fn.jobstart = function(c, o) cmd = c; opts = o; buf = vim.api.nvim_get_current_buf(); return 300 end
+
+      assert(M.open({sid="goose:20261016_222", dir=".", url="http://x"}) == 0,
+        "a goose id without harness=goose is refused by the opencode path")
+      assert(M.open({sid="ses_abc", dir=".", harness="goose"}) == 0, "harness=goose with an opencode id is refused")
+      assert(M.open({sid="goose:2026;rm", dir=".", harness="goose"}) == 0, "a malformed goose id is refused")
+      assert(M.open({sid="goose:abc", dir=".", harness="goose"}) == 0, "a non-numeric goose id is refused")
+      assert(M.open({sid="goose:1_2;x", dir=".", harness="goose"}) == 0, "trailing junk after a goose id is refused")
+      assert(M.open({sid="20261016_222", dir=".", harness="goose"}) == 0, "a bare goose id (no prefix) is refused")
+      assert(M.open({sid="goose:20261016_222", dir="/nonexistent/dir", harness="goose"}) == 0, "a missing dir is refused")
+      assert(cmd == nil, "no job started for any refused open")
+
+      assert(M.open({sid="goose:20261016_222", dir=".", harness="goose",
+        scroll_to_message_id="msg_abc"}) == 1, "goose open needs no url")
+      vim.wait(100, function() return cmd ~= nil end)
+      assert(#cmd == 3 and cmd[1] == "honk" and cmd[2] == "chat" and cmd[3] == "20261016_222",
+        "argv is honk chat <goose-id>, got " .. vim.inspect(cmd))
+      assert(opts.cwd == ".", "honk runs in the session dir")
+      assert(opts.env == nil, "no OPENCODE_SCROLL_TO for honk")
+      assert(vim.b[buf].oc_session_id == "goose:20261016_222", "buffer carries the PICKER id, for discovery")
+      assert(M.status("goose:20261016_222") == "running", "status is keyed by the picker id")
+      opts.on_exit(300, 1, "exit")
+      assert(M.status("goose:20261016_222") == "failed", "honk exiting at once (honkd down) is a failed attach")
+
+      -- The opencode path is untouched by the goose branch.
+      cmd = nil
+      M.open({sid="ses_ok1", dir=".", url="http://127.0.0.1:4096"})
+      vim.wait(100, function() return cmd ~= nil end)
+      assert(cmd[4] == "opencode" and cmd[5] == "attach", "opencode rows still run opencode attach")
+      print("LUA_TEST_OK")
+    ' 2>&1 || true)"
+    case "$lua_goose_out" in
+      *"LUA_TEST_OK"*) pass 'lua module unit test via nvim -l (goose: honk chat)' ;;
+      *) printf 'FAIL  lua module unit test via nvim -l (goose)\n        out: %s\n' "$lua_goose_out"; exit 1 ;;
     esac
   fi
 else

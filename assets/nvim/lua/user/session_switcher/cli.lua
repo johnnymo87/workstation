@@ -94,6 +94,14 @@ function M.build_argv(opts)
   if opts.fold then
     table.insert(argv, "--fold")
   end
+  -- `--goose` (honk-9qf.15.11) adds goose sessions (ids `goose:<id>`, opened in
+  -- `honk chat`). Opt-in so a caller that cannot open them never receives them:
+  -- the CLI and this Lua deploy separately -- a running nvim keeps yesterday's
+  -- modules until it restarts -- and a picker without the goose open path would
+  -- list rows that fail silently on Enter.
+  if opts.goose then
+    table.insert(argv, "--goose")
+  end
   if opts.limit then
     table.insert(argv, "--limit")
     table.insert(argv, tostring(opts.limit))

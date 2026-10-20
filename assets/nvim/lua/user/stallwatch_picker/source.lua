@@ -222,6 +222,8 @@ function M.fetch(opts, cb)
       end
       list_fetch({
         fold = true,
+        -- goose:<id> is how oc-tags names a goose session (honk-9qf.15.11).
+        goose = true,
         ids = valid_ids,
         system = system,
         timeout_ms = opts.list_timeout_ms or M.LIST_TIMEOUT_MS,

@@ -91,6 +91,7 @@ do
   check(list_argv ~= nil, "step 3 ran oc-session-list exactly via cli.fetch")
   check(vim.tbl_contains(list_argv, "--fold") and vim.tbl_contains(list_argv, "--with-state"), "--with-state --fold")
   check(not vim.tbl_contains(list_argv, "--limit"), "ids mode sends no --limit")
+  check(vim.tbl_contains(list_argv, "--goose"), "--goose, so goose:<id> tags resolve (honk-9qf.15.11)")
   local i = vim.fn.index(list_argv, "--ids")
   check(i >= 0, "--ids present")
   check(list_argv[i + 2] == "ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1",

@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { queryBaseList, queryTreesForIds, queryTreesForSessions } from "./oc-session-list-base.js";
 import { queryWithState, runOrphanGc } from "./oc-session-list-state.js";
 import { foldRows } from "./oc-session-list-fold.js";
+import { finishGooseRows, isGooseId, startGooseFetch, windowFloor } from "./oc-session-list-goose.js";
 
 export interface CliOptions {
   limit: number;
@@ -19,6 +20,11 @@ export interface CliOptions {
    * fall back to the recency window, which would answer a different question.
    */
   ids: string[] | null;
+  /**
+   * `--goose`: include goose sessions (from `honk list --json`) in --with-state
+   * output. Opt-in; plain mode never includes them.
+   */
+  goose: boolean;
 }
 
 export function parseCliArgs(args: string[]): CliOptions {
@@ -36,6 +42,7 @@ export function parseCliArgs(args: string[]): CliOptions {
   let gc = false;
   let help = false;
   let ids: string[] | null = null;
+  let goose = false;
   const splitIds = (v: string): string[] =>
     v.split(",").map((s) => s.trim()).filter((s) => s !== "");
 
@@ -73,6 +80,8 @@ export function parseCliArgs(args: string[]): CliOptions {
       overlayDir = arg.slice(14);
     } else if (arg === "--gc") {
       gc = true;
+    } else if (arg === "--goose") {
+      goose = true;
     } else if (arg === "--ids") {
       const next = args[i + 1];
       const val = next && !next.startsWith("-") ? args[++i] : "";
@@ -89,7 +98,7 @@ export function parseCliArgs(args: string[]): CliOptions {
   // meaningless. Fall back to the default rather than surprising the caller.
   if (!Number.isFinite(limit) || limit <= 0) limit = 50;
 
-  return { limit, dbPath, routingDbPath, overlayDir, withState, fold, gc, help, ids };
+  return { limit, dbPath, routingDbPath, overlayDir, withState, fold, gc, help, ids, goose };
 }
 
 export function printHelp(): void {
@@ -108,11 +117,16 @@ Options:
   --ids <id,...>       Resolve exactly these sessions (a child id brings its whole root tree;
                        archived and unknown ids are dropped). Replaces the recency window:
                        --limit is ignored and --fold adds no overlay union.
+  --goose              With --with-state, also list goose sessions, from \`honk list --json\`
+                       (\$OC_SESSION_LIST_HONK overrides the honk path), as rows with id
+                       goose:<goose-id>. Browse mode keeps human (non-recipe) sessions no older than
+                       the opencode window's oldest root; --ids accepts goose:<id>. Silently none
+                       when honk is not installed; a warning on stderr when it is set up and fails.
   --help, -h           Show this help message
 `);
 }
 
-export function main(args: string[] = process.argv.slice(2)): void {
+export async function main(args: string[] = process.argv.slice(2)): Promise<void> {
   const options = parseCliArgs(args);
 
   if (options.help) {
@@ -129,6 +143,13 @@ export function main(args: string[] = process.argv.slice(2)): void {
     runOrphanGc(options.overlayDir);
   }
 
+  // Started BEFORE the opencode DB work and awaited at the merge, so honkd's
+  // latency overlaps the sqlite reads instead of adding to them.
+  const gooseFetch =
+    options.withState && options.goose
+      ? startGooseFetch({ env: process.env, ids: options.ids })
+      : null;
+
   try {
     const db = new Database(options.dbPath, { readonly: true });
     const warn = (msg: string) => console.error(`oc-session-list: ${msg}`);
@@ -139,8 +160,10 @@ export function main(args: string[] = process.argv.slice(2)): void {
     // the answer is the set that was asked for, not that set plus whatever
     // else is attention-worthy right now.
     const idsMode = options.ids !== null;
+    // goose:<id> names a goose session, which opencode.db has never heard of.
+    const opencodeIds = (options.ids ?? []).filter((id) => !isGooseId(id));
     const baseRows = idsMode
-      ? queryTreesForIds(db, options.ids ?? [], warn)
+      ? queryTreesForIds(db, opencodeIds, warn)
       : queryBaseList(db, { limit: options.limit });
 
     if (options.withState) {
@@ -154,7 +177,20 @@ export function main(args: string[] = process.argv.slice(2)): void {
         // where it belongs and leaves the plain --with-state shape untouched.
         ...(options.fold && !idsMode ? { unionLookup: (sids: string[]) => queryTreesForSessions(db, sids) } : {}),
       });
-      const out = options.fold ? foldRows(rowsWithState) : rowsWithState;
+      // Goose rows join AFTER queryWithState, so the overlay merge, owner map and
+      // nodata tripwire (all written for opencode serves) never see them, and
+      // BEFORE foldRows, so the one sort places every row.
+      const gooseRows = gooseFetch
+        ? finishGooseRows(await gooseFetch, {
+            limit: options.limit,
+            ids: options.ids,
+            routingDbPath: options.routingDbPath,
+            floorMs: idsMode ? null : windowFloor(baseRows, options.limit),
+            onWarn: warn,
+          })
+        : [];
+      const allRows = gooseRows.length > 0 ? [...rowsWithState, ...gooseRows] : rowsWithState;
+      const out = options.fold ? foldRows(allRows) : allRows;
       console.log(JSON.stringify(out, null, 2));
     } else {
       console.log(JSON.stringify(baseRows, null, 2));
@@ -166,5 +202,5 @@ export function main(args: string[] = process.argv.slice(2)): void {
 }
 
 if (import.meta.main) {
-  main();
+  await main();
 }

@@ -145,7 +145,14 @@ local function watermark_for_row(row)
     return nil
   end
 
+  -- pigeon keys a goose session's ledger by its OWN id (gse_...), which the row
+  -- carries as pigeon_session_id; the picker id (goose:<id>) means nothing to
+  -- pigeon. Opencode rows have no such field, so they keep using row.id.
   local sid = row.id
+  local pigeon_sid = row.pigeon_session_id
+  if type(pigeon_sid) == "string" and pigeon_sid ~= "" then
+    sid = pigeon_sid
+  end
   if sid == nil or sid == vim.NIL or type(sid) ~= "string" or sid == "" then
     return nil
   end
