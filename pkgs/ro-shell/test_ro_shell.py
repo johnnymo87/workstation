@@ -106,5 +106,96 @@ class ShimTest(unittest.TestCase):
         self.assertEqual(r.returncode, REFUSED)
 
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+class CheckCommandTest(unittest.TestCase):
+    def test_bypasses_refused(self):
+        import ro_shell
+        for cmd in ["/nix/store/abc-git-2.50/bin/git stash", "/run/current-system/sw/bin/git reset --hard",
+                    "PATH=/usr/bin git stash", "env PATH=/x git stash", "export PATH=/x; git stash",
+                    "command -p git stash", "x=1 PATH=/y git status"]:
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(ro_shell.check_command(cmd))
+
+    def test_normal_commands_pass(self):
+        import ro_shell
+        for cmd in ["git diff | head", "rg -n foo src/", "cd sub && git log -1", "echo $PATH",
+                    "ls ~/projects/git-tools", "cat .gitignore"]:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(ro_shell.check_command(cmd))
+
+
+class RunCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo()
+        os.environ["RO_SHELL_SHIM_DIR"] = SHIM_DIR
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_indirect_git_hits_shim(self):
+        import ro_shell
+        before = snapshot(self.repo)
+        for cmd in ["sh -c 'git stash'", "echo stash | xargs git", "find . -maxdepth 0 -exec git stash \\;",
+                    "bash -c 'cd . && git checkout -- f.txt'", "git co .", "(git reset --hard)"]:
+            with self.subTest(cmd=cmd):
+                code, out = ro_shell.run_command(cmd, self.repo, 30)
+                self.assertIn("ro-shell: refused", out)
+        self.assertEqual(snapshot(self.repo), before)
+
+    def test_read_only_git_works_and_cwd_honoured(self):
+        import ro_shell
+        code, out = ro_shell.run_command("git diff --stat && pwd", self.repo, 30)
+        self.assertEqual(code, 0, out)
+        self.assertIn("f.txt", out)
+        self.assertIn(os.path.realpath(self.repo), os.path.realpath(out.strip().splitlines()[-1]))
+
+    def test_timeout(self):
+        import ro_shell
+        code, out = ro_shell.run_command("sleep 5", self.repo, 1)
+        self.assertIn("timed out", out)
+
+
+@unittest.skipUnless(os.environ.get("RO_SHELL_BIN"), "packaged binary only")
+class McpStdioTest(unittest.TestCase):
+    """End-to-end over stdio JSON-RPC against the PACKAGED binary."""
+
+    def rpc(self, proc, msg):
+        proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+        if "id" not in msg:
+            return None
+        while True:
+            line = proc.stdout.readline()
+            self.assertTrue(line, "server closed stdout")
+            resp = json.loads(line)
+            if resp.get("id") == msg["id"]:
+                return resp
+
+    def test_tools_list_and_call(self):
+        repo = make_repo()
+        proc = subprocess.Popen([os.environ["RO_SHELL_BIN"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        try:
+            self.rpc(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}})
+            self.rpc(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+            tools = self.rpc(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
+            self.assertEqual([t["name"] for t in tools], ["shell"])
+            r = self.rpc(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                "name": "shell", "arguments": {"command": "pwd; git stash"},
+                "_meta": {"agent-working-dir": repo}}})["result"]
+            text = "".join(c.get("text", "") for c in r["content"])
+            self.assertIn(os.path.realpath(repo), text)       # goose's per-call working dir honoured
+            self.assertIn("ro-shell: refused", text)
+            r = self.rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+                "name": "shell", "arguments": {"command": "/nix/store/x-git/bin/git stash"}}})["result"]
+            self.assertTrue(r.get("isError"), r)
+        finally:
+            proc.kill()
+            shutil.rmtree(repo, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
