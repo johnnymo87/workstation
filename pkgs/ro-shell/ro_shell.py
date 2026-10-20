@@ -27,7 +27,7 @@ COMMAND_P = re.compile(r"\bcommand\s+-p\b")
 LOGIN_SHELL = re.compile(
     r"(?:^|[\s;&|(`'\"])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
     r"(?:\s+-[a-bd-zA-BD-Z0-9]+)*"
-    r"\s+(?:--login|-[a-zA-Z]*l[a-zA-Z]*)"
+    r"\s+(?:--login|--interactive|-[a-zA-Z]*[li][a-zA-Z]*)"
     r"(?=$|[\s;&|)`'\"])"
 )
 
@@ -46,7 +46,15 @@ def check_command(command: str):
 def run_command(command: str, cwd: str, timeout: int):
     env = dict(os.environ)
     env["PATH"] = os.environ["RO_SHELL_SHIM_DIR"] + os.pathsep + env.get("PATH", "")
-    env.update(GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    env.update(
+        GIT_PAGER="cat",
+        PAGER="cat",
+        GIT_TERMINAL_PROMPT="0",
+        GIT_OPTIONAL_LOCKS="0",
+        __ETC_PROFILE_DONE="1",
+        __NIXOS_SET_ENVIRONMENT_DONE="1",
+        __HM_SESS_VARS_SOURCED="1",
+    )
     bash = os.environ.get("RO_SHELL_BASH", "bash")
     proc = subprocess.Popen([bash, "-c", command], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)

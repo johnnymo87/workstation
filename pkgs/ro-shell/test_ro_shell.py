@@ -126,6 +126,8 @@ class CheckCommandTest(unittest.TestCase):
                     "command -p git stash", "x=1 PATH=/y git status",
                     "bash -lc 'command -v git'", "bash -lc 'git stash'", "bash -cl 'git stash'",
                     "bash -l -c 'git stash'", "bash -il 'git stash'",
+                    "bash -i -c 'git stash'", "bash -ic 'git stash'", "bash -ci 'git stash'",
+                    "bash --interactive -c 'git stash'", "sh -i -c 'git stash'",
                     "bash --login -c 'git stash'", "sh -l -c 'git stash'",
                     "/bin/bash -lc 'git stash'", "bash -c 'bash -lc \"git stash\"'",
                     "sh -c \"bash --login -c 'git stash'\""]:
@@ -170,6 +172,22 @@ class RunCommandTest(unittest.TestCase):
         import ro_shell
         code, out = ro_shell.run_command("sleep 5", self.repo, 1)
         self.assertIn("timed out", out)
+
+    def test_profile_markers_in_child_env(self):
+        import ro_shell
+        code, out = ro_shell.run_command(
+            "echo $__ETC_PROFILE_DONE$__NIXOS_SET_ENVIRONMENT_DONE$__HM_SESS_VARS_SOURCED",
+            self.repo, 30
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "111")
+
+    def test_interactive_shell_hits_shim(self):
+        import ro_shell
+        before = snapshot(self.repo)
+        code, out = ro_shell.run_command("bash -i -c 'git stash'", self.repo, 30)
+        self.assertIn("ro-shell: refused", out)
+        self.assertEqual(snapshot(self.repo), before)
 
 
 @unittest.skipUnless(os.environ.get("RO_SHELL_BIN"), "packaged binary only")
