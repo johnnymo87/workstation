@@ -101,6 +101,7 @@
         agentsDir = ./assets/opencode/agents;
         inherit ro-shell goose;
       };
+      goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -2048,6 +2049,26 @@
         }
         cat "$TMPDIR/out.txt"
         grep -q '^hm-deploy-gate-behaviour: ALL PASS$' "$TMPDIR/out.txt"
+        touch $out
+      '';
+
+      # goose-config-enforce rewrites a file goose itself writes, on every
+      # switch. The suite is mostly about what it must NOT touch (other fields,
+      # other keys, an unparseable file, a non-boolean policy, a file that
+      # already matches). The count is PINNED: a suite that stops asserting
+      # still exits 0.
+      goose-config-enforce = devboxPkgs.runCommand "goose-config-enforce-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.yq-go devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } ''
+        cd ${self}
+        bash pkgs/goose-config-enforce/test.sh > "$TMPDIR/out.txt" 2>&1 || {
+          cat "$TMPDIR/out.txt"; exit 1;
+        }
+        cat "$TMPDIR/out.txt"
+        grep -q '^goose-config-enforce: 40 passed$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 40 assertions." >&2
+          exit 1
+        }
         touch $out
       '';
 

@@ -652,6 +652,9 @@ in
   # anyway. Environment variables ARE above the file -- goose's Config::get_param
   # checks env before the file -- so the unit pins every scalar it cares about
   # here and lets the file supply only `extensions:` and `active_provider`.
+  # The `enabled` flags under `extensions:` are re-applied from
+  # gooseExtensionsEnabled in users/dev/home.cloudbox.nix on every home-manager
+  # switch (pkgs/goose-config-enforce); the file itself stays writable.
   systemd.services.goose-serve = {
     description = "Goose ACP server (backend for pigeon /launch --backend goose)";
     wantedBy = [ "multi-user.target" ];
