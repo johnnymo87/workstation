@@ -58,7 +58,8 @@ local function make_finder(rows, opts)
   })
 end
 
---- Make telescope's generic sorter answer `ses_...` prompts with SESSION IDs.
+--- Make telescope's generic sorter answer id prompts (`ses_...`, `goose:...`, a
+--- bare goose id; see spec.id_query) with SESSION IDs.
 ---
 --- WHY A SORTER WRAPPER, and not the two alternatives:
 ---

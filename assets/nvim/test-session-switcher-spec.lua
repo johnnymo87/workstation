@@ -2509,6 +2509,39 @@ do
   check(spec.id_query(123) == nil, "non-string prompt is not an id query")
 end
 
+-- 76b. id_query for GOOSE ids (honk-9qf.15.11.4). Goose rows are
+--      `goose:<YYYYMMDD>_<n>`, and an id is handed over either with that prefix
+--      (oc-tags, the picker) or bare (honk list, honk chat <id>).
+do
+  check(spec.GOOSE_ID_PREFIX == "goose:", "the goose mode prefix is the picker's goose id prefix")
+  check(spec.id_query("goose:20261016_2") == "goose:20261016_2", "a goose:-prefixed prompt is an id query")
+  check(spec.id_query("goose:") == "goose:", "the bare goose: prefix is id mode (it lists every goose session)")
+  check(spec.id_query("  goose:2026  ") == "goose:2026", "whitespace is trimmed off a goose query")
+  -- Bare ids are normalised onto the row id's prefix, so they score as a prefix match.
+  check(spec.id_query("20261016_222") == "goose:20261016_222", "a bare goose id is an id query, normalised to goose:")
+  check(spec.id_query("20261016_") == "goose:20261016_", "8 digits and the underscore are enough to flip the mode")
+  check(spec.id_query(" 20261016_2 ") == "goose:20261016_2", "a bare id is trimmed before it is normalised")
+  -- Everything below MUST stay in ordinary title mode.
+  check(spec.id_query("goose") == nil, "'goose' without the colon is a plausible title fragment, NOT an id query")
+  check(spec.id_query("Goose:2026") == nil, "the goose trigger is case-sensitive like ses_")
+  check(spec.id_query("my goose:1") == nil, "'goose:' in the middle of a prompt does not flip the mode")
+  check(spec.id_query("20261016") == nil, "digits without the underscore stay a title search")
+  check(spec.id_query("2026101_2") == nil, "7 digits and an underscore are not a goose id")
+  check(spec.id_query("20261016_2 notes") == nil, "a goose id followed by words is a title search")
+  check(spec.id_query("20261016_2a") == nil, "a bare goose id has only digits after the underscore")
+
+  local G = "goose:20261016_222"
+  check(spec.id_score(G, spec.id_query("20261016_2")) == 0, "a bare partial id finds the goose row, best score")
+  check(spec.id_score(G, spec.id_query("goose:20261016_222")) == 0, "the whole goose id matches its row")
+  check(spec.id_score(G, spec.id_query("goose:")) == 0, "goose: matches every goose row")
+  check(spec.id_score("goose:20261017_1", spec.id_query("20261016_")) == spec.ID_FILTERED,
+    "a different day's goose id is filtered out")
+  check(spec.id_score("ses_f73a030f3ffePG2zTAA5vhy30d", spec.id_query("goose:")) == spec.ID_FILTERED,
+    "goose: never matches an opencode row")
+  check(spec.id_score(G, spec.id_query("ses_")) == spec.ID_FILTERED, "ses_ never matches a goose row")
+  check(spec.session_id_of({ value = { id = G } }) == G, "session_id_of reads a goose row id like any other")
+end
+
 -- 77. session_id_of: reaching the id from a telescope entry.
 do
   local row = { id = "ses_f73a030f3ffePG2zTAA5vhy30d", title = "T" }

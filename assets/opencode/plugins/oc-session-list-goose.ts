@@ -300,12 +300,14 @@ export interface GooseRowsOptions {
 /**
  * Turn honk's list into picker rows.
  *
- * Browse mode keeps the `limit` most recent NON-recipe sessions. Recipe runs
- * (lanes, stall-watch coordinators, some test runs) are 70% of goose sessions and
- * arrive every few minutes, so counting them against the window would push
- * every human chat out of it; they are reachable through `--ids`, where the
- * stall-watch picker names them. In `--ids` mode recipe rows are kept and
- * marked `automated`.
+ * Browse mode keeps the `limit` most recent NON-recipe sessions, then, in a
+ * separate window of the same size and floor, the most recent recipe runs.
+ * Recipe runs (lanes, stall-watch coordinators, some test runs) are 70% of
+ * goose sessions and arrive every few minutes, so counting them against the
+ * human window would push every human chat out of it. Recipe rows are marked
+ * `automated` in both modes: the ordinary picker hides them, ,fs id search
+ * finds them, and `--ids` (the stall-watch picker) returns exactly the ids
+ * asked for.
  */
 export function gooseRows(sessions: HonkSession[], opts: GooseRowsOptions): GooseRow[] {
   let picked: HonkSession[];
@@ -315,18 +317,26 @@ export function gooseRows(sessions: HonkSession[], opts: GooseRowsOptions): Goos
     picked = live.filter((s) => wanted.has(s.sessionId));
   } else {
     const floor = opts.floorMs ?? null;
+    const window = (list: HonkSession[]) =>
+      list
+        .map((s) => ({ s, t: recency(s) }))
+        .filter((x) => floor === null || x.t >= floor)
+        .sort((a, b) => b.t - a.t || (a.s.sessionId < b.s.sessionId ? -1 : 1))
+        .slice(0, Math.max(0, opts.limit))
+        .map((x) => x.s);
     const human = live.filter((s) => !s.hasRecipe);
     // A session mid-turn or parked on a prompt is never windowed out -- the
     // goose counterpart of opencode's overlay-truth union.
     const needsYou = (s: HonkSession) => s.running || (s.pendingRequests ?? 0) > 0;
-    const windowed = human
-      .filter((s) => !needsYou(s))
-      .map((s) => ({ s, t: recency(s) }))
-      .filter((x) => floor === null || x.t >= floor)
-      .sort((a, b) => b.t - a.t || (a.s.sessionId < b.s.sessionId ? -1 : 1))
-      .slice(0, Math.max(0, opts.limit))
-      .map((x) => x.s);
-    picked = [...human.filter(needsYou), ...windowed];
+    // Recipe runs get a window of their own, so they never push a human chat
+    // out of the human one. They are marked automated, so the ordinary picker
+    // hides them; ,fs id search (everything fetched, hide_automated lifted)
+    // is what reaches them.
+    picked = [
+      ...human.filter(needsYou),
+      ...window(human.filter((s) => !needsYou(s))),
+      ...window(live.filter((s) => s.hasRecipe)),
+    ];
   }
 
   return picked.map((s): GooseRow => {

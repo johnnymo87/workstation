@@ -1795,8 +1795,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 114 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (893 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 893 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (914 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 914 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (136 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -2350,7 +2350,7 @@
               expected_skips=1
               ;;
             test/oc-session-list-goose.spec.ts)
-              expected_expects=62
+              expected_expects=63
               expected_skips=0
               ;;
             *)

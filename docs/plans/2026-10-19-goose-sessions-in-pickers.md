@@ -213,8 +213,8 @@ the follow-up that makes `,fp` useful for goose.
 ## Known limits and follow-ups
 
 - Goose error state is not reported.
-- `,fs` id-search mode for goose ids (`spec.id_query` only knows `ses_`).
-- `honk chat --new --tag <tag>`, without which `,fp` lists no goose sessions.
+- `honk chat --new --tag <tag>`, without which `,fp` lists no goose sessions
+  (honk-9qf.15.11.5, in a honk PR).
 - Scroll-to-message for honk (M4 backlog, honk-9qf.15).
 - A failed GOOSE open now shows a warning with oc-auto-attach's last log line
   (`exec.attach` watches the exit for `goose:` ids). The opencode open stays
@@ -225,9 +225,22 @@ the follow-up that makes `,fp` useful for goose.
   warning. That is the one visible change for opencode rows.
 - Each pick holds the session in honkd while its tab is open. honkd caps held
   sessions at 64 (idle TTL 900 s); opening many old sessions can reach it.
-- Not verified: whether pigeon clears a goose session's unread count when you
-  type in `honk chat`. If it does not, `<M-r>` is the only way to clear it.
 - `/tmp` probe sessions newer than the opencode window's edge still show.
+
+## Follow-ups done (2026-10-20)
+
+- Typing in `honk chat` clears a goose session's unread count, verified live
+  (honk-9qf.15.11.6). honkd's turn hook posts `turn.started` to pigeon's
+  `/goose/turn-event`, which runs the same `handleMirrorBody` -> `markAllRead`
+  path as opencode's `/mirror`; the pigeon log's `outcome=mirrored` second
+  matched `session_reads.updated_at` exactly. Telegram replies clear at
+  pigeon's `poller.dispatch`. No code change was needed.
+- `,fs` id search finds goose sessions (honk-9qf.15.11.4). `spec.id_query`
+  also enters id mode on a `goose:` prompt and on a bare goose id (8 digits,
+  `_`, digits), which it prefixes with `goose:`. `gooseRows` browse mode now
+  returns recipe runs too, marked `automated` and windowed separately from
+  human sessions: the ordinary picker hides them (they count in `N hidden`),
+  and id search, which fetches everything and shows automated rows, finds them.
 
 ## Plan
 

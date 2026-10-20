@@ -252,12 +252,16 @@ if (!g) { console.error("goose row missing"); process.exit(1); }
 if (g.harness !== "goose" || g.effective_state !== "working" || g.directory !== "/proj") {
   console.error("goose row has the wrong shape:", g); process.exit(1);
 }
-if (rows.some(r => r.id === "goose:20261019_8")) { console.error("browse mode listed a recipe run"); process.exit(1); }
+// A recipe run is listed (so ,fs id search can find it) but marked automated,
+// which the ordinary picker hides.
+const lane = rows.find(r => r.id === "goose:20261019_8");
+if (!lane || lane.automated !== true) { console.error("recipe run missing or not automated:", lane); process.exit(1); }
 // The opencode window is not full (2 roots, --limit 10), so it has no floor.
 if (!rows.some(r => r.id === "goose:20261019_9")) { console.error("an unfull window dropped an old goose row"); process.exit(1); }
 if (!rows.some(r => r.id === "root_1")) { console.error("opencode rows lost"); process.exit(1); }
-// Newest first: the goose row (2026) is newer than every fixture row (epoch 1970).
-if (rows[0].id !== "goose:20261019_7") { console.error("goose row not placed by the fold sort:", rows.map(r => r.id)); process.exit(1); }
+// Newest first: the goose rows (2026) are newer than every fixture row (epoch 1970).
+const order = rows.map(r => r.id);
+if (order[0] !== "goose:20261019_8" || order[1] !== "goose:20261019_7") { console.error("goose row not placed by the fold sort:", rows.map(r => r.id)); process.exit(1); }
 ' "$GOOSE_OUT" || fail "goose rows not merged into the fold correctly"
 
 GOOSE_IDS_OUT="$(OC_SESSION_LIST_HONK="$TMP_DIR/honk-two" "$BIN" --db "$TEST_DB" --with-state --fold --goose \
