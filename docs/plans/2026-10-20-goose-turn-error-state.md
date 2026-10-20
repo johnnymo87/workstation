@@ -221,11 +221,11 @@ malformed -> no error; a stale error outside the floor is not unioned in.
 
 ## Shipped (2026-10-20)
 
-- goose: johnnymo87/goose#8 (patch 15, tag `patched-1.54.0.9`).
-- honk: honkd `State.turn_errors`, `turn::turn_outcome`, `session/list`
-  `_meta.honk.error`, `honk list --json` `lastError`.
-- workstation: this PR (goose bump, honk flake bump, oc-session-list
-  mapping).
+- goose: johnnymo87/goose#8 (patch 15), released as `patched-1.54.0.9`.
+- honk: johnnymo87/honk#22 (honkd `State.turn_errors`, `session/list`
+  `_meta.honk.error`, `honk list --json` `lastError`).
+- workstation: the PR that carries this doc (goose pin bump, honk flake bump,
+  oc-session-list mapping).
 
 ## Known limits
 
