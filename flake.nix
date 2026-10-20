@@ -63,6 +63,8 @@
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let
       p = pkgsFor system;
+      goose = p.callPackage ./pkgs/goose { };
+      ro-shell = p.callPackage ./pkgs/ro-shell { };
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
       # Named `bazel-scope` rather than `bazel`: the DERIVATION provides bin/bazel
@@ -94,7 +96,11 @@
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };
-      goose = p.callPackage ./pkgs/goose { };
+      inherit goose;
+      goose-roles = p.callPackage ./pkgs/goose-roles {
+        agentsDir = ./assets/opencode/agents;
+        inherit ro-shell goose;
+      };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -125,7 +131,7 @@
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
-      ro-shell = p.callPackage ./pkgs/ro-shell { };
+      inherit ro-shell;
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
       slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
@@ -1385,6 +1391,19 @@
           grep -q 'skipped' "$TMPDIR/ro.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
           touch $out
         '';
+
+      goose-roles-tests = devboxPkgs.runCommand "goose-roles-tests" {
+        nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.pyyaml ])) devboxPkgs.gnugrep ];
+        GOOSE_ROLES_AGENTS_DIR = "${self}/assets/opencode/agents";
+        ROLES_OUT = (localPkgsFor devboxSystem).goose-roles;   # forces the build + validate
+      } ''
+        cd ${self}
+        python3 pkgs/goose-roles/test_gen_goose_roles.py 2>&1 | tee "$TMPDIR/gr.txt"
+        grep -q '^OK' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: goose-roles suite did not pass." >&2; exit 1; }
+        grep -q '^Ran 9 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 9 tests." >&2; exit 1; }
+        grep -q 'skipped' "$TMPDIR/gr.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
+        touch $out
+      '';
 
       # opencode-serve-auth.sh: the serve pool's password/curl-args resolver.
       # `source`s the real production file (pkgs/opencode-serve-auth-sh's
