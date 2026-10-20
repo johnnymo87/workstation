@@ -127,7 +127,8 @@ class CheckCommandTest(unittest.TestCase):
                     "bash -lc 'command -v git'", "bash -lc 'git stash'", "bash -cl 'git stash'",
                     "bash -l -c 'git stash'", "bash -il 'git stash'",
                     "bash --login -c 'git stash'", "sh -l -c 'git stash'",
-                    "/bin/bash -lc 'git stash'"]:
+                    "/bin/bash -lc 'git stash'", "bash -c 'bash -lc \"git stash\"'",
+                    "sh -c \"bash --login -c 'git stash'\""]:
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(ro_shell.check_command(cmd))
 

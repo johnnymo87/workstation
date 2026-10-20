@@ -25,7 +25,7 @@ ABS_GIT = re.compile(_SEP + r"[^\s;&|()`'\"]*/git(?=$|[\s;&|)`'\"])")
 PATH_ASSIGN = re.compile(r"(?:^|[\s;&|(`])(?:export\s+)?PATH\+?=")
 COMMAND_P = re.compile(r"\bcommand\s+-p\b")
 LOGIN_SHELL = re.compile(
-    r"(?:^|[\s;&|(`])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
+    r"(?:^|[\s;&|(`'\"])(?:[^\s;&|()`'\"]*/)?(?:bash|sh|zsh|dash)"
     r"(?:\s+-[a-bd-zA-BD-Z0-9]+)*"
     r"\s+(?:--login|-[a-zA-Z]*l[a-zA-Z]*)"
     r"(?=$|[\s;&|)`'\"])"
