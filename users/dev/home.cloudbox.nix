@@ -72,7 +72,7 @@ let
     todo = true;
     skills = true;
     chatrecall = true; # honk-9qf.20: read-only past-session search
-    summon = false; # subagents: honk-9qf.19 is bringing it in with a policy
+    summon = false; # subagents: flip here (not in config.yaml) for honk-9qf.19 Part C
     code_execution = false;
     tom = false;
     orchestrator = false;
