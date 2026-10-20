@@ -576,7 +576,8 @@ lib.mkIf isCloudbox {
   # Apply gooseExtensionsEnabled (above) to the writable config.yaml. New
   # sessions read the file per lookup, so no goose-serve restart is needed.
   # A failure warns rather than aborting the switch: an unparseable file is
-  # left exactly as it was, and goose-serve's own preflight names a missing one.
+  # left exactly as it was, and a missing one is left missing (goose-serve's
+  # preflight names it; goose creates it on first run).
   home.activation.enforceGooseExtensions = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     run ${gooseConfigEnforce}/bin/goose-config-enforce \
       "$HOME/.config/goose/config.yaml" ${gooseExtensionPolicy} \

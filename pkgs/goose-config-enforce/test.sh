@@ -114,15 +114,13 @@ chmod 0600 "$cfg"; policy '{"extensions":{"todo":false}}'
 bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1
 check "5 mode still 600" test "$(stat -c '%a' "$cfg")" = 600
 
-# 6. missing file: created with just the policy, mode 600
+# 6. missing file: left missing (creating it would skip goose's onboarding)
 cfg="$work/new/dir/config.yaml"
 policy '{"extensions":{"todo":true,"summon":false}}'
-bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
 check "6 exit 0" test "$rc" -eq 0
-check "6 file created" test -f "$cfg"
-check "6 todo true" test "$(enabled_of "$cfg" todo)" = true
-check "6 summon false" test "$(enabled_of "$cfg" summon)" = false
-check "6 mode 600" test "$(stat -c '%a' "$cfg")" = 600
+check "6 file not created" test ! -e "$cfg"
+check "6 says it does not exist" grep -q 'does not exist' <<<"$out"
 
 # 7. existing file without an extensions key: added, rest kept
 cfg="$work/c7.yaml"; printf 'GOOSE_MODE: auto\n' > "$cfg"
@@ -159,6 +157,69 @@ policy '{"extensions":{"todo":true}}'
 bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
 check "11 exit 0" test "$rc" -eq 0
 check "11 todo true" test "$(enabled_of "$cfg" todo)" = true
+
+# 13. a symlinked config: the TARGET is rewritten, the link survives, and the
+#     target keeps its own mode (not the link's 777)
+mkdir -p "$work/real"; sample "$work/real/c13.yaml"; chmod 0600 "$work/real/c13.yaml"
+ln -s "$work/real/c13.yaml" "$work/link13.yaml"
+policy '{"extensions":{"todo":true}}'
+bash "$enforce" "$work/link13.yaml" "$work/policy.json" >/dev/null 2>&1; rc=$?
+check "13 exit 0" test "$rc" -eq 0
+check "13 link is still a symlink" test -L "$work/link13.yaml"
+check "13 target updated" test "$(enabled_of "$work/real/c13.yaml" todo)" = true
+check "13 target mode still 600" test "$(stat -c '%a' "$work/real/c13.yaml")" = 600
+
+# 14. a dangling symlink counts as missing: exit 0, nothing created
+ln -s "$work/nowhere/c14.yaml" "$work/link14.yaml"
+bash "$enforce" "$work/link14.yaml" "$work/policy.json" >/dev/null 2>&1; rc=$?
+check "14 exit 0" test "$rc" -eq 0
+check "14 target not created" test ! -e "$work/nowhere/c14.yaml"
+
+# 15. a key with no entry is warned about (a typo looks exactly like this)
+cfg="$work/c15.yaml"; sample "$cfg"
+policy '{"extensions":{"extension_manager":false}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "15 exit 0" test "$rc" -eq 0
+check "15 warns about the unknown key" grep -q "WARNING: no entry for 'extension_manager'" <<<"$out"
+policy '{"extensions":{"todo":true}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"
+check "15 no warning for an existing key" bash -c '! grep -q WARNING <<<"$1"' _ "$out"
+
+# 16. a non-mapping extensions: is refused, untouched
+cfg="$work/c16.yaml"; printf 'extensions: nope
+' > "$cfg"; sha_before="$(sha256sum "$cfg")"
+bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+check "16 non-zero exit" test "$rc" -ne 0
+check "16 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
+
+# 17. a multi-document file is refused, untouched
+cfg="$work/c17.yaml"; printf 'a: 1\n---\nb: 2\n' > "$cfg"; sha_before="$(sha256sum "$cfg")"
+bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+check "17 non-zero exit" test "$rc" -ne 0
+check "17 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
+
+# 18. goose writes the file while the update is in flight: the attempt is
+#     redone, so goose's write survives AND the policy is applied
+cfg="$work/c18.yaml"; sample "$cfg"
+shim="$work/shim"; mkdir -p "$shim"
+real_yq="$(command -v yq)"
+real_bash="$(command -v bash)"  # no /usr/bin/env in the nix sandbox
+cat > "$shim/yq" <<SHIM
+#!$real_bash
+if [ "\$1" = "-i" ] && [ ! -e "$work/raced" ]; then
+  touch "$work/raced"
+  printf 'GOOSE_WROTE: yes\n' >> "$cfg"
+fi
+exec "$real_yq" "\$@"
+SHIM
+chmod +x "$shim/yq"
+policy '{"extensions":{"todo":true}}'
+out="$(PATH="$shim:$PATH" bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "18 exit 0" test "$rc" -eq 0
+check "18 raced once" test -e "$work/raced"
+check "18 retried" grep -q 'retrying' <<<"$out"
+check "18 goose write kept" test "$(yq -r '.GOOSE_WROTE' "$cfg")" = yes
+check "18 policy applied" test "$(enabled_of "$cfg" todo)" = true
 
 # 12. no temp files left beside the config
 check "12 no temp leftovers" bash -c '! ls -A "$1" | grep -q "\.goose-config-enforce\."' _ "$work"
