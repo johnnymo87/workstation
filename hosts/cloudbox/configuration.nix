@@ -721,7 +721,17 @@ in
         # cfp's Vertex leg goes through a gateway that attributes each request by the
         # caller's identity, so goose's token must carry the email scope as gcloud's
         # does; with cloud-platform alone the gateway answers 503.
-        "GCP_AUTH_SCOPES=https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email"
+        #
+        # QUOTED because the value contains a space. Entries in this list are written
+        # into the unit verbatim, and systemd splits an unquoted Environment= line at
+        # whitespace: it kept GCP_AUTH_SCOPES=<cloud-platform> and dropped the email
+        # scope as an "Invalid environment assignment" (a journal warning on every
+        # daemon-reload, nothing louder). So goose-serve ran with cloud-platform alone
+        # from the day this was added, and every request cfp routed to Vertex got the
+        # 503 above. It went unnoticed while Opus went to Max first; once that was
+        # turned off, new goose sessions sat silent. Any future entry here whose value
+        # has a space needs the same escaped quotes.
+        "\"GCP_AUTH_SCOPES=https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email\""
 
         # ---- Tool-shell environment, NOT goose's provider config. ----
         # Everything below exists for the shells goose's developer extension
