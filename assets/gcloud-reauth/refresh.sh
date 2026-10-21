@@ -149,6 +149,7 @@ PY
 # on screen at a time: a new one is skipped while the last is unanswered.
 # "Open sign-in page" raises the IdP sign-in in the isolated Chrome. Unanswered
 # alerts give up after 50 min, so the hourly runs re-ask rather than pile up.
+# REAUTH_OSASCRIPT overrides osascript, for tests only.
 # Usage: alert_human <title> <message> [signin]
 alert_human() {
   local title="$1" message="$2" signin="${3:-}" pidf="$STATE/alert.pid" pid
@@ -159,14 +160,14 @@ alert_human() {
   fi
   (
     if [ "$signin" = signin ]; then
-      ans="$(/usr/bin/osascript \
+      ans="$("${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
         -e 'on run argv' \
         -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"Later", "Open sign-in page"} default button 2 giving up after 3000' \
         -e 'if gave up of r then return "gave up"' \
         -e 'return button returned of r' \
         -e 'end run' "$title" "$message" 2>&1)"
     else
-      ans="$(/usr/bin/osascript \
+      ans="$("${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
         -e 'on run argv' \
         -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"OK"} default button 1 giving up after 3000' \
         -e 'if gave up of r then return "gave up"' \
