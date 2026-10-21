@@ -101,13 +101,22 @@ let
     let
       unknown = lib.subtractLists gooseKnownExtensionKeys (lib.attrNames gooseExtensionsEnabled);
       hasSubagentSettings =
-        gooseConfigSettings ? GOOSE_SUBAGENT_ROLES_DIR
-        && gooseConfigSettings ? GOOSE_SUBAGENT_DEFAULT_RECIPE;
+        (gooseConfigSettings ? GOOSE_SUBAGENT_ROLES_DIR)
+        && (builtins.isString gooseConfigSettings.GOOSE_SUBAGENT_ROLES_DIR)
+        && (gooseConfigSettings.GOOSE_SUBAGENT_ROLES_DIR != "")
+        && (gooseConfigSettings ? GOOSE_SUBAGENT_DEFAULT_RECIPE)
+        && (builtins.isString gooseConfigSettings.GOOSE_SUBAGENT_DEFAULT_RECIPE)
+        && (gooseConfigSettings.GOOSE_SUBAGENT_DEFAULT_RECIPE != "");
+      # Note: this checks the home-manager package, not the running goose-serve
+      # (restartIfChanged=false) -- Part C's running-binary check covers that.
+      gooseVersionOk = lib.versionAtLeast gooseCli.version "1.54.0-patched.10";
     in
     assert lib.assertMsg (unknown == [ ])
       "gooseExtensionsEnabled has unknown goose extension key(s): ${lib.concatStringsSep ", " unknown}";
     assert lib.assertMsg (!gooseExtensionsEnabled.summon || hasSubagentSettings)
-      "gooseExtensionsEnabled.summon requires GOOSE_SUBAGENT_ROLES_DIR and GOOSE_SUBAGENT_DEFAULT_RECIPE in gooseConfigSettings";
+      "gooseExtensionsEnabled.summon requires non-empty string values for GOOSE_SUBAGENT_ROLES_DIR and GOOSE_SUBAGENT_DEFAULT_RECIPE in gooseConfigSettings (goose treats empty values as unset, which would cause delegates to inherit every parent tool)";
+    assert lib.assertMsg (!gooseExtensionsEnabled.summon || gooseVersionOk)
+      "gooseExtensionsEnabled.summon requires goose >= 1.54.0-patched.10 (current: ${gooseCli.version}); older goose ignores subagent policy keys and delegates would inherit every parent tool";
     pkgs.writeText "goose-extension-policy.json"
       (builtins.toJSON {
         extensions = gooseExtensionsEnabled;

@@ -113,7 +113,12 @@ for attempt in 1 2 3; do
     .extensions | with_entries(select(($cur[.key] | type) != "boolean" or $cur[.key] != .value))
   ' "$policy")"
 
-  current_settings="$(yq -o=json '. // {}' "$tmp")"
+  setting_keys="$(jq -c '.settings // {} | keys' "$policy")"
+  if [ "$setting_keys" = "[]" ]; then
+    current_settings="{}"
+  else
+    current_settings="$(KEYS="$setting_keys" yq -o=json '(. // {}) | pick(strenv(KEYS) | from_json)' "$tmp")"
+  fi
   setting_changes="$(jq -c --argjson cur "$current_settings" '
     (.settings // {}) | with_entries(select(($cur[.key] | type) != "string" or $cur[.key] != .value))
   ' "$policy")"

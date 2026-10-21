@@ -303,6 +303,23 @@ check "25 exit 0" test "$rc" -eq 0
 check "25 todo enabled" test "$(enabled_of "$cfg" todo)" = true
 check "25 GOOSE_MODE kept" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
 
+# 26. file with non-JSON-representable value (e.g. .nan) still has extensions and settings enforced
+cfg="$work/c26.yaml"
+cat > "$cfg" <<'EOF'
+a: .nan
+GOOSE_MODE: smart_approve
+extensions:
+  todo:
+    enabled: false
+EOF
+policy '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":"/roles/path"}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "26 exit 0" test "$rc" -eq 0
+check "26 todo updated" test "$(enabled_of "$cfg" todo)" = true
+check "26 settings written" test "$(yq -r '.GOOSE_SUBAGENT_ROLES_DIR' "$cfg")" = '/roles/path'
+check "26 nan preserved" test "$(yq -r '.a' "$cfg")" = '.nan'
+check "26 GOOSE_MODE preserved" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
+
 # 12. no temp files left beside the config
 check "12 no temp leftovers" bash -c '! ls -A "$1" | grep -q "\.goose-config-enforce\."' _ "$work"
 
