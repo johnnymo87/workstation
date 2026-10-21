@@ -146,41 +146,70 @@ PY
 #
 # Runs in the background so this script carries on (or exits); the agents set
 # AbandonProcessGroup so launchd does not kill it when they do. At most one is
-# on screen at a time: a new one is skipped while the last is unanswered.
+# on screen per kind (sign-in / other) at a time; a new one is skipped while
+# the last of its kind is unanswered.
 # "Open sign-in page" raises the IdP sign-in in the isolated Chrome. Unanswered
 # alerts give up after 50 min, so the hourly runs re-ask rather than pile up.
 # REAUTH_OSASCRIPT overrides osascript, for tests only.
-# Usage: alert_human <title> <message> [signin]
+# Usage: alert_human <title> <message> [signin|ok]
+# Process start time, whitespace-normalised: ps pads lstart with trailing
+# spaces, which `read` would strip from the stored copy.
+started_at_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/ $//'; }
+
 alert_human() {
-  local title="$1" message="$2" signin="${3:-}" pidf="$STATE/alert.pid" pid
-  pid="$(cat "$pidf" 2>/dev/null)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    echo "alert already on screen (pid $pid); not stacking another"
+  local title="$1" message="$2" kind="${3:-ok}" pidf pid start buttons
+  [ "$kind" = signin ] || kind=ok
+  # One slot per kind, so a routine failure alert can never hide the sign-in
+  # prompt (or the reverse). The pid file stores pid AND start time: a pid
+  # alone is reused within the hour on this Mac, and a stale file pointing at
+  # some unrelated live process would suppress every alert, silently.
+  pidf="$STATE/alert-$kind.pid"
+  read -r pid start 2>/dev/null < "$pidf" || true
+  if [ -n "${pid:-}" ] && [ "$(started_at_of "$pid")" = "${start:-}" ]; then
+    echo "a $kind alert is already on screen (pid $pid); not stacking another"
     return
   fi
+  if [ "$kind" = signin ]; then
+    buttons='{"Later", "Open sign-in page"} default button 2'
+  else
+    buttons='{"OK"} default button 1'
+  fi
   (
-    if [ "$signin" = signin ]; then
-      ans="$("${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
-        -e 'on run argv' \
-        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"Later", "Open sign-in page"} default button 2 giving up after 3000' \
-        -e 'if gave up of r then return "gave up"' \
-        -e 'return button returned of r' \
-        -e 'end run' "$title" "$message" 2>&1)"
-    else
-      ans="$("${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
-        -e 'on run argv' \
-        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"OK"} default button 1 giving up after 3000' \
-        -e 'if gave up of r then return "gave up"' \
-        -e 'return button returned of r' \
-        -e 'end run' "$title" "$message" 2>&1)"
-    fi
+    # osascript runs as a direct, recorded child so dismiss_signin_alert can
+    # take exactly this alert down (a $(...) would hide it a level deeper).
+    out="$(mktemp "$STATE/alert.XXXXXX")"
+    "${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
+      -e 'on run argv' \
+      -e "set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons $buttons giving up after 3000" \
+      -e 'if gave up of r then return "gave up"' \
+      -e 'return button returned of r' \
+      -e 'end run' "$title" "$message" > "$out" 2>&1 &
+    opid=$!
+    echo "$opid $(started_at_of "$opid")" > "$pidf"
+    wait "$opid"
+    ans="$(cat "$out")"; rm -f "$out"
     echo "$(date -u +%FT%TZ) alert [$title] answered: $ans"
+    # Only clear the slot if it is still ours.
+    read -r cur _ 2>/dev/null < "$pidf" && [ "$cur" = "$opid" ] && rm -f "$pidf"
     if [ "$ans" = "Open sign-in page" ]; then
       IDP_ORIGIN="${IDP_ORIGIN:-}" REAUTH_CDP_URL="$CDP_URL" \
         timeout 60 "$NODE" "$LIB/raise-signin.mjs"
     fi
   ) </dev/null >>"$STATE/alert.log" 2>&1 &
-  echo $! > "$pidf"
+  # Claim the slot at once (the subshell re-records it as osascript's pid), so
+  # two alerts raised back to back cannot both get through.
+  pid=$!
+  echo "$pid $(started_at_of "$pid")" > "$pidf"
+}
+
+# Take down a sign-in prompt that is no longer true (the refresh succeeded).
+dismiss_signin_alert() {
+  local pidf="$STATE/alert-signin.pid" pid start
+  read -r pid start 2>/dev/null < "$pidf" || return 0
+  if [ -n "${pid:-}" ] && [ "$(started_at_of "$pid")" = "${start:-}" ]; then
+    kill "$pid" 2>/dev/null
+  fi
+  rm -f "$pidf"
 }
 
 failed=no
@@ -284,7 +313,9 @@ LOCK="$STATE/reauth.lock"
 for _ in $(seq 1 36); do
   if mkdir "$LOCK" 2>/dev/null; then have_lock=yes; break; fi
   # Stale lock from a killed run should not wedge the refresher forever.
-  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+  # 60, not 30: a run that waits for a sign-in twice can legitimately hold
+  # the lock ~40 min.
+  if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
     rmdir "$LOCK" 2>/dev/null
     continue
   fi
@@ -663,5 +694,8 @@ if [ "$HANDED_OFF" = yes ] && [ "$HANDOFF_REASON" = idp_login_required ] \
   fi
 fi
 
-[ "$failed" = no ] && exit 0
+if [ "$failed" = no ]; then
+  dismiss_signin_alert
+  exit 0
+fi
 exit 1

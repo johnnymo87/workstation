@@ -21,12 +21,13 @@ const idpHost = new URL(ORIGIN).host;
 
 const browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null, protocolTimeout: 30000 });
 try {
-  let page = null;
-  for (const p of await browser.pages()) {
-    let host = '';
-    try { host = new URL(p.url()).host; } catch {}
-    if (host === idpHost || host === 'accounts.google.com') { page = p; break; }
-  }
+  // Prefer the IdP's own page: an accounts.google.com tab may be a leftover
+  // from a login whose PKCE flow is long dead.
+  const hostOf = (p) => { try { return new URL(p.url()).host; } catch { return ''; } };
+  const pages = await browser.pages();
+  let page = pages.find((p) => hostOf(p) === idpHost)
+    || pages.find((p) => hostOf(p) === 'accounts.google.com')
+    || null;
   if (!page) {
     page = await browser.newPage();
     await page.goto(ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
