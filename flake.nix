@@ -2065,8 +2065,8 @@
           cat "$TMPDIR/out.txt"; exit 1;
         }
         cat "$TMPDIR/out.txt"
-        grep -q '^goose-config-enforce: 67 passed$' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 67 assertions." >&2
+        grep -q '^goose-config-enforce: 95 passed$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 95 assertions." >&2
           exit 1
         }
         touch $out
