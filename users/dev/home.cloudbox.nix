@@ -1204,6 +1204,12 @@ lib.mkIf isCloudbox {
   #   server needs a confirming `/mcp enable <name>!` except the --mcp-no-confirm list (slack-ro cannot post; figma
   #   is read-only). Needs honk with honk#18: an older honkd refuses the unknown flags
   #   and fails to start.
+  # - --swarm-*: `/mcp` gains a built-in `swarm` entry (`honk swarm-mcp`), giving goose
+  #   sessions swarm_send/swarm_read/swarm_list through pigeon (honk#23, pigeon#187), and
+  #   `honk chat --new` enables it by default. The binary path must stay stable: goose stores
+  #   the extension's command per session and re-spawns it after restarts, so a /nix/store
+  #   path would break once garbage-collected. After changing these flags, an existing session
+  #   needs `/mcp disable swarm` then `/mcp enable swarm`.
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
@@ -1213,7 +1219,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
