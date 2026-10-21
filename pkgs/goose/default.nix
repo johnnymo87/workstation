@@ -67,6 +67,12 @@
 #      with stopReason end_turn. honkd records it per session and the nvim
 #      pickers show the session as errored (honk-9qf.15.11.3). Absent on
 #      clean and cancelled turns; a client that ignores `_meta` sees no change.
+#  16. Subagent policy (inert unless set): GOOSE_SUBAGENT_ROLES_DIR is scanned
+#      first so repo files cannot shadow a role; a delegated recipe's declared
+#      extensions replace the parent's (port of upstream #12938, not in 1.54);
+#      GOOSE_SUBAGENT_DEFAULT_RECIPE scopes delegates that declare none (ad-hoc,
+#      agent .md) and fails closed; with it set, a subagent extension that fails
+#      to start fails the delegate. Used by users/dev/goose-roles.nix.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -89,7 +95,8 @@
 # patched-1.54.0.7 adds patch 13 (johnnymo87/goose#6); patched-1.54.0.8
 # (2026-10-19) adds patch 14 (johnnymo87/goose#7); no schema change.
 # patched-1.54.0.9 (2026-10-20) adds patch 15 (johnnymo87/goose#8); no schema
-# change.
+# change. patched-1.54.0.10 (2026-10-21) adds patch 16 (johnnymo87/goose#9);
+# no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -102,8 +109,8 @@
 }:
 
 let
-  version = "1.54.0-patched.9";
-  tag = "patched-1.54.0.9";
+  version = "1.54.0-patched.10";
+  tag = "patched-1.54.0.10";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -115,11 +122,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-cc6Bml7T12viBV9R8vLjQh0ot9ALpIrFXtLaQ3Er7gU=";
+      hash = "sha256-4jd1r/Y5TE7YdK6b7jTZXEVrvYkKgRAIlFCdmTrb4CE=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-8E03z7/aQ7/tHh4xg3w7UWCLsW7Amg7ftgdju+cTvuc=";
+      hash = "sha256-JyLFWq9QU+GPKZ4r5pJpbweP9kp1lkK51Rl1xp6yde4=";
     };
   };
 
