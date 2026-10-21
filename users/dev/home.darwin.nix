@@ -359,6 +359,9 @@ lib.mkIf isDarwin {
         # fire together; the shared reauth.lock serialises them (each waits
         # for the other rather than skipping).
         StartCalendarInterval = [ { Minute = 7; } ];
+        # The "sign in" alert runs in the background so the run can carry on
+        # waiting for the sign-in; without this launchd kills it on exit.
+        AbandonProcessGroup = true;
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-refresh.err.log";
       };
@@ -390,6 +393,7 @@ lib.mkIf isDarwin {
         # rather than StartInterval for the same reason as the refresher: it
         # fires on wake. (Was 90 min of AWAKE time, which drifts.)
         StartCalendarInterval = [ { Minute = 37; } ];
+        AbandonProcessGroup = true;  # same reason as the refresher
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/gcloud-reauth-keepalive.err.log";
       };
@@ -1475,6 +1479,7 @@ EOF
     cp -f "${assetsPath}/gcloud-reauth/e2e.mjs" \
           "${assetsPath}/gcloud-reauth/idp-session-probe.mjs" \
           "${assetsPath}/gcloud-reauth/bg-page.mjs" \
+          "${assetsPath}/gcloud-reauth/raise-signin.mjs" \
           "${assetsPath}/gcloud-reauth/package.json" \
           "$reauthLib/"
     chmod u+w "$reauthLib"/*.mjs "$reauthLib/package.json"

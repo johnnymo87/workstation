@@ -10,7 +10,7 @@
 # only the CLI credential left every opencode session on the remote failing
 # with invalid_grant/invalid_rapt (2026-10-15 ~02:40Z) while this job was green.
 # Each credential gets its own login, its own verification, its own jsonl row
-# and its own notification, so one can never hide the other.
+# and its own alert, so one can never hide the other.
 #
 # DIRECTION IS THE WHOLE POINT. The remote host used to reach INTO this Mac over
 # a reverse tunnel to Chrome's DevTools port and drive the browser itself, which
@@ -101,12 +101,11 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ALL_CREDENTIALS=(cli adc)
 CREDENTIALS=("${ALL_CREDENTIALS[@]}")
 
-# --- logging and notification ----------------------------------------------
+# --- logging and alerting --------------------------------------------------
 # Every credential gets a row on every run, on every path -- "quietly did
 # nothing" is not reachable, and that includes `not_due`. (A run that waits for
 # a human and retries writes a second row for what it retried.) Any outcome
-# other than `refreshed` and the three quiet ones below raises a notification
-# of its own. The failure this replaces
+# other than the quiet ones below raises an alert. The failure this replaces
 # ran green on a timer for ~14 hours while the credential was dead, and then
 # ran green again while the OTHER credential was dead.
 record() {
@@ -128,32 +127,59 @@ PY
   echo "credential=$cred outcome=$outcome ${detail:+detail=$detail}"
   case "$outcome" in
     refreshed|not_due|skipped) ;;
-    # Already notified when the failure happened; a reminder every hour would
-    # train the human to ignore these.
+    # Already alerted when the failure happened; it retries by itself.
     backing_off) failed=yes ;;
-    # Quiet but not fine: the human was told when the wait began, and the
-    # keepalive repeats that every hour. Re-raising here would be a second,
-    # hourly, focus-stealing copy of the same message.
-    waiting_for_human) failed=yes ;;
-    *) notify "$cred" "$outcome" "$detail"; failed=yes ;;
+    # The alert for these is raised once per run by the caller, not per row:
+    # both credentials share one sign-in.
+    human_required|waiting_for_human) failed=yes ;;
+    *) alert_human "gcloud reauth failed ($cred): $outcome" "$detail"; failed=yes ;;
   esac
 }
 
-notify() {
-  local cred="$1" outcome="$2" detail="$3"
-  # Through argv, not interpolated into the AppleScript source: a detail
-  # containing a double quote would otherwise break the script and lose the
-  # notification -- the one signal a human sees.
-  # Do not swallow osascript's own failure: if notifications are denied this
-  # is the only human-facing signal, and losing it silently is the bug.
-  if ! /usr/bin/osascript \
-      -e 'on run argv' \
-      -e 'display notification (item 3 of argv) with title ("gcloud reauth needs you (" & item 1 of argv & ")") subtitle (item 2 of argv)' \
-      -e 'end run' \
-      "$cred" "$outcome" "$detail" \
-      >/dev/null 2>"$STATE/osascript.err"; then
-    echo "WARNING: could not post notification: $(cat "$STATE/osascript.err" 2>/dev/null)" >&2
+# --- telling the human --------------------------------------------------------
+# A MODAL ALERT, not a notification. `display notification` from osascript
+# posts as Script Editor, which on this Mac has no Notification Center
+# registration at all -- so every notification these scripts sent was silently
+# dropped, with osascript exiting 0. Nobody saw 46 "sign in" notifications over
+# 2026-10-17..21, and the credentials were kept alive by hand meanwhile. An
+# alert needs no registration and stays on screen until answered.
+#
+# Runs in the background so this script carries on (or exits); the agents set
+# AbandonProcessGroup so launchd does not kill it when they do. At most one is
+# on screen at a time: a new one is skipped while the last is unanswered.
+# "Open sign-in page" raises the IdP sign-in in the isolated Chrome. Unanswered
+# alerts give up after 50 min, so the hourly runs re-ask rather than pile up.
+# Usage: alert_human <title> <message> [signin]
+alert_human() {
+  local title="$1" message="$2" signin="${3:-}" pidf="$STATE/alert.pid" pid
+  pid="$(cat "$pidf" 2>/dev/null)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "alert already on screen (pid $pid); not stacking another"
+    return
   fi
+  (
+    if [ "$signin" = signin ]; then
+      ans="$(/usr/bin/osascript \
+        -e 'on run argv' \
+        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"Later", "Open sign-in page"} default button 2 giving up after 3000' \
+        -e 'if gave up of r then return "gave up"' \
+        -e 'return button returned of r' \
+        -e 'end run' "$title" "$message" 2>&1)"
+    else
+      ans="$(/usr/bin/osascript \
+        -e 'on run argv' \
+        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"OK"} default button 1 giving up after 3000' \
+        -e 'if gave up of r then return "gave up"' \
+        -e 'return button returned of r' \
+        -e 'end run' "$title" "$message" 2>&1)"
+    fi
+    echo "$(date -u +%FT%TZ) alert [$title] answered: $ans"
+    if [ "$ans" = "Open sign-in page" ]; then
+      IDP_ORIGIN="${IDP_ORIGIN:-}" REAUTH_CDP_URL="$CDP_URL" \
+        timeout 60 "$NODE" "$LIB/raise-signin.mjs"
+    fi
+  ) </dev/null >>"$STATE/alert.log" 2>&1 &
+  echo $! > "$pidf"
 }
 
 failed=no
@@ -173,7 +199,7 @@ LAST_OUTCOME=""
 #
 # BACKOFF. A failure that is not a human stop (verify_failed, no_authcode, a
 # changed consent page...) usually fails the same way again, and each attempt
-# steals focus and notifies. So after one, wait RETRY_AFTER before the next.
+# steals focus and alerts. So after one, wait RETRY_AFTER before the next.
 # Human stops are handled by the waiting gate below instead.
 REFRESH_AFTER="${REAUTH_REFRESH_AFTER_SECONDS:-21600}"
 RETRY_AFTER="${REAUTH_RETRY_AFTER_SECONDS:-7200}"
@@ -297,14 +323,28 @@ h = r.get("has_session")
 print("unknown" if r.get("error") or h is None else ("yes" if h else "no"))' "$out"
 }
 
-# Already told the human, and they have not signed in yet: say so quietly
-# rather than raising the sign-in page and a notification again every hour.
+# Already stopped for a human, and the IdP session is still absent: do not run
+# the browser flow again (it would only stop at the same page). Ask again with
+# an alert -- one per hourly run, never stacked -- then give the human the same
+# window as a fresh stop does: if they sign in, carry straight on.
 # Only when the probe positively says "no session"; a forced run always tries.
+SIGNIN_MSG="Your IdP session in the isolated gcloud-reauth Chrome has expired, so the remote gcloud credentials cannot be refreshed. Click Open sign-in page and sign in there; the refresh then finishes by itself."
 if [ "$waiting_on_human" = yes ] && [ "$FORCE" = no ] && [ "$(idp_session)" = no ]; then
-  for cred in "${CREDENTIALS[@]}"; do
-    record "$cred" "waiting_for_human" "Still no IdP session in the isolated Chrome; sign in there and the next hourly run (or gcloud-reauth-refresh) finishes the refresh"
+  alert_human "gcloud reauth needs you to sign in" "$SIGNIN_MSG" signin
+  wait_deadline=$(( $(date +%s) + ${REAUTH_HUMAN_WAIT_SECONDS:-900} ))
+  came_back=no
+  while [ "$(date +%s)" -lt "$wait_deadline" ]; do
+    sleep 20
+    if [ "$(idp_session)" = yes ]; then came_back=yes; break; fi
   done
-  exit 1
+  if [ "$came_back" != yes ]; then
+    for cred in "${CREDENTIALS[@]}"; do
+      record "$cred" "waiting_for_human" "Still no IdP session in the isolated Chrome; an alert is up asking for a sign-in, and the next hourly run asks again"
+    done
+    exit 1
+  fi
+  echo "IdP session is back; refreshing"
+  sleep 10   # let the human's tab finish its redirect before a flow closes it
 fi
 
 # A failure before any login starts applies to every credential: record it once
@@ -581,6 +621,13 @@ HANDOFF_REASON=""
 
 HUMAN_WAIT="${REAUTH_HUMAN_WAIT_SECONDS:-900}"
 attempt "${CREDENTIALS[@]}"
+if [ "$HANDED_OFF" = yes ]; then
+  if [ "$HANDOFF_REASON" = idp_login_required ]; then
+    alert_human "gcloud reauth needs you to sign in" "$SIGNIN_MSG" signin
+  else
+    alert_human "gcloud reauth needs you" "Google stopped the sign-in at: ${HANDOFF_REASON:-unknown}. The page is open in the isolated gcloud-reauth Chrome; finish it there, then run gcloud-reauth-refresh." signin
+  fi
+fi
 
 # --- waiting for a human ------------------------------------------------------
 # The notification just told the human to sign in, and they usually do within a

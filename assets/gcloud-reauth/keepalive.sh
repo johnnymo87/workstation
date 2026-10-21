@@ -35,6 +35,53 @@ STATE="${REAUTH_STATE_DIR:-$HOME/.local/state/gcloud-reauth}"
 NODE="${REAUTH_NODE:-node}"
 LOG="$STATE/keepalive.jsonl"
 
+# --- telling the human --------------------------------------------------------
+# A MODAL ALERT, not a notification. `display notification` from osascript
+# posts as Script Editor, which on this Mac has no Notification Center
+# registration at all -- so every notification these scripts sent was silently
+# dropped, with osascript exiting 0. Nobody saw 46 "sign in" notifications over
+# 2026-10-17..21, and the credentials were kept alive by hand meanwhile. An
+# alert needs no registration and stays on screen until answered.
+#
+# Runs in the background so this script carries on (or exits); the agents set
+# AbandonProcessGroup so launchd does not kill it when they do. At most one is
+# on screen at a time: a new one is skipped while the last is unanswered.
+# "Open sign-in page" raises the IdP sign-in in the isolated Chrome. Unanswered
+# alerts give up after 50 min, so the hourly runs re-ask rather than pile up.
+# (Same as refresh.sh, which explains it.)
+# Usage: alert_human <title> <message> [signin]
+alert_human() {
+  local title="$1" message="$2" signin="${3:-}" pidf="$STATE/alert.pid" pid
+  pid="$(cat "$pidf" 2>/dev/null)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "alert already on screen (pid $pid); not stacking another"
+    return
+  fi
+  (
+    if [ "$signin" = signin ]; then
+      ans="$(/usr/bin/osascript \
+        -e 'on run argv' \
+        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"Later", "Open sign-in page"} default button 2 giving up after 3000' \
+        -e 'if gave up of r then return "gave up"' \
+        -e 'return button returned of r' \
+        -e 'end run' "$title" "$message" 2>&1)"
+    else
+      ans="$(/usr/bin/osascript \
+        -e 'on run argv' \
+        -e 'set r to display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"OK"} default button 1 giving up after 3000' \
+        -e 'if gave up of r then return "gave up"' \
+        -e 'return button returned of r' \
+        -e 'end run' "$title" "$message" 2>&1)"
+    fi
+    echo "$(date -u +%FT%TZ) alert [$title] answered: $ans"
+    if [ "$ans" = "Open sign-in page" ]; then
+      IDP_ORIGIN="${IDP_ORIGIN:-}" REAUTH_CDP_URL="$CDP_URL" \
+        timeout 60 "$NODE" "$LIB/raise-signin.mjs"
+    fi
+  ) </dev/null >>"$STATE/alert.log" 2>&1 &
+  echo $! > "$pidf"
+}
+
 mkdir -p "$STATE"
 
 record() {
@@ -52,11 +99,7 @@ with open(log, "a") as f:
 PY
   echo "outcome=$outcome ${detail:+detail=$detail}"
   if [ "$notify" = "yes" ]; then
-    if ! /usr/bin/osascript \
-        -e "display notification \"$detail\" with title \"IdP session needs you\" subtitle \"$outcome\"" \
-        >/dev/null 2>"$STATE/osascript.err"; then
-      echo "WARNING: could not post notification: $(cat "$STATE/osascript.err" 2>/dev/null)" >&2
-    fi
+    alert_human "gcloud reauth keepalive: $outcome" "$detail"
   fi
 }
 
@@ -156,7 +199,10 @@ case "$state" in
     record "held" "IdP session live${secs:+, ${secs}s remaining}"
     ;;
   no_session)
-    record "no_session" "No IdP session in the isolated browser. Sign in there; the reauth cannot run without it." yes
+    # Quiet: the refresh asks for the sign-in, with an alert, when a refresh is
+    # actually due and needs it. Asking here too would be a second, hourly
+    # prompt for the same thing -- and usually hours before it matters.
+    record "no_session" "No IdP session in the isolated browser; the refresh will ask for a sign-in when it needs one."
     exit 1
     ;;
   probe_error)
