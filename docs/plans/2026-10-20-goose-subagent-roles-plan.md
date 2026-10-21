@@ -1546,7 +1546,7 @@ Part C `config.yaml` edits.
 
 ## Part C: Deploy and live acceptance (with the user, after B7 merges)
 
-Order matters. Turning on summon before `.9` and the roles are live would expose
+Order matters. Turning on summon before `.10` and the roles are live would expose
 unscoped delegation.
 
 1. **Pull and rebuild** from the main workstation checkout (`rebuilding`
@@ -1559,11 +1559,11 @@ unscoped delegation.
    ```
 2. **Check the deploy:**
    `readlink ~/.config/goose/subagent-roles` (store dir) and
-   `goose --version` (`1.54.0`; the store path contains `patched.9`).
+   `goose --version` (`1.54.0`; the store path contains `patched.10`).
    goose-serve has `restartIfChanged = false`, so the RUNNING binary does not
    change on rebuild. After the step-4 restart, and before trusting anything,
    confirm `readlink /proc/$(systemctl show -p MainPID --value goose-serve)/exe`
-   contains `patched.9`. On `.8` or older the two keys are silently ignored and
+   contains `patched.10`. On `.9` or older the two keys are silently ignored and
    delegates inherit every parent tool.
 3. **Edit `~/.config/goose/config.yaml`.** First copy it to
    `config.yaml.bak-<date>`. Then:
@@ -1602,6 +1602,10 @@ unscoped delegation.
 6. **Close the bead** with the results. File follow-ups.
 
 ## As built: changes from review (2026-10-20)
+
+**Release number.** Another change (fork #8, turnError) took `patched-1.54.0.9`
+first, so this patch shipped as fork PR #9 → `patched-1.54.0.10`, and goose
+patch 16 in `pkgs/goose`. Read `.9` in Tasks A6/B6 above as `.10`.
 
 Reviews (spec, code, adversarial) added the following beyond the tasks above.
 
