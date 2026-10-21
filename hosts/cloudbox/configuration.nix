@@ -4910,9 +4910,20 @@ Forensics: $DUMP"
         #
         # ONLY the literal string "true" enables it (cfp warns on anything else
         # and stays off) -- note CFP_DISABLE_BILLING_HEADER in the same codebase
-        # uses "1", so the convention is not uniform. To roll back, set this to
-        # "false" and rebuild; no cfp release change is needed.
-        "CFP_OPUS_MAX_FIRST=true"
+        # uses "1", so the convention is not uniform.
+        #
+        # CURRENTLY OFF (2026-10-20). The premise was Fable on the paid legs and
+        # Opus on Max. Since Opus 5.5 shipped, Fable is not used, so the inversion
+        # put ALL Claude load on Max and left the $100/day Vertex budget idle:
+        # Vertex fell from ~$100/day to <$1/day, four of five Max accounts sat at
+        # their weekly limit, and on 2026-10-16 the pool ran fully dry and
+        # overflowed to enterprise. Off restores the plain chain for Opus too:
+        # Vertex up to its budget, then enterprise up to its budget, then Max.
+        # Expect paid spend to return toward ~$100-200/day.
+        #
+        # Left UNSET rather than "false": unset is off without the startup
+        # warning. Re-enable by restoring "CFP_OPUS_MAX_FIRST=true" -- likely
+        # worth doing when a new Fable model makes the family split real again.
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
