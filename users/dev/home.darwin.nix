@@ -493,7 +493,17 @@ lib.mkIf isDarwin {
           ''
             SEC="/usr/bin/security"
             export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
-            export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
+            # Prefer this machine's own worker key (pigeon-k0qn.8). Rollback
+            # without a rebuild: touch ~/.config/pigeon/use-shared-worker-key
+            # and restart the daemon (only works while macbook is not in the
+            # worker's SHARED_KEY_REFUSED_MACHINES).
+            k="$($SEC find-generic-password -s pigeon-worker-key -w 2>/dev/null || true)"
+            if [ -n "$k" ] && [ ! -e "$HOME/.config/pigeon/use-shared-worker-key" ]; then
+              export CCR_API_KEY="$k"
+            else
+              export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
+            fi
+            unset k
             export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
             export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
             export PIGEON_GOOSE_ACP_TOKEN="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
