@@ -673,6 +673,8 @@ in
     # turn dies silently rather than reporting. So do NOT let an unrelated
     # rebuild restart this; restart it deliberately, in a window:
     #   sudo systemctl restart goose-serve
+    # reset-workspace does exactly that every night at 03:00 (Step 6), so
+    # changes to this unit land by the next morning without a manual bounce.
     #
     # This is also why the shared ACP secret above carries no restartUnits:
     # this very line is what would make such a listing fire for pigeon-daemon

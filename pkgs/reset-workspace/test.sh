@@ -646,6 +646,33 @@ if [ -f "$default_nix" ]; then
   else
     echo "FAIL: prune must precede pool restart (prune at ${prune_line:-?}, restart at ${restart_line:-?})"; fail=1
   fi
+
+  # workstation-mrfu: goose-serve is bounced too, with non-interactive sudo
+  # (the destructive phase has stdin=/dev/null), AFTER the opencode pool (so a
+  # goose failure cannot skip the pool restart), and its failure is raised
+  # only after the ShaDa report. honkd must never be restarted by the reset.
+  want_grep "goose-serve is restarted"                   'sudo -n systemctl restart "$GOOSE_UNIT"'
+  want_grep "goose restart skipped when unit absent"     '[ "$goose_load" != "loaded" ]'
+  want_grep "goose health is polled with a bounded curl" 'curl -sf --max-time 3 "$GOOSE_STATUS_URL"'
+  goose_line=$(grep -n 'sudo -n systemctl restart "$GOOSE_UNIT"' "$default_nix" | head -1 | cut -d: -f1)
+  last_pool_line=$(grep -n 'restart_pool_target "$POOL_SCOPE"' "$default_nix" | tail -1 | cut -d: -f1)
+  report_line=$(grep -n 'shada_watch_report "$nvim_exited"' "$default_nix" | head -1 | cut -d: -f1)
+  raise_line=$(grep -n '\[ -z "$GOOSE_FAILED" \] || die' "$default_nix" | head -1 | cut -d: -f1)
+  if [ -n "$goose_line" ] && [ -n "$last_pool_line" ] && [ "$goose_line" -gt "$last_pool_line" ]; then
+    echo "ok: goose restart runs after the pool restart"
+  else
+    echo "FAIL: goose restart must follow the pool restart (goose at ${goose_line:-?}, pool at ${last_pool_line:-?})"; fail=1
+  fi
+  if [ -n "$raise_line" ] && [ -n "$report_line" ] && [ "$raise_line" -gt "$report_line" ]; then
+    echo "ok: goose failure is raised after the ShaDa report"
+  else
+    echo "FAIL: goose failure must be raised after the ShaDa report (raise at ${raise_line:-?}, report at ${report_line:-?})"; fail=1
+  fi
+  if grep -qE 'systemctl --user (restart|stop|kill) honkd' "$default_nix"; then
+    echo "FAIL: reset-workspace must not restart honkd"; fail=1
+  else
+    echo "ok: honkd is not restarted"
+  fi
 else
   echo "SKIP: source guards (default.nix not next to test)"
 fi
