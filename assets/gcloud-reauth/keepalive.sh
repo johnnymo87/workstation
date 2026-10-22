@@ -247,9 +247,18 @@ last_chance() {
   [ -n "$expires_at" ] && [ -n "$secs" ] || return 0
   prev="$(cat "$prev_exp_file" 2>/dev/null)"
   printf '%s\n' "$expires_at" > "$prev_exp_file"
-  # Still sliding (or first sighting): the idle timeout is in charge, not the cap.
-  [ "$prev" = "$expires_at" ] || return 0
-  [ "$secs" -le "$LAST_CHANCE_SECONDS" ] || return 0
+  # Capped = the expiry no longer slides. Every probe is itself an
+  # authenticated read, so a session still under its idle timeout reads ~7200s
+  # right after it; anything clearly below that means the cap is in charge.
+  # (Equality with the previous probe is a second signal.) Testing remaining
+  # time, not only equality, is what buys lead time: with hourly probes the
+  # first capped probe has 1-2h left, and waiting for a second sighting would
+  # leave anywhere from 0 to 60 min -- sometimes less than the refresh takes.
+  # Hourly probes then guarantee >= ~15 min of lead.
+  if [ "$prev" != "$expires_at" ] && [ "$secs" -ge 7000 ] 2>/dev/null; then
+    return 0
+  fi
+  [ "$secs" -le "$LAST_CHANCE_SECONDS" ] 2>/dev/null || return 0
   [ "$(cat "$done_file" 2>/dev/null)" = "$expires_at" ] && return 0
   printf '%s\n' "$expires_at" > "$done_file"
   printf '%s\n' "$expires_at" > "$STATE/refresh-requested"

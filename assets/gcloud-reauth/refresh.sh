@@ -77,10 +77,21 @@ FORCE=no
 [ "${1:-}" = --force ] && FORCE=yes
 # A one-shot force requested by the keepalive's last-chance check (the IdP
 # session is about to hit its hard cap). Consumed here so it fires once.
+# Ignored once that expiry has passed: forcing then gains nothing.
+LAST_CHANCE=no
 if [ -f "$STATE/refresh-requested" ]; then
-  echo "last-chance refresh requested (IdP session expires $(cat "$STATE/refresh-requested" 2>/dev/null))"
-  rm -f "$STATE/refresh-requested"
-  FORCE=yes
+  req_exp="$(cat "$STATE/refresh-requested" 2>/dev/null)"
+  if python3 -c '
+import sys, datetime
+e = datetime.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+sys.exit(0 if e > datetime.datetime.now(datetime.timezone.utc) else 1)' "$req_exp" 2>/dev/null; then
+    echo "last-chance refresh requested (IdP session expires $req_exp)"
+    FORCE=yes
+    LAST_CHANCE=yes
+  else
+    echo "ignoring stale last-chance request (expiry $req_exp has passed)"
+    rm -f "$STATE/refresh-requested"
+  fi
 fi
 
 # --- wait out a dark wake ---------------------------------------------------
@@ -336,6 +347,9 @@ done
 # Release only a lock we took: removing another run's would let a third start.
 trap '[ "$have_lock" = yes ] && rmdir "$LOCK" 2>/dev/null' EXIT
 
+# Consume a last-chance request only now that this run will act on it; a run
+# that loses the lock leaves it for the next one.
+[ "$LAST_CHANCE" = yes ] && [ "$have_lock" = yes ] && rm -f "$STATE/refresh-requested"
 if [ "$have_lock" != yes ]; then
   for cred in "${CREDENTIALS[@]}"; do
     record "$cred" "skipped" "Another reauth run has held $LOCK for over 3 minutes"
