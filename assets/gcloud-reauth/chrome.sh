@@ -58,8 +58,8 @@ if [ ! -x "$CHROME" ]; then
 fi
 
 # --no-startup-window: no window (and no focus steal) at login or on respawn.
-# Chrome stays alive windowless and serves CDP; e2e.mjs's newPage()+bringToFront
-# still raises a window when a human is needed.
+# Chrome stays alive windowless and serves CDP. The reauth works in background
+# tabs; raise-signin.mjs brings a window forward only when the human asks.
 exec "$CHROME" \
   --user-data-dir="$PROFILE" \
   --remote-debugging-port="$PORT" \

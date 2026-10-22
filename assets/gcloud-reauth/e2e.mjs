@@ -1,5 +1,6 @@
 import puppeteer from 'puppeteer-core';
 import fs from 'fs';
+import { newBackgroundPage } from './bg-page.mjs';
 
 const url = fs.readFileSync(process.argv[2], 'utf8').trim();
 
@@ -137,17 +138,13 @@ const log = (...a) => console.log(`[+${((Date.now() - t0) / 1000).toFixed(1)}s]`
 
 // protocolTimeout well under the wrapper's 300s budget, so a stall surfaces as
 // a logged error rather than being killed mid-write by the outer timeout.
-// NOTE ON FOCUS: pages are created in the FOREGROUND. Creating them as
-// background targets (Target.createTarget with background:true) was tried and
-// does not work here -- target.page() either hangs in page.evaluate until
-// protocolTimeout, or fails with 'Target.attachToTarget: Session with given id
-// not found'. Measured side by side against a real OAuth page: foreground 1.1s
-// OK, background failed. This flow runs only when a reauth is actually due
-// (~once a day), so a brief focus steal is an acceptable price for a path that
-// works. Do not reintroduce the background variant HERE without measuring it.
-// It IS used by idp-session-probe.mjs (see bg-page.mjs): that path loads one
-// static asset and runs every hour, and was measured separately. Finding
-// createTarget in this tree is therefore not evidence that this note is stale.
+// NOTE ON FOCUS: pages are created in the BACKGROUND (bg-page.mjs), so a
+// refresh never raises Chrome over whatever the human is doing. An earlier
+// measurement (2026-09) found background targets hanging on this flow; that no
+// longer holds -- re-measured 2026-10-22: both the CLI and ADC logins completed
+// in background tabs, and the frontmost app never changed for the whole run
+// (sampled every 0.5s). The page mode is recorded in every result row, so a
+// fall back to a foreground page shows up in reauth-probe.jsonl.
 if (urlRejection) {
   // Refuse BEFORE connecting to the browser -- a rejected URL must not so much
   // as open a tab in a profile holding a live session.
@@ -175,7 +172,8 @@ for (const p of await browser.pages()) {
     try { await p.close(); } catch {}
   }
 }
-const page = await browser.newPage();
+const { page, mode: pageMode } = await newBackgroundPage(browser);
+log('page mode', pageMode);
 const bodyText = async () => {
   // A page-level evaluate can also land mid-navigation; one retry after the
   // new document settles covers it.
@@ -199,6 +197,7 @@ const result = {
   awaiting_human: false,
   clicks: [],
   outcome: null,
+  page_mode: pageMode,
 };
 
 // Element handles die when the page navigates under them -- and these pages
@@ -271,12 +270,11 @@ try {
     const { txt } = await inspect(`03-loop${i}`);
     if (result.password_demanded || result.mfa_demanded || result.captcha || result.bot_blocked || result.idp_login_required) {
       log('HALT: challenge detected, refusing to proceed');
-      // A human has to act. Routine runs stay in a background tab so they never
-      // steal focus, but this is the one case where grabbing attention IS the
-      // correct behaviour -- the alternative is failing silently and being
-      // discovered hours later as dead credentials.
+      // A human has to act. The tab stays open, still in the background; the
+      // alert refresh.sh raises asks for attention, and its button brings this
+      // tab forward. Focus moves only when the human says so.
       handoffToHuman = true;
-      result.awaiting_human = true;   // set here: the log line is written before the raise
+      result.awaiting_human = true;
       break;
     }
     await clickByText([/^select all$/i]);
@@ -347,15 +345,14 @@ try {
     awaiting_human: result.awaiting_human,
     clicks: result.clicks,
     outcome: result.outcome,
+    page_mode: result.page_mode,
   }) + '\n');
   fs.writeFileSync(`${WORK}/e2e-result.json`, JSON.stringify(result));
   if (handoffToHuman) {
-    try {
-      await page.bringToFront();       // raise the tab, and with it the window
-      console.log('HANDOFF: left the sign-in page open and raised it for the human');
-    } catch (e) {
-      console.log('HANDOFF: could not raise the page:', e.message);
-    }
+    // Left open, NOT raised: the alert's "Open sign-in page" button raises it
+    // (raise-signin.mjs finds this tab), so focus moves only when the human
+    // asks for it.
+    console.log('HANDOFF: left the sign-in page open in the background for the human');
   } else {
     try { await page.close(); } catch {}
   }
