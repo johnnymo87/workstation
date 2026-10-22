@@ -44,6 +44,8 @@
 #
 # Usage: gcloud-reauth-refresh [--force]
 #   --force   refresh every credential now, however recently it was refreshed
+#             ($STATE/refresh-requested, written by the keepalive's last-chance
+#             check, has the same effect once)
 #
 # SCHEDULE. The agent fires hourly on a calendar interval, and this script
 # decides whether anything is due. It used to fire on an 8h StartInterval, which
@@ -73,6 +75,13 @@ mkdir -p "$STATE" "$WORK"
 
 FORCE=no
 [ "${1:-}" = --force ] && FORCE=yes
+# A one-shot force requested by the keepalive's last-chance check (the IdP
+# session is about to hit its hard cap). Consumed here so it fires once.
+if [ -f "$STATE/refresh-requested" ]; then
+  echo "last-chance refresh requested (IdP session expires $(cat "$STATE/refresh-requested" 2>/dev/null))"
+  rm -f "$STATE/refresh-requested"
+  FORCE=yes
+fi
 
 # --- wait out a dark wake ---------------------------------------------------
 # A calendar job that comes due while the Mac sleeps fires on the next wake --
