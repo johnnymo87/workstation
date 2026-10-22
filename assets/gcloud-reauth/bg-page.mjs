@@ -5,14 +5,9 @@
 // timer while the human is working. Target.createTarget supports background:
 // true, which puppeteer's newPage() does not expose.
 //
-// SCOPE: this is for the IdP session PROBE, which loads one tiny page
-// (<origin>/favicon.ico) and issues one fetch. It is deliberately NOT used by
-// e2e.mjs -- background targets were measured against a real OAuth page there
-// and failed (target.page() hangs in page.evaluate, or 'Session with given id
-// not found'); see the focus note in e2e.mjs. The two differ in both page
-// weight and cadence: e2e runs ~once a day when a reauth is actually due, so a
-// brief focus steal is a fair price; the probe runs every hour forever,
-// so it is not.
+// Used by both the IdP session probe and the e2e login flow. (An earlier
+// note here said background targets failed for the login flow; re-measured on
+// 2026-10-22, they work -- see the focus note in e2e.mjs.)
 //
 // The new target is matched by a nonce in its initial URL rather than by a
 // private _targetId field, so this does not depend on puppeteer internals.
