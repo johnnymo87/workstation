@@ -72,7 +72,7 @@ let
     todo = true;
     skills = true;
     chatrecall = true; # honk-9qf.20: read-only past-session search
-    summon = false; # subagents: flip here (not in config.yaml) for honk-9qf.19 Part C
+    summon = true; # subagent roles, honk-9qf.19; requires goose >= patched-1.54.0.10 and the settings below
     code_execution = false;
     tom = false;
     orchestrator = false;
@@ -90,12 +90,38 @@ let
     "analyze" "apps" "chatrecall" "code_execution" "developer" "extensionmanager"
     "orchestrator" "scheduler" "skills" "summarize" "summon" "todo" "tom"
   ];
+  # Deploy path for goose subagent roles (users/dev/goose-roles.nix deploys to
+  # ~/.config/goose/subagent-roles; keep in sync).
+  gooseRolesDeployPath = ".config/goose/subagent-roles";
+  gooseConfigSettings = {
+    GOOSE_SUBAGENT_ROLES_DIR = "${config.home.homeDirectory}/${gooseRolesDeployPath}/roles";
+    GOOSE_SUBAGENT_DEFAULT_RECIPE = "${config.home.homeDirectory}/${gooseRolesDeployPath}/unscoped.yaml";
+  };
   gooseExtensionPolicy =
-    let unknown = lib.subtractLists gooseKnownExtensionKeys (lib.attrNames gooseExtensionsEnabled);
-    in assert lib.assertMsg (unknown == [ ])
+    let
+      unknown = lib.subtractLists gooseKnownExtensionKeys (lib.attrNames gooseExtensionsEnabled);
+      hasSubagentSettings =
+        (gooseConfigSettings ? GOOSE_SUBAGENT_ROLES_DIR)
+        && (builtins.isString gooseConfigSettings.GOOSE_SUBAGENT_ROLES_DIR)
+        && (gooseConfigSettings.GOOSE_SUBAGENT_ROLES_DIR != "")
+        && (gooseConfigSettings ? GOOSE_SUBAGENT_DEFAULT_RECIPE)
+        && (builtins.isString gooseConfigSettings.GOOSE_SUBAGENT_DEFAULT_RECIPE)
+        && (gooseConfigSettings.GOOSE_SUBAGENT_DEFAULT_RECIPE != "");
+      # Note: this checks the home-manager package, not the running goose-serve
+      # (restartIfChanged=false) -- Part C's running-binary check covers that.
+      gooseVersionOk = lib.versionAtLeast gooseCli.version "1.54.0-patched.10";
+    in
+    assert lib.assertMsg (unknown == [ ])
       "gooseExtensionsEnabled has unknown goose extension key(s): ${lib.concatStringsSep ", " unknown}";
+    assert lib.assertMsg (!gooseExtensionsEnabled.summon || hasSubagentSettings)
+      "gooseExtensionsEnabled.summon requires non-empty string values for GOOSE_SUBAGENT_ROLES_DIR and GOOSE_SUBAGENT_DEFAULT_RECIPE in gooseConfigSettings (goose treats empty values as unset, which would cause delegates to inherit every parent tool)";
+    assert lib.assertMsg (!gooseExtensionsEnabled.summon || gooseVersionOk)
+      "gooseExtensionsEnabled.summon requires goose >= 1.54.0-patched.10 (current: ${gooseCli.version}); older goose ignores subagent policy keys and delegates would inherit every parent tool";
     pkgs.writeText "goose-extension-policy.json"
-      (builtins.toJSON { extensions = gooseExtensionsEnabled; });
+      (builtins.toJSON {
+        extensions = gooseExtensionsEnabled;
+        settings = gooseConfigSettings;
+      });
   gooseConfigEnforce = pkgs.callPackage ../../pkgs/goose-config-enforce { };
 
   # Shared alert helper (dedup by signature, exponential backoff, warning->error
@@ -594,7 +620,7 @@ lib.mkIf isCloudbox {
   home.activation.enforceGooseExtensions = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     run ${gooseConfigEnforce}/bin/goose-config-enforce \
       "$HOME/.config/goose/config.yaml" ${gooseExtensionPolicy} \
-      || echo "WARNING: goose-config-enforce failed; ~/.config/goose/config.yaml extensions not enforced" >&2
+      || echo "WARNING: goose-config-enforce failed; ~/.config/goose/config.yaml extensions/settings not enforced" >&2
   '';
 
   # goose drops comments when it rewrites config.yaml, so the why lives beside it.
@@ -608,9 +634,10 @@ lib.mkIf isCloudbox {
 
       `config.yaml` itself stays writable, because goose writes it: `goose configure`,
       extension toggles and its own migrations. On every home-manager switch,
-      `goose-config-enforce` sets only `extensions.<key>.enabled` to match
-      `gooseExtensionsEnabled` in home.cloudbox.nix and leaves everything else alone.
-      An extension toggled by hand is therefore reverted on the next switch. To change
+      `goose-config-enforce` sets `extensions.<key>.enabled` to match
+      `gooseExtensionsEnabled` and top-level settings to match `gooseConfigSettings`
+      in home.cloudbox.nix, leaving everything else alone. An extension or setting
+      toggled by hand is therefore reverted on the next switch. To change
       the default set, change it in workstation.
 
       Enabled by default: ${lib.concatStringsSep ", " (lib.attrNames (lib.filterAttrs (_: v: v) gooseExtensionsEnabled))}.
@@ -627,7 +654,16 @@ lib.mkIf isCloudbox {
       2026-09-23 as a cautious default (eng-agent-platform
       docs/plans/2026-09-22-goose-extension-defaults-design.md, §3 and §4 per extension).
       chatrecall and todo were switched on on 2026-10-20 after the honk extension tour
-      (honk bead honk-9qf.20). summon is coming back with a subagent policy (honk-9qf.19).
+      (honk bead honk-9qf.20).
+
+      On 2026-10-21, summon is on with the subagent policy (goose patch 16,
+      johnnymo87/goose#9); GOOSE_SUBAGENT_ROLES_DIR points at five generated role
+      recipes (pkgs/goose-roles) scanned first so repo files cannot shadow them;
+      GOOSE_SUBAGENT_DEFAULT_RECIPE gives delegates with no role the read-only set
+      (developer limited to tree/read_image, analyze, skills, ro-shell), failing
+      closed; both keys are also enforced by goose-config-enforce on every switch;
+      needs goose >= .10 (older binaries ignore the keys); pigeon and the lane name
+      their own extensions and are unaffected.
     '';
   };
 

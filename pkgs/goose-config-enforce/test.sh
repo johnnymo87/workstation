@@ -248,6 +248,78 @@ for key in 'a*' 'tod?' '*'; do
 done
 check "20 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
 
+# 21. settings written into a file lacking them; other keys untouched
+cfg="$work/c21.yaml"; sample "$cfg"
+policy '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":"/roles/path","GOOSE_SUBAGENT_DEFAULT_RECIPE":"/recipes/default.yaml"}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "21 exit 0" test "$rc" -eq 0
+check "21 settings ROLES_DIR written" test "$(yq -r '.GOOSE_SUBAGENT_ROLES_DIR' "$cfg")" = '/roles/path'
+check "21 settings DEFAULT_RECIPE written" test "$(yq -r '.GOOSE_SUBAGENT_DEFAULT_RECIPE' "$cfg")" = '/recipes/default.yaml'
+check "21 todo updated" test "$(enabled_of "$cfg" todo)" = true
+check "21 GOOSE_MODE untouched" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
+check "21 providers untouched" test "$(yq -r '.providers.gcp_vertex_ai.model' "$cfg")" = claude-opus-5-5
+check "21 plugins untouched" test "$(yq -r '.plugins."/tmp/x/.agents/plugins/p".enabled' "$cfg")" = true
+check "21 reports settings in output" grep -q 'GOOSE_SUBAGENT_ROLES_DIR=/roles/path' <<<"$out"
+
+# 22. already-matching settings → no rewrite (mtime unchanged)
+before="$(stat -c '%i %Y %s' "$cfg")"; sha_before="$(sha256sum "$cfg")"
+sleep 1
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "22 exit 0" test "$rc" -eq 0
+check "22 reports unchanged" grep -q 'unchanged' <<<"$out"
+check "22 same inode/mtime/size" test "$(stat -c '%i %Y %s' "$cfg")" = "$before"
+check "22 same bytes" test "$(sha256sum "$cfg")" = "$sha_before"
+
+# 23. different setting value → corrected, other keys untouched
+policy '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":"/new/roles/path","GOOSE_SUBAGENT_DEFAULT_RECIPE":"/recipes/default.yaml"}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "23 exit 0" test "$rc" -eq 0
+check "23 settings ROLES_DIR updated" test "$(yq -r '.GOOSE_SUBAGENT_ROLES_DIR' "$cfg")" = '/new/roles/path'
+check "23 settings DEFAULT_RECIPE unchanged" test "$(yq -r '.GOOSE_SUBAGENT_DEFAULT_RECIPE' "$cfg")" = '/recipes/default.yaml'
+check "23 GOOSE_MODE still untouched" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
+check "23 reports updated setting" grep -q 'GOOSE_SUBAGENT_ROLES_DIR=/new/roles/path' <<<"$out"
+check "23 does not report matching setting" bash -c '! grep -q "GOOSE_SUBAGENT_DEFAULT_RECIPE=" <<<"$1"' _ "$out"
+
+# 24. invalid settings value or invalid key name: non-zero, file untouched
+cfg="$work/c24.yaml"; sample "$cfg"; sha_before="$(sha256sum "$cfg")"
+for bad_policy in \
+  '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":123}}' \
+  '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":true}}' \
+  '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":["a"]}}' \
+  '{"extensions":{"todo":true},"settings":{"lower_case":"/path"}}' \
+  '{"extensions":{"todo":true},"settings":{"WITH-DASH":"/path"}}' \
+  '{"extensions":{"todo":true},"settings":"not-an-object"}'; do
+  policy "$bad_policy"
+  bash "$enforce" "$cfg" "$work/policy.json" >/dev/null 2>&1; rc=$?
+  check "24 bad policy refused ($bad_policy)" test "$rc" -ne 0
+done
+check "24 file untouched" test "$(sha256sum "$cfg")" = "$sha_before"
+
+# 25. policy without settings behaves as before
+cfg="$work/c25.yaml"; sample "$cfg"
+policy '{"extensions":{"todo":true}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "25 exit 0" test "$rc" -eq 0
+check "25 todo enabled" test "$(enabled_of "$cfg" todo)" = true
+check "25 GOOSE_MODE kept" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
+
+# 26. file with non-JSON-representable value (e.g. .nan) still has extensions and settings enforced
+cfg="$work/c26.yaml"
+cat > "$cfg" <<'EOF'
+a: .nan
+GOOSE_MODE: smart_approve
+extensions:
+  todo:
+    enabled: false
+EOF
+policy '{"extensions":{"todo":true},"settings":{"GOOSE_SUBAGENT_ROLES_DIR":"/roles/path"}}'
+out="$(bash "$enforce" "$cfg" "$work/policy.json" 2>&1)"; rc=$?
+check "26 exit 0" test "$rc" -eq 0
+check "26 todo updated" test "$(enabled_of "$cfg" todo)" = true
+check "26 settings written" test "$(yq -r '.GOOSE_SUBAGENT_ROLES_DIR' "$cfg")" = '/roles/path'
+check "26 nan preserved" test "$(yq -r '.a' "$cfg")" = '.nan'
+check "26 GOOSE_MODE preserved" test "$(yq -r '.GOOSE_MODE' "$cfg")" = smart_approve
+
 # 12. no temp files left beside the config
 check "12 no temp leftovers" bash -c '! ls -A "$1" | grep -q "\.goose-config-enforce\."' _ "$work"
 
