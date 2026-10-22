@@ -34,6 +34,26 @@ describe("timeouts exemption classifier", () => {
     expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/wait/", singleSid)).toBe(true);
   });
 
+  // An MCP connect spawns the server and waits for initialize + tools/list
+  // before the serve answers. Healthy atlassian connects (npx mcp-remote ->
+  // mcp.atlassian.com) measured 1.2-4.5 s over 30 days, so the 5 s cheap
+  // timeout 503'd them whenever Atlassian was slow (2026-10-21/22), and the
+  // 503 was then misread as "pigeon down".
+  test("exempts POST /session/{id}/mcp/{name}/connect (slow MCP startup)", () => {
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/mcp/atlassian/connect", singleSid)).toBe(true);
+    expect(isExemptFromFirstByteTimeout("POST", "/api/session/ses_123/mcp/atlassian/connect", singleSid)).toBe(true);
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/mcp/slack-ro/connect/", singleSid)).toBe(true);
+  });
+
+  test("does NOT exempt MCP disconnect, status, or a connect-suffixed path of another shape", () => {
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/mcp/atlassian/disconnect", singleSid)).toBe(false);
+    expect(isExemptFromFirstByteTimeout("GET", "/session/ses_123/mcp", singleSid)).toBe(false);
+    expect(isExemptFromFirstByteTimeout("GET", "/session/ses_123/mcp/atlassian/connect", singleSid)).toBe(false);
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/connect", singleSid)).toBe(false);
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/other/atlassian/connect", singleSid)).toBe(false);
+    expect(isExemptFromFirstByteTimeout("POST", "/session/ses_123/mcp/atlassian/connect", multiSid)).toBe(false);
+  });
+
   test("does NOT exempt cheap GETs on session", () => {
     expect(isExemptFromFirstByteTimeout("GET", "/session/ses_123", singleSid)).toBe(false);
     expect(isExemptFromFirstByteTimeout("GET", "/api/session/ses_123", singleSid)).toBe(false);

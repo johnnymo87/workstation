@@ -30,6 +30,25 @@ Two complementary tools. **Read this whole file before choosing one** — pickin
 - **Reading rich content (rendered Markdown + images + comments) → nvim.**
 - **Mutations, JQL/CQL, arbitrary Jira fields, Confluence authoring → Atlassian MCP.**
 
+## If the Atlassian MCP is unavailable: STOP and report
+
+If you cannot get the `atlassian` MCP tools — `oc-mcp-enable` (or `opencode-launch --mcp
+atlassian`) fails, the connect reports any status other than `connected`, or the tools never
+appear in your tool list — **stop and tell the human**. Quote the error verbatim and say
+which write you were about to make.
+
+**Do not fall back to the Jira or Confluence REST API.** Your bash environment holds
+`ATLASSIAN_EMAIL` / `ATLASSIAN_API_TOKEN` because the nvim read path and
+`confluence-to-md.sh` need them. They are not a backup route for writes, and the human has
+said so after an agent used them that way: on 2026-10-22, with the MCP failing to connect,
+an agent posted and then edited a Jira comment over REST, which the human did not want.
+"The MCP is down, so I used curl" is not acceptable for comments, ticket edits,
+transitions, or Confluence pages. Waiting for the human costs less than an unsanctioned
+write under their name.
+
+Reads stay on their sanctioned path: nvim `:FetchJiraTicket` / `:FetchConfluencePage` and
+`confluence-to-md.sh` do not depend on the MCP and are fine to use while it is down.
+
 ## Quick Start
 
 ### Read a Jira ticket (nvim)

@@ -12,6 +12,20 @@ session**. Both harnesses read the same list of servers: opencode's generated
 If a tool you need does not exist in your tool list, the server is off. How to turn it on
 depends on the harness.
 
+## If the server cannot be turned on: stop and report
+
+This applies in both harnesses. If enabling fails, or the tools still don't appear, **stop
+and report the error to the human, verbatim**. Do not route around the MCP server by calling
+the service's API yourself (`curl` or a REST client with tokens from your environment, such
+as `ATLASSIAN_API_TOKEN`). The MCP server is the sanctioned path for that service. Those
+tokens are in your shell for other tools, and using them to write instead is a decision for
+the human. On 2026-10-22 an agent whose `atlassian` connect failed posted a Jira comment over
+REST instead, and the human did not want that.
+
+A failed enable is usually not something you can fix from the session anyway: the server's
+upstream is slow or down, it needs re-authentication that only the human can do, or the host
+needs a deploy.
+
 ## Which harness am I in?
 
 - **opencode:** `$OPENCODE_SESSION_ID` is set in your shell. Follow the `opencode-launch`

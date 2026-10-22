@@ -364,11 +364,28 @@ if [ -f "$default_nix" ]; then
   # outage makes the door 503 every MCP connect (proxy.ts:741-745) and the
   # launcher exits 1, where the pre-Phase-9 code survived. So assert the
   # STRUCTURE instead of banning the string: door first, bare route only under a
-  # 503 test.
-  if grep -q 'if \[ "\$connect_code" = "503" \]; then' "$default_nix"; then
-    printf 'PASS  source degrades MCP connect on 503 (pigeon-down survivability)\n'
+  # 503 test -- and only a PIGEON 503. The door also 503s on its own first-byte
+  # timeout and on a wedged serve, with pigeon healthy; degrading on those would
+  # re-run the connect against a serve that may not own the session
+  # (2026-10-22: slow atlassian connects 503'd this way and were read as
+  # "pigeon down"). So a bare `= "503" ]; then` must NOT gate the degrade.
+  if grep -q 'if \[ "\$connect_code" = "503" \] && \[\[ "\$connect_msg" == \*pigeon\* \]\]; then' "$default_nix"; then
+    printf 'PASS  source degrades MCP connect on a pigeon 503 only (pigeon-down survivability)\n'
   else
-    printf 'FAIL  source degrades MCP connect on 503\n        not found in: %s\n' "$default_nix"; exit 1
+    printf 'FAIL  source degrades MCP connect on a pigeon 503 only\n        not found in: %s\n' "$default_nix"; exit 1
+  fi
+  if grep -q 'if \[ "\$connect_code" = "503" \]; then' "$default_nix"; then
+    printf 'FAIL  source degrades on ANY 503 (door timeout / wedged would hit the anchor)\n'; exit 1
+  else
+    printf 'PASS  source does not degrade on a non-pigeon 503\n'
+  fi
+  # HTTP 200 from connect does not mean connected (the serve answers 200 `true`
+  # for a server that ends `failed`), so the launcher must read the state back.
+  if grep -q '"\$FRONTDOOR_URL/session/\$session_id/mcp"' "$default_nix" \
+     && grep -q '^ *connected) : ;;' "$default_nix"; then
+    printf 'PASS  source verifies the MCP server reached status connected\n'
+  else
+    printf 'FAIL  source verifies the MCP server reached status connected\n        not found in: %s\n' "$default_nix"; exit 1
   fi
   # The bare connect must appear exactly once, and inside the 503 branch. Two
   # occurrences would mean the primary path regressed back to direct-to-serve.
@@ -380,7 +397,10 @@ if [ -f "$default_nix" ]; then
   fi
   # Both connect legs must be time-bounded: a wedged serve otherwise parks the
   # launcher (reset-workspace documents a 6+ hour parked curl on this shape).
-  if [ "$(grep -c -- '--max-time 20' "$default_nix" || true)" -ge 2 ]; then
+  # 90s, not 20: since the front door exempts MCP connect from its 5s
+  # first-byte timeout, the caller's deadline is the only bound, and healthy
+  # remote-backed connects (atlassian) can take several seconds plus npx.
+  if [ "$(grep -c -- '--max-time 90' "$default_nix" || true)" -ge 2 ]; then
     printf 'PASS  both MCP connect legs carry --max-time\n'
   else
     printf 'FAIL  both MCP connect legs carry --max-time\n        in: %s\n' "$default_nix"; exit 1

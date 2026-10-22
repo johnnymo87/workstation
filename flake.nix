@@ -502,8 +502,8 @@
         # test. The second skips EVERY source-grep guard, which is precisely
         # the set that pins the production call site.
         got=$(grep -c '^PASS' "$TMPDIR/ol.txt")
-        [ "$got" = "158" ] || {
-          echo "GATE FAILURE: expected 158 PASS lines, got $got." >&2
+        [ "$got" = "160" ] || {
+          echo "GATE FAILURE: expected 160 PASS lines, got $got." >&2
           echo "If you added assertions, bump this deliberately." >&2
           exit 1
         }
@@ -2078,8 +2078,13 @@
       # pattern grants nothing, and the session just fails to use the tool with
       # no error anywhere), and the source guards -- connect-before-PATCH,
       # front-door-only, and never disconnecting a per-directory-shared client.
+      # The behaviour half runs the BUILT script against a fake front door on
+      # loopback (pkgs/oc-mcp-enable/fake-door.py): 200-but-failed connects must
+      # not be reported as connected or granted, and a door 503 must name its
+      # real cause instead of "pigeon down?" (incident 2026-10-22).
       oc-mcp-enable-tests = devboxPkgs.runCommand "oc-mcp-enable-test" {
-        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils ];
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.jq devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.python3 ];
+        OC_MCP_ENABLE_BIN = "${(localPkgsFor devboxSystem).oc-mcp-enable}/bin/oc-mcp-enable";
       } ''
         cd ${self}
         bash pkgs/oc-mcp-enable/test.sh > "$TMPDIR/out.txt" || {
@@ -2089,6 +2094,7 @@
         # Assert the assertions RAN: a suite that exits 0 having executed
         # nothing (e.g. jq missing, helper renamed) is green and worthless.
         grep -q '^all oc-mcp-enable helper tests passed$' "$TMPDIR/out.txt"
+        grep -q '^oc-mcp-enable behaviour tests ran$' "$TMPDIR/out.txt"
         touch $out
       '';
 

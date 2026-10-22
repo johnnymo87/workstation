@@ -133,4 +133,105 @@ else
   printf 'SKIP  production-source check (default.nix not next to test)\n'
 fi
 
+# ---- behaviour: the REAL script against a fake front door --------------------
+#
+# OC_MCP_ENABLE_BIN is the built package's binary (the flake check sets it; run
+# locally with `OC_MCP_ENABLE_BIN=$(nix build --print-out-paths .#oc-mcp-enable)/bin/oc-mcp-enable`).
+# The flake check also requires the "behaviour tests ran" line, so a check that
+# silently skipped this section would fail.
+
+if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  work="$(mktemp -d)"
+  door_pid=""
+  cleanup() { [ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null; rm -rf "$work"; }
+  trap cleanup EXIT
+
+  # run_scenario <scenario>: start a fake door, run `oc-mcp-enable ses_fake123
+  # atlassian` against it, and leave rc/stdout/stderr/patch-log in $work.
+  run_scenario() {
+    [ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null && wait "$door_pid" 2>/dev/null || true
+    rm -f "$work/port" "$work/patches"
+    : >"$work/patches"
+    SCENARIO="$1" PATCH_LOG="$work/patches" python3 "$here/fake-door.py" "$work/port" &
+    door_pid=$!
+    for _ in $(seq 1 100); do [ -s "$work/port" ] && break; sleep 0.05; done
+    [ -s "$work/port" ] || { printf 'FAIL  fake door did not start (%s)\n' "$1"; exit 1; }
+    set +e
+    FRONTDOOR_URL="http://127.0.0.1:$(cat "$work/port")" \
+      "$OC_MCP_ENABLE_BIN" ses_fake123 atlassian >"$work/out" 2>"$work/err"
+    rc=$?
+    set -e
+  }
+
+  assert_contains() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then
+      printf 'PASS  %s\n' "$msg"
+    else
+      printf 'FAIL  %s\n        %s does not contain: %s\n        ---\n%s\n' "$msg" "$file" "$needle" "$(cat "$file")"; exit 1
+    fi
+  }
+  assert_not_contains() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then
+      printf 'FAIL  %s\n        %s unexpectedly contains: %s\n' "$msg" "$file" "$needle"; exit 1
+    else
+      printf 'PASS  %s\n' "$msg"
+    fi
+  }
+  no_grant() { assert_eq 0 "$(wc -l <"$work/patches")" "$1: no permission grant attempted"; }
+  stop_footer() { assert_contains "$work/err" "Stop and report" "$1: tells the agent to stop and report, not work around"; }
+
+  run_scenario ok
+  assert_eq 0 "$rc" "ok: exits 0"
+  assert_contains "$work/out" "Connected MCP server 'atlassian'" "ok: reports connected"
+  assert_contains "$work/patches" '"atlassian_*"' "ok: grants atlassian_*"
+
+  # The 2026-10-22 serve behaviour: 200 `true`, server ends `failed`.
+  run_scenario failed-after-200
+  assert_eq 1 "$rc" "failed-after-200: exits 1 despite HTTP 200"
+  assert_not_contains "$work/out" "Connected" "failed-after-200: does not claim connected"
+  assert_contains "$work/err" "status=failed (Failed to get tools)" "failed-after-200: surfaces the serve's status and error"
+  no_grant failed-after-200
+  stop_footer failed-after-200
+
+  run_scenario needs-auth
+  assert_eq 1 "$rc" "needs-auth: exits 1"
+  assert_contains "$work/err" "status=needs_auth" "needs-auth: names the state"
+  assert_contains "$work/err" "only the human can do" "needs-auth: says the human must re-auth"
+  no_grant needs-auth
+
+  # The 2026-10-22 symptom: door first-byte timeout, previously "pigeon down?".
+  run_scenario door-timeout
+  assert_eq 1 "$rc" "door-timeout: exits 1"
+  assert_contains "$work/err" "first-byte timeout" "door-timeout: names the door's timeout"
+  assert_contains "$work/err" "NOT that pigeon is down" "door-timeout: explicitly not pigeon"
+  assert_not_contains "$work/err" "pigeon down?" "door-timeout: old misleading message is gone"
+  no_grant door-timeout
+  stop_footer door-timeout
+
+  run_scenario pigeon-down
+  assert_eq 1 "$rc" "pigeon-down: exits 1"
+  assert_contains "$work/err" "pigeon is unavailable" "pigeon-down: a real pigeon 503 still says pigeon"
+  no_grant pigeon-down
+
+  run_scenario not-configured
+  assert_eq 1 "$rc" "not-configured: exits 1"
+  assert_contains "$work/err" "not configured on this host" "not-configured: says so"
+  no_grant not-configured
+
+  # Could not READ the state: warn, do not claim connected, still grant (inert
+  # if the tools do not exist). Distinct from a state that reads as failed.
+  run_scenario status-unreadable
+  assert_eq 0 "$rc" "status-unreadable: exits 0 (unknown is not failed)"
+  assert_not_contains "$work/out" "Connected" "status-unreadable: does not claim connected"
+  assert_contains "$work/err" "could not be read back" "status-unreadable: says the state is unknown"
+  assert_contains "$work/patches" '"atlassian_*"' "status-unreadable: still grants"
+
+  echo "oc-mcp-enable behaviour tests ran"
+else
+  printf 'SKIP  behaviour tests (OC_MCP_ENABLE_BIN unset)\n'
+fi
+
 echo "all oc-mcp-enable helper tests passed"

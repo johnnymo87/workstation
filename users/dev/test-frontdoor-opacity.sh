@@ -240,7 +240,7 @@ done
 read -r -d '' EXPECTED_MANIFEST <<'MANIFEST' || true
 hosts/cloudbox/configuration.nix 6
 hosts/devbox/configuration.nix 2
-pkgs/opencode-launch/default.nix 2
+pkgs/opencode-launch/default.nix 3
 pkgs/reset-workspace/default.nix 2
 users/dev/home.darwin.nix 3
 users/dev/home.devbox.nix 2
