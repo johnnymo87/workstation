@@ -262,19 +262,31 @@ pkgs.writeShellApplication {
             || printf 'unknown\t')"
           srv_status="''${srv_state%%$'\t'*}"
           srv_error="''${srv_state#*$'\t'}"
-          if [ "$srv_status" != "connected" ]; then
-            detail=""
-            [ -n "$srv_error" ] && detail=" ($srv_error)"
-            echo "Error: MCP server '$srv' did not connect: status=$srv_status$detail" >&2
-            case "$srv_status" in
-              needs_auth|needs_client_registration)
-                echo "It needs (re-)authentication, which only the human can do; see the server's setup skill." >&2
-                ;;
-            esac
-            mcp_unavailable_footer "$srv"
-            exit 1
-          fi
-          echo "Connected MCP server '$srv'"
+          case "$srv_status" in
+            connected)
+              echo "Connected MCP server '$srv'"
+              ;;
+            unknown)
+              # Could not READ the state (status call failed, or no entry).
+              # That is not evidence the connect failed, so grant -- a rule
+              # for tools that turn out not to exist is inert -- but do not
+              # claim success either.
+              echo "Warning: connect for MCP server '$srv' returned 200 but its state could not be read back." >&2
+              echo "Check with: oc-mcp-enable --status $session_id" >&2
+              ;;
+            *)
+              detail=""
+              [ -n "$srv_error" ] && detail=" ($srv_error)"
+              echo "Error: MCP server '$srv' did not connect: status=$srv_status$detail" >&2
+              case "$srv_status" in
+                needs_auth|needs_client_registration)
+                  echo "It needs (re-)authentication, which only the human can do; see the server's setup skill." >&2
+                  ;;
+              esac
+              mcp_unavailable_footer "$srv"
+              exit 1
+              ;;
+          esac
         done
       fi
 

@@ -381,8 +381,8 @@ if [ -f "$default_nix" ]; then
   fi
   # HTTP 200 from connect does not mean connected (the serve answers 200 `true`
   # for a server that ends `failed`), so the launcher must read the state back.
-  if grep -q '"\$status_base/session/\$session_id/mcp"' "$default_nix" \
-     && grep -q '!= "connected" \]; then' "$default_nix"; then
+  if grep -q '"\$FRONTDOOR_URL/session/\$session_id/mcp"' "$default_nix" \
+     && grep -q '^ *connected) : ;;' "$default_nix"; then
     printf 'PASS  source verifies the MCP server reached status connected\n'
   else
     printf 'FAIL  source verifies the MCP server reached status connected\n        not found in: %s\n' "$default_nix"; exit 1

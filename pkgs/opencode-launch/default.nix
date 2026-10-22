@@ -711,7 +711,7 @@ pkgs.writeShellApplication {
             -H "x-opencode-directory: $directory" || true)
           connect_msg="$(jq -r '.message // empty' <"$connect_body" 2>/dev/null || true)"
           rm -f "$connect_body"
-          status_base="$FRONTDOOR_URL"
+          connect_degraded=0
           # Degrade, mirroring the prompt_async retry below. Without this, a pigeon
           # outage HARD-KILLS every --mcp launch: create can't place -> no sticky ->
           # the door sees a mutating request it refuses to send to a non-owner and
@@ -735,8 +735,7 @@ pkgs.writeShellApplication {
               ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
               -X POST "$serve_url/mcp/$srv/connect" \
               -H "x-opencode-directory: $directory" || true)
-            # Same C8 degrade as the connect above: the status read follows the connect to the anchor.
-            status_base="$serve_url"
+            connect_degraded=1
           fi
           if [ "$connect_code" = "404" ]; then
             echo "Error: MCP server '$srv' is not configured on this host" >&2
@@ -747,21 +746,29 @@ pkgs.writeShellApplication {
             exit 1
           fi
           # HTTP 200 does not mean connected: the serve answers 200 `true` even
-          # when the server ends `failed` (measured 2026-10-22). Read it back.
-          status_auth=()
-          if [ "$status_base" != "$FRONTDOOR_URL" ]; then
-            status_auth=(''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"})
+          # when the server ends `failed` (measured 2026-10-22). Read it back,
+          # from wherever the connect went.
+          if [ "$connect_degraded" = "1" ]; then
+            # frontdoor-exempt(C8): status read after the pigeon-503 degrade above; follows the connect to the anchor
+            status_json="$(curl -s --max-time 15 ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} "$serve_url/session/$session_id/mcp" \
+              -H "x-opencode-directory: $directory" || true)"
+          else
+            status_json="$(curl -s --max-time 15 "$FRONTDOOR_URL/session/$session_id/mcp" \
+              -H "x-opencode-directory: $directory" || true)"
           fi
-          srv_status="$(curl -s --max-time 15 \
-            ''${status_auth[@]+"''${status_auth[@]}"} \
-            "$status_base/session/$session_id/mcp" \
-            -H "x-opencode-directory: $directory" \
-            | jq -r --arg s "$srv" '.[$s] // {} | "\(.status // "unknown") \(.error // "")"' 2>/dev/null || echo unknown)"
-          if [ "''${srv_status%% *}" != "connected" ]; then
-            echo "Error: MCP server '$srv' did not connect: $srv_status" >&2
-            echo "Do not work around the MCP server with direct API calls; stop and report this error to the human." >&2
-            exit 1
-          fi
+          srv_status="$(jq -r --arg s "$srv" '.[$s] // {} | "\(.status // "unknown") \(.error // "")"' <<<"$status_json" 2>/dev/null || echo unknown)"
+          case "''${srv_status%% *}" in
+            connected) : ;;
+            unknown)
+              # Could not READ the state; that is not evidence the connect failed.
+              echo "Warning: MCP server '$srv' connect returned 200 but its state could not be read back; continuing" >&2
+              ;;
+            *)
+              echo "Error: MCP server '$srv' did not connect: $srv_status" >&2
+              echo "Do not work around the MCP server with direct API calls; stop and report this error to the human." >&2
+              exit 1
+              ;;
+          esac
         done
         mcp_tools_json=$(build_mcp_tools_json "''${mcp_servers[@]}" | jq -c '. + {"question": false}')
       fi

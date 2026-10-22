@@ -30,6 +30,8 @@ SCENARIOS = {
     "door-timeout": (503, DOOR_TIMEOUT, {"status": "disabled"}),
     "pigeon-down": (503, DOOR_PIGEON, {"status": "disabled"}),
     "not-configured": (404, {"name": "NotFoundError"}, {"status": "disabled"}),
+    # Connect OK, but the status read itself fails: state unknown, not failed.
+    "status-unreadable": (200, True, None),
 }
 
 
@@ -52,6 +54,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"id": SID, "directory": "/tmp/fake", "permission": []})
         if self.path == f"/session/{SID}/mcp":
             state = SCENARIOS[SCENARIO][2]
+            if state is None:
+                return self._send(500, {"name": "UnknownError"})
             return self._send(200, {"atlassian": state, "slack-ro": {"status": "disabled"}})
         return self._send(404, {"name": "NotFoundError"})
 

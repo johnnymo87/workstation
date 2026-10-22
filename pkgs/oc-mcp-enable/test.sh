@@ -221,6 +221,14 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
   assert_contains "$work/err" "not configured on this host" "not-configured: says so"
   no_grant not-configured
 
+  # Could not READ the state: warn, do not claim connected, still grant (inert
+  # if the tools do not exist). Distinct from a state that reads as failed.
+  run_scenario status-unreadable
+  assert_eq 0 "$rc" "status-unreadable: exits 0 (unknown is not failed)"
+  assert_not_contains "$work/out" "Connected" "status-unreadable: does not claim connected"
+  assert_contains "$work/err" "could not be read back" "status-unreadable: says the state is unknown"
+  assert_contains "$work/patches" '"atlassian_*"' "status-unreadable: still grants"
+
   echo "oc-mcp-enable behaviour tests ran"
 else
   printf 'SKIP  behaviour tests (OC_MCP_ENABLE_BIN unset)\n'

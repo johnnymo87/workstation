@@ -175,7 +175,7 @@ its cause:
 |---|---|
 | `status=failed (...)` | The MCP server started but did not work. Usually its upstream is down or slow, as with mcp.atlassian.com on 2026-10-22 |
 | `status=needs_auth` / `needs_client_registration` | The server needs re-authentication, which only the human can do |
-| `front door gave up waiting ... (its first-byte timeout)` | The connect took longer than the door allows. **Not** pigeon. The door has exempted MCP connects from that timeout since this fix, so seeing this means the door predates it |
+| `front door gave up waiting ... (its first-byte timeout)` | The connect took longer than the door allows. **Not** pigeon. Newer doors exempt MCP connects from that timeout, so this means the running door is older. The door unit has `restartIfChanged = false`, so a rebuild alone does not update it; it needs an explicit restart, which is the human's call |
 | `pigeon is unavailable` | Pigeon is genuinely down. `systemctl status pigeon-daemon` |
 | `owning serve failed the front door's health probe (wedged)` | See the `monitoring-serve-pool` skill |
 | `no answer within 90s` | The server or its upstream is hanging |
