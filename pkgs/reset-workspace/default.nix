@@ -17,7 +17,8 @@ pkgs.writeShellApplication {
     # reset-workspace [--yes]
     #
     # Tear down all nvims and opencode sessions, restart the opencode serve pool
-    # (opencode-serve-pool.target), bring nvims back up as `nvims`. See:
+    # (opencode-serve-pool.target) and the goose serve (goose-serve.service,
+    # when the host has one), bring nvims back up as `nvims`. See:
     # docs/plans/2026-04-24-reset-workspace-design.md
     #
     # --yes  Skip the confirmation prompt (used by the nightly systemd unit).
@@ -27,6 +28,9 @@ pkgs.writeShellApplication {
     serve_auth_load
 
     OPENCODE_URL="''${OPENCODE_URL:-http://127.0.0.1:4096}"
+    # goose-serve's unauthenticated liveness endpoint (/acp needs the secret).
+    GOOSE_STATUS_URL="''${GOOSE_STATUS_URL:-http://127.0.0.1:4080/status}"
+    GOOSE_UNIT="goose-serve.service"
     YES=0
 
     # Save original args for the flock re-exec below.
@@ -357,7 +361,8 @@ pkgs.writeShellApplication {
 Usage: reset-workspace [--yes]
 
 Tear down all nvims and opencode sessions, restart the opencode serve pool
-(opencode-serve-pool.target), bring nvims back up as \`nvims\`.
+(opencode-serve-pool.target) and goose-serve.service (if present), bring
+nvims back up as \`nvims\`.
 
   --yes, -y    Skip the confirmation prompt.
 EOF
@@ -398,6 +403,7 @@ EOF
       log "About to:"
       log "  1. Exit all dev-owned nvim processes one at a time (SIGKILL only stragglers)"
       log "  2. Restart opencode-serve-pool.target (this Claude session's TUI will reconnect)"
+      log "  3. Restart $GOOSE_UNIT if this host has one (kills any in-flight goose turn)"
       log ""
 
       if [ "$YES" -ne 1 ]; then
@@ -1153,6 +1159,101 @@ EOF2
       log "WARNING: could not discover pool instances; restart postcondition NOT verified"
     fi
 
+    # ---- Step 6: Restart goose-serve ----
+    # goose sessions run on their own serve (goose-serve.service, :4080), which
+    # needs the same nightly bounce as the opencode pool: memory hygiene, and on
+    # cloudbox the unit sets restartIfChanged=false, so a rebuild never restarts
+    # it and a goose/unit change otherwise waits for a manual bounce. 03:00 is
+    # the quiet window that comment asks for. A bounce kills any in-flight goose
+    # turn (goose has no cancel), the same cost the pool restart imposes.
+    #
+    # It is a SYSTEM unit on both NixOS hosts, so it needs sudo. Both hosts have
+    # passwordless sudo, so both get bounced (on devbox the nightly unit has
+    # just restarted pigeon, which already cancelled any goose run on its
+    # connection). `-n`: the destructive phase runs with stdin=/dev/null, so a
+    # password prompt could never be answered; a host without passwordless sudo
+    # skips with a warning rather than failing the reset.
+    #
+    # honkd (the user-level ACP relay in front of goose on cloudbox) is NOT
+    # restarted. Its upstream control connection re-initializes on its own
+    # (honkd logs "re-initialized successfully"), and a restart would also drop
+    # its attached viewers. Cost accepted: a honk binary upgrade
+    # (X-SwitchMethod=keep-old) still does not land nightly, and neither does a
+    # rotated pigeon_goose_acp_token, which honkd reads only at startup -- see
+    # the rotation runbook in hosts/cloudbox/configuration.nix. Because honkd
+    # being *alive* says nothing about whether it reconnected (it logs retry
+    # failures at debug and retries forever), we wait for the success line.
+    #
+    # Runs AFTER the opencode pool so a goose failure cannot cost the pool its
+    # restart. A failure here is recorded and raised at the very end, after the
+    # ShaDa report, so the sentinel still shows phase=restart-goose.
+    update_sentinel "started" "restart-goose"
+    GOOSE_FAILED=""
+    goose_load="$(systemctl show -p LoadState --value "$GOOSE_UNIT" 2>/dev/null || true)"
+    if [ "$goose_load" != "loaded" ]; then
+      log "skipping goose restart ($GOOSE_UNIT not installed on this host)"
+    elif ! /run/wrappers/bin/sudo -n true 2>/dev/null; then
+      log "WARNING: skipping goose restart: restarting $GOOSE_UNIT needs passwordless sudo, which this host lacks"
+    else
+      goose_before="$(systemctl show -p ExecMainStartTimestampMonotonic --value "$GOOSE_UNIT" 2>/dev/null || true)"
+      goose_restart_at="$(date '+%Y-%m-%d %H:%M:%S')"
+      log "restarting $GOOSE_UNIT (ExecMainStartTimestampMonotonic before: ''${goose_before:-unreadable})..."
+      if ! /run/wrappers/bin/sudo -n systemctl restart "$GOOSE_UNIT"; then
+        GOOSE_FAILED="systemctl restart $GOOSE_UNIT failed"
+      elif [ "$(systemctl show -p ConditionResult --value "$GOOSE_UNIT" 2>/dev/null || true)" = "no" ]; then
+        # devbox gates the unit on ConditionPathExists=~/.local/bin/goose; a
+        # restart then "succeeds" with nothing running. Not a failure.
+        log "  $GOOSE_UNIT start condition not met on this host; nothing to health-check"
+      else
+        # --max-time for the same reason as the pool poll: one hung curl must
+        # not wedge the reset.
+        GOOSE_DEADLINE=$(($(date +%s) + 30))
+        goose_healthy=0
+        while [ "$(date +%s)" -lt "$GOOSE_DEADLINE" ]; do
+          if curl -sf --max-time 3 "$GOOSE_STATUS_URL" >/dev/null 2>&1; then
+            goose_healthy=1; break
+          fi
+          sleep 0.5
+        done
+        goose_after="$(systemctl show -p ExecMainStartTimestampMonotonic --value "$GOOSE_UNIT" 2>/dev/null || true)"
+        if [ "$goose_healthy" -ne 1 ]; then
+          GOOSE_FAILED="$GOOSE_UNIT did not answer $GOOSE_STATUS_URL within 30s of restart"
+        elif ! is_timestamp_increased "$goose_before" "$goose_after"; then
+          # Healthy but not provably new: something else answering :4080, or
+          # an unreadable timestamp. Say so; do not fail on it.
+          log "  WARNING: $GOOSE_UNIT healthy but restart unverified (before: ''${goose_before:-unreadable}, after: ''${goose_after:-unreadable})"
+        else
+          log "  $GOOSE_UNIT verified restarted and healthy (before: $goose_before, after: $goose_after)"
+        fi
+      fi
+      # The nightly system unit may not export XDG_RUNTIME_DIR, which --user needs.
+      goose_xdg="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      if [ -z "$GOOSE_FAILED" ] &&
+         XDG_RUNTIME_DIR="$goose_xdg" systemctl --user is-active --quiet honkd.service 2>/dev/null; then
+        # Not fatal: goose itself is fine, and honkd keeps retrying. But a miss
+        # (secret mismatch, unpatched goose) leaves every goose session dead
+        # behind a healthy-looking honkd, so say it loudly.
+        honkd_ok=0
+        HONKD_DEADLINE=$(($(date +%s) + 20))
+        while [ "$(date +%s)" -lt "$HONKD_DEADLINE" ]; do
+          # Capture first, then grep a here-string: `journalctl | grep -q`
+          # under pipefail can read a match as a miss (SIGPIPE to journalctl).
+          honkd_log="$(XDG_RUNTIME_DIR="$goose_xdg" journalctl --user -u honkd.service --since "$goose_restart_at" -o cat --no-pager 2>/dev/null || true)"
+          if grep -q 'Upstream control connection re-initialized successfully' <<<"$honkd_log"; then
+            honkd_ok=1; break
+          fi
+          sleep 1
+        done
+        if [ "$honkd_ok" -eq 1 ]; then
+          log "  honkd (not restarted) reconnected to the new $GOOSE_UNIT"
+        else
+          log "  WARNING: honkd did not log an upstream reconnect within 20s of the goose restart;"
+          log "           goose sessions behind it may be dead. Check: journalctl --user -u honkd --since '$goose_restart_at'"
+        fi
+      fi
+    fi
+    [ -z "$GOOSE_FAILED" ] || log "WARNING: goose restart failed: $GOOSE_FAILED (raised after the ShaDa report)"
+
     # Stop measuring and report. This sits at the very END of the run, not right
     # after the walk, because the invariant is "max concurrent == 1 across the
     # WHOLE reset" and Steps 4-5 are part of the reset. Measured 2026-08-10: the
@@ -1166,6 +1267,11 @@ EOF2
     # events means the instrument is dead, and the report says so rather than
     # reporting a reassuring "max 1".
     shada_watch_report "$nvim_exited"
+
+    # Raised here rather than in Step 6 so the report above still runs. The
+    # sentinel's CURRENT_PHASE is still restart-goose, so it reads
+    # "failed ... phase=restart-goose".
+    [ -z "$GOOSE_FAILED" ] || die "$GOOSE_FAILED"
 
     FINISHED=1
     update_sentinel "ok"

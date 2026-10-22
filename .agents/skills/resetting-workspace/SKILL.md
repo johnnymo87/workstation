@@ -10,7 +10,7 @@ description: Use when the user wants a fresh start on cloudbox — to kill all n
 ## What survives a reset
 
 Nothing on screen. `reset-workspace` tears down every nvim and bounces the
-opencode serve pool; no TUI is captured, no tab is reopened, and nothing is
+opencode serve pool and goose-serve; no TUI is captured, no tab is reopened, and nothing is
 recommended to you afterwards. You wake up to a clean `main` tmux session.
 
 Your **sessions** survive — they live in `opencode.db`, not in the TUI (see
@@ -46,6 +46,16 @@ Your **sessions** survive — they live in `opencode.db`, not in the TUI (see
 6. Restarts the opencode serve pool (`opencode-serve-pool.target`; user
    `systemctl --user` on devbox, passwordless sudo on cloudbox) and
    waits for every pool member to report healthy.
+7. Restarts `goose-serve.service` (`:4080`, a system unit; passwordless sudo)
+   and waits for `/status`, on cloudbox and devbox alike. Skipped when the host
+   has no such unit or no passwordless sudo. It runs after the opencode pool so
+   it can never cost the pool its restart; a goose failure fails the reset with
+   `phase=restart-goose` in `/tmp/reset-workspace-last-status.txt`. Any
+   in-flight goose turn dies (goose has no cancel). `honkd` (cloudbox) is
+   deliberately **not** restarted: it reconnects to a bounced goose on its own,
+   and the reset waits up to 20s for its `re-initialized successfully` log line,
+   warning (not failing) on a miss. Consequence: a honk upgrade or a rotated
+   `pigeon_goose_acp_token` still needs a manual `systemctl --user restart honkd`.
 
 Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 

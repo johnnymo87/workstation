@@ -1229,7 +1229,8 @@ lib.mkIf isCloudbox {
   #   An explicit `systemctl --user restart honkd` in a quiet window applies a binary upgrade immediately.
   # - MemoryMax=1G, MemorySwapMax=0: bounds cgroup resources and prevents swap churn.
   # - Excluded from nightly reset-workspace restarts (honkd is a relay daemon, not an
-  #   opencode serve pool instance).
+  #   opencode serve pool instance). reset-workspace DOES bounce goose-serve, and honkd
+  #   rides that out by re-initializing its upstream connection with backoff.
   # - --turn-hook-url: report every turn's start and end to pigeon's /goose/turn-event so a
   #   registered goose session's Telegram topic shows turns from every client (honk chat,
   #   coordinator wakes), not only pigeon's own. Loopback only; the token is pigeon's daemon
