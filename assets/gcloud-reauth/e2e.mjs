@@ -279,6 +279,9 @@ const signinUrl = (() => {
 try {
   await page.goto('https://accounts.google.com/Logout', { waitUntil: 'networkidle2', timeout: 60000 });
   log('signed the isolated profile out of Google');
+  // Only the sign-in may count: a sign-out that itself passes through the IdP
+  // would otherwise make fresh_signin true for a flow that never re-signed in.
+  result.idp_redirect = false;
   await page.goto(signinUrl, { waitUntil: 'networkidle2', timeout: 60000 });
   await sleep(3000);
   await inspect('01-landing');

@@ -247,8 +247,11 @@ LAST_OUTCOME=""
 # sign-in -- an IdP round trip -- NOT 16h after minting: a grant minted on
 # Google cookies alone inherits the older sign-in's deadline (2026-10-22:
 # minted 18:20Z, dead by 22:00Z, sign-in 03:12Z). e2e.mjs therefore forces an
-# IdP round trip on every flow, and with it each `refreshed` row really does
-# start a ~16h lifetime. 6h is a trade, not a derivation: each refresh drives
+# IdP round trip on every flow (`refreshed`, vs `refreshed_unanchored` when it
+# did not happen). Whether a SILENT round trip -- the IdP answering from its
+# own session -- restarts the clock, or Google keys on when the human last
+# signed in at the IdP, is being measured (bead workstation-0w5k); either way
+# the deadline is no older than before. 6h is a trade, not a derivation: each refresh drives
 # a background tab for ~30s and is a chance to stop for a human; while the Mac
 # is awake 6h gives two retries inside one lifetime. Overnight the last-chance
 # refresh (keepalive.sh) mints just before the IdP session's own cap.
@@ -619,6 +622,10 @@ except Exception:
   fi
   if ! { cat "$dir/authcode.txt" >&3 && echo "" >&3; }; then
     abort_remote
+    if slept_through "$step_t0" 260; then
+      record "$cred" "interrupted" "The Mac slept during the login; the remote session was gone when the code was ready. Retrying next run"
+      return
+    fi
     record "$cred" "code_delivery_failed" "Obtained a code but the remote session was gone before it could be delivered"
     return
   fi
@@ -635,6 +642,11 @@ except Exception:
   # alone would call that `refreshed`. Exit status comes from the remote
   # command through ssh (124 if the local timeout fired).
   if [ "$login_rc" -ne 0 ]; then
+    # 255 is ssh's own failure: a session that died across a sleep.
+    if [ "$login_rc" -eq 255 ] && slept_through "$step_t0" 260; then
+      record "$cred" "interrupted" "The Mac slept during the login and the remote session died; retrying next run"
+      return
+    fi
     record "$cred" "verify_failed" "Remote $cred login exited $login_rc after the code was delivered; the old credential may still be in place. See $dir/gcloud-login.log"
     return
   fi
@@ -662,7 +674,10 @@ import json,sys
 sys.exit(0 if json.load(open(sys.argv[1])).get("fresh_signin") else 1)' "$dir/e2e-result.json" 2>/dev/null; then
         record "$cred" "refreshed" "Remote $cred credential is live and freshly minted after a fresh IdP sign-in"
       else
-        record "$cred" "refreshed" "Remote $cred credential is live and freshly minted, but WITHOUT a fresh IdP sign-in: it expires with an earlier sign-in, possibly within hours"
+        # Not `refreshed`: it does not reset the due clock, and it alerts. With
+        # the sign-out forced, this means that mechanism broke -- the same
+        # "refreshed, dead hours later" failure this exists to catch.
+        record "$cred" "refreshed_unanchored" "Remote $cred credential is live and new, but the flow did not pass through the IdP, so it expires with an earlier sign-in, possibly within hours. The forced sign-out in e2e.mjs is no longer taking effect"
       fi ;;
     file_not_rewritten)
       record "$cred" "verify_failed" "Login reported no error but the remote ADC refresh token did not change; see $dir/gcloud-login.log" ;;
