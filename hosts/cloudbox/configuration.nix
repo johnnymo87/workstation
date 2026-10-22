@@ -675,6 +675,9 @@ in
     #   sudo systemctl restart goose-serve
     # reset-workspace does exactly that every night at 03:00 (Step 6), so
     # changes to this unit land by the next morning without a manual bounce.
+    # NOT a rotation of pigeon_goose_acp_token, though: the nightly run never
+    # restarts honkd, which reads the secret only at startup. Rotation still
+    # needs the three-unit runbook on that secret above.
     #
     # This is also why the shared ACP secret above carries no restartUnits:
     # this very line is what would make such a listing fire for pigeon-daemon

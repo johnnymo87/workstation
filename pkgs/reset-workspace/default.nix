@@ -1161,22 +1161,28 @@ EOF2
 
     # ---- Step 6: Restart goose-serve ----
     # goose sessions run on their own serve (goose-serve.service, :4080), which
-    # needs the same nightly bounce as the opencode pool: memory hygiene, and it
-    # is the only way a goose/secret/config change reaches it, because the unit
-    # sets restartIfChanged=false so a rebuild never restarts it mid-turn. 03:00
-    # is the quiet window that comment asks for. A bounce kills any in-flight
-    # goose turn (goose has no cancel), the same cost the pool restart imposes.
+    # needs the same nightly bounce as the opencode pool: memory hygiene, and on
+    # cloudbox the unit sets restartIfChanged=false, so a rebuild never restarts
+    # it and a goose/unit change otherwise waits for a manual bounce. 03:00 is
+    # the quiet window that comment asks for. A bounce kills any in-flight goose
+    # turn (goose has no cancel), the same cost the pool restart imposes.
     #
-    # It is a SYSTEM unit on both NixOS hosts, so it needs sudo. `-n`: the
-    # destructive phase runs with stdin=/dev/null, so a password prompt could
-    # never be answered; on a host without passwordless sudo (devbox) we skip
-    # with a warning rather than fail the reset.
+    # It is a SYSTEM unit on both NixOS hosts, so it needs sudo. Both hosts have
+    # passwordless sudo, so both get bounced (on devbox the nightly unit has
+    # just restarted pigeon, which already cancelled any goose run on its
+    # connection). `-n`: the destructive phase runs with stdin=/dev/null, so a
+    # password prompt could never be answered; a host without passwordless sudo
+    # skips with a warning rather than failing the reset.
     #
     # honkd (the user-level ACP relay in front of goose on cloudbox) is NOT
-    # restarted. It survives an upstream bounce by itself ("Upstream control
-    # connection lost; re-initializing with backoff"), and restarting it
-    # alongside goose makes it race goose's startup, exit on "connection
-    # refused", and fall into its restart backoff. We only report its state.
+    # restarted. Its upstream control connection re-initializes on its own
+    # (honkd logs "re-initialized successfully"), and a restart would also drop
+    # its attached viewers. Cost accepted: a honk binary upgrade
+    # (X-SwitchMethod=keep-old) still does not land nightly, and neither does a
+    # rotated pigeon_goose_acp_token, which honkd reads only at startup -- see
+    # the rotation runbook in hosts/cloudbox/configuration.nix. Because honkd
+    # being *alive* says nothing about whether it reconnected (it logs retry
+    # failures at debug and retries forever), we wait for the success line.
     #
     # Runs AFTER the opencode pool so a goose failure cannot cost the pool its
     # restart. A failure here is recorded and raised at the very end, after the
@@ -1190,6 +1196,7 @@ EOF2
       log "WARNING: skipping goose restart: restarting $GOOSE_UNIT needs passwordless sudo, which this host lacks"
     else
       goose_before="$(systemctl show -p ExecMainStartTimestampMonotonic --value "$GOOSE_UNIT" 2>/dev/null || true)"
+      goose_restart_at="$(date '+%Y-%m-%d %H:%M:%S')"
       log "restarting $GOOSE_UNIT (ExecMainStartTimestampMonotonic before: ''${goose_before:-unreadable})..."
       if ! /run/wrappers/bin/sudo -n systemctl restart "$GOOSE_UNIT"; then
         GOOSE_FAILED="systemctl restart $GOOSE_UNIT failed"
@@ -1221,8 +1228,28 @@ EOF2
       fi
       # The nightly system unit may not export XDG_RUNTIME_DIR, which --user needs.
       goose_xdg="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-      if XDG_RUNTIME_DIR="$goose_xdg" systemctl --user cat honkd.service >/dev/null 2>&1; then
-        log "  honkd (not restarted; reconnects on its own): $(XDG_RUNTIME_DIR="$goose_xdg" systemctl --user is-active honkd.service 2>/dev/null || true)"
+      if [ -z "$GOOSE_FAILED" ] &&
+         XDG_RUNTIME_DIR="$goose_xdg" systemctl --user is-active --quiet honkd.service 2>/dev/null; then
+        # Not fatal: goose itself is fine, and honkd keeps retrying. But a miss
+        # (secret mismatch, unpatched goose) leaves every goose session dead
+        # behind a healthy-looking honkd, so say it loudly.
+        honkd_ok=0
+        HONKD_DEADLINE=$(($(date +%s) + 20))
+        while [ "$(date +%s)" -lt "$HONKD_DEADLINE" ]; do
+          # Capture first, then grep a here-string: `journalctl | grep -q`
+          # under pipefail can read a match as a miss (SIGPIPE to journalctl).
+          honkd_log="$(XDG_RUNTIME_DIR="$goose_xdg" journalctl --user -u honkd.service --since "$goose_restart_at" -o cat --no-pager 2>/dev/null || true)"
+          if grep -q 'Upstream control connection re-initialized successfully' <<<"$honkd_log"; then
+            honkd_ok=1; break
+          fi
+          sleep 1
+        done
+        if [ "$honkd_ok" -eq 1 ]; then
+          log "  honkd (not restarted) reconnected to the new $GOOSE_UNIT"
+        else
+          log "  WARNING: honkd did not log an upstream reconnect within 20s of the goose restart;"
+          log "           goose sessions behind it may be dead. Check: journalctl --user -u honkd --since '$goose_restart_at'"
+        fi
       fi
     fi
     [ -z "$GOOSE_FAILED" ] || log "WARNING: goose restart failed: $GOOSE_FAILED (raised after the ShaDa report)"

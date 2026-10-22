@@ -47,14 +47,15 @@ Your **sessions** survive — they live in `opencode.db`, not in the TUI (see
    `systemctl --user` on devbox, passwordless sudo on cloudbox) and
    waits for every pool member to report healthy.
 7. Restarts `goose-serve.service` (`:4080`, a system unit; passwordless sudo)
-   and waits for `/status`. Skipped when the host has no such unit or no
-   passwordless sudo (devbox). It runs after the opencode pool so it can never
-   cost the pool its restart; a goose failure fails the reset with
+   and waits for `/status`, on cloudbox and devbox alike. Skipped when the host
+   has no such unit or no passwordless sudo. It runs after the opencode pool so
+   it can never cost the pool its restart; a goose failure fails the reset with
    `phase=restart-goose` in `/tmp/reset-workspace-last-status.txt`. Any
-   in-flight goose turn dies (goose has no cancel). `honkd` is deliberately
-   **not** restarted: it reconnects to a bounced goose on its own, and
-   restarting the two together makes honkd race goose's startup into its
-   restart backoff.
+   in-flight goose turn dies (goose has no cancel). `honkd` (cloudbox) is
+   deliberately **not** restarted: it reconnects to a bounced goose on its own,
+   and the reset waits up to 20s for its `re-initialized successfully` log line,
+   warning (not failing) on a miss. Consequence: a honk upgrade or a rotated
+   `pigeon_goose_acp_token` still needs a manual `systemctl --user restart honkd`.
 
 Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 
