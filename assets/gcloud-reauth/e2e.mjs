@@ -270,12 +270,11 @@ try {
     const { txt } = await inspect(`03-loop${i}`);
     if (result.password_demanded || result.mfa_demanded || result.captcha || result.bot_blocked || result.idp_login_required) {
       log('HALT: challenge detected, refusing to proceed');
-      // A human has to act. Routine runs stay in a background tab so they never
-      // steal focus, but this is the one case where grabbing attention IS the
-      // correct behaviour -- the alternative is failing silently and being
-      // discovered hours later as dead credentials.
+      // A human has to act. The tab stays open, still in the background; the
+      // alert refresh.sh raises asks for attention, and its button brings this
+      // tab forward. Focus moves only when the human says so.
       handoffToHuman = true;
-      result.awaiting_human = true;   // set here: the log line is written before the raise
+      result.awaiting_human = true;
       break;
     }
     await clickByText([/^select all$/i]);

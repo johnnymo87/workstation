@@ -70,9 +70,10 @@ alert_human() {
     return
   fi
   if [ "$kind" = signin ]; then
-    # No default button: the alert takes keyboard focus when it appears, and
-    # a Return meant for whatever the human was typing must not answer it.
-    buttons='{"Later", "Open sign-in page"} cancel button 1'
+    # No default and no cancel button: the alert takes keyboard focus when it
+    # appears, and a Return or Esc meant for whatever the human was typing must
+    # not answer it.
+    buttons='{"Later", "Open sign-in page"}'
   else
     buttons='{"OK"} default button 1'
   fi

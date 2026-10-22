@@ -170,9 +170,10 @@ alert_human() {
     return
   fi
   if [ "$kind" = signin ]; then
-    # No default button: the alert takes keyboard focus when it appears, and
-    # a Return meant for whatever the human was typing must not answer it.
-    buttons='{"Later", "Open sign-in page"} cancel button 1'
+    # No default and no cancel button: the alert takes keyboard focus when it
+    # appears, and a Return or Esc meant for whatever the human was typing must
+    # not answer it.
+    buttons='{"Later", "Open sign-in page"}'
   else
     buttons='{"OK"} default button 1'
   fi
@@ -220,8 +221,8 @@ LAST_OUTCOME=""
 # --- which credentials are due ----------------------------------------------
 # Due = no `refreshed` row in the last REAUTH_REFRESH_AFTER_SECONDS. The
 # session-control policy has killed these credentials ~16h after minting.
-# 6h is a trade, not a derivation: each refresh steals browser focus for ~30s,
-# and while the Mac is awake 6h gives two retries inside one lifetime. Across
+# 6h is a trade, not a derivation: each refresh drives a background tab for
+# ~30s and is a chance to stop for a human; while the Mac is awake 6h gives two retries inside one lifetime. Across
 # a night it cannot help -- a credential up to 6h old at lid-close dies after
 # ~10h of sleep, and the morning run needs a human at the IdP anyway. A
 # smaller value only moves that overnight death later, at the cost of more
@@ -565,7 +566,7 @@ except Exception:
     print("unknown")' "$dir/e2e-result.json" 2>/dev/null)"
     case "$reason" in
       idp_login_required|password_demanded|mfa_demanded|bot_blocked)
-        record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open and raised; sign in there and this run retries by itself." ;;
+        record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open in the isolated Chrome (the alert brings it forward); sign in there and this run retries by itself." ;;
       *)
         record "$cred" "no_authcode" "Browser flow ended without a code (outcome: $reason)" ;;
     esac
@@ -623,7 +624,7 @@ except Exception:
 # independent failure modes, and a CLI fault must not leave ADC unattempted.
 # The one exception is a stop for a human at the shared IdP sign-in. A later
 # flow would hit the same page in the same browser, and its first act is to
-# close stale IdP tabs -- the very tab just raised for the human, possibly
+# close stale IdP tabs -- the very tab just left open for the human, possibly
 # mid-typing. It still gets its own row and its own notification.
 rm -f "$WORK"/authfifo "$WORK"/authcode.txt   # pre-ADC single-workdir layout
 attempt() {
@@ -637,7 +638,7 @@ attempt() {
     fi
     refresh_one "$cred"
     [ "$LAST_OUTCOME" = refreshed ] || PENDING+=("$cred")
-    # Keyed on what the browser actually did (a tab raised for the human), not
+    # Keyed on what the browser actually did (a tab left open for the human), not
     # on the mapped outcome: e2e.mjs can raise the tab and then still end in
     # `error`, which maps to no_authcode.
     if [ "$LAST_OUTCOME" = human_required ] || python3 -c '
@@ -666,7 +667,7 @@ fi
 # --- waiting for a human ------------------------------------------------------
 # The notification just told the human to sign in, and they usually do within a
 # minute or two. Watch for it rather than leaving the credentials dead until the
-# next hourly run: poll the IdP session (background tab; the raised sign-in tab
+# next hourly run: poll the IdP session (background tab; the sign-in tab left for the human
 # is left alone) and, once it is live, retry what is still pending. Exactly one
 # retry -- a second stop means something other than a missing sign-in.
 #
