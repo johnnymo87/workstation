@@ -704,10 +704,14 @@ pkgs.writeShellApplication {
           # Error semantics are preserved exactly: verified 2026-07-26 that a
           # missing server returns byte-identical 404 McpServerNotFoundError
           # through the door and direct to a serve.
-          connect_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            --max-time 20 \
+          connect_body="$(mktemp)"
+          connect_code=$(curl -s -o "$connect_body" -w '%{http_code}' \
+            --max-time 90 \
             -X POST "$FRONTDOOR_URL/session/$session_id/mcp/$srv/connect" \
-            -H "x-opencode-directory: $directory")
+            -H "x-opencode-directory: $directory" || true)
+          connect_msg="$(jq -r '.message // empty' <"$connect_body" 2>/dev/null || true)"
+          rm -f "$connect_body"
+          status_base="$FRONTDOOR_URL"
           # Degrade, mirroring the prompt_async retry below. Without this, a pigeon
           # outage HARD-KILLS every --mcp launch: create can't place -> no sticky ->
           # the door sees a mutating request it refuses to send to a non-owner and
@@ -716,22 +720,46 @@ pkgs.writeShellApplication {
           # this through the door without a degrade was a REGRESSION (found by
           # adversarial review after deploy, 2026-07-26). The prompt_async retry
           # below cannot cover it -- we exit before ever reaching it.
-          # 503 specifically means "pigeon unavailable, refusing to guess an owner",
+          # A pigeon 503 means "pigeon unavailable, refusing to guess an owner",
           # which is exactly when $serve_url's raw-anchor fallback is the right
           # target: a create-degraded session actually lives on the anchor.
-          if [ "$connect_code" = "503" ]; then
-            echo "Note: MCP connect via front door got 503 (pigeon down); retrying direct against $serve_url" >&2
+          # ONLY that 503. The door also 503s on its own first-byte timeout and
+          # on a wedged serve, with pigeon healthy; falling back then would
+          # re-run the connect against a serve that may not own the session
+          # (2026-10-22: slow atlassian connects 503'd this way and were read as
+          # "pigeon down").
+          if [ "$connect_code" = "503" ] && [[ "$connect_msg" == *pigeon* ]]; then
+            echo "Note: MCP connect via front door got 503 (pigeon unavailable); retrying direct against $serve_url" >&2
             # frontdoor-exempt(C8): fires ONLY on a door 503 (pigeon down); without it every --mcp launch dies at connect
-            connect_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+            connect_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
               ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
               -X POST "$serve_url/mcp/$srv/connect" \
-              -H "x-opencode-directory: $directory")
+              -H "x-opencode-directory: $directory" || true)
+            # Same C8 degrade as the connect above: the status read follows the connect to the anchor.
+            status_base="$serve_url"
           fi
           if [ "$connect_code" = "404" ]; then
             echo "Error: MCP server '$srv' is not configured on this host" >&2
             exit 1
           elif [ "$connect_code" != "200" ]; then
-            echo "Error: failed to connect MCP server '$srv' (HTTP $connect_code)" >&2
+            echo "Error: failed to connect MCP server '$srv' (HTTP $connect_code''${connect_msg:+: $connect_msg})" >&2
+            echo "Do not work around the MCP server with direct API calls; stop and report this error to the human." >&2
+            exit 1
+          fi
+          # HTTP 200 does not mean connected: the serve answers 200 `true` even
+          # when the server ends `failed` (measured 2026-10-22). Read it back.
+          status_auth=()
+          if [ "$status_base" != "$FRONTDOOR_URL" ]; then
+            status_auth=(''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"})
+          fi
+          srv_status="$(curl -s --max-time 15 \
+            ''${status_auth[@]+"''${status_auth[@]}"} \
+            "$status_base/session/$session_id/mcp" \
+            -H "x-opencode-directory: $directory" \
+            | jq -r --arg s "$srv" '.[$s] // {} | "\(.status // "unknown") \(.error // "")"' 2>/dev/null || echo unknown)"
+          if [ "''${srv_status%% *}" != "connected" ]; then
+            echo "Error: MCP server '$srv' did not connect: $srv_status" >&2
+            echo "Do not work around the MCP server with direct API calls; stop and report this error to the human." >&2
             exit 1
           fi
         done

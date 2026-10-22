@@ -94,6 +94,9 @@ Key caveats:
   workers. Prefer `--mcp slack-ro` when the worker only needs to read.
 - **Launch-time only.** `--mcp` is a flag on `opencode-launch`; it cannot help a
   session that is already running. For that, use `oc-mcp-enable` (next section).
+- **A failed `--mcp` fails the launch.** The launcher reads the server's state
+  back and exits 1 unless it is `connected`. Treat that the same as a failed
+  `oc-mcp-enable`: stop and report (see "When `oc-mcp-enable` fails" below).
 
 > **The `tools` map is not per-message.** An earlier version of this doc said the
 > `tools` override "applies only to the launch prompt". That is wrong, and it is
@@ -152,6 +155,34 @@ It does exactly two HTTP calls through the front door, and **both are required**
    `<server>_*`. Without it the tools are *visible* to the model but every call
    falls through to the default `ask` action, which in a headless session blocks
    forever waiting for a human who isn't there.
+
+Between the two, it reads the server's state back from `GET /session/<id>/mcp`
+and refuses to grant unless the state is `connected`. The connect call answers
+HTTP 200 even when the server ends up `failed`. On 2026-10-22 the atlassian
+connect returned 200 after 48 s, and the server's state was
+`failed: Failed to get tools`.
+
+### When `oc-mcp-enable` fails: stop and report
+
+If it exits non-zero, **stop and report its error to the human verbatim**. Do
+not retry in a loop. Above all, do not work around the server by calling the
+service's API with credentials from your environment (for example the Jira REST
+API with `ATLASSIAN_API_TOKEN`). On 2026-10-22 an agent did exactly that after
+three failed atlassian connects, and the human did not want it. The error names
+its cause:
+
+| Error says | Meaning |
+|---|---|
+| `status=failed (...)` | The MCP server started but did not work. Usually its upstream is down or slow, as with mcp.atlassian.com on 2026-10-22 |
+| `status=needs_auth` / `needs_client_registration` | The server needs re-authentication, which only the human can do |
+| `front door gave up waiting ... (its first-byte timeout)` | The connect took longer than the door allows. **Not** pigeon. The door has exempted MCP connects from that timeout since this fix, so seeing this means the door predates it |
+| `pigeon is unavailable` | Pigeon is genuinely down. `systemctl status pigeon-daemon` |
+| `owning serve failed the front door's health probe (wedged)` | See the `monitoring-serve-pool` skill |
+| `no answer within 90s` | The server or its upstream is hanging |
+
+Before this fix, every 503 was reported as `pigeon down?`. That was wrong for
+the 2026-10-22 failures: pigeon was healthy, and the door's own 5 s timeout
+fired while Atlassian's remote MCP was slow.
 
 ### Scope: connect is per-DIRECTORY, permission is per-SESSION
 
