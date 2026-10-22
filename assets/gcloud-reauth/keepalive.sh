@@ -218,19 +218,64 @@ except Exception:
 err = row.get("error")
 has = row.get("has_session")
 secs = row.get("seconds_remaining")
+exp = row.get("expires_at") or ""
 if err or has is None:
     print(f"probe_error|{err or 'probe returned no verdict'}")
 else:
-    print(f"{'ok' if has else 'no_session'}|{secs if secs is not None else ''}")
+    print(f"{'ok' if has else 'no_session'}|{secs if secs is not None else ''}|{exp}")
 PY
 )"
-state="${verdict%%|*}"
-secs="${verdict##*|}"
+IFS='|' read -r state secs expires_at <<<"$verdict"
+
+# --- last-chance refresh ------------------------------------------------------
+# The IdP session has a hard cap on top of its 2h idle timeout: past it, our
+# hourly touch stops extending expiresAt (2026-10-21: signed in ~14:12Z, the
+# expiry froze at 02:12Z, exactly 12h on, keepalive or not). Once it expires,
+# no refresh can run until a human signs in -- and the credentials minted by
+# the last routine refresh (up to 6h earlier) die ~16h after THAT. So when the
+# expiry has stopped moving and less than LAST_CHANCE_SECONDS is left, ask for
+# one forced refresh now: credentials minted in the session's final hour carry
+# the remote host ~16h, e.g. through the night.
+#
+# Asked, not run here: the refresh agent has the env (remote host, Keychain
+# values) and its own lock handling. A request file says "force once"; the
+# kickstart starts it now rather than at :07. If it is already running, the
+# next run picks the request up. Once per session expiry, via the marker.
+LAST_CHANCE_SECONDS="${REAUTH_LAST_CHANCE_SECONDS:-4500}"
+last_chance() {
+  local prev_exp_file="$STATE/idp-last-expires-at" prev done_file="$STATE/last-chance-done"
+  [ -n "$expires_at" ] && [ -n "$secs" ] || return 0
+  prev="$(cat "$prev_exp_file" 2>/dev/null)"
+  printf '%s\n' "$expires_at" > "$prev_exp_file"
+  # Capped = the expiry no longer slides. Every probe is itself an
+  # authenticated read, so a session still under its idle timeout reads ~7200s
+  # right after it; anything clearly below that means the cap is in charge.
+  # (Equality with the previous probe is a second signal.) Testing remaining
+  # time, not only equality, is what buys lead time: with hourly probes the
+  # first capped probe has 1-2h left, and waiting for a second sighting would
+  # leave anywhere from 0 to 60 min -- sometimes less than the refresh takes.
+  # Hourly probes then guarantee >= ~15 min of lead.
+  if [ "$prev" != "$expires_at" ] && [ "$secs" -ge 7000 ] 2>/dev/null; then
+    return 0
+  fi
+  [ "$secs" -le "$LAST_CHANCE_SECONDS" ] 2>/dev/null || return 0
+  [ "$(cat "$done_file" 2>/dev/null)" = "$expires_at" ] && return 0
+  printf '%s\n' "$expires_at" > "$done_file"
+  printf '%s\n' "$expires_at" > "$STATE/refresh-requested"
+  record "last_chance" "IdP session hits its hard cap in $((secs / 60)) min ($expires_at); requested a forced refresh so the remote credentials outlast it"
+  # The refresh waits for the lock this run holds; release it first.
+  rmdir "$LOCK" 2>/dev/null
+  trap - EXIT
+  if ! launchctl kickstart "gui/$(id -u)/org.nix-community.home.gcloud-reauth-refresh" >/dev/null 2>&1; then
+    echo "WARNING: could not kickstart the refresh agent; the request waits for its next hourly run" >&2
+  fi
+}
 
 case "$state" in
   ok)
     record "held" "IdP session live${secs:+, ${secs}s remaining}"
     dismiss_signin_alert   # the human signed in; the prompt is no longer true
+    last_chance
     ;;
   no_session)
     # Quiet: the refresh asks for the sign-in, with an alert, when a refresh is
@@ -258,6 +303,7 @@ print(last)' 2>/dev/null)"
     exit 1
     ;;
   probe_error)
+    # $secs carries the error text on this path.
     record "probe_error" "Could not read the IdP session: $secs" yes
     exit 1
     ;;
