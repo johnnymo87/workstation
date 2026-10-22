@@ -153,6 +153,14 @@ in
         group = "dev";
         mode = "0400";
       };
+      # This machine's own worker key (pigeon-k0qn.8). Only the daemon start
+      # script reads it; anything else that talks to the worker keeps
+      # ccr_api_key. See pigeon docs/runbooks/per-machine-credentials.md.
+      pigeon_worker_key = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       telegram_bot_token = {
         owner = "dev";
         group = "dev";
@@ -386,7 +394,14 @@ in
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
-        export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
+        # Prefer this machine's own worker key. Rollback without a rebuild:
+        # touch ~/.config/pigeon/use-shared-worker-key and restart the daemon
+        # (only works while this machine is not in SHARED_KEY_REFUSED_MACHINES).
+        if [ -s /run/secrets/pigeon_worker_key ] && [ ! -e "$HOME/.config/pigeon/use-shared-worker-key" ]; then
+          export CCR_API_KEY="$(cat /run/secrets/pigeon_worker_key)"
+        else
+          export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
+        fi
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
         [ -f /run/secrets/pigeon_goose_acp_token ] && export PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
