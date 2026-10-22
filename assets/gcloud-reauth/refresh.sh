@@ -147,6 +147,9 @@ PY
   echo "credential=$cred outcome=$outcome ${detail:+detail=$detail}"
   case "$outcome" in
     refreshed|not_due|skipped) ;;
+    # The Mac slept mid-step: nothing is wrong, and the next run retries with
+    # no backoff (QUIET in cred_status).
+    interrupted) ;;
     # Already alerted when the failure happened; it retries by itself.
     backing_off) failed=yes ;;
     # The alert for these is raised once per run by the caller, not per row:
@@ -240,13 +243,15 @@ LAST_OUTCOME=""
 
 # --- which credentials are due ----------------------------------------------
 # Due = no `refreshed` row in the last REAUTH_REFRESH_AFTER_SECONDS. The
-# session-control policy has killed these credentials ~16h after minting.
-# 6h is a trade, not a derivation: each refresh drives a background tab for
-# ~30s and is a chance to stop for a human; while the Mac is awake 6h gives two retries inside one lifetime. Across
-# a night it cannot help -- a credential up to 6h old at lid-close dies after
-# ~10h of sleep, and the morning run needs a human at the IdP anyway. A
-# smaller value only moves that overnight death later, at the cost of more
-# focus steals by day.
+# session-control policy kills the CLI credential ~16h after the last real
+# sign-in -- an IdP round trip -- NOT 16h after minting: a grant minted on
+# Google cookies alone inherits the older sign-in's deadline (2026-10-22:
+# minted 18:20Z, dead by 22:00Z, sign-in 03:12Z). e2e.mjs therefore forces an
+# IdP round trip on every flow, and with it each `refreshed` row really does
+# start a ~16h lifetime. 6h is a trade, not a derivation: each refresh drives
+# a background tab for ~30s and is a chance to stop for a human; while the Mac
+# is awake 6h gives two retries inside one lifetime. Overnight the last-chance
+# refresh (keepalive.sh) mints just before the IdP session's own cap.
 # Per credential: if ADC failed and CLI did not, the next run retries only ADC.
 # Rows written before credentials were split out count as cli.
 #
@@ -262,7 +267,7 @@ cred_status() {
   python3 - "$LOG" "$REFRESH_AFTER" "$RETRY_AFTER" "${ALL_CREDENTIALS[@]}" <<'PY'
 import json, sys, datetime
 log, after, retry, creds = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4:]
-QUIET = ("not_due", "skipped", "backing_off")
+QUIET = ("not_due", "skipped", "backing_off", "interrupted")
 HUMAN = ("human_required", "waiting_for_human")
 last_ok, last_outcome, last_attempt = {}, {}, {}
 parse = datetime.datetime.fromisoformat
@@ -507,6 +512,12 @@ abort_remote() {
   GPID=""
 }
 
+# Wall-clock seconds since $1 exceed $2: the Mac slept during a step whose own
+# budget is $2. A login spanning a sleep fails for that reason alone -- its ssh
+# session is dead on wake (2026-10-22: started 11:45Z, woke 12:56Z, recorded
+# no_auth_url and backed off for 2h) -- and is not evidence of a broken flow.
+slept_through() { [ $(( $(date +%s) - $1 )) -gt "$2" ]; }
+
 refresh_one() {
   local cred="$1" login_cmd verify_cmd dir answered=0 prompts node_rc reason verdict qp_mode login_rc
   case "$cred" in
@@ -542,7 +553,8 @@ refresh_one() {
   # pipe and is read as the AUTH CODE, failing the flow. So reply only to a
   # prompt actually seen, and at most twice -- more than that is not the flow
   # this script knows, and it should stop rather than keep agreeing.
-  local url_seen=no
+  local url_seen=no step_t0
+  step_t0=$(date +%s)
   for _ in $(seq 1 60); do
     if grep -qo 'https://accounts.google.com[^ ]*' "$dir/gcloud-login.log" 2>/dev/null; then
       url_seen=yes; break
@@ -557,6 +569,10 @@ refresh_one() {
   grep -o 'https://accounts.google.com[^ ]*' "$dir/gcloud-login.log" | head -1 > "$dir/e2e-url.txt"
   if [ "$url_seen" != yes ] || [ ! -s "$dir/e2e-url.txt" ]; then
     abort_remote
+    if slept_through "$step_t0" 180; then
+      record "$cred" "interrupted" "The Mac slept while waiting for the remote auth URL; retrying next run"
+      return
+    fi
     record "$cred" "no_auth_url" "Remote gcloud never printed an auth URL in 60s (answered $answered prompt(s)); see $dir/gcloud-login.log"
     return
   fi
@@ -565,6 +581,7 @@ refresh_one() {
   # exact allowlist before navigating (untrusted: it came from the remote
   # host), clicks only account-selection and consent, and halts on any
   # credential prompt rather than answering it.
+  step_t0=$(date +%s)
   REAUTH_FLOW="$cred" \
   SPIKE_ACCOUNT="$SPIKE_ACCOUNT" \
   REAUTH_WORKDIR="$dir" \
@@ -591,7 +608,12 @@ except Exception:
       idp_login_required|password_demanded|mfa_demanded|bot_blocked)
         record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open in the isolated Chrome (the alert brings it forward); sign in there and this run retries by itself." ;;
       *)
-        record "$cred" "no_authcode" "Browser flow ended without a code (outcome: $reason)" ;;
+        # 200s is the flow's own timeout; well past it, the Mac slept mid-flow.
+        if slept_through "$step_t0" 260; then
+          record "$cred" "interrupted" "The Mac slept during the browser flow (outcome: $reason); retrying next run"
+        else
+          record "$cred" "no_authcode" "Browser flow ended without a code (outcome: $reason)"
+        fi ;;
     esac
     return
   fi
@@ -630,7 +652,18 @@ except Exception:
     esac
   fi
   case "$verdict" in
-    ok) record "$cred" "refreshed" "Remote $cred credential is live and freshly minted" ;;
+    ok)
+      # Whether the flow really signed in at the IdP decides how long this
+      # credential lives (see "which credentials are due"). Still `refreshed`
+      # -- the credential IS new and live -- but say so when it is not
+      # anchored to a fresh sign-in, since it can then die within hours.
+      if python3 -c '
+import json,sys
+sys.exit(0 if json.load(open(sys.argv[1])).get("fresh_signin") else 1)' "$dir/e2e-result.json" 2>/dev/null; then
+        record "$cred" "refreshed" "Remote $cred credential is live and freshly minted after a fresh IdP sign-in"
+      else
+        record "$cred" "refreshed" "Remote $cred credential is live and freshly minted, but WITHOUT a fresh IdP sign-in: it expires with an earlier sign-in, possibly within hours"
+      fi ;;
     file_not_rewritten)
       record "$cred" "verify_failed" "Login reported no error but the remote ADC refresh token did not change; see $dir/gcloud-login.log" ;;
     quota_project_lost)

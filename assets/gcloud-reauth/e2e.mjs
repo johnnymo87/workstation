@@ -194,6 +194,7 @@ const result = {
   bot_blocked: false,
   idp_redirect: false,
   idp_login_required: false,
+  fresh_signin: false,
   awaiting_human: false,
   clicks: [],
   outcome: null,
@@ -248,24 +249,59 @@ const inspect = async (label) => {
   return { txt, u };
 };
 
+// Every main-frame navigation, not only the ones inspect() samples: the IdP
+// round trip below is a chain of auto-posting redirects that is usually over
+// before the next screenshot.
+const isIdp = (u) => IDP_HOST_RE.test(u) || /\/sso\/saml|SAMLRequest/i.test(u);
+page.on('framenavigated', (f) => {
+  if (f === page.mainFrame() && isIdp(f.url())) result.idp_redirect = true;
+});
+
+// FORCE A REAL SIGN-IN. The Cloud session-length policy counts a grant's
+// lifetime from the user's last *authentication*, not from when the grant was
+// minted. A consent that completes on Google cookies alone is not an
+// authentication: on 2026-10-22 a credential minted at 18:20Z that way
+// inherited a 03:12Z sign-in and was dead by 22:00Z, while the browser itself
+// stayed signed in throughout (the policy governs grants, not the web
+// session). Google ignores OIDC max_age=0 here (measured), so: sign this
+// dedicated profile out of Google, and hint the account so Google sends it
+// straight to the IdP over SAML. With the IdP session live -- which is what
+// the keepalive maintains -- that round trip completes on the IdP's cookies
+// with no human; without one it stops at the IdP sign-in form, which is
+// detected below and handed to the human exactly as before.
+// The hint is added AFTER validation and is the only change to the URL.
+const signinUrl = (() => {
+  const u = new URL(url);
+  if (ACCT) u.searchParams.set('login_hint', ACCT);
+  return u.toString();
+})();
+
 try {
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+  await page.goto('https://accounts.google.com/Logout', { waitUntil: 'networkidle2', timeout: 60000 });
+  log('signed the isolated profile out of Google');
+  await page.goto(signinUrl, { waitUntil: 'networkidle2', timeout: 60000 });
   await sleep(3000);
   await inspect('01-landing');
 
-  // Step: account chooser
-  const hs = await queryAll('li, div[role="link"], div[data-identifier]');
-  for (const h of hs) {
-    const t = await textOf(h);
-    if (t.includes(ACCT)) {
-      try { await h.click(); result.clicks.push('account-row'); break; } catch {}
+  // Step: account chooser -- only when actually ON the chooser. With the
+  // login_hint above Google often skips it and lands on "You're signing back
+  // in", where the element carrying the account's address is the account
+  // switcher: clicking it OPENS the chooser (measured 2026-10-22, ADC flow).
+  // The consent loop below calls this again, for a chooser met later.
+  const pickAccount = async () => {
+    if (!/\/accountchooser/.test(page.url())) return false;
+    for (const h of await queryAll('li, div[role="link"], div[data-identifier]')) {
+      if ((await textOf(h)).includes(ACCT)) {
+        try { await h.click(); result.clicks.push('account-row'); return true; } catch {}
+      }
     }
-  }
-  await sleep(6000);
+    return false;
+  };
+  if (await pickAccount()) await sleep(6000);
   await inspect('02-after-account');
 
-  // Up to 4 consent-ish screens: "Continue" / "Allow" / "Select all"
-  for (let i = 0; i < 4; i++) {
+  // Up to 6 consent-ish screens: "Continue" / "Allow" / "Select all"
+  for (let i = 0; i < 6; i++) {
     if (onAuthcode(page.url())) break;
     const { txt } = await inspect(`03-loop${i}`);
     if (result.password_demanded || result.mfa_demanded || result.captcha || result.bot_blocked || result.idp_login_required) {
@@ -277,9 +313,20 @@ try {
       result.awaiting_human = true;
       break;
     }
+    if (await pickAccount()) { await sleep(6000); continue; }
     await clickByText([/^select all$/i]);
     const c = await clickByText([/^continue$/i, /^allow$/i, /^next$/i]);
-    if (!c) { log(`no actionable button on loop${i}`); break; }
+    if (!c) {
+      // Google's interstitials (/v3/signin/continue, "Loading") have no button
+      // and redirect on their own; the IdP hop passes through one every time.
+      // Stopping on one was the 2026-10-22 15:07Z `stalled`. Give it up to
+      // 20s to move on before calling the page a dead end.
+      const before = page.url();
+      for (let w = 0; w < 20 && page.url() === before; w++) await sleep(1000);
+      if (page.url() !== before) { log(`loop${i}: page moved on by itself`); await sleep(3000); continue; }
+      log(`no actionable button on loop${i}`);
+      break;
+    }
     result.clicks.push(c);
     await sleep(6000);
   }
@@ -294,6 +341,10 @@ try {
     if (m) {
       fs.writeFileSync(CODE_FILE, m.trim());
       result.completed_on_cookies = !result.password_demanded && !result.mfa_demanded;
+      // The IdP was visited and did not ask for credentials: the grant's
+      // session-length clock starts now. False means it inherits an older
+      // sign-in and may die within hours -- refresh.sh says so in its row.
+      result.fresh_signin = result.idp_redirect && !result.idp_login_required;
       result.outcome = 'authcode_obtained';
       log('AUTHCODE OBTAINED, length', m.trim().length);
     } else {
@@ -342,6 +393,7 @@ try {
     bot_blocked: result.bot_blocked,
     idp_redirect: result.idp_redirect,
     idp_login_required: result.idp_login_required,
+    fresh_signin: result.fresh_signin,
     awaiting_human: result.awaiting_human,
     clicks: result.clicks,
     outcome: result.outcome,
