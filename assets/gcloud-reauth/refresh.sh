@@ -248,10 +248,10 @@ LAST_OUTCOME=""
 # Google cookies alone inherits the older sign-in's deadline (2026-10-22:
 # minted 18:20Z, dead by 22:00Z, sign-in 03:12Z). e2e.mjs therefore forces an
 # IdP round trip on every flow (`refreshed`, vs `refreshed_unanchored` when it
-# did not happen). Whether a SILENT round trip -- the IdP answering from its
-# own session -- restarts the clock, or Google keys on when the human last
-# signed in at the IdP, is being measured (bead workstation-0w5k); either way
-# the deadline is no older than before. 6h is a trade, not a derivation: each refresh drives
+# did not happen). A SILENT round trip -- the IdP answering from its own
+# session, no human -- restarts the clock too: measured 2026-10-22/23, a grant
+# minted at 23:04Z right after one was live at 15:00Z and dead by 15:15Z,
+# ~16h later and ~26h after the human's last IdP sign-in. 6h is a trade, not a derivation: each refresh drives
 # a background tab for ~30s and is a chance to stop for a human; while the Mac
 # is awake 6h gives two retries inside one lifetime. Overnight the last-chance
 # refresh (keepalive.sh) mints just before the IdP session's own cap.
@@ -441,8 +441,16 @@ fi
 # --- preflight: which account the browser should pick ----------------------
 # Both logins are for the same user, and both pages show the same account
 # chooser. Read once, before any remote login is started.
-SPIKE_ACCOUNT="$(timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" \
-  'gcloud config get-value account' 2>/dev/null | tr -d '\r')"
+# Retried for ~60s: the first run after a wake can start before the network
+# is back (2026-10-23: 9s after a full wake, ssh failed, and the `error` row
+# put both credentials into a 2h backoff).
+SPIKE_ACCOUNT=""
+for _ in 1 2 3 4; do
+  SPIKE_ACCOUNT="$(timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" \
+    'gcloud config get-value account' 2>/dev/null | tr -d '\r')"
+  [ -n "$SPIKE_ACCOUNT" ] && break
+  sleep 15
+done
 if [ -z "$SPIKE_ACCOUNT" ]; then
   fail_all "error" "Could not read the remote gcloud account"
 fi
