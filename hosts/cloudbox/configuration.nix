@@ -5688,6 +5688,15 @@ EOF
       # after the reset registers with a fresh daemon.
       # Symmetric with devbox (hosts/devbox/configuration.nix).
       /run/wrappers/bin/sudo systemctl restart pigeon-daemon.service
+      # mono's origin is https with the `gh auth git-credential` helper, which
+      # needs GH_TOKEN; this system unit has none, so `work --prune-merged`'s
+      # fetch failed every night ("could not read Username") and pruning
+      # judged merged-ness against a stale origin/main. Optional: a missing
+      # secret leaves the old degraded-but-working behaviour.
+      if [ -r /run/secrets/github_api_token ]; then
+        GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        export GH_TOKEN
+      fi
       /home/dev/.nix-profile/bin/reset-workspace --yes
     '';
   };
