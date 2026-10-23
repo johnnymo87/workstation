@@ -1,6 +1,6 @@
 ---
 name: escalating-azure-aks-rbac
-description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a Wonder production AKS cluster fails with a Forbidden / RBAC error, or when you need to self-activate the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
+description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a Wonder production AKS cluster fails with a Forbidden / RBAC error, or when self-activating the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
 ---
 
 # Escalating Azure AKS prod RBAC (PIM self-activation)

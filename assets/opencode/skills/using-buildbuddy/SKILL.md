@@ -67,7 +67,7 @@ spam, this is the only way to get all of it.
 
 When you need something `bb-test-log` doesn't expose (e.g. enumerate every
 failing target in an invocation, fetch `test.xml` instead of `test.log`,
-filter by tag), call the API directly. Three endpoints:
+filter by tag), call the API directly. Four endpoints:
 
 ```bash
 H="x-buildbuddy-api-key: $BUILDBUDDY_API_KEY"

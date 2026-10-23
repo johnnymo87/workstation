@@ -168,7 +168,7 @@ Old swarm messages stay in the daemon's `swarm_messages` table. They aren't auto
 - **Growing one by accident.** A worker that everyone reports to, or that everyone asks for status, has become a coordinator whether or not you called it one. Warning signs: one session's transcript is mostly `swarm_send` calls; the human hears findings second-hand; a worker asks a peer "how's it going?" instead of reading its beads.
 - **Spinning up workers without giving them each other's ids.** They can't coordinate directly and will funnel everything through whoever they do know, manufacturing a coordinator.
 - **Spawning more workers than there are decoupled slices.** Two workers fighting over the same code is worse than one worker doing both.
-- **Forgetting `--reply-to` in chained conversations.** Without threading, the receiver has to reconstruct context from prose. Cheap to set; expensive to omit.
+- **Forgetting `reply_to` in chained conversations.** Without threading, the receiver has to reconstruct context from prose. Cheap to set; expensive to omit.
 - **Not telling workers how to escalate.** Workers that don't know they should ask the human directly will silently get stuck, or make decisions that should have been the human's.
 
 ## See Also

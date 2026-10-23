@@ -146,6 +146,8 @@ let
       "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/lgtm-review-mechanics.md";
     "${skillsDir}/shepherding-pull-requests/reference/retired-wake-scheduling.md".source =
       "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/retired-wake-scheduling.md";
+    "${skillsDir}/shepherding-pull-requests/reference/common-mistakes.md".source =
+      "${assetsPath}/opencode/skills/shepherding-pull-requests/reference/common-mistakes.md";
   };
 
   # monitoring-deployments has an executable rollout-monitoring python script

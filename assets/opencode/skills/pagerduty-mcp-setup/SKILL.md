@@ -134,7 +134,7 @@ Rotate when the token is revoked, compromised, no longer has needed permissions,
 
 ## Tools
 
-PagerDuty documents 64 tools across 14 domains. The workstation wrapper passes `--enable-write-tools`, so **both read and write tools are available when the server is enabled**. Because the MCP is `enabled: false` by default, write tools never load in ordinary sessions — they appear only after you deliberately switch the server on. The read tools below are always part of the surface; the write tools (next paragraph) are the addition.
+PagerDuty documents 64 tools across 14 domains. The workstation wrapper passes `--enable-write-tools`, so **both read and write tools are available when the server is enabled**. Names below are the server's own; opencode exposes them as `pagerduty_<tool>` (e.g. `pagerduty_get_incident`).
 
 | Domain | Read tools |
 |--------|------------|

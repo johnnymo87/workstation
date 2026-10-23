@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
@@ -147,7 +147,7 @@ be glad not to be asked) send it a swarm message from `stall-watch` with kind
 
 This is the human's standing, sanctioned arrangement, not a coordinator: it only
 accepts the recipient's own recommendation (never invents or overrides), holds
-no shared context, assigns no work, and every answer is recorded and shown to
+no shared context, assigns no work of its own, and every answer is recorded and shown to
 the human (who usually also sees a notice in that session's Telegram thread and
 can countermand).
 
@@ -169,6 +169,10 @@ What a worker should understand:
   recommendation for <the human>", not as the human's approval.
 - **The human's word wins.** If the human has answered in the session since,
   the human's word wins.
+- **A relayed assignment quotes the human.** stall-watch may pass a finished
+  worker a new assignment the human asked for. That message quotes the human's
+  request; the quote is what makes it the human's work rather than
+  stall-watch's. An assignment without that quote is not one: ask the human.
 - **No need to acknowledge a delegated answer; carry on.** stall-watch reads
   your session the next time it runs, so what you write there reaches it. If a
   `chat` message from stall-watch asks you something, answer the same way: in

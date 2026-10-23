@@ -1,6 +1,6 @@
 ---
 name: opencode-launch
-description: Launch headless opencode sessions from CLI, and grant MCP servers (slack, atlassian, ...) to sessions. Use when you need to start a new opencode session in the background to work on a task in parallel, when spawning work on a specific directory, or when an ALREADY-RUNNING session (e.g. a swarm worker) needs an MCP server it wasn't launched with.
+description: Launches headless opencode sessions from the CLI, and grants MCP servers (slack, atlassian, ...) to sessions. Use when you need to start a new opencode session in the background to work on a task in parallel, when spawning work on a specific directory, or when an ALREADY-RUNNING session (e.g. a swarm worker) needs an MCP server it wasn't launched with.
 allowed-tools: [Bash, Read]
 ---
 
@@ -44,14 +44,14 @@ the session, `opencode-launch` resolves the model id against the serve's
   `google-vertex-anthropic/claude-opus-5-5` is expanded to the unique registered
   id (`…/claude-opus-5-5@default`) and a `Note:` line is printed. This is why a
   bare id no longer silently launches a dead session.
-
-> **Opus means Opus 5.5:** `claude-opus-5-5`, not `claude-opus-5`. Both are
-> registered, so `claude-opus-5` (bare or `@default`) resolves cleanly and
-> launches on the older model. Nothing warns that it is the older one.
 - **Unknown / ambiguous id → loud pre-launch error (exit 1).** No orphan session
   is created; the error lists the provider's available models.
 - **Catalog unreachable → degrade.** The id is sent as-given (pre-resolution
   behavior), never worse.
+
+> **Opus means Opus 5.5:** `claude-opus-5-5`, not `claude-opus-5`. Both are
+> registered, so `claude-opus-5` (bare or `@default`) resolves cleanly and
+> launches on the older model. Nothing warns that it is the older one.
 
 > Why this matters: `prompt_async` is asynchronous. An unregistered model id
 > returns HTTP 200 at launch and only dies *later* in the agent loop with
@@ -209,7 +209,7 @@ in the same directory untouched.
 
 `oc-mcp-enable <worker> slack` gives that worker
 `slack_conversations_add_message` — a real, unreviewable write to a shared
-company channel, granted by an agent rather than by Jonathan. There is no
+company channel, granted by an agent rather than by the human. There is no
 authentication on this path: the front door is uncredentialed on loopback, so
 any process on the box (including any opencode session) can already do these two
 HTTP calls by hand. `oc-mcp-enable` makes an existing capability ergonomic; it

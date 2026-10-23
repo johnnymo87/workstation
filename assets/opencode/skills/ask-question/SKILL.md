@@ -1,6 +1,6 @@
 ---
 name: ask-question
-description: Draft a technical research question and send to ChatGPT for investigation
+description: Drafts a technical research question and sends it to ChatGPT for deep web research via the ask-question CLI. Use when the user runs /ask-question or asks to research a problem with ChatGPT. With the `draft` argument, only the question file is written.
 argument-hint: [draft]
 allowed-tools: [Read, Glob, Grep, Bash]
 ---

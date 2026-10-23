@@ -1,6 +1,6 @@
 ---
 name: tagging-sessions
-description: Use when checking or setting which spend tag an opencode session is attributed to, when an oc-tags report shows untagged (auto:) sessions or tags that look like branch names, when asked which programs of work spend is going to, or before adding, renaming, or bulk-retagging oc-tags tags.
+description: Policy and commands for oc-tags, which attributes opencode and goose session LLM spend to program-of-work tags. Use when checking or setting which spend tag an opencode session is attributed to, when an oc-tags report shows untagged (auto:) sessions or tags that look like branch names, when asked which programs of work spend is going to, or before adding, renaming, or bulk-retagging oc-tags tags.
 ---
 
 # Tagging Sessions

@@ -1,6 +1,6 @@
 ---
 name: enabling-mcp-servers
-description: Use when a task needs tools from an MCP server (slack, slack-ro, atlassian, pagerduty, rollbar, figma, devcycle, chrome-devtools, ...) that the current opencode or goose session does not have, or when the user asks how to turn an MCP server on or off for a session.
+description: Explains how an MCP server gets turned on for an opencode or goose session. Use when a task needs tools from an MCP server (slack, slack-ro, atlassian, pagerduty, rollbar, figma, devcycle, chrome-devtools, ...) that the current opencode or goose session does not have, or when the user asks how to turn an MCP server on or off for a session.
 ---
 
 # Enabling MCP Servers for a Session

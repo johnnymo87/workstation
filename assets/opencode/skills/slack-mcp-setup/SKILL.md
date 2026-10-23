@@ -1,6 +1,6 @@
 ---
 name: slack-mcp-setup
-description: Set up Slack MCP server with xoxp User OAuth token. Use for initial setup or token rotation, when a Slack tool is missing or disabled, or when a file upload is rejected with "file_path is not allowed" / "uploading by file_path is disabled". Covers macOS (Keychain) and cloudbox (sops), the per-tool env-var gates, and the file_path upload allowlist. For composing a message or attaching a file day-to-day, use formatting-slack-messages instead.
+description: Sets up the Slack MCP server with an xoxp User OAuth token. Use for initial setup or token rotation, when a Slack tool is missing or disabled, or when a file upload is rejected with "file_path is not allowed" / "uploading by file_path is disabled". Covers macOS (Keychain) and cloudbox (sops), the per-tool env-var gates, and the file_path upload allowlist. For composing a message or attaching a file day-to-day, use formatting-slack-messages instead.
 ---
 
 # Slack MCP Setup
@@ -46,6 +46,9 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 
 ### Which gate registers which tool
 
+Tool names below are the server's own. opencode exposes them prefixed with the
+server name: `slack_<tool>` or `slack-ro_<tool>` (e.g. `slack_file_upload`).
+
 | Env var | Tool it registers | `slack` | `slack-ro` |
 |---|---|---|---|
 | (none — always on) | `channels_list`, `conversations_history`, `conversations_replies`, `conversations_search_messages`, `users_search`, … | yes | yes |
@@ -68,7 +71,10 @@ not a preference. The server's logger middleware logs **every tool call's params
 at INFO** — which for `file_upload` is the file content and for
 `conversations_add_message` is the message text. The MCP process's stderr is
 inherited by `opencode-serve`, so at the default level everything you upload is
-also durably in the journal. At `warn`, failures still log tool name and error.
+also durably in the journal. (With `file_path` the logged param is only the
+path; with `content` / `content_base64` it is the payload, so a secret uploaded
+that way lands in stderr as well as in Slack.) At `warn`, failures still log
+tool name and error.
 
 (PR #334's description claims params are not logged for its tool. That is true
 of its own handler and false of the global middleware that wraps it. Measured,
@@ -112,11 +118,6 @@ transcript, which is what makes bulk exfiltration infeasible, and `file_path`
 removes that limit. Keep the root to files staged in order to be sent. Do not
 widen it to `/tmp/opencode` itself — that is ~2 GB of scratch from every
 concurrent session, including repo checkouts and multi-MB data exports.
-
-> **The server logs tool arguments at info level.** With `file_path` the logged
-> param is the path; with `content` / `content_base64` it is the payload, so
-> uploading a secret that way puts it in the server's stderr as well as in
-> Slack. `SLACK_MCP_LOG_LEVEL=warn` is set for this reason.
 
 ### Why a pinned build
 
