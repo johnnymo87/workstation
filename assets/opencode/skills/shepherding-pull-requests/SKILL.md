@@ -64,11 +64,11 @@ Reporting a PR URL and treating the task as finished is the specific failure thi
 
 ## Detailed references
 
-Everything needed for an ordinary PR is in this file. Two branches have detail worth keeping out
-of the way until they apply:
+The loop and its rules are in this file. Detail worth keeping out of the way until it applies:
 
 - **Is this PR lgtm-bound, and must lgtm be re-requested?** → [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md)
 - **The retired self-scheduled wake mechanism, and why it was removed** → [reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md)
+- **Common mistakes, with the incidents behind them** → [reference/common-mistakes.md](reference/common-mistakes.md)
 
 ## PR Lifecycle
 
@@ -380,6 +380,7 @@ failure-asymmetry argument behind that default: see
    - For deciding *what* to reply (accept / push back / escalate), see the `receiving-code-review` skill — every thread gets one of those three responses; nothing gets silently dropped.
    - If a thread needs a human decision, surface it to the user before continuing.
 5. **If anything was fixed in steps 2-4**, push, then:
+   - **Confirm the push landed before citing it:** `git rev-parse HEAD`, `origin/<branch>` (after a fetch) and `gh pr view --json headRefOid` must all agree. A failed push can print a success-looking line (see [reference/common-mistakes.md](reference/common-mistakes.md)).
    - **If a HUMAN reviewer's most recent review is `CHANGES_REQUESTED` or `COMMENTED`** -- they asked for changes, you addressed them, now they need to look again -- re-request that login (see §"Re-requesting review"). Nothing else re-notifies them.
    - **If their most recent review was already `APPROVED`**, do NOT re-request -- they signed off; you're just mopping up leftover inline threads. The approval stays valid; pushing fixes for inline-only feedback does not invalidate sign-off.
    - **Do not re-request or trigger-comment any bot.** Bots do not come back and should not be asked to.

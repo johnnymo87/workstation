@@ -54,6 +54,9 @@ kubectl --kubeconfig=/path/to/config get pods
 
 # Set via environment (use ABSOLUTE paths, not ~/)
 export KUBECONFIG=/Users/you/.kube/config-prod
+
+# Confirm which cluster you are on before any prod command
+kubectl config current-context
 ```
 
 ## Troubleshooting

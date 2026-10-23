@@ -49,7 +49,7 @@ Steps:
 
 > Note: **new tokens are encrypted and shown only once at creation** — copy it
 > immediately, you cannot view it again in the UI or API afterward. (Tokens
-> created before this change, in April 2025, remain visible.)
+> created before that change, made in April 2025, remain visible.)
 
 Do not commit account names, project names, project counters, or token values.
 
