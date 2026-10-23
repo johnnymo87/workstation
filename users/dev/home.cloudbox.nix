@@ -667,6 +667,20 @@ lib.mkIf isCloudbox {
     '';
   };
 
+  # The stall-watch coordinators' `sw` skill, delivered on goose's own global
+  # skills root (~/.config/goose/skills) instead of being copied into each
+  # coordinator's working directory. goose scans this root on every model
+  # call; opencode does not scan it, so opencode workers never see the skill,
+  # and the lane turns goose's global roots off (GOOSE_GLOBAL_SKILLS=false).
+  # Out-of-store, like superpowers: the source is the private repo's
+  # production checkout, so a skill edit goes live when that checkout is
+  # fast-forwarded, with no switch and no goose-serve restart. stall-watch
+  # keeps writing per-home copies until this link resolves to its checkout,
+  # then removes them (they would shadow it). Bead eng-agent-platform-fkrd.
+  home.file.".config/goose/skills/sw".source =
+    config.lib.file.mkOutOfStoreSymlink
+      "${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/sw_skill";
+
   home.activation.assembleGwsCredentials = lib.hm.dag.entryAfter [ "writeBoundary" "linkGeneration" ] ''
     set -euo pipefail
 
