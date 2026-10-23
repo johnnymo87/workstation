@@ -194,7 +194,7 @@ bd q "Quick capture"        # Returns only ID
 # Update as you work
 bd update bd-a1b2 --status in_progress
 bd note bd-a1b2 "DONE: X. NEXT: Y. BLOCKER: Z"   # APPENDS -- see below
-bd update bd-a1b2 --design "Decided approach A because..."
+bd update bd-a1b2 --design "Decided approach A because..."   # REPLACES the field -- see runbook section above
 
 # Close when done
 bd close bd-a1b2 --reason "Completed: summary of what was done"
@@ -327,7 +327,7 @@ And add to `.beads/.gitignore`:
 ```
 
 ### 3. Add a Dolt Remote (Cloud Backup)
-Point your Beads database to a shared remote (like a GitHub repo, DoltHub, S3, or GCS) using the wrapper command:
+Point your Beads database to a shared remote (like a GitHub repo, DoltHub, S3, or GCS) using the wrapper command. **On workstation hosts the default is DoltHub, never git-backed** — see "Workstation setup (DoltHub)" and the anti-pattern below; the other forms are listed for completeness:
 ```bash
 # GitHub (using Dolt's git-backed refs format under refs/dolt/data)
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git

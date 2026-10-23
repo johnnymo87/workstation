@@ -37,8 +37,7 @@ its own set; new projects start with four tokens, one per scope:
 | `post_client_item` | Client-side event sending (not used here) |
 
 The workstation deployment uses a **read+write** token so the full triage flow —
-investigate *and* resolve — works. `read` alone is enough for every read tool;
-`update-item` (resolve/assign) additionally needs `write`.
+investigate *and* resolve — works.
 
 Steps:
 
@@ -48,9 +47,9 @@ Steps:
    `update-item`.
 3. Copy it.
 
-> Note: since April 2025, **newly created tokens are encrypted and shown only
-> once at creation** — copy it immediately, you cannot view it again in the UI or
-> API afterward. Existing pre-2025 tokens remain visible.
+> Note: **new tokens are encrypted and shown only once at creation** — copy it
+> immediately, you cannot view it again in the UI or API afterward. (Tokens
+> created before this change, in April 2025, remain visible.)
 
 Do not commit account names, project names, project counters, or token values.
 
@@ -142,7 +141,8 @@ enablement or after applying new secrets. A `home-manager switch` also resets
 
 ## Tools
 
-The server exposes (verified against `@rollbar/mcp-server` v0.5.0):
+The server exposes (verified against `@rollbar/mcp-server` v0.5.0; opencode
+prefixes each name with the server, e.g. `rollbar_get-item-details`):
 
 | Tool | Purpose |
 |------|---------|

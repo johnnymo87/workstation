@@ -1,6 +1,6 @@
 ---
 name: scheduling-wakes
-description: Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong.
+description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong.
 ---
 
 # Scheduling Wakes

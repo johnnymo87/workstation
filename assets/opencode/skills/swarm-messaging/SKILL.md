@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging

@@ -2,6 +2,15 @@
 
 Full details for both tools. SKILL.md has the decision matrix and quick-start; this file has command-level detail and troubleshooting.
 
+## Contents
+
+- Environment & Auth (required variables, required tools)
+- Part 1: Atlassian MCP — Jira CRUD (create, read, update/transition, JQL search, comments, example bug ticket, best practices)
+- Part 1b: Atlassian MCP — Confluence authoring
+- Part 2: nvim — Fetch Atlassian Content as Markdown (Jira ticket, Confluence page, batch fetch, plugin source, known limitations)
+- Part 3: `confluence-to-md.sh` (bundled helper)
+- Troubleshooting (env vars, MCP not authenticated, nvim fetch fails, wrong instance)
+
 ## Environment & Auth
 
 ### Required Variables (set automatically by home-manager)
@@ -100,7 +109,7 @@ The response contains the new key, e.g. `PROJ-1234`
 
 ## Part 1b: Atlassian MCP — Confluence authoring
 
-The MCP closes the old gap where neither tool could write Confluence:
+Confluence write and search tools:
 
 - `createConfluencePage` — params `spaceId`, `title`, Markdown `body`, optional `parentId`.
 - `updateConfluencePage` — params `pageId`, `title`, Markdown `body` (and the current `version` if the tool requires it).

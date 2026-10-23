@@ -21,8 +21,7 @@ ls "$GOOGLE_WORKSPACE_CLI_CONFIG_DIR"   # must contain client_secret.json + cred
 
 ## Accounts
 
-The config dir `$GOOGLE_WORKSPACE_CLI_CONFIG_DIR` (or `~/.config/gws/` if unset)
-holds credentials for ONE account at a time. The OAuth client accepts both
+The config dir holds credentials for ONE account at a time. The OAuth client accepts both
 personal and work Google accounts -- whichever you sign in with during
 `gws auth login` becomes the active account.
 

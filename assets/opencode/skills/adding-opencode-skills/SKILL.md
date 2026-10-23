@@ -1,6 +1,6 @@
 ---
 name: adding-opencode-skills
-description: Use when adding, editing, or moving an OpenCode skill, or debugging why a newly-added skill is not picked up.
+description: Use when adding, editing, renaming, or moving an OpenCode skill, deciding between a repo-local and a system-wide (workstation-deployed) skill, or debugging why a newly-added skill is not picked up or logs "failed to load skill".
 ---
 
 # Adding OpenCode Skills
@@ -150,14 +150,7 @@ Generic skill-writing discipline lives in `superpowers:writing-skills` (deployed
 
 ### 6. Executable bit is opt-in
 
-Default `home.file."path".source = ...` deploys read-only and **not executable**. Helper scripts need:
-```nix
-"${skillsDir}/your-skill/helper.sh" = {
-  source = "${assetsPath}/...";
-  executable = true;
-};
-```
-Existing examples: `notifyTelegramScript`, `atlassianExtras`'s `confluence-to-md.sh`.
+Default `home.file."path".source = ...` deploys read-only and **not executable**. Helper scripts need the `executable = true;` attrset form shown in Workflow B step 3. Existing examples: `notifyTelegramScript`, `atlassianExtras`'s `confluence-to-md.sh`.
 
 ### 7. New SKILL.md left git-untracked → dangling symlink, "failed to load skill"
 

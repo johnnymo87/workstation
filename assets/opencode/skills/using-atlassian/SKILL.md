@@ -1,13 +1,13 @@
 ---
 name: using-atlassian
-description: Use when reading or writing Jira tickets, fetching Confluence pages, searching with JQL, adding comments, or downloading Atlassian attachments from this devbox.
+description: Use when reading or writing Jira tickets, fetching Confluence pages, searching with JQL, adding comments, or downloading Atlassian attachments from this host.
 ---
 
 # Using Atlassian (Jira + Confluence)
 
 Two complementary tools. **Read this whole file before choosing one** — picking the wrong tool is the most common mistake.
 
-- **Atlassian MCP** (`atlassian` MCP server): mutations, JQL/CQL search, arbitrary fields, and Confluence create/edit. This is the default for everything except rich reads.
+- **Atlassian MCP** (`atlassian` MCP server): mutations, JQL/CQL search, arbitrary fields, and Confluence create/edit. This is the default for everything except rich reads. Tool names in this skill are the server's own; opencode exposes them as `atlassian_<tool>` (e.g. `atlassian_createJiraIssue`).
 - **nvim** (`:FetchJiraTicket` / `:FetchConfluencePage`): the best *read* path — it renders a ticket or page (plus threaded comments and image attachments) to Markdown on disk.
 
 ## Decision Matrix

@@ -58,7 +58,7 @@ On a View or Collab seat, a single exploratory session can spend the month.
 Plan the calls: get the node links from the designer, fetch each frame once
 with `nodeId` set and a small `depth`, and save what you learn (to the plan doc,
 say) instead of fetching again. Put every node you want rendered into one
-`download_figma_images` call: that is one Tier 1 request per format (PNG, SVG)
+`figma_download_figma_images` call: that is one Tier 1 request per format (PNG, SVG)
 instead of one per node. Files in a Starter-plan team are capped at about 6
 reads a month whatever the seat.
 
@@ -80,7 +80,7 @@ included). Re-run `oc-mcp-enable` if the tools disappear.
 ## Get a token
 
 The token owner must be able to open the files in Figma. A View seat works but
-is capped at about 20 reads a month (see "Using it"); a Dev or Full seat is
+is capped at about 20 reads a month (see "Tools"); a Dev or Full seat is
 what makes this practical.
 
 1. Figma -> account menu -> **Settings** -> **Security** -> **Personal access
@@ -118,7 +118,7 @@ The sops key must exist before `hosts/cloudbox/configuration.nix` declares
 **Then restart the serves.** opencode reads its config, and expands the
 `{file:}` token reference, when a serve starts. Serves started before the
 switch don't have `mcp.figma`, and `oc-mcp-enable` reports it as "not
-configured". Run `reset-workspace` (see the `resetting-workspace` skill) or
+configured". Run `reset-workspace` (see the workstation repo-local `resetting-workspace` skill) or
 wait for the 3 AM nightly reset.
 
 ## macOS setup
@@ -168,8 +168,8 @@ Then grant it to a session and call `figma_get_figma_data` on a known node.
 | `MCP server 'figma' is not configured on this host` | Check `jq .mcp.figma ~/.config/opencode/opencode.json`. Null: the secret is missing or the switch hasn't been applied. Present: the serve started before the switch; restart it. |
 | `403` / `Forbidden` from a tool | Token expired (90-day cap), lacks `file_content:read`, or the owner cannot open that file. Right after a rotation: the serve still holds the old token; restart it. |
 | `429` rate limit | Seat quota. `X-Figma-Rate-Limit-Type: low` means a View/Collab seat (about 20 Tier 1 calls a month); wait for the reset, or use a token from a Dev/Full-seat owner. |
-| `resolves outside the allowed image directory` | `localPath` must be relative, e.g. `cops-6793`, not `/tmp/...`. |
-| Gemini-tier subagent returns empty while figma is granted | Test the server against Gemini (`opencode-agents` skill, "Testing a new MCP server against Gemini"); if it fails, add `figma*: false` to the Gemini-tier agents. |
+| `resolves outside the allowed image directory` | `localPath` must be relative, e.g. `my-frame`, not `/tmp/...`. |
+| Gemini-tier subagent returns empty while figma is granted | Test the server against Gemini (workstation repo-local `opencode-agents` skill, "Testing a new MCP server against Gemini"); if it fails, add `figma*: false` to the Gemini-tier agents. |
 
 ## References
 

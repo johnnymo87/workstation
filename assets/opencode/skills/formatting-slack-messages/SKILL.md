@@ -1,6 +1,6 @@
 ---
 name: formatting-slack-messages
-description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), when replying in a Slack thread, when reporting an update to people who were not in the session, and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Apply this whenever drafting Slack content or you'll post mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
+description: Use when composing or posting messages to Slack via the Slack MCP (or any Slack API), when replying in a Slack thread, when reporting an update to people who were not in the session, and when attaching a file, image, chart, or CSV to a Slack message. Slack's mrkdwn dialect is similar to but NOT the same as CommonMark — bold uses single asterisks, italic uses underscores, headers don't exist, and links use angle-bracket syntax. Applies whenever drafting Slack content, to avoid posting mangled formatting. Also covers uploading by file_path (do not base64 a large file into the tool call) and the staging directory it requires.
 ---
 
 # Formatting Slack Messages
@@ -26,7 +26,7 @@ The MCP authenticates with the human's `xoxp` User OAuth token, so **every messa
 | What you want | Slack mrkdwn | NOT this (CommonMark) |
 |---|---|---|
 | **Bold** | `*bold*` | `**bold**` |
-| *Italic* | `_italic_` | `*italic*` or `_italic_` |
+| *Italic* | `_italic_` | `*italic*` |
 | ~~Strike~~ | `~strike~` | `~~strike~~` |
 | `inline code` | `` `code` `` | same — backticks work |
 | Code block | ` ```code``` ` | same — triple backticks work |
@@ -154,7 +154,7 @@ mkdir -p /tmp/opencode/slack-uploads
 cp outputs/chart-2026-09-02.png /tmp/opencode/slack-uploads/
 ```
 
-then `file_upload(channel_id=…, file_path="/tmp/opencode/slack-uploads/chart-2026-09-02.png")`.
+then `slack_file_upload(channel_id=…, file_path="/tmp/opencode/slack-uploads/chart-2026-09-02.png")`.
 
 Better still, skip the copy: have whatever generates the artifact write into
 `/tmp/opencode/slack-uploads/` in the first place.
@@ -202,10 +202,6 @@ When you call `slack_conversations_history`, `slack_conversations_replies`, or `
 6. If a human tells you "the message looks fine" and you're staring at scary-looking read-API output, **believe the human**. The read API is the red herring, not the message.
 
 **When you genuinely need to confirm formatting:** ask the human to spot-check, or post a small test message with known-distinctive content into a low-traffic channel and ask. Do not iterate on formatting fixes based solely on read-API roundtrips.
-
-## Why Slack Did This
-
-Slack's mrkdwn predates CommonMark's market dominance. They chose a syntax inspired by IRC/early-2010s chat conventions (single `*` for bold, `_` for italic) and have kept it for backward compatibility. It's not going to change. Treat mrkdwn as a separate dialect and you'll stop fighting it.
 
 ## Reference
 

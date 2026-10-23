@@ -1,6 +1,6 @@
 ---
 name: searching-sessions
-description: Use when searching OpenCode session history for PRs, Jira tickets, commands, or any text across past sessions.
+description: Searches OpenCode session transcripts with oc-search and resumes a found session. Use when searching OpenCode session history for PRs, Jira tickets, commands, or any text across past sessions.
 ---
 
 # Searching OpenCode Sessions

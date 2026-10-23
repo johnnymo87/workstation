@@ -1,6 +1,6 @@
 ---
 name: reviving-worktree-orphaned-sessions
-description: Use when an opencode session stops responding after its working directory (usually a git worktree) was deleted — symptoms are assistant turns that finish instantly with zero output, swarm messages that get delivered but never answered, or "prompt_async failed ... FileSystem.realPath ... ENOENT" in the serve log. Also use before deleting or pruning any worktree that a live session is sitting in.
+description: Diagnoses and revives an opencode session whose working directory was deleted. Use when an opencode session stops responding after its working directory (usually a git worktree) was deleted — symptoms are assistant turns that finish instantly with zero output, swarm messages that get delivered but never answered, or "prompt_async failed ... FileSystem.realPath ... ENOENT" in the serve log. Also use before deleting or pruning any worktree that a live session is sitting in.
 ---
 
 # Reviving Worktree-Orphaned Sessions

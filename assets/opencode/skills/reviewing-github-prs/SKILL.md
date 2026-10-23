@@ -266,23 +266,9 @@ JSONEOF
 
 ## Useful companion commands
 
+Inline comments: see §"Finding existing inline comments before you reply" (list them BEFORE replying so you don't miss threads).
+
 ```bash
-# View PR details
-gh pr view {number} --json title,body,files,additions,deletions
-
-# Get the diff
-gh pr diff {number}
-
-# Check CI status
-gh pr checks {number}
-
-# Checkout the PR branch
-git checkout {branch-name}
-
-# List all inline comments on a PR (use this BEFORE replying so you don't miss threads)
-gh api repos/{owner}/{repo}/pulls/{number}/comments \
-  --jq '.[] | {id, user: .user.login, path, line, in_reply_to_id, body_preview: (.body[0:120])}'
-
 # List all top-level issue comments on a PR
 gh api repos/{owner}/{repo}/issues/{number}/comments \
   --jq '.[] | {id, user: .user.login, body_preview: (.body[0:120])}'

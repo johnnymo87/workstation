@@ -103,7 +103,7 @@ gh api repos/<owner>/<repo>/commits --jq '.[0:5][] | "\(.sha[0:7]) \(.commit.mes
 gh api repos/<owner>/<repo>/compare/<yours>...<batchhead> --jq .status
 
 # 3. Re-run the monitor against the batch head.
-python monitor-rollout.py --merge-sha <BATCH HEAD> --target <ENV:CTX:NS:DEPLOY>
+python ~/.agents/skills/monitoring-deployments/monitor-rollout.py --merge-sha <BATCH HEAD> --target <ENV:CTX:NS:DEPLOY>
 ```
 
 ### What the script does automatically
@@ -130,14 +130,14 @@ On exit `1` the script tells you *which* pod and *why*; deciding what to do is
 yours:
 
 - **CrashLoopBackOff / restart spike** → `kubectl --context <c> -n <ns> logs <pod>`
+  (add `--previous`) to find the crash. App bug introduced by the change → fix
+  forward or roll back; surface the choice to the user.
   (A pod that is Ready **now** is never reported as a restart spike, however
   high its restart count: `restartCount` is cumulative, so a noisy roll that
   recovered is history rather than a wedge. Measured on mono#4613, where
   eleven JVMs rolling at once in one UAT namespace starved each other past the
   startup-probe budget, restarted, and came up clean — and the check called
   that a wedge on pods it had just called healthy.)
-  (add `--previous`) to find the crash. App bug introduced by the change → fix
-  forward or roll back; surface the choice to the user.
 - **ImagePullBackOff / ErrImagePull** → the tag isn't in the registry. Usually
   the image-build CI hasn't finished or failed — check that before assuming a
   deploy problem.
