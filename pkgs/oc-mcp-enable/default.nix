@@ -128,6 +128,13 @@ pkgs.writeShellApplication {
         echo "error to the human." >&2
       }
 
+      # Printed when the requested MCP server is not configured, but the catalog
+      # of available servers was successfully retrieved.
+      mcp_unknown_footer() {
+        echo "A misspelled or unknown MCP server name is a caller error: retry with one of the listed" >&2
+        echo "names; only if the intended server is genuinely absent, report to the human." >&2
+      }
+
       revoke=0
       status_only=0
       while [ $# -gt 0 ]; do
@@ -174,7 +181,8 @@ pkgs.writeShellApplication {
       # silently target the wrong process.
       sess_body_file="$(mktemp)"
       connect_body_file="$(mktemp)"
-      trap 'rm -f "$sess_body_file" "$connect_body_file"' EXIT
+      catalog_body_file="$(mktemp)"
+      trap 'rm -f "$sess_body_file" "$connect_body_file" "$catalog_body_file"' EXIT
       sess_code="$(curl -s -o "$sess_body_file" -w '%{http_code}' --max-time 10 \
         "$FRONTDOOR_URL/session/$session_id")"
       case "$sess_code" in
@@ -231,7 +239,29 @@ pkgs.writeShellApplication {
             200) : ;;
             404)
               echo "Error: MCP server '$srv' is not configured on this host" >&2
-              mcp_unavailable_footer "$srv"
+              : >"$catalog_body_file"
+              catalog_code="$(curl -s -o "$catalog_body_file" -w '%{http_code}' --max-time 15 \
+                "$FRONTDOOR_URL/session/$session_id/mcp" \
+                -H "x-opencode-directory: $directory" || true)"
+              suggestion=""
+              if [ "$catalog_code" = "200" ]; then
+                suggestion="$(jq -r --arg s "$srv" '
+                  (if type == "object" then [to_entries[] | select(.value | type == "object") | .key] | sort else [] end) as $all |
+                  ($all | map(select((. != $s) and (ascii_downcase | startswith($s | ascii_downcase))))) as $prefix |
+                  ($all | map(select((. != $s) and (ascii_downcase | contains($s | ascii_downcase)) and (ascii_downcase | startswith($s | ascii_downcase) | not)))) as $contain |
+                  ($prefix + $contain) as $matches |
+                  if ($all | length) == 0 then empty
+                  elif ($matches | length) > 0 then "did you mean: " + ($matches | join(", "))
+                  else "configured servers: " + ($all | join(", "))
+                  end
+                ' <"$catalog_body_file" 2>/dev/null || true)"
+              fi
+              if [ -n "$suggestion" ]; then
+                echo "$suggestion" >&2
+                mcp_unknown_footer
+              else
+                mcp_unavailable_footer "$srv"
+              fi
               exit 1
               ;;
             503)

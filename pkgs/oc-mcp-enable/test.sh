@@ -147,19 +147,21 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
   cleanup() { [ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null; rm -rf "$work"; }
   trap cleanup EXIT
 
-  # run_scenario <scenario>: start a fake door, run `oc-mcp-enable ses_fake123
-  # atlassian` against it, and leave rc/stdout/stderr/patch-log in $work.
+  # run_scenario <scenario> [server]: start a fake door, run `oc-mcp-enable ses_fake123
+  # <server>` against it, and leave rc/stdout/stderr/patch-log in $work.
   run_scenario() {
+    local scenario="$1"
+    local srv="${2:-atlassian}"
     [ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null && wait "$door_pid" 2>/dev/null || true
     rm -f "$work/port" "$work/patches"
     : >"$work/patches"
-    SCENARIO="$1" PATCH_LOG="$work/patches" python3 "$here/fake-door.py" "$work/port" &
+    SCENARIO="$scenario" PATCH_LOG="$work/patches" python3 "$here/fake-door.py" "$work/port" &
     door_pid=$!
     for _ in $(seq 1 100); do [ -s "$work/port" ] && break; sleep 0.05; done
-    [ -s "$work/port" ] || { printf 'FAIL  fake door did not start (%s)\n' "$1"; exit 1; }
+    [ -s "$work/port" ] || { printf 'FAIL  fake door did not start (%s)\n' "$scenario"; exit 1; }
     set +e
     FRONTDOOR_URL="http://127.0.0.1:$(cat "$work/port")" \
-      "$OC_MCP_ENABLE_BIN" ses_fake123 atlassian >"$work/out" 2>"$work/err"
+      "$OC_MCP_ENABLE_BIN" ses_fake123 "$srv" >"$work/out" 2>"$work/err"
     rc=$?
     set -e
   }
@@ -219,7 +221,27 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
   run_scenario not-configured
   assert_eq 1 "$rc" "not-configured: exits 1"
   assert_contains "$work/err" "not configured on this host" "not-configured: says so"
+  assert_contains "$work/err" "configured servers: slack-ro" "not-configured: lists configured servers when no match"
+  assert_contains "$work/err" "caller error" "not-configured: says unknown name is caller error"
+  assert_not_contains "$work/err" "Stop and report" "not-configured: does not use the escalate footer"
   no_grant not-configured
+
+  run_scenario did-you-mean chrome-devtools
+  assert_eq 1 "$rc" "did-you-mean: exits 1"
+  assert_contains "$work/err" "not configured on this host" "did-you-mean: says so"
+  assert_contains "$work/err" "did you mean: chrome-devtools-9222, chrome-devtools-9223" "did-you-mean: suggests prefix/substring matches"
+  assert_contains "$work/err" "caller error" "did-you-mean: says unknown name is caller error"
+  assert_not_contains "$work/err" "Stop and report" "did-you-mean: does not use the escalate footer"
+  no_grant did-you-mean
+
+  run_scenario not-configured-list-fails
+  assert_eq 1 "$rc" "not-configured-list-fails: exits 1"
+  assert_contains "$work/err" "not configured on this host" "not-configured-list-fails: says so"
+  assert_not_contains "$work/err" "configured servers:" "not-configured-list-fails: no server list when fetch fails"
+  assert_not_contains "$work/err" "did you mean:" "not-configured-list-fails: no suggestions when fetch fails"
+  assert_not_contains "$work/err" "caller error" "not-configured-list-fails: no caller error footer when fetch fails"
+  stop_footer not-configured-list-fails
+  no_grant not-configured-list-fails
 
   # Could not READ the state: warn, do not claim connected, still grant (inert
   # if the tools do not exist). Distinct from a state that reads as failed.
