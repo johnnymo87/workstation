@@ -101,6 +101,7 @@ let
     "cleaning-disk"
     "escalating-azure-aks-rbac"
     "figma-mcp-setup"
+    "finding-program-coordinators"
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
