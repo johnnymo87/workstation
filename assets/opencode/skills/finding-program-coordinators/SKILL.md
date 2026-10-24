@@ -38,27 +38,41 @@ queried the registry.
 stall-watch's state DB is the registry. The `pigeon_session` column holds the id
 to `swarm_send` to. That is the same value the coordinators' own `./sw peers`
 command reads. (`./sw` will not run outside its coordinator: it refuses on
-identity.) There is no `sqlite3` CLI on cloudbox, so use python:
+identity.) The program's config (`enabled`, `mode`, `heartbeat`) is in
+`stallwatch/programs.toml` in the private `eng-agent-platform` checkout. There
+is no `sqlite3` CLI on cloudbox, so use python:
 
 ```bash
 TAG=<program-tag>
 python3 - "$TAG" <<'PY'
-import os, sqlite3, sys
+import datetime, os, sqlite3, sys, tomllib
 tag = sys.argv[1]
 db = os.path.expanduser("~/.local/state/stall-watch/state.db")
+toml = os.path.expanduser("~/projects/eng-agent-platform/stallwatch/programs.toml")
 if not os.path.exists(db):
-    sys.exit("no stall-watch on this host: no program coordinators here")
+    sys.exit("no stall-watch on THIS host. Coordinators run on cloudbox; "
+             "this host cannot see or reach them.")
 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)   # read-only
-row = con.execute("SELECT coord_mode, coord_session, pigeon_session"
+row = con.execute("SELECT coord_session, pigeon_session"
                   " FROM program WHERE tag=?", (tag,)).fetchone()
-if not row or not row[2]:
-    sys.exit(f"{tag}: no bound coordinator (row={row})")
-print(f"{tag}  to={row[2]}  goose={row[1]}  mode={row[0]}")
+prog = next((p for p in tomllib.load(open(toml, "rb")).get("program", [])
+             if p.get("tag") == tag), None)
+if not row or not row[1] or not prog:
+    sys.exit(f"{tag}: no bound coordinator (db row={row}, in programs.toml={bool(prog)})")
+if not prog.get("enabled", True) or prog.get("mode", "json") != "tools":
+    sys.exit(f"{tag}: coordinator {row[1]} is disabled or not in tools mode; "
+             "nothing reads its mailbox")
+until = prog.get("heartbeat_until")
+hb = bool(prog.get("heartbeat")) and (until is None or
+     datetime.date.today() <= datetime.date.fromisoformat(str(until)))
+print(f"{tag}  to={row[1]}  goose={row[0]}  heartbeat={'on' if hb else 'off'}")
 PY
 ```
 
 To list every program that has one, use
 `SELECT tag, pigeon_session FROM program WHERE pigeon_session IS NOT NULL`.
+Then check each one against `programs.toml`. A row can outlive its program
+being disabled.
 
 **Then confirm pigeon can route to it.** Pigeon is the daemon that actually
 delivers your message:
@@ -88,29 +102,40 @@ the tag.
 
 - **A coordinator is not woken by your message.** Swarm mail to a `gse_` is
   drained by the stall-watch tick and shown to the coordinator at its **next
-  wake**. A wake comes from the human's reply in its Telegram topic, an alert,
-  its daily reminder review, or its heartbeat. Most programs run with the
-  heartbeat off (`heartbeat = true` in `programs.toml` means on), so the next
-  wake can be hours away. If the issue is urgent, send the message **and** tell
-  the human in one line that you sent it. Don't assume the coordinator has
-  seen it.
+  wake**. With `heartbeat=on`, that is soon. Most programs run with the
+  heartbeat **off**. Their coordinators wake when the human writes in their
+  Telegram topic, on an alert, or on a review of items they already hold. For
+  a quiet program that can be days away, or never.
+- **So with `heartbeat=off`, sending is not handing off.** Send the message,
+  **and** tell the human in one line that program X's coordinator has a message
+  from you. Do this every time, urgent or not, and above all when nobody asked
+  you to report. Your session might be gone by the time the coordinator reads
+  the message, so the human must know it is there. This matches the
+  coordinators' own rule: they treat a handoff as done only when the receiver's
+  heartbeat is on.
 - **Write it so a stranger can act on it.** The coordinator has not seen your
   conversation. In one message, include the finding, the evidence (file:line,
   bead id, PR, query output), what you think it means for its program, and what
   you need back, if anything. Use kind `result` for a report and
   `clarification.request` if you need an answer. The `swarm-messaging` economy
   rules apply: one substantial message, and no follow-up pings.
-- **Expect the reply as a swarm message.** A coordinator with swarm tools
-  replies to your `ses_` id, and that reply wakes you.
+- **Expect the reply as a swarm message, possibly much later.** A coordinator
+  with swarm tools replies to your `ses_` id, and that reply wakes you if your
+  session is still alive.
 - **Report to the program through its coordinator, not its workers.** A worker
   holds one slice of the program. The coordinator holds the whole of it, and
   it is the session the human talks to about that program.
 
 ## No coordinator found
 
-Report the absence only after the lookup above says so: no row for the tag,
-`pigeon_session` empty, or no state DB on this host (macOS, devbox). Then
-**tell the human** that program X has no bound coordinator, give the evidence
-(the query output), and wait for them to say where the finding should go. Don't
-fall back to messaging a worker or a launcher session. A dead `ses_` produces
-`delivery.failed`. A live one is the wrong recipient.
+Report the absence only after the lookup above says so on cloudbox: no row for
+the tag, `pigeon_session` empty, or the program disabled. Then **tell the
+human** that program X has no bound coordinator, give the evidence (the query
+output), and wait for them to say where the finding should go.
+
+On macOS or devbox there is no state DB. That does **not** mean there is no
+coordinator. It means this host cannot reach one. Say exactly that, and ask
+the human to forward the finding.
+
+In either case, don't fall back to messaging a worker or a launcher session. A
+dead `ses_` produces `delivery.failed`. A live one is the wrong recipient.
