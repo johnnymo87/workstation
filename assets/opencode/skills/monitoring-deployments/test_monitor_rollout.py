@@ -15,10 +15,10 @@ not change between two commits keeps the older commit's tag in pod status
 forever, while the pod is a member of the newest ReplicaSet and its spec names
 the newest tag.
 
-Measured on mono, 2026-09-12 (merge adf1a60, superseded by
+Measured on the monorepo, 2026-09-12 (merge adf1a60, superseded by
 c092993): all three example-service pods in ReplicaSet 846f965849 have
 spec image `:c092993...` and imageID `sha256:d68597cae56b...`; ONE of them
-reports status image `:adf1a60...`. An itemforecastconsumer pod in the
+reports status image `:adf1a60...`. A second service's pod in the
 c092993 ReplicaSet reports status image `:adb33b1...`. Judging by the status
 tag, the watcher reported "pods updating" for 30 hours against a rollout that
 had completed, then declared the merge "still on the old tag".
@@ -50,7 +50,7 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(mr)
 
 
-REPO = "mono"
+REPO = "acme/monorepo"
 # The real SHAs from the incident, so a fixture cannot drift into a shape the
 # cluster never produces.
 OURS = "adf1a604e0ff86f1bd40cef9a117e0ba57c22455"
@@ -264,7 +264,7 @@ class PodRevisionJudgement(unittest.TestCase):
         self.assertIn("istio-proxy", p["wedge_reason"])
 
     def test_a_healthy_pod_that_restarted_earlier_is_NOT_a_wedge(self):
-        # MEASURED, mono#4613 (merged 2026-09-16T16:29Z): eleven
+        # MEASURED, monorepo#4613 (merged 2026-09-16T16:29Z): eleven
         # JVMs rolled at once in one UAT namespace and starved each other past
         # the startup-probe budget -- `failed startup probe, will be restarted`
         # -> SIGKILL, exitCode 137, NOT OOMKilled. They then came up clean.

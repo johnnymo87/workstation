@@ -382,7 +382,7 @@ DBs). Concrete facts learned wiring this up:
   (`nix run nixpkgs#dolt -- creds new`) or to *clone a DoltHub DB for
   verification/backup* (`nix run nixpkgs#dolt -- clone jmohrbacher/<repo>
   /tmp/x`). Confirmed across both personal and work trackers — workstation,
-  pigeon, chatgpt-relay, mono, internal-frontends, protos — all on DoltHub.
+  pigeon, chatgpt-relay, and the work-repo trackers — all on DoltHub.
 - **GOTCHA — `bd dolt remote add` commits to git even under `no-git-ops`.**
   Adding a remote / changing `sync.remote` writes `.beads/config.yaml` and
   makes a `bd: update sync.remote` commit on the host repo despite stealth
@@ -407,7 +407,7 @@ bd's embedded engine pushes/pulls over git+ssh and git+https fine — **but it
 writes the tracker into the code repo's git** as `refs/dolt/data` AND a
 `refs/heads/__dolt_remote_info__` **branch**, polluting the repo (the branch
 shows in GitHub's branch list, PR base pickers, etc.). We tried git-backed for
-mono/protos/internal-frontends/pigeon/culops/lgtm on 2026-06-12 and reverted —
+six trackers (four work repos, pigeon and lgtm) on 2026-06-12 and reverted —
 all six now use **DoltHub private DBs** (above). If you find these refs on a
 code remote, delete them:
 `git push <url> :refs/dolt/data :refs/heads/__dolt_remote_info__`.

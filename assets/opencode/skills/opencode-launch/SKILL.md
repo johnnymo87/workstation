@@ -237,17 +237,17 @@ Given that, the discipline is conventional rather than enforced:
 `--worktree <slug>` lands the session in a fresh git worktree instead of at the
 passed directory's root. Use it for **writable** sessions (anything that edits
 code — swarm workers, implementation launches) so the session never starts in a
-repo's primary root. In mono that root is the read-only trunk: a git pre-commit
+repo's primary root. In the monorepo that root is the read-only trunk: a git pre-commit
 hook refuses commits there, so writable work started at the root gets stuck at
 commit time with nowhere to land.
 
 ```bash
-# writable worker: isolated in ~/projects/mono/.worktrees/proj-1234 off trunk
-opencode-launch --worktree proj-1234 ~/projects/mono "implement the X importer"
+# writable worker: isolated in ~/projects/monorepo/.worktrees/proj-1234 off trunk
+opencode-launch --worktree proj-1234 ~/projects/monorepo "implement the X importer"
 
 # read-only session (review / coordinate / "what does this do?"): NO --worktree,
 # so it gets the clean current trunk to read.
-opencode-launch ~/projects/mono "what does the catalog importer do?"
+opencode-launch ~/projects/monorepo "what does the catalog importer do?"
 ```
 
 What it does, in order:
@@ -277,7 +277,7 @@ something if it must survive. To prune on demand:
 `cd <repo> && work --prune-merged`.
 
 Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos with
-`origin/HEAD` set (mono has it); pass `work`'s trunk via the repo if needed.
+`origin/HEAD` set (the monorepo has it); pass `work`'s trunk via the repo if needed.
 
 ## Tagging the Session for Cost Reporting (`--tag`)
 
@@ -286,8 +286,8 @@ Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos wit
 consumption to that work.
 
 ```bash
-opencode-launch --tag late-deliveries ~/projects/mono "port the last two callers"
-opencode-launch --tag late-deliveries --worktree ops-991 ~/projects/mono "fix the rollout"
+opencode-launch --tag late-deliveries ~/projects/monorepo "port the last two callers"
+opencode-launch --tag late-deliveries --worktree ops-991 ~/projects/monorepo "fix the rollout"
 ```
 
 **Which tag** is not this skill's call. Load `tagging-sessions`: the tag must be
@@ -299,9 +299,9 @@ Three things about the oc-tags model make this worth using:
 
 - **It is an override, not a creation.** Every session *always* has exactly one
   tag; an untagged one falls back to a directory-derived `auto:` tag
-  (`auto:mono`, `auto:mono/some-worktree`). `--tag` converts the session off
+  (`auto:monorepo`, `auto:monorepo/some-worktree`). `--tag` converts the session off
   that fallback. Precedence: explicit session tag > `auto:`.
-- **A repo ROOT launch is where it pays.** `auto:mono` lumps together every
+- **A repo ROOT launch is where it pays.** `auto:monorepo` lumps together every
   unrelated thing ever done at that root, and that is where most of the dollars
   sit. The launcher knows what the session is for; without `--tag` that knowledge
   is thrown away and reconstructed by hand later.

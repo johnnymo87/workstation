@@ -32,7 +32,7 @@ are blocked. So the swarm can keep reading beads; it just can't file new ones.
 - **"Clones" = machines** (devbox / cloudbox / macOS), each syncing
   to the same remote. The single-migrator rule is per-remote, across machines.
 - **A bd upgrade blocks every remote-backed DB on the machine at once** — not
-  just one repo. Expect to sweep all of them (`mono`, `workstation`, `pigeon`,
+  just one repo. Expect to sweep all of them (the work repos, `workstation`, `pigeon`,
   and the other DoltHub trackers; see the `beads` skill for the full list).
 - **Canonical remote is DoltHub** (`https://doltremoteapi.dolthub.com/jmohrbacher/<repo>`)
   for the shared trackers. See the `beads` skill (`~/.agents/skills/beads/SKILL.md`)

@@ -98,7 +98,7 @@ Measured on cloudbox, two deaths of the same session, two different causes — s
 |---|---|---|
 | **The session itself** | `grep -ahs "worktree remove" ~/.local/share/opencode/log/opencode.log{.1,}` — the `run=` id is the session's own | It ran `git worktree remove` on the tree it was sitting in. |
 | **`disk-cleanup.service`** | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly, walks `<repo>/.worktrees/*/` in **every** repo under `~/projects`. Removes merged worktrees; until the live-session guard landed, being *clean* was what made you collectable. Never touches a primary checkout. |
-| **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged`, **`~/projects/mono` only**. Do not blame it for another repo — that hardcoded root is the fastest way to falsify the guess. |
+| **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged`, **one hardcoded work-repo root only** (see `pkgs/reset-workspace`). Do not blame it for another repo — that hardcoded root is the fastest way to falsify the guess. |
 
 ## Prevention
 

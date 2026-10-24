@@ -25,6 +25,15 @@ works from home with WARP **off** but not with WARP **on**.
 
 ## 1. Get back in
 
+The commands below need cloudbox's GCP project, which this public repo does not name. Set it
+first. It is the `--project` in the IAP `ProxyCommand` of your `~/.ssh/config` cloudbox host,
+and `gcloud projects list` under your own account shows it too:
+
+```bash
+grep -n -- '--project' ~/.ssh/config
+export CLOUDBOX_GCP_PROJECT=<project-id>
+```
+
 In order. Stop at the first one that works.
 
 1. **Turn WARP off**, connect from home. Home ISP is allowlisted directly
@@ -35,7 +44,7 @@ In order. Stop at the first one that works.
    ```bash
    gcloud compute start-iap-tunnel cloudbox 22 \
      --local-host-port=localhost:2222 \
-     --zone us-east1-b --project wonder-sandbox
+     --zone us-east1-b --project "$CLOUDBOX_GCP_PROJECT"
    ssh -p 2222 dev@localhost
    ```
 
@@ -49,7 +58,7 @@ In order. Stop at the first one that works.
      ```bash
      CLOUDSDK_CONFIG=~/.config/gcloud-tunnel/config \
        gcloud iam service-accounts keys list --managed-by=user \
-       --iam-account=cloudbox-iap-tunnel@wonder-sandbox.iam.gserviceaccount.com
+       --iam-account="cloudbox-iap-tunnel@$CLOUDBOX_GCP_PROJECT.iam.gserviceaccount.com"
      ```
 
    - **Is the isolated config intact?** The SA lives in `~/.config/gcloud-tunnel/config`
@@ -67,7 +76,8 @@ In order. Stop at the first one that works.
 4. **Full rollback**, if you need the door open now and cannot diagnose:
 
    ```bash
-   gcloud compute firewall-rules update default-allow-ssh --no-disabled
+   gcloud compute firewall-rules update default-allow-ssh --no-disabled \
+     --project "$CLOUDBOX_GCP_PROJECT"
    ```
 
    This re-enables SSH from `0.0.0.0/0`. It works from **any** network, because the GCP
@@ -81,7 +91,7 @@ In order. Stop at the first one that works.
 `allow-mosh` permits `udp:60000-61000` from `0.0.0.0/0`, and that is **deliberate**. It
 looks like an oversight during any security review. It is not.
 
-Wonder's dedicated Zero Trust egress IP applies to **TCP only**. Mosh's UDP egresses from
+The company's dedicated Zero Trust egress IP applies to **TCP only**. Mosh's UDP egresses from
 Cloudflare's *shared* WARP pool instead — measured at `104.28.165.70` on 2026-09-13, an
 address that is neither stable nor allowlistable. Narrowing this rule breaks mosh roaming
 across WARP toggles, which is a hard requirement.
@@ -94,11 +104,11 @@ rule sat at `0.0.0.0/0` for weeks without ever producing a finding.
 
 ## 3. The rules
 
-GCP project `wonder-sandbox`, network `default`. Verified against the live project
+GCP project `$CLOUDBOX_GCP_PROJECT` (see §1), network `default`. Verified against the live project
 2026-09-20; re-read rather than trusting this table if it matters:
 
 ```bash
-gcloud compute firewall-rules list --project=wonder-sandbox \
+gcloud compute firewall-rules list --project="$CLOUDBOX_GCP_PROJECT" \
   --format='table(name,disabled,priority,sourceRanges.list(),targetTags.list(),
                   allowed[].map().firewall_rule().list(),logConfig.enable)'
 ```
