@@ -40,8 +40,10 @@ than the user wants now. Ask explicitly.
 When `gws auth status` shows `token_valid: false`, re-authenticate.
 
 **Critical gotchas (learned the hard way):**
-- **Do NOT use `sleep`** -- it hangs in some environments. Check the listener
-  immediately after launch; if it's not up, the launch failed.
+- **Check the listener rather than waiting for it.** Don't add a `sleep` before
+  the check (and never chain one with the follow-up commands; see "Bash
+  Environment" in the user-level `AGENTS.md`). If the listener is not up right
+  after launch, the launch failed.
 - A bare `nohup ... &` can die when the shell is interrupted, taking the OAuth
   listener with it. Use `setsid nohup ... < /dev/null > log 2>&1 & disown` to
   detach from the shell session. That is sufficient *here* — the OAuth listener

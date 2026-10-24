@@ -88,10 +88,11 @@ Length is not the rule — a reader with no memory of you is.
   depends on the worktree still existing; reference the repo root and the
   branch/PR instead.
 
-  **Today this failure is silent** (`pigeon-s9d`). A wake into a session whose
-  directory was deleted is accepted by the daemon, recorded as delivered, and
-  injected into the transcript — and then the turn produces nothing at all: no
-  output, no tool call, no error, forever. Nobody is alerted. If you scheduled
+  **This failure is quiet** (`pigeon-s9d`). A wake into a session whose
+  directory was deleted is injected into the transcript, and then the turn
+  produces nothing at all: no output, no tool call, no error, forever. Since
+  2026-08-03 the daemon no longer records it as delivered (the row stays
+  `handed_off` with no `verified_at`), but nobody is alerted. If you scheduled
   a wake and it never seems to have happened, check whether its directory
   survived.
 

@@ -31,7 +31,7 @@ Compaction has two parts, and understanding both keeps you from doing redundant 
    - **HANDOFF.md** (or similar) in the relevant project/output directory: for incident response, exploratory investigations, anything where a plan-style document doesn't fit.
    - **Git commit message**: a well-crafted commit message is itself durable context for uncommitted work.
 
-3. **Commit and push.** Persisted context that isn't pushed doesn't survive. Follow the session close protocol.
+3. **Commit where you are allowed to.** Compaction does not touch the disk: plan files and the local beads DB survive it uncommitted. A commit is what protects them from a pruned worktree or a lost machine. Commit and push when the repo's instructions or the user permit it; where they don't (a conservative beads profile, "no git ops without being asked"), leave the files uncommitted and name each path in the resumption prompt.
 
 4. **Draft and apply a resumption prompt.** Draft a concise message for the post-compaction session and pass it as the `prompt` argument to the `self_compact_and_resume` tool. See "Resumption Prompt Shape" below. Call the tool **alone**, as the last thing you do in the step, and **read its result**.
 

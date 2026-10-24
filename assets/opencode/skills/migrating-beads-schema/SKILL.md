@@ -196,6 +196,8 @@ Progress:
 ```bash
 cd ~/projects/<repo>
 
+# 0. Stop a stale bd daemon for this repo (see "Stop a stale bd daemon" above).
+
 # 1. Save current local, then find issues that exist ONLY locally.
 bd export --all -o /tmp/<repo>-local-$(date +%s).jsonl
 
@@ -203,12 +205,20 @@ bd export --all -o /tmp/<repo>-local-$(date +%s).jsonl
 #    Use a UNIQUE timestamped target; a fixed name collides on retry and nests dirs.
 mv .beads/embeddeddolt /tmp/<repo>-old-$(date +%s)
 bd bootstrap --yes                                # clones the migrated remote
-bd status                                         # expect: no guard
 
-# 3. Re-import any local-only ids the remote didn't have (diff old export vs now).
+# 3. Verify.
+bd status                                         # expect: no guard; count sane
+
+# 4. Probe the UUID defaults; if stripped, repair locally.
+#    See "Known defect: migration 0037" below for the probe and the ALTERs.
+
+# 5. Re-import any local-only ids the remote didn't have (diff old export vs now).
 bd export --all -o /tmp/<repo>-now.jsonl
-# (compare ids; extract the missing lines to a .jsonl; then:)
+# (compare ids per "Diffing ids" below; extract the missing lines to a .jsonl; then:)
 bd import /tmp/<repo>-missing.jsonl               # upsert; preserves ids
+
+# 6. A scratch write proves writes work, then push.
+#    (create + close a throwaway issue, then:) bd dolt push
 ```
 
 **Do NOT blind-import the whole pre-adopt export.** Import is an upsert keyed by

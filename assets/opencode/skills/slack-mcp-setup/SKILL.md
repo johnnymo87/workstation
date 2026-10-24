@@ -21,7 +21,7 @@ No browser cookie scraping -- tokens don't expire unless revoked.
   - **`slack-ro`** — read-**only** (cannot post or upload). Used by lgtm's read-only gather session (`opencode-launch --mcp slack-ro`).
 - Both run a **pinned, nix-built** server (`localPkgs.slack-mcp-server`), **not** `npx -y slack-mcp-server@latest`. See "Why a pinned build" below.
 - **Both are disabled by default** (`"enabled": false`) to keep slack tools out of normal sessions
-- To use Slack: delegate to the `slack` agent, or launch with `--mcp slack` / `--mcp slack-ro`
+- To use Slack: grant it to a session (`oc-mcp-enable <session-id> slack`), or launch with `--mcp slack` / `--mcp slack-ro`. See "Using Slack" below.
 
 **Why disabled by default?**
 - Prevents accidental Slack API calls from main agents
@@ -34,15 +34,16 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 > session is missing the Slack *read* tools, that is **not** a server or
 > token-scope problem — it is an **opencode gating/connection** issue:
 > 1. the global `tools: {"slack_*": false, "slack-ro_*": false}` gate disables the
->    tools for every agent except the `slack` subagent, and
+>    tools for every agent unless a session is granted them, and
 > 2. `enabled: false` means the server is never auto-connected — a session only
 >    gets Slack if something runs `POST /mcp/<server>/connect` (which is what
 >    `opencode-launch --mcp <server>` does).
 >
 > Note also that `--mcp` folds the tools into a **single prompt** (per-turn
 > scope), and the in-memory connect is **lost on an opencode-serve restart**
-> (no auto-reconnect while `enabled: false`). For durable interactive Slack use,
-> delegate to the `@slack` subagent rather than relying on a per-turn `--mcp` fold.
+> (no auto-reconnect while `enabled: false`). For Slack use across turns, grant
+> the server with `oc-mcp-enable`: its permission persists on the session, though
+> the connection does not, so re-run it after a serve restart.
 
 ### Which gate registers which tool
 
@@ -256,25 +257,17 @@ If you do need to refresh:
 
 ## Using Slack
 
-### Option 1: Enable MCP temporarily
-
-```bash
-jq '.mcp.slack.enabled = true' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
-# Restart OpenCode, use slack tools
-# Disable when done:
-jq '.mcp.slack.enabled = false' ~/.config/opencode/opencode.json > /tmp/oc.json && mv /tmp/oc.json ~/.config/opencode/opencode.json
-```
-
-### Option 2: Grant the MCP to a session
-
-There is no slack *agent* — an earlier version of this doc pointed at
-`assets/opencode/agents/slack.md`, which does not exist. Use one of:
+Grant the server to a session. This is the default way to use Slack:
 
 ```bash
 oc-mcp-enable <session-id> slack      # grant to an ALREADY-RUNNING session
 opencode-launch --mcp slack ...       # launch a new session with it
 opencode-launch --mcp slack-ro ...    # read-only variant; cannot post or upload
 ```
+
+There is no slack *agent*. Don't flip `mcp.slack.enabled` in `~/.config/opencode/opencode.json`
+by hand either: the global `slack_*: false` tools gate still hides the tools, and the next
+home-manager switch rewrites the file.
 
 **Available tools:**
 - `slack_channels_list` - List channels

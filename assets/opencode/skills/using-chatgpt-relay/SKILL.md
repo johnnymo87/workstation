@@ -114,10 +114,10 @@ ask-question "What is 2+2?"
 
 The CLI uses `ASK_QUESTION_SERVER_URL` (default: `http://127.0.0.1:3033`).
 
-With the SSH reverse tunnel, the default works. If using a different setup:
+With the SSH reverse tunnel, the default works. Set it only if the relay listens elsewhere:
 
 ```bash
-export ASK_QUESTION_SERVER_URL=http://localhost:3033
+export ASK_QUESTION_SERVER_URL=http://127.0.0.1:<port>
 ```
 
 ## Research Caveats
@@ -178,11 +178,10 @@ cd ~/Code/chatgpt-relay && node src/login.js
 
 ### Tunnel drops on disconnect
 
-The SSH tunnel only exists while your SSH connection is active. If you disconnect, reconnect with the `-R` flag.
-
-For persistent tunnels, consider:
-- Using `autossh` for automatic reconnection
-- Running the tunnel in a separate tmux pane
+A manual `ssh -R` tunnel exists only while that SSH connection is up. On this repo's hosts the
+persistent launchd tunnel agents (`devbox-dev-tunnel`, `cloudbox-dev-tunnel`) carry port 3033
+and reconnect on their own, so check that agent on the Mac (`launchctl list | grep dev-tunnel`)
+before falling back to a manual `ssh -R`.
 
 ### Response timeout
 
