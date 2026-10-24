@@ -159,6 +159,14 @@ let
     };
   };
 
+  # finding-program-coordinators has an executable read-only lookup script
+  findingCoordinatorsExtras = {
+    "${skillsDir}/finding-program-coordinators/find-coordinator.py" = {
+      source = "${assetsPath}/opencode/skills/finding-program-coordinators/find-coordinator.py";
+      executable = true;
+    };
+  };
+
   # Superpowers skills: symlink the entire upstream skills directory
   # Uses out-of-store symlink since the repo is cloned via projects.nix, not in the Nix store
   superpowersSkills = {
@@ -372,6 +380,7 @@ in
       mkSkills workOnlySkills
       // atlassianExtras
       // monitoringDeploymentsExtras
+      // findingCoordinatorsExtras
     );
 
   # One-time tidy of the legacy ~/.config/opencode/skills/ tree after the move

@@ -35,62 +35,32 @@ queried the registry.
 
 ## The lookup
 
-stall-watch's state DB is the registry. The `pigeon_session` column holds the id
-to `swarm_send` to. That is the same value the coordinators' own `./sw peers`
-command reads. (`./sw` will not run outside its coordinator: it refuses on
-identity.) The program's config (`enabled`, `mode`, `heartbeat`) is in
-`stallwatch/programs.toml` in the private `eng-agent-platform` checkout. There
-is no `sqlite3` CLI on cloudbox, so use python:
+Run the bundled script. It is read-only:
 
 ```bash
-TAG=<program-tag>
-python3 - "$TAG" <<'PY'
-import datetime, os, sqlite3, sys, tomllib
-tag = sys.argv[1]
-db = os.path.expanduser("~/.local/state/stall-watch/state.db")
-toml = os.path.expanduser("~/projects/eng-agent-platform/stallwatch/programs.toml")
-if not os.path.exists(db):
-    sys.exit("no stall-watch on THIS host. Coordinators run on cloudbox; "
-             "this host cannot see or reach them.")
-con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)   # read-only
-row = con.execute("SELECT coord_session, pigeon_session"
-                  " FROM program WHERE tag=?", (tag,)).fetchone()
-prog = next((p for p in tomllib.load(open(toml, "rb")).get("program", [])
-             if p.get("tag") == tag), None)
-if not row or not row[1] or not prog:
-    sys.exit(f"{tag}: no bound coordinator (db row={row}, in programs.toml={bool(prog)})")
-if not prog.get("enabled", True) or prog.get("mode", "json") != "tools":
-    sys.exit(f"{tag}: coordinator {row[1]} is disabled or not in tools mode; "
-             "nothing reads its mailbox")
-until = prog.get("heartbeat_until")
-hb = bool(prog.get("heartbeat")) and (until is None or
-     datetime.date.today() <= datetime.date.fromisoformat(str(until)))
-print(f"{tag}  to={row[1]}  goose={row[0]}  heartbeat={'on' if hb else 'off'}")
-PY
+~/.agents/skills/finding-program-coordinators/find-coordinator.py <tag>
+~/.agents/skills/finding-program-coordinators/find-coordinator.py --all
 ```
 
-To list every program that has one, use
-`SELECT tag, pigeon_session FROM program WHERE pigeon_session IS NOT NULL`.
-Then check each one against `programs.toml`. A row can outlive its program
-being disabled.
+| Output | Exit | Meaning |
+|---|---|---|
+| `<tag>  to=gse_…  heartbeat=on\|off` | 0 | `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
+| `<tag>: no bound coordinator`, or a line saying nothing reads the mailbox or pigeon can't route to it | 1 | Don't send. See "No coordinator found". |
+| `no stall-watch on THIS host…` | 2 | You are not on cloudbox. See "No coordinator found". |
 
-**Then confirm pigeon can route to it.** Pigeon is the daemon that actually
-delivers your message:
+A `warning:` on stderr means one cross-check was skipped, either because
+`programs.toml` was unreadable or because pigeon was unreachable. The id is
+still the registry's, but treat it as unverified.
 
-```bash
-AUTH=(); [ -r /run/secrets/pigeon_daemon_auth_token ] && \
-  AUTH=(-H "Authorization: Bearer $(cat /run/secrets/pigeon_daemon_auth_token)")
-curl -sf "${AUTH[@]}" "${PIGEON_DAEMON_URL:-http://127.0.0.1:4731}/sessions" \
-  | jq -r --arg l "📋 $TAG" '.sessions[] | select(.label == $l)
-      | "\(.session_id)  state=\(.state)  pulls=\(.pull_sources | join(","))"'
-```
-
-You want exactly one row. Its `session_id` should equal `to=` above,
-`state=running`, and `pulls` should include `swarm`. Every coordinator is
-registered under the label `📋 <tag>`, with a working directory under
-`~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`. If the two sources
-disagree, the state DB wins: stall-watch rebinds and deletes superseded `gse_`
-rows, so a stray pigeon row is the stale side.
+What it checks: the registry is stall-watch's
+`~/.local/state/stall-watch/state.db`, table `program`, column `pigeon_session`.
+The coordinators' own `./sw peers` reads the same column. (`./sw` refuses to
+run outside its coordinator.) The script then checks the program is enabled
+and in tools mode in `programs.toml`, because a row can outlive its program.
+Last, it checks that pigeon `GET /sessions` has the id `running` with a
+`swarm` mailbox. Every coordinator is registered there under the label
+`📋 <tag>`, with a working directory under
+`~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`.
 
 **Which tag?** Use the tag of the program that owns the problem, not your own.
 If you only know the epic, the mapping from tag to `beads_epic` is in
