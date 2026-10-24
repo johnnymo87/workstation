@@ -47,7 +47,7 @@ reviewers:
 authors:
   - author-p
   # a comment: with a colon in it
-  - ELang7
+  - author-e
   - commented-author  # temporarily allowlisted, remove after PROJ-1234
   - 'quoted-block-author'
   - hash#in#login
@@ -352,7 +352,7 @@ YAML
 # Third fixture: the same global lists, spelled in flow style.
 cat > "$tmp/lgtm-flow.yml" <<'YAML'
 reviewers: [johnnymo87, 'reviewer-k']
-authors: [author-p, ELang7]
+authors: [author-p, author-e]
 onRequestAuthors: [author-r]
 
 repos:

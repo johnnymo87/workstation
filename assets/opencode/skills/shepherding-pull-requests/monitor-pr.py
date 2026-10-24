@@ -578,7 +578,7 @@ def detect_lgtm_bound(owner, repo, author_login=None, pool_engaged=False):
     All three make this return True on a PR lgtm cannot actually dispatch for,
     and all three are about lanes rather than authors:
 
-      * A repo-scoped author a repo-scoped author whose repo carries a
+      * A repo-scoped author whose repo carries a
         deliberately unmatchable `paths` sentinel, so the proactive sweep can
         never fire and only the request lanes remain (lgtm-68r).
       * A per-repo author, on files outside `paths`: per-repo

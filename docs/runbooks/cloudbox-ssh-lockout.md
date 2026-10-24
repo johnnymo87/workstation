@@ -26,13 +26,14 @@ works from home with WARP **off** but not with WARP **on**.
 ## 1. Get back in
 
 The commands below need cloudbox's GCP project, which this public repo does not name. Set it
-first. It is the `--project` in the IAP `ProxyCommand` of your `~/.ssh/config` cloudbox host,
-and `gcloud projects list` under your own account shows it too:
+first. The isolated tunnel config holds it as its default project:
 
 ```bash
-grep -n -- '--project' ~/.ssh/config
-export CLOUDBOX_GCP_PROJECT=<project-id>
+export CLOUDBOX_GCP_PROJECT="$(CLOUDSDK_CONFIG=~/.config/gcloud-tunnel/config gcloud config get-value project)"
 ```
+
+If that config is the broken part (step 3), the project id is also recorded in the private
+`eng-agent-platform` repo, `docs/cloudbox-gcp.md`.
 
 In order. Stop at the first one that works.
 
