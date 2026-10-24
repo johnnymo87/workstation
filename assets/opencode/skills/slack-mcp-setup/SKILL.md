@@ -21,7 +21,7 @@ No browser cookie scraping -- tokens don't expire unless revoked.
   - **`slack-ro`** — read-**only** (cannot post or upload). Used by lgtm's read-only gather session (`opencode-launch --mcp slack-ro`).
 - Both run a **pinned, nix-built** server (`localPkgs.slack-mcp-server`), **not** `npx -y slack-mcp-server@latest`. See "Why a pinned build" below.
 - **Both are disabled by default** (`"enabled": false`) to keep slack tools out of normal sessions
-- To use Slack: grant it to a session (`oc-mcp-enable <session-id> slack`), or launch with `--mcp slack` / `--mcp slack-ro`. See "Using Slack" below.
+- To use Slack: grant it to a session (`oc-mcp-enable <session-id> slack-ro`; `slack` only when the session must post), or launch with `--mcp slack-ro` / `--mcp slack`. See "Using Slack" below.
 
 **Why disabled by default?**
 - Prevents accidental Slack API calls from main agents
@@ -257,12 +257,13 @@ If you do need to refresh:
 
 ## Using Slack
 
-Grant the server to a session. This is the default way to use Slack:
+Grant the server to a session. This is the default way to use Slack. Prefer the read-only
+`slack-ro`; grant `slack` only when the session has to post or upload:
 
 ```bash
-oc-mcp-enable <session-id> slack      # grant to an ALREADY-RUNNING session
-opencode-launch --mcp slack ...       # launch a new session with it
-opencode-launch --mcp slack-ro ...    # read-only variant; cannot post or upload
+oc-mcp-enable <session-id> slack-ro   # grant to an ALREADY-RUNNING session (read-only)
+opencode-launch --mcp slack-ro ...    # launch a new session with it
+oc-mcp-enable <session-id> slack      # read + write: only when it must post or upload
 ```
 
 There is no slack *agent*. Don't flip `mcp.slack.enabled` in `~/.config/opencode/opencode.json`

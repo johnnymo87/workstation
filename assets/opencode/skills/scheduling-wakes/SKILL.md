@@ -88,11 +88,13 @@ Length is not the rule — a reader with no memory of you is.
   depends on the worktree still existing; reference the repo root and the
   branch/PR instead.
 
-  **This failure is quiet** (`pigeon-s9d`). A wake into a session whose
-  directory was deleted is injected into the transcript, and then the turn
-  produces nothing at all: no output, no tool call, no error, forever. Since
-  2026-08-03 the daemon no longer records it as delivered (the row stays
-  `handed_off` with no `verified_at`), but nobody is alerted. If you scheduled
+  **This failure is late and causeless.** pigeon checks the directory before
+  delivering (`pigeon-0ay7`), so a wake into a session whose directory is gone
+  never runs: the row stays `queued` and retries until it expires (6h after its
+  delivery time by default). Only then does an "expired before delivery" alert
+  arrive, with the payload but no cause (`pigeon-o57l`). A directory deleted
+  mid-turn still gives the older silent state: the turn produces nothing, and
+  the row stays `handed_off` with no `verified_at` (`pigeon-s9d`). If you scheduled
   a wake and it never seems to have happened, check whether its directory
   survived.
 
