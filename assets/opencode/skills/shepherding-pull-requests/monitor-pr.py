@@ -363,7 +363,7 @@ def _parse_lgtm_config(owner, repo):
           owner/repo: {}         # col 2  -> listed with no settings
 
     THE INLINE FORMS ARE NOT DECORATION. `owner/repo: {}` is how two live repos
-    are configured (blueapron/culinary-operations-server and blueapron/bluechef),
+    are configured (culinary-operations-server and bluechef),
     and a key pattern that required the line to end after the colon classified
     them as *not listed at all*. `detect_lgtm_bound` then returned False, the
     loop dropped the lgtm APPROVAL from its exit conditions, and the session
@@ -578,10 +578,10 @@ def detect_lgtm_bound(owner, repo, author_login=None, pool_engaged=False):
     All three make this return True on a PR lgtm cannot actually dispatch for,
     and all three are about lanes rather than authors:
 
-      * food-truck/tempo + jvanbaalen: a repo-scoped author whose repo carries a
+      * tempo + a repo-scoped author: a repo-scoped author whose repo carries a
         deliberately unmatchable `paths` sentinel, so the proactive sweep can
         never fire and only the request lanes remain (lgtm-68r).
-      * food-truck/protos + mshahrawat, on files outside `paths`: per-repo
+      * protos + a per-repo author, on files outside `paths`: per-repo
         authors get no path bypass (discover.ts:577), so that PR too is
         reachable only by request.
       * Staleness: tiers 1 and 2 drop PRs idle beyond MAX_PR_AGE_HOURS, which

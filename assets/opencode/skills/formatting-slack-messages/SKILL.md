@@ -183,8 +183,8 @@ This is the most common Claude failure mode with this MCP and it has burned mult
 When you call `slack_conversations_history`, `slack_conversations_replies`, or `slack_conversations_search_messages` to look at a message you just posted, the `Text` field you get back is a **lossy plain-text extraction of the rendered message, not the raw mrkdwn source**. That extraction strips or alters:
 
 - `*` and `_` formatting markers (because they're rendering as bold/italic, not as literal characters).
-- Apostrophes — `Karen's` shows up as `Karens`. This is a tokenizer artifact in the extraction layer, NOT something Slack did to your source.
-- Em dashes, en dashes, arrows, and other Unicode punctuation — `OnTrac→p44` may come back as `OnTracp44`.
+- Apostrophes — `don't` shows up as `dont`. This is a tokenizer artifact in the extraction layer, NOT something Slack did to your source.
+- Em dashes, en dashes, arrows, and other Unicode punctuation — `A→B` may come back as `AB`.
 - Triple-backtick code-block markers (the content survives, but the fences are gone).
 - Leading `>` on blockquoted lines.
 - Most emoji shortcodes get rendered to actual emoji (or stripped from the extraction).

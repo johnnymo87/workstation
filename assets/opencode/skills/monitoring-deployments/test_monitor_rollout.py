@@ -15,8 +15,8 @@ not change between two commits keeps the older commit's tag in pod status
 forever, while the pod is a member of the newest ReplicaSet and its spec names
 the newest tag.
 
-Measured on food-truck/mono, 2026-09-12 (merge adf1a60, superseded by
-c092993): all three ba-fulfillment-service pods in ReplicaSet 846f965849 have
+Measured on mono, 2026-09-12 (merge adf1a60, superseded by
+c092993): all three example-service pods in ReplicaSet 846f965849 have
 spec image `:c092993...` and imageID `sha256:d68597cae56b...`; ONE of them
 reports status image `:adf1a60...`. An itemforecastconsumer pod in the
 c092993 ReplicaSet reports status image `:adb33b1...`. Judging by the status
@@ -50,16 +50,16 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(mr)
 
 
-REPO = "food-truck/mono"
+REPO = "mono"
 # The real SHAs from the incident, so a fixture cannot drift into a shape the
 # cluster never produces.
 OURS = "adf1a604e0ff86f1bd40cef9a117e0ba57c22455"
 LATER = "c09299320924d327476a35066c886b179f83af27"
 OLDER = "adb33b1feeba1cc4748dbfafeb3c7dcf975ee6f4"
-IMG = "ftiuatacr.azurecr.io/wonder/blueapron/fulfillment/service"
+IMG = "registry.example.com/team/example-service"
 DIGEST = "sha256:d68597cae56bc0f346b9066bf8f9db182f54791cdcb1dec39f46701583389453"
 
-TARGET = "UAT:ctx:ns:ba-fulfillment-service"
+TARGET = "UAT:ctx:ns:example-service"
 
 
 def container(name, tag):
@@ -184,7 +184,7 @@ class PodRevisionJudgement(unittest.TestCase):
     """The bug: which field decides that a pod is on the new revision."""
 
     def test_stale_status_tag_does_not_hide_a_finished_rollout(self):
-        # The live ba-fulfillment-service-846f965849-psd9l shape: the pod is a
+        # The live example-service-846f965849-psd9l shape: the pod is a
         # member of the current ReplicaSet and its spec names the new tag, but
         # the kubelet reports the tag it first cached for that digest.
         p = get_pods([pod_simple("psd9l", LATER, OURS)])[0]
@@ -264,7 +264,7 @@ class PodRevisionJudgement(unittest.TestCase):
         self.assertIn("istio-proxy", p["wedge_reason"])
 
     def test_a_healthy_pod_that_restarted_earlier_is_NOT_a_wedge(self):
-        # MEASURED, food-truck/mono#4613 (merged 2026-09-16T16:29Z): eleven BAF
+        # MEASURED, mono#4613 (merged 2026-09-16T16:29Z): eleven
         # JVMs rolled at once in one UAT namespace and starved each other past
         # the startup-probe budget -- `failed startup probe, will be restarted`
         # -> SIGKILL, exitCode 137, NOT OOMKilled. They then came up clean.
@@ -275,7 +275,7 @@ class PodRevisionJudgement(unittest.TestCase):
         # the script printed, on adjacent lines about the same pod:
         #
         #   pod ...-pttlb: phase=Running ready=True restarts=4 ... <-- WEDGED
-        #   => UAT/ba-fulfillment-worker rolled out & healthy
+        #   => UAT/example-worker rolled out & healthy
         #
         # and `if wedged:` precedes the all-healthy branch, so the run exited 1
         # (action needed) for a rollout that had entirely succeeded. A settled

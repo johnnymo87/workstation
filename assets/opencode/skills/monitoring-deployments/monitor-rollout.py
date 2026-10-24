@@ -119,7 +119,7 @@ WEDGED_WAITING_REASONS = {
 # so without the readiness gate that history is reported as a live wedge
 # forever.
 #
-# MEASURED, food-truck/mono#4613 (2026-09-16): eleven BAF JVMs rolled at once
+# MEASURED, mono#4613 (2026-09-16): eleven JVM services rolled at once
 # in one UAT namespace, starved each other past the startup-probe budget
 # (`failed startup probe, will be restarted` -> SIGKILL, exitCode 137, not
 # OOMKilled), then came up clean. PROD ran the identical tag with restarts=0.
@@ -506,7 +506,7 @@ def on_target(pod, short_sha):
     so consecutive commits share one digest -- and a pod created for commit C
     reports the tag of commit A, forever.
 
-    Measured on food-truck/mono 2026-09-12: all three ba-fulfillment-service
+    Measured on mono 2026-09-12: all three example-service
     pods of ReplicaSet 846f965849 had spec image `:c092993` and imageID
     `sha256:d68597cae56b...`; one reported status image `:adf1a60`. The
     watcher read that as "pods updating" for 30 hours, then reported a merge

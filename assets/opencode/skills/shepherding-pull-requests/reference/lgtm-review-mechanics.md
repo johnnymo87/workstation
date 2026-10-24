@@ -85,7 +85,7 @@ gh pr view <n> --repo <owner>/<repo> --json reviewDecision -q .reviewDecision
 
 The line that separates the two, in one sentence: **a push is a signal lgtm already receives; a reply is not.**
 
-Why the field behaves that way: `reviewDecision` is only ever `REVIEW_REQUIRED` when the PR's *base branch* carries a review-required protection rule. Without one, GitHub reports the latest *decisive* review and null when there is none — and a `COMMENTED` review is not a decision. lgtm posts `COMMENTED` when it wants changes without blocking, so on such a repo its own review both clears the review request and nulls the field, and tier 0b's gate refuses forever. Measured on `food-truck/salmon-of-knowledge`, 2026-09-04:
+Why the field behaves that way: `reviewDecision` is only ever `REVIEW_REQUIRED` when the PR's *base branch* carries a review-required protection rule. Without one, GitHub reports the latest *decisive* review and null when there is none — and a `COMMENTED` review is not a decision. lgtm posts `COMMENTED` when it wants changes without blocking, so on such a repo its own review both clears the review request and nulls the field, and tier 0b's gate refuses forever. Measured on `salmon-of-knowledge`, 2026-09-04:
 
 | PR | latest non-bot review | pending requests | `reviewDecision` |
 |---|---|---|---|

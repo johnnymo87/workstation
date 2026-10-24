@@ -173,7 +173,7 @@ reproducible builds (bazel), a merge that doesn't touch a service produces a
 byte-identical image, so consecutive commits share a digest and a pod created
 for commit C reports commit A's tag *forever*.
 
-Measured on food-truck/mono 2026-09-12: all three `ba-fulfillment-service`
+Measured on mono 2026-09-12: all three `example-service`
 pods of ReplicaSet `846f965849` had spec image `:c092993` and imageID
 `sha256:d68597cae56b…`; one reported status image `:adf1a60`. Reading that
 column, the rollout looks permanently half-updated. It was finished.

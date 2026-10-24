@@ -233,7 +233,7 @@ unresolved review comments" — `unresolved=3 of 12`, with the query beside it. 
 bare assertion cannot be audited by the recipient; it can only be obeyed.
 
 Measured incident. A session dispatched seven `task.assign` messages telling
-peers that specific PRs "have inline review comments Jonathan wants answered."
+peers that specific PRs "have inline review comments the human wants answered."
 Its only query was:
 
 ```

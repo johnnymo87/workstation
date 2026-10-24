@@ -1,11 +1,11 @@
 ---
 name: escalating-azure-aks-rbac
-description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a Wonder production AKS cluster fails with a Forbidden / RBAC error, or when self-activating the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
+description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a company production AKS cluster fails with a Forbidden / RBAC error, or when self-activating the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
 ---
 
 # Escalating Azure AKS prod RBAC (PIM self-activation)
 
-Wonder production AKS clusters authorize with **Azure RBAC for Kubernetes**. You
+The company's production AKS clusters authorize with **Azure RBAC for Kubernetes**. You
 get **READ** by default (via an AAD group), but **WRITE** — `kubectl patch`,
 `scale`, `set env`, `exec`, `delete`, `rollout restart`, etc. — requires the
 **Azure Kubernetes Service RBAC Writer** role. That role is handed out as a
@@ -24,7 +24,8 @@ The subscription, cluster, resource-group, role-definition, and scope IDs are
 environment-specific and **deliberately not stored in this repo**. They live in
 one Confluence page, which is the single source of truth:
 
-**Runbook:** [Azure Kubernetes (AKS) prod RBAC self-escalation via PIM](https://wonder.atlassian.net/wiki/spaces/Platform/pages/5386600450) — Confluence space `Platform`, page id `5386600450`.
+**Runbook:** "Azure Kubernetes (AKS) prod RBAC self-escalation via PIM" in Confluence. Its page
+id is this skill's entry in `confluenceSkills` in `users/dev/opencode-skills.nix`.
 
 Two ways to read it:
 
@@ -35,7 +36,7 @@ Two ways to read it:
 2. **Fetch it live.** If `INTERNAL.md` is missing or stale, fetch the page
    directly. Use the `using-atlassian` skill:
    ```bash
-   nvim --headless out.md -c "FetchConfluencePage 5386600450" -c "write" -c "quit"
+   nvim --headless out.md -c "FetchConfluencePage <page-id>" -c "write" -c "quit"
    ```
    or re-run `home-manager switch` (requires Atlassian env vars) to refresh the
    companion file.
