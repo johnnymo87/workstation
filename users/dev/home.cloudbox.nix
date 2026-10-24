@@ -1235,18 +1235,22 @@ lib.mkIf isCloudbox {
   #   registered goose session's Telegram topic shows turns from every client (honk chat,
   #   coordinator wakes), not only pigeon's own. Loopback only; the token is pigeon's daemon
   #   token (honkd -> pigeon). Requires a pigeon daemon that has the route (pigeon#181).
-  # - --mcp-catalog: honk chat's `/mcp` turns opencode's MCP servers on per goose session.
-  #   honkd reads the generated opencode.json `mcp` block fresh on every request (one source
-  #   of truth; secrets stay {file:} refs, read by the server's wrapper at spawn). Every
-  #   server needs a confirming `/mcp enable <name>!` except the --mcp-no-confirm list (slack-ro cannot post; figma
-  #   is read-only). Needs honk with honk#18: an older honkd refuses the unknown flags
-  #   and fails to start.
-  # - --swarm-*: `/mcp` gains a built-in `swarm` entry (`honk swarm-mcp`), giving goose
-  #   sessions swarm_send/swarm_read/swarm_list through pigeon (honk#23, pigeon#187), and
-  #   `honk chat --new` enables it by default. The binary path must stay stable: goose stores
-  #   the extension's command per session and re-spawns it after restarts, so a /nix/store
-  #   path would break once garbage-collected. After changing these flags, an existing session
-  #   needs `/mcp disable swarm` then `/mcp enable swarm`.
+  # - --mcp-catalog, --mcp-self-grant: honk chat's `/mcp` turns opencode's MCP servers on per
+  #   goose session. honkd reads the generated opencode.json `mcp` block fresh on every request
+  #   (one source of truth; secrets stay {file:} refs, read by the server's wrapper at spawn).
+  #   Every server needs a confirming `/mcp enable <name>!` except the --mcp-no-confirm list
+  #   (slack-ro cannot post; figma is read-only). `--mcp-self-grant` lets goose agents turn
+  #   servers on/off for themselves through swarm's `mcp_list`/`mcp_enable`/`mcp_disable` tools
+  #   (honk#24; reason required for `!` servers; removing the flag + restart hides the tools
+  #   from newly spawned swarm servers). Needs honk with honk#24: an older honkd refuses
+  #   the unknown flags and fails to start.
+  # - --swarm-*, --swarm-default: `/mcp` gains a built-in `swarm` entry (`honk swarm-mcp`),
+  #   giving goose sessions swarm_send/swarm_read/swarm_list through pigeon (honk#23, pigeon#187).
+  #   `--swarm-default` turns swarm on for every new session (pigeon /launch, coordinators),
+  #   opt-out `_meta.honk.swarm:false`. The binary path must stay stable: goose stores the
+  #   extension's command per session and re-spawns it after restarts, so a /nix/store path
+  #   would break once garbage-collected. Existing sessions get the tools once their swarm server
+  #   respawns (`/mcp disable swarm` then `/mcp enable swarm`).
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
@@ -1256,7 +1260,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --mcp-self-grant --swarm-default --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
