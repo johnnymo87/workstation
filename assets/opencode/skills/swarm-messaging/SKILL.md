@@ -102,6 +102,15 @@ Summarizing for a human who is watching the swarm.
 whose job is to route messages between other sessions.** (The human's
 `stall-watch` delegated answers described below are not a coordinator.)
 
+**This bans the role inside a swarm. It does not mean coordinators don't exist.**
+On cloudbox, stall-watch runs one **program coordinator** per program of work. Each is a
+goose session with a `gse_` id, keyed by the program's oc-tags tag. It is the
+human's standing infrastructure, not a session routing a swarm. When something
+you found belongs to another program, that program's coordinator is the right
+recipient. Look it up with the `finding-program-coordinators` skill (deployed
+on work hosts). Never conclude "there is no coordinator" from `swarm_list` or
+from bead notes.
+
 A coordinator is a session that holds shared context, turns direction into
 `task.assign` messages, aggregates worker reports, and owns the upward channel
 to the human. It sounds like a manager. It behaves like a message bus, and the
@@ -289,7 +298,7 @@ Call the **`swarm_send`** tool:
 
 | Arg | Required | Meaning |
 |-----|----------|---------|
-| `to` | yes | Recipient session id (starts with `ses_`). |
+| `to` | yes | Recipient session id: `ses_` for an opencode session, `gse_` for a goose session reached through its pigeon mailbox (for example, a program coordinator). |
 | `message` | yes | **Raw** payload text. Pigeon wraps it in the `<swarm_message>` envelope for you — do **not** write envelope tags yourself. |
 | `kind` | no | Message kind (default `chat`). |
 | `priority` | no | `urgent` \| `normal` (default) \| `low`. |
@@ -297,7 +306,7 @@ Call the **`swarm_send`** tool:
 
 Your own session is filled in as `from` automatically (from the calling session id), so you can't spoof or typo it. `swarm_send` returns `Queued msg_<id> -> <to>` once the daemon accepts the message (HTTP 202).
 
-Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first.
+Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first. It lists **opencode sessions only**, and only recent ones: goose sessions, including every program coordinator, never appear there. For a program's coordinator, use `finding-program-coordinators`.
 
 ### Message kinds
 
@@ -413,7 +422,7 @@ On terminal failure the daemon sends a `delivery.failed` message **back to you**
 - **Don't** ack, heartbeat, or ping. If a message carries no decision, no new evidence and no changed instruction, it shouldn't exist.
 - **Don't** split one report into several sends to keep each one short. Count is the cost, not length.
 - **Don't** paraphrase a swarm message to a human who can already see it — point at it in one sentence.
-- **Don't** appoint, accept, or route through a coordinator (stall-watch's delegated answers are not one). Report your own work to the human yourself, once, when it is done.
+- **Don't** appoint, accept, or route your own swarm's traffic through a coordinator (stall-watch's delegated answers are not one). Report your own work to the human yourself, once, when it is done. Handing a finding to **another program's** stall-watch coordinator is different and allowed; see `finding-program-coordinators`.
 - **Don't** POST to `opencode serve`'s `/session/<id>/prompt_async` directly for cross-session messaging. That route races (concurrent calls from different `x-opencode-directory` headers bypass the per-session busy guard, producing 400 "does not support assistant message prefill" from Anthropic). Always use `swarm_send`.
 - **Don't** write the `<swarm_message>` envelope into your `message` — pigeon adds it. Pre-wrapping is rejected (the close tag is forbidden in payloads) and double-wraps confuse receivers. Send only the raw payload.
 - **Don't** paste a received envelope back verbatim as your reply — send only the new payload.

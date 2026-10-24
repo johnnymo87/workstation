@@ -101,6 +101,7 @@ let
     "cleaning-disk"
     "escalating-azure-aks-rbac"
     "figma-mcp-setup"
+    "finding-program-coordinators"
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
@@ -154,6 +155,14 @@ let
   monitoringDeploymentsExtras = {
     "${skillsDir}/monitoring-deployments/monitor-rollout.py" = {
       source = "${assetsPath}/opencode/skills/monitoring-deployments/monitor-rollout.py";
+      executable = true;
+    };
+  };
+
+  # finding-program-coordinators has an executable read-only lookup script
+  findingCoordinatorsExtras = {
+    "${skillsDir}/finding-program-coordinators/find-coordinator.py" = {
+      source = "${assetsPath}/opencode/skills/finding-program-coordinators/find-coordinator.py";
       executable = true;
     };
   };
@@ -371,6 +380,7 @@ in
       mkSkills workOnlySkills
       // atlassianExtras
       // monitoringDeploymentsExtras
+      // findingCoordinatorsExtras
     );
 
   # One-time tidy of the legacy ~/.config/opencode/skills/ tree after the move

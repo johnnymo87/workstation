@@ -34,6 +34,10 @@ Untagged goose sessions report as `auto:goose/<slug>` (derived from recipe
 title, session name, or session type). Tag goose runs with
 `oc-tags set <tag> --goose-dir <dir>` (optionally with `--since <epoch_ms>`).
 
+A program's tag is also the key to its stall-watch **coordinator**. oc-tags
+will not find that coordinator, because coordinator sessions are not tagged
+with their program's tag. Use `finding-program-coordinators` instead.
+
 Launching sessions? `opencode-launch --tag` writes the same tag and follows the
 same rules below. Without `--tag`, a launch copies the launcher's tag onto the
 child (so does Telegram `/launch` from a session's topic or reply) — only an explicit session tag, never an `auto:` fallback. Check
