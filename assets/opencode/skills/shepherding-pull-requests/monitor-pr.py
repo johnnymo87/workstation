@@ -363,7 +363,7 @@ def _parse_lgtm_config(owner, repo):
           owner/repo: {}         # col 2  -> listed with no settings
 
     THE INLINE FORMS ARE NOT DECORATION. `owner/repo: {}` is how two live repos
-    are configured (blueapron/culinary-operations-server and blueapron/bluechef),
+    are configured,
     and a key pattern that required the line to end after the colon classified
     them as *not listed at all*. `detect_lgtm_bound` then returned False, the
     loop dropped the lgtm APPROVAL from its exit conditions, and the session
@@ -578,10 +578,10 @@ def detect_lgtm_bound(owner, repo, author_login=None, pool_engaged=False):
     All three make this return True on a PR lgtm cannot actually dispatch for,
     and all three are about lanes rather than authors:
 
-      * food-truck/tempo + jvanbaalen: a repo-scoped author whose repo carries a
+      * A repo-scoped author whose repo carries a
         deliberately unmatchable `paths` sentinel, so the proactive sweep can
         never fire and only the request lanes remain (lgtm-68r).
-      * food-truck/protos + mshahrawat, on files outside `paths`: per-repo
+      * A per-repo author, on files outside `paths`: per-repo
         authors get no path bypass (discover.ts:577), so that PR too is
         reachable only by request.
       * Staleness: tiers 1 and 2 drop PRs idle beyond MAX_PR_AGE_HOURS, which
@@ -890,7 +890,7 @@ def evaluate_iteration(pr_num, owner, repo, lgtm_bound):
             # a settled head itself" -- true only where GitHub reports
             # reviewDecision == REVIEW_REQUIRED, which is a property of the
             # base branch's protection rules, not of the PR. On
-            # salmon-of-knowledge#208 (2026-09-04) that field was null, tier
+            # js-repo#208 (2026-09-04) that field was null, tier
             # 0b could never fire, and this message was the correct advice
             # while the prose was wrong. Keying on "has this reviewer seen
             # the current head" is the question that matters; the prose now

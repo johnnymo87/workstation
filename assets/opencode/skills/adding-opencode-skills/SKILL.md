@@ -95,7 +95,7 @@ That's it.
 | Skill location | What to do |
 |---|---|
 | `<repo>/.agents/skills/<name>/SKILL.md` | Edit, commit. Effective immediately for any new OpenCode session run from that repo. |
-| `workstation/assets/opencode/skills/<name>/` | Edit the source, then `nix run home-manager -- switch --flake .#<host>` to refresh the symlink target. |
+| `workstation/assets/opencode/skills/<name>/` | Edit the source, then apply it as in Workflow B step 5 (home-manager switch on NixOS hosts, `darwin-rebuild switch` on macOS) to refresh the symlink target. |
 | `~/.agents/skills/<name>/` directly | **Don't.** It's either a Nix store symlink (read-only) or it'll be skipped/clobbered on next switch. Edit the source in workstation. |
 | `~/projects/superpowers/skills/<name>/` | That's the upstream superpowers repo (deployed via `mkOutOfStoreSymlink`). Commit and push there separately; live immediately on next session. |
 

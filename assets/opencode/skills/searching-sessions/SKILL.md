@@ -11,7 +11,7 @@ Search session transcripts with `oc-search`. Run `oc-search --help` for all opti
 
 ```bash
 # Which session created a Jira ticket?
-oc-search DATA-4297
+oc-search PROJ-1234
 
 # Which session opened a PR?
 oc-search 'gh pr create'

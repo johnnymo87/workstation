@@ -15,7 +15,7 @@
 # The shape that broke it (found 2026-08-31): a repo written as an INLINE
 # EMPTY MAPPING, which is how two live repos are configured:
 #
-#     blueapron/culinary-operations-server: {}
+#     globex/ops-server: {}
 #
 # The key pattern required the line to END after the colon, so that repo was
 # never seen as listed at all. The same pattern also hid `allAuthors: true`.
@@ -42,12 +42,12 @@ trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/lgtm.yml" <<'YAML'
 reviewers:
   - johnnymo87
-  - Krosantos
+  - reviewer-k
 
 authors:
-  - pfarina
+  - author-p
   # a comment: with a colon in it
-  - ELang7
+  - author-e
   - commented-author  # temporarily allowlisted, remove after PROJ-1234
   - 'quoted-block-author'
   - hash#in#login
@@ -60,34 +60,34 @@ authors:
 # that depends on an unmerged branch reports the wrong thing on this one.)
 onRequestAuthors:
   # Reviewed only when a review is requested; never proactively swept.
-  - ratnikov
+  - author-r
   - second-on-request-author
 
 repos:
-  food-truck/mono:
+  acme/monorepo:
     authors:
-      - camden-wonder
+      - author-c
       - repo-commented-author  # same shape, one level deeper
     paths:
-      - wonder/blueapron
+      - acme/platform-team
     ownerReviewers:
       # A sentinel login that is in NO author list: if ownerReviewers values
       # ever leak into the author union, only a login like this can show it.
       supplychain: [owner-reviewer-sentinel]
-      ba-consumer: [johnnymo87]
+      consumer-team: [johnnymo87]
 
-  food-truck/salmon-of-knowledge:
+  acme/js-repo:
     allAuthors: True
 
   # Inline non-empty mapping: `{}` is the empty case of a form that can carry
   # settings, so the reader must not read the empty one and drop this one.
-  food-truck/inline-settings: {allAuthors: true}
-  food-truck/inline-authors: {authors: [inline-only-author]}
+  acme/inline-settings: {allAuthors: true}
+  acme/inline-authors: {authors: [inline-only-author]}
 
-  blueapron/culinary-operations-server: {}
-  blueapron/internal-frontends:
+  globex/ops-server: {}
+  globex/frontends:
     authors: [flow-style-author]
-  blueapron/bluechef: {}
+  globex/chef-app: {}
 YAML
 
 # Driver: import monitor-pr.py by path, repoint LGTM_CONFIG_PATH at a fixture,
@@ -109,17 +109,17 @@ d = mod.detect_lgtm_bound
 
 # --- The bug: inline empty mapping (`{}`) is still a listed repo. ----------
 check("inline-empty-repo-listed-author-global",
-      d("blueapron", "culinary-operations-server", "pfarina"), True)
+      d("globex", "ops-server", "author-p"), True)
 check("inline-empty-repo-listed-author-reviewer",
-      d("blueapron", "bluechef", "johnnymo87"), True)
+      d("globex", "chef-app", "johnnymo87"), True)
 check("inline-empty-repo-unknown-author",
-      d("blueapron", "culinary-operations-server", "nobody-at-all"), False)
+      d("globex", "ops-server", "nobody-at-all"), False)
 
 # --- No regression on the block form that already worked. -----------------
-check("block-repo-global-author", d("food-truck", "mono", "pfarina"), True)
-check("block-repo-reviewer-is-author", d("food-truck", "mono", "Krosantos"), True)
-check("block-repo-scoped-author", d("food-truck", "mono", "camden-wonder"), True)
-check("block-repo-unknown-author", d("food-truck", "mono", "stranger"), False)
+check("block-repo-global-author", d("acme", "monorepo", "author-p"), True)
+check("block-repo-reviewer-is-author", d("acme", "monorepo", "reviewer-k"), True)
+check("block-repo-scoped-author", d("acme", "monorepo", "author-c"), True)
+check("block-repo-unknown-author", d("acme", "monorepo", "stranger"), False)
 
 # --- A block list item keeps its login when the line carries a comment. ---
 # YAML ends a scalar at ` #`, so these are the logins `commented-author` and
@@ -127,81 +127,81 @@ check("block-repo-unknown-author", d("food-truck", "mono", "stranger"), False)
 # thing on the line drops them silently, and silently dropping a login is a
 # `lgtm-bound: False` on a PR lgtm reviews.
 check("block-item-trailing-comment",
-      d("food-truck", "mono", "commented-author"), True)
+      d("acme", "monorepo", "commented-author"), True)
 check("block-item-trailing-comment-repo-scoped",
-      d("food-truck", "mono", "repo-commented-author"), True)
+      d("acme", "monorepo", "repo-commented-author"), True)
 check("block-item-trailing-comment-repo-scoped-does-not-leak",
-      d("blueapron", "bluechef", "repo-commented-author"), False)
-check("block-item-quoted", d("food-truck", "mono", "quoted-block-author"), True)
+      d("globex", "chef-app", "repo-commented-author"), False)
+check("block-item-quoted", d("acme", "monorepo", "quoted-block-author"), True)
 # `#` NOT preceded by whitespace does not start a YAML comment, so the login
 # is the whole token -- truncating at the first `#` would invent a login.
-check("block-item-hash-without-space", d("food-truck", "mono", "hash#in#login"), True)
-check("block-item-hash-not-truncated", d("food-truck", "mono", "hash"), False)
+check("block-item-hash-without-space", d("acme", "monorepo", "hash#in#login"), True)
+check("block-item-hash-not-truncated", d("acme", "monorepo", "hash"), False)
 # The comment text itself must not become a login.
 check("block-item-comment-text-not-an-author",
-      d("food-truck", "mono", "temporarily"), False)
+      d("acme", "monorepo", "temporarily"), False)
 # One space before `#` is enough to start a YAML comment; none is required
 # after it.
 check("block-item-no-space-after-hash",
-      d("food-truck", "mono", "no-space-before-hash"), True)
+      d("acme", "monorepo", "no-space-before-hash"), True)
 # A quoted scalar containing ` # ` is ONE scalar, not a login plus a comment.
 # Capturing the prefix would invent the login `spaced` out of a line that
 # names nobody -- and an invented login that happens to match the PR author
 # makes the loop wait for an approval that cannot arrive.
 check("quoted-scalar-with-hash-not-split",
-      d("food-truck", "mono", "spaced"), False)
+      d("acme", "monorepo", "spaced"), False)
 
 # A repo-scoped author must NOT leak to another repo (the union is
 # global ∪ reviewers ∪ repos[R].authors -- R, not every R).
 check("repo-scoped-author-does-not-leak",
-      d("blueapron", "culinary-operations-server", "camden-wonder"), False)
+      d("globex", "ops-server", "author-c"), False)
 
 # Unlisted repo is never bound, whatever the author.
-check("unlisted-repo", d("food-truck", "not-a-repo", "pfarina"), False)
+check("unlisted-repo", d("acme", "not-a-repo", "author-p"), False)
 
 # Unknown author fails toward NOT-bound (documented in detect_lgtm_bound).
-check("no-author-login", d("food-truck", "mono", None), False)
+check("no-author-login", d("acme", "monorepo", None), False)
 
 # --- allAuthors: true admits any human author in that repo only. ----------
 check("all-authors-admits-stranger",
-      d("food-truck", "salmon-of-knowledge", "stranger"), True)
+      d("acme", "js-repo", "stranger"), True)
 check("all-authors-excludes-bot",
-      d("food-truck", "salmon-of-knowledge", "dependabot[bot]"), False)
+      d("acme", "js-repo", "dependabot[bot]"), False)
 check("all-authors-does-not-leak",
-      d("food-truck", "mono", "stranger"), False)
+      d("acme", "monorepo", "stranger"), False)
 
 # --- Nested inline mappings must not be mistaken for repos or authors. ----
 # `supplychain: [owner-reviewer-sentinel]` under ownerReviewers sits at
 # repo-sub depth: it is neither a repo nor an author entry, and neither its
 # key nor its value may reach the author union.
 check("owner-reviewers-key-not-an-author",
-      d("food-truck", "mono", "supplychain"), False)
+      d("acme", "monorepo", "supplychain"), False)
 check("owner-reviewers-value-not-an-author",
-      d("food-truck", "mono", "owner-reviewer-sentinel"), False)
+      d("acme", "monorepo", "owner-reviewer-sentinel"), False)
 
 # --- Inline mappings that CARRY settings, not just `{}`. ------------------
 check("inline-map-all-authors",
-      d("food-truck", "inline-settings", "stranger"), True)
+      d("acme", "inline-settings", "stranger"), True)
 check("inline-map-all-authors-excludes-bot",
-      d("food-truck", "inline-settings", "renovate"), False)
+      d("acme", "inline-settings", "renovate"), False)
 check("inline-map-repo-authors",
-      d("food-truck", "inline-authors", "inline-only-author"), True)
+      d("acme", "inline-authors", "inline-only-author"), True)
 check("inline-map-repo-authors-do-not-leak",
-      d("food-truck", "mono", "inline-only-author"), False)
+      d("acme", "monorepo", "inline-only-author"), False)
 check("inline-map-repo-authors-reject-stranger",
-      d("food-truck", "inline-authors", "stranger"), False)
+      d("acme", "inline-authors", "stranger"), False)
 
 # --- Flow sequences as author lists, at both indents. --------------------
 # (These two logins are onRequestAuthors, so they need the request -- see the
 # on-request section below for why.)
 check("block-list-on-request-author",
-      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
+      d("acme", "monorepo", "author-r", pool_engaged=True), True)
 check("block-list-second-on-request-author",
-      d("food-truck", "mono", "second-on-request-author", pool_engaged=True), True)
+      d("acme", "monorepo", "second-on-request-author", pool_engaged=True), True)
 check("flow-list-repo-author",
-      d("blueapron", "internal-frontends", "flow-style-author"), True)
+      d("globex", "frontends", "flow-style-author"), True)
 check("flow-list-repo-author-does-not-leak",
-      d("food-truck", "mono", "flow-style-author"), False)
+      d("acme", "monorepo", "flow-style-author"), False)
 
 # --- onRequestAuthors bind only when a pool reviewer is engaged. ----------
 # lgtm admits these logins in the two review-REQUESTED lanes only (tier 0 and
@@ -211,31 +211,31 @@ check("flow-list-repo-author-does-not-leak",
 # lgtm-bound makes the loop wait for an approval that cannot arrive, which is
 # the unbounded mistake, not the recoverable one.
 check("on-request-author-without-request",
-      d("food-truck", "mono", "ratnikov"), False)
+      d("acme", "monorepo", "author-r"), False)
 check("on-request-author-with-request",
-      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
+      d("acme", "monorepo", "author-r", pool_engaged=True), True)
 # An ordinary allowlisted author needs no request: the proactive sweep covers
 # them. Gating everyone on a request would be the opposite error.
 check("global-author-needs-no-request",
-      d("food-truck", "mono", "pfarina", pool_engaged=False), True)
+      d("acme", "monorepo", "author-p", pool_engaged=False), True)
 check("reviewer-as-author-needs-no-request",
-      d("food-truck", "mono", "Krosantos", pool_engaged=False), True)
+      d("acme", "monorepo", "reviewer-k", pool_engaged=False), True)
 check("repo-scoped-author-needs-no-request",
-      d("food-truck", "mono", "camden-wonder", pool_engaged=False), True)
+      d("acme", "monorepo", "author-c", pool_engaged=False), True)
 # A request does not admit an author who is in no list at all.
 check("request-does-not-admit-stranger",
-      d("food-truck", "mono", "stranger", pool_engaged=True), False)
+      d("acme", "monorepo", "stranger", pool_engaged=True), False)
 # allAuthors still admits humans in its repo without any request.
 check("all-authors-needs-no-request",
-      d("food-truck", "salmon-of-knowledge", "stranger", pool_engaged=False), True)
+      d("acme", "js-repo", "stranger", pool_engaged=False), True)
 # ...including an on-request author, who is swept there like anybody else:
 # `allAuthors` is inside filterByAuthors, so it admits in EVERY lane. Gating
 # him on a request would be a false negative on a PR lgtm really does review.
 check("all-authors-beats-on-request-gate",
-      d("food-truck", "salmon-of-knowledge", "ratnikov", pool_engaged=False), True)
+      d("acme", "js-repo", "author-r", pool_engaged=False), True)
 # But a bot is still excluded there, request or not.
 check("all-authors-still-excludes-bot-with-request",
-      d("food-truck", "salmon-of-knowledge", "renovate", pool_engaged=True), False)
+      d("acme", "js-repo", "renovate", pool_engaged=True), False)
 
 # --- Engagement is computed from the PR payload, not guessed. -------------
 # The pool is lgtm's `reviewers:` list; a request for one of them, or a review
@@ -267,10 +267,10 @@ check("engaged-missing-fields", e({}, {"johnnymo87"}), False)
 # parser. The pool would come back empty, pool_reviewer_engaged would return
 # False forever, and the gate would look like it was working.
 check("reviewer-pool-extracted",
-      mod.lgtm_reviewer_pool("food-truck", "mono"), {"johnnymo87", "Krosantos"})
+      mod.lgtm_reviewer_pool("acme", "monorepo"), {"johnnymo87", "reviewer-k"})
 missing_cfg, mod.LGTM_CONFIG_PATH = mod.LGTM_CONFIG_PATH, Path("/nonexistent/lgtm.yml")
 check("reviewer-pool-absent-config", mod.lgtm_reviewer_pool("x", "y"), set())
-check("absent-config-not-bound", d("food-truck", "mono", "pfarina"), False)
+check("absent-config-not-bound", d("acme", "monorepo", "author-p"), False)
 mod.LGTM_CONFIG_PATH = missing_cfg
 
 # --- The main() wiring: which side of the trigger, and when. --------------
@@ -287,20 +287,20 @@ pr_of = lambda author, requested, reviewed: {
     "reviewRequests": [{"login": r} for r in requested],
     "latestReviews": [{"author": {"login": r}} for r in reviewed],
 }
-b = lambda pr: mod.lgtm_bound_for_pr("food-truck", "mono", pr)
-check("wiring-on-request-no-request", b(pr_of("ratnikov", [], [])), False)
+b = lambda pr: mod.lgtm_bound_for_pr("acme", "monorepo", pr)
+check("wiring-on-request-no-request", b(pr_of("author-r", [], [])), False)
 check("wiring-on-request-daemon-requested",
-      b(pr_of("ratnikov", ["johnnymo87"], [])), True)
+      b(pr_of("author-r", ["johnnymo87"], [])), True)
 check("wiring-on-request-other-pool-member-requested",
-      b(pr_of("ratnikov", ["Krosantos"], [])), False)
+      b(pr_of("author-r", ["reviewer-k"], [])), False)
 # ...but a pool member who ALREADY REVIEWED binds whoever they are: lgtm
 # dispatches under a rotating pool identity, so the review that consumed the
 # request need not be the daemon's.
 check("wiring-on-request-other-pool-member-reviewed",
-      b(pr_of("ratnikov", [], ["Krosantos"])), True)
+      b(pr_of("author-r", [], ["reviewer-k"])), True)
 # An ordinary author must not pay for a `gh api user` round-trip at all.
 calls.clear()
-check("wiring-ordinary-author-bound", b(pr_of("pfarina", [], [])), True)
+check("wiring-ordinary-author-bound", b(pr_of("author-p", [], [])), True)
 check("wiring-ordinary-author-skips-daemon-lookup", calls, [])
 mod.run_cmd = real_run_cmd
 
@@ -320,21 +320,21 @@ check("pr-info-fetches-latest-reviews", "latestReviews" in fields, True)
 
 # --- Back-compat: no author config at all means no author filtering. ------
 mod.LGTM_CONFIG_PATH = Path(sys.argv[3])
-check("no-author-config-admits-anyone", d("blueapron", "bluechef", "stranger"), True)
-check("no-author-config-still-needs-repo", d("blueapron", "nope", "stranger"), False)
+check("no-author-config-admits-anyone", d("globex", "chef-app", "stranger"), True)
+check("no-author-config-still-needs-repo", d("globex", "nope", "stranger"), False)
 
 # --- The same admissions, written in flow style. -------------------------
 # The main fixture writes the global lists block-style because the real
 # lgtm.yml does. Both spellings reach the same accumulators, and a fixture
 # only proves the shapes someone thought to write down.
 mod.LGTM_CONFIG_PATH = Path(sys.argv[4])
-check("flow-globals-author", d("food-truck", "mono", "pfarina"), True)
-check("flow-globals-reviewer-is-author", d("food-truck", "mono", "Krosantos"), True)
+check("flow-globals-author", d("acme", "monorepo", "author-p"), True)
+check("flow-globals-reviewer-is-author", d("acme", "monorepo", "reviewer-k"), True)
 check("flow-globals-pool-extracted",
-      mod.lgtm_reviewer_pool("food-truck", "mono"), {"johnnymo87", "Krosantos"})
-check("flow-globals-on-request-gated", d("food-truck", "mono", "ratnikov"), False)
+      mod.lgtm_reviewer_pool("acme", "monorepo"), {"johnnymo87", "reviewer-k"})
+check("flow-globals-on-request-gated", d("acme", "monorepo", "author-r"), False)
 check("flow-globals-on-request-with-request",
-      d("food-truck", "mono", "ratnikov", pool_engaged=True), True)
+      d("acme", "monorepo", "author-r", pool_engaged=True), True)
 PY
 
 # Second fixture for the back-compat rule: repos, but zero author config.
@@ -343,20 +343,20 @@ reviewers:
   - johnnymo87
 
 repos:
-  blueapron/bluechef: {}
-  food-truck/mono:
+  globex/chef-app: {}
+  acme/monorepo:
     paths:
-      - wonder/blueapron
+      - acme/platform-team
 YAML
 
 # Third fixture: the same global lists, spelled in flow style.
 cat > "$tmp/lgtm-flow.yml" <<'YAML'
-reviewers: [johnnymo87, 'Krosantos']
-authors: [pfarina, ELang7]
-onRequestAuthors: [ratnikov]
+reviewers: [johnnymo87, 'reviewer-k']
+authors: [author-p, author-e]
+onRequestAuthors: [author-r]
 
 repos:
-  food-truck/mono: {}
+  acme/monorepo: {}
 YAML
 
 out=$(python3 "$tmp/drive.py" "$SCRIPT" "$tmp/lgtm.yml" "$tmp/lgtm-noauthors.yml" "$tmp/lgtm-flow.yml")

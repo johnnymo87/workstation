@@ -134,7 +134,7 @@ yours:
   forward or roll back; surface the choice to the user.
   (A pod that is Ready **now** is never reported as a restart spike, however
   high its restart count: `restartCount` is cumulative, so a noisy roll that
-  recovered is history rather than a wedge. Measured on mono#4613, where
+  recovered is history rather than a wedge. Measured on monorepo#4613, where
   eleven JVMs rolling at once in one UAT namespace starved each other past the
   startup-probe budget, restarted, and came up clean — and the check called
   that a wedge on pods it had just called healthy.)
@@ -173,7 +173,7 @@ reproducible builds (bazel), a merge that doesn't touch a service produces a
 byte-identical image, so consecutive commits share a digest and a pod created
 for commit C reports commit A's tag *forever*.
 
-Measured on food-truck/mono 2026-09-12: all three `ba-fulfillment-service`
+Measured on the monorepo 2026-09-12: all three `example-service`
 pods of ReplicaSet `846f965849` had spec image `:c092993` and imageID
 `sha256:d68597cae56b…`; one reported status image `:adf1a60`. Reading that
 column, the rollout looks permanently half-updated. It was finished.

@@ -29,9 +29,6 @@ Complete command reference for bd (beads) CLI tool v0.42+. All commands support 
   - [bd dolt push / bd dolt pull](#bd-dolt-pushpull) - Dolt-native cross-machine sync
   - [bd sync (removed)](#bd-sync-removed) - Deprecated no-op; see bd dolt push/pull
   - [bd export / bd import](#bd-export) - Manual JSONL operations
-- [Daemon Commands](#daemon-commands)
-  - [bd daemon](#bd-daemon) - Background daemon management
-  - [bd daemons](#bd-daemons) - Multi-project daemon status
 - [Setup Commands](#setup-commands)
   - [bd init](#bd-init) - Initialize database
   - [bd doctor](#bd-doctor) - Health checks and repair
@@ -53,7 +50,7 @@ Complete command reference for bd (beads) CLI tool v0.42+. All commands support 
 | `bd list` | List issues with filters | `--status`, `--priority`, `--type`, `--assignee` |
 | `bd show <id>` | Show issue details | `--json` |
 | `bd create "Title"` | Create new issue | `-t`, `-p`, `-d`, `--design`, `--acceptance` |
-| `bd update <id>` | Update existing issue | `--status`, `--priority`, `--design` (NOT `--notes` — it replaces) |
+| `bd update <id>` | Update existing issue | `--status`, `--priority`, `--design` (field flags REPLACE the field; append with `bd note`) |
 | `bd note <id> "text"` | Append to notes | `--file`, `--stdin` |
 | `bd close <id>` | Close completed issue | `--reason` |
 
@@ -147,7 +144,7 @@ Update an existing issue's fields.
 bd update bd-a1b2 --status in_progress
 bd update bd-a1b2 --priority 0
 bd note bd-a1b2 "Progress: completed X, next: Y"   # APPENDS
-bd update bd-a1b2 --design "Decided to use Redis"
+bd update bd-a1b2 --design "Decided to use Redis"   # REPLACES the whole design field
 bd update bd-a1b2 --acceptance "Tests passing"
 ```
 
@@ -417,36 +414,6 @@ bd import --resolve-collisions < issues.jsonl
 
 ---
 
-## Daemon Commands
-
-### bd daemon
-
-Manage background daemon for a project.
-
-```bash
-bd daemon --start                        # Start daemon
-bd daemon --start --auto-commit          # Auto-commit after changes
-bd daemon --start --auto-commit --auto-push  # Also push to remote
-bd daemon --stop                         # Stop daemon
-bd daemon --status                       # Check if running
-bd daemon --health                       # Show uptime, cache stats, metrics
-```
-
-**Architecture:** Per-project daemon at `.beads/bd.sock`. Provides connection pooling and performance optimization.
-
----
-
-### bd daemons
-
-Manage daemons across multiple projects.
-
-```bash
-bd daemons list                 # List all running daemons
-bd daemons health               # Health status of all daemons
-```
-
----
-
 ## Setup Commands
 
 ### bd init
@@ -475,7 +442,7 @@ bd doctor                      # Check installation health
 bd doctor --fix                # Auto-repair issues found
 ```
 
-Checks: database integrity, git hooks, daemon status, JSONL sync state.
+Checks: database integrity, git hooks, JSONL sync state.
 
 ---
 

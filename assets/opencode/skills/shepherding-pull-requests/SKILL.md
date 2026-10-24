@@ -435,7 +435,7 @@ Loop exits only when **all** of the following are true in the same iteration:
 
 **A PR can satisfy every check in this skill and still be going nowhere.** Threads all answered and resolved, CI green, no conflicts, no standing objection — and *nobody pending on it*. No requested reviewers, no approval, `mergeStateStatus: BLOCKED`. Every component reports success and the PR never moves again.
 
-This is not hypothetical and it is not rare. `mono#4476` reached exactly that state on 2026-09-02 and sat in it: the author had been woken twice, both wakes productive, clearing three then six threads. Answering the threads is what *created* the state.
+This is not hypothetical and it is not rare. `monorepo#4476` reached exactly that state on 2026-09-02 and sat in it: the author had been woken twice, both wakes productive, clearing three then six threads. Answering the threads is what *created* the state.
 
 The reason it hides so well is that it looks like the good outcome. "Green and fully answered" is the shape of a finished PR, and the check for it is not a check on the diff at all:
 
@@ -444,7 +444,7 @@ gh api repos/{owner}/{repo}/pulls/<n>/requested_reviewers --jq '[.users[].login]
 gh pr view <n> --json reviewDecision,mergeStateStatus -q '{d:.reviewDecision,m:.mergeStateStatus}'
 ```
 
-Empty reviewers **and** no approval (`reviewDecision` of `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or empty) means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. That second one is conditional: lgtm picks up a settled head only where `reviewDecision` is `REVIEW_REQUIRED` (see [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md)). If the field is empty or `CHANGES_REQUESTED`, nobody is on the hook until you re-request lgtm once. `salmon-of-knowledge#208` sat in exactly this state on 2026-09-04 with an agent waiting for a sweep that could not reach it. If neither is true, you are the only thing standing between that PR and indefinite silence.
+Empty reviewers **and** no approval (`reviewDecision` of `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or empty) means nothing is pending on anyone. **Before you report a PR as held and end the turn, confirm someone is on the hook** — a human with a live review request, or lgtm with a settled head it will pick up. That second one is conditional: lgtm picks up a settled head only where `reviewDecision` is `REVIEW_REQUIRED` (see [reference/lgtm-review-mechanics.md](reference/lgtm-review-mechanics.md)). If the field is empty or `CHANGES_REQUESTED`, nobody is on the hook until you re-request lgtm once. `js-repo#208` sat in exactly this state on 2026-09-04 with an agent waiting for a sweep that could not reach it. If neither is true, you are the only thing standing between that PR and indefinite silence.
 
 Note the shepherd does not rescue this either. `landable` requires an approval, so a stalled PR fails it and falls through to `idle`, which only tells the human — hours later, and only that "it has not moved."
 

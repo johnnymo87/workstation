@@ -23,7 +23,7 @@ opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incid
 
 ## What This Does
 
-1. Health-checks the local `opencode serve` instance (port 4096)
+1. Health-checks the front door (`$FRONTDOOR_URL/global/health`, port 4700)
 2. Creates a new session via `POST /session`
 3. Sends the prompt via `POST /session/{id}/prompt_async`
 4. Prints the session ID and commands to attach or kill
@@ -237,17 +237,17 @@ Given that, the discipline is conventional rather than enforced:
 `--worktree <slug>` lands the session in a fresh git worktree instead of at the
 passed directory's root. Use it for **writable** sessions (anything that edits
 code — swarm workers, implementation launches) so the session never starts in a
-repo's primary root. In mono that root is the read-only trunk: a git pre-commit
+repo's primary root. In the monorepo that root is the read-only trunk: a git pre-commit
 hook refuses commits there, so writable work started at the root gets stuck at
 commit time with nowhere to land.
 
 ```bash
-# writable worker: isolated in ~/projects/mono/.worktrees/proj-1234 off trunk
-opencode-launch --worktree proj-1234 ~/projects/mono "implement the X importer"
+# writable worker: isolated in ~/projects/monorepo/.worktrees/proj-1234 off trunk
+opencode-launch --worktree proj-1234 ~/projects/monorepo "implement the X importer"
 
 # read-only session (review / coordinate / "what does this do?"): NO --worktree,
 # so it gets the clean current trunk to read.
-opencode-launch ~/projects/mono "what does the catalog importer do?"
+opencode-launch ~/projects/monorepo "what does the catalog importer do?"
 ```
 
 What it does, in order:
@@ -277,7 +277,7 @@ something if it must survive. To prune on demand:
 `cd <repo> && work --prune-merged`.
 
 Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos with
-`origin/HEAD` set (mono has it); pass `work`'s trunk via the repo if needed.
+`origin/HEAD` set (the monorepo has it); pass `work`'s trunk via the repo if needed.
 
 ## Tagging the Session for Cost Reporting (`--tag`)
 
@@ -286,8 +286,8 @@ Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos wit
 consumption to that work.
 
 ```bash
-opencode-launch --tag late-deliveries ~/projects/mono "port the last two callers"
-opencode-launch --tag late-deliveries --worktree ops-991 ~/projects/mono "fix the rollout"
+opencode-launch --tag late-deliveries ~/projects/monorepo "port the last two callers"
+opencode-launch --tag late-deliveries --worktree ops-991 ~/projects/monorepo "fix the rollout"
 ```
 
 **Which tag** is not this skill's call. Load `tagging-sessions`: the tag must be
@@ -299,9 +299,9 @@ Three things about the oc-tags model make this worth using:
 
 - **It is an override, not a creation.** Every session *always* has exactly one
   tag; an untagged one falls back to a directory-derived `auto:` tag
-  (`auto:mono`, `auto:mono/some-worktree`). `--tag` converts the session off
+  (`auto:monorepo`, `auto:monorepo/some-worktree`). `--tag` converts the session off
   that fallback. Precedence: explicit session tag > `auto:`.
-- **A repo ROOT launch is where it pays.** `auto:mono` lumps together every
+- **A repo ROOT launch is where it pays.** `auto:monorepo` lumps together every
   unrelated thing ever done at that root, and that is where most of the dollars
   sit. The launcher knows what the session is for; without `--tag` that knowledge
   is thrown away and reconstructed by hand later.
@@ -367,8 +367,7 @@ up from a tagged session therefore lands on the program's tag without passing
   environment, so an attach that (re)starts the tmux server cannot plant the
   agent's id in tmux's global env for every later pane to inherit.
 
-Telegram `/launch` gets the same rule from pigeon (a separate pigeon change that may
-not be deployed yet). It inherits from the session whose topic it was typed in or
+Telegram `/launch` gets the same rule from pigeon (pigeon#158). It inherits from the session whose topic it was typed in or
 whose notification it replies to (no opt-out syntax; `/launch` in General
 inherits nothing). See
 `docs/plans/2026-09-23-launch-tag-inheritance-design.md` in the workstation
@@ -451,29 +450,37 @@ curl -s http://127.0.0.1:4700/session | jq
 
 ## Environment
 
-- `OPENCODE_URL` defaults to `http://127.0.0.1:4700` (front door)
-- Override if opencode serve runs on a different port
+- `FRONTDOOR_URL` defaults to `http://127.0.0.1:4700`: the front door, which every launch goes through.
+- `OPENCODE_URL` defaults to `http://127.0.0.1:4096`: a raw serve, used only as the fallback
+  when pigeon cannot route the session to a pool member.
 
 ## Prerequisites
 
-The `opencode serve` service must be running:
+The front door and the serve pool behind it must be running. Unit names differ per host:
 
 ```bash
-# Linux (NixOS)
-systemctl status opencode-serve
+# cloudbox (system units)
+systemctl status opencode-frontdoor 'opencode-serve@*'
 
-# macOS
-launchctl list | grep opencode
+# devbox (user units)
+systemctl --user status opencode-frontdoor 'opencode-serve@*'
 
-# Direct health check (all platforms; /global/health is unauthenticated)
-curl -s http://127.0.0.1:4096/global/health
+# macOS (launchd agents)
+launchctl list | grep -E 'opencode-(frontdoor|serve-)'
+
+# Health check (all platforms; /global/health is unauthenticated)
+curl -s http://127.0.0.1:4700/global/health
 ```
 
 ## Troubleshooting
 
-**"opencode serve is not reachable"**: The service isn't running. Start it:
-- NixOS: `sudo systemctl start opencode-serve`
-- macOS: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.nix-community.home.opencode-serve.plist`
+**"Error: front door is unreachable at …"**: the front door isn't answering. Check it and the
+pool with the commands under Prerequisites, then restart what is down:
+- cloudbox: `sudo systemctl restart opencode-frontdoor` (and any dead `opencode-serve@<port>`)
+- devbox: `systemctl --user restart opencode-frontdoor` (and any dead `opencode-serve@<port>`)
+- macOS: `launchctl kickstart -k gui/$(id -u)/org.nix-community.home.opencode-frontdoor`. Restart
+  stale `org.nix-community.home.opencode-serve-<i>` agents too: a front door on new code in front
+  of serves on old code 404s session routes.
 
 **Session created but no activity**: Check that the model provider API key is available
 in the opencode serve environment (e.g. `GOOGLE_GENERATIVE_AI_API_KEY` for Gemini).

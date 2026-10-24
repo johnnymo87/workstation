@@ -60,7 +60,7 @@ The mechanism is the existing tools — there's no `swarm spawn` command. You or
 Write a plan file (`docs/plans/...`) — **not** a session's context — containing:
 
 - For each worker: which dir, what slice, what hand-off points it owns, what "done" means.
-- The integration order and the dependency edges ("protos must land before BE").
+- The integration order and the dependency edges ("the proto repo must land before BE").
 - The communication graph: who needs to know what from whom. (E.g. "worker A → worker B at proto-published, worker B → worker C at deploy-complete".)
 
 If you can't write this, don't swarm (see "When NOT To Swarm").
@@ -74,7 +74,7 @@ For each worker, launch from its own dir with a prompt that includes:
 - An explicit statement that there is no coordinator: report to the human, pull peer state rather than asking for it.
 
 **Workers are writable — launch them with `--worktree <slug>`.** A swarm worker
-edits code, so it must NOT start in a repo's primary root (in mono that's the
+edits code, so it must NOT start in a repo's primary root (in the monorepo that's the
 read-only trunk the guard protects). `--worktree <slug>` runs `work <slug>` in
 `<worker-dir>` and lands the session in a fresh `.worktrees/<slug>` off the
 local trunk, so the worker is isolated and the read-only-main guard is bypassed
@@ -100,7 +100,7 @@ There is NO coordinator in this swarm. Report your finished slice to the human
 directly, once. Do not send progress updates to anyone. To learn what a peer is
 doing, read its beads/PR rather than asking it.
 
-Peers: FE=ses_<fe-id>, protos=ses_<protos-id>
+Peers: FE=ses_<fe-id>, proto=ses_<proto-id>
 
 When your API is deployed, use the `swarm_send` tool (to=ses_<fe-id>, kind=status.update, message="API live at /v2/foo") so the FE can proceed.
 
@@ -119,7 +119,7 @@ Every worker needs every other worker's id. Ids only exist after launch, so this
 Swarm roster (no coordinator — report to the human, message peers directly):
 - BE:     ses_<be-id>
 - FE:     ses_<fe-id>
-- protos: ses_<protos-id>
+- proto: ses_<proto-id>
 - dbt:    ses_<dbt-id>
 ```
 

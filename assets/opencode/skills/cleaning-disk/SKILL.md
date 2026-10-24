@@ -209,7 +209,8 @@ rm -rf ~/.cache/uv/* ~/.cache/pip/
 # Clean application caches
 rm -rf ~/.cache/ms-playwright/ ~/.cache/datalab/*
 
-# Clean old Nix generations (devbox/cloudbox)
+# Clean old Nix generations (devbox/cloudbox). Routine cleanup keeps 5 for rollback
+# headroom; the emergency path above keeps only 3.
 nix-env --delete-generations +5 \
   --profile ~/.local/state/nix/profiles/home-manager
 sudo nix-env --delete-generations +5 \

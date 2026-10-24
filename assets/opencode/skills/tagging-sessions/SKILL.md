@@ -36,8 +36,7 @@ title, session name, or session type). Tag goose runs with
 
 Launching sessions? `opencode-launch --tag` writes the same tag and follows the
 same rules below. Without `--tag`, a launch copies the launcher's tag onto the
-child (so will Telegram `/launch` from a session's topic or reply, once pigeon
-ships it) — only an explicit session tag, never an `auto:` fallback. Check
+child (so does Telegram `/launch` from a session's topic or reply) — only an explicit session tag, never an `auto:` fallback. Check
 your own tag before spinning up unrelated work, and pass `--tag auto` to opt out.
 
 ## Tagging the session you are in

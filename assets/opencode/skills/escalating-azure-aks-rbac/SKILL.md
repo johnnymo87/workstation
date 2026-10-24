@@ -1,11 +1,11 @@
 ---
 name: escalating-azure-aks-rbac
-description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a Wonder production AKS cluster fails with a Forbidden / RBAC error, or when self-activating the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
+description: Use when a kubectl write operation (patch, scale, set env, exec, delete, rollout restart) against a company production AKS cluster fails with a Forbidden / RBAC error, or when self-activating the time-boxed Azure "Kubernetes Service RBAC Writer" role via PIM. Explains the read-vs-write Azure RBAC model and points to the Confluence runbook that holds the exact subscription, cluster, role-definition, and scope IDs (kept out of source control).
 ---
 
 # Escalating Azure AKS prod RBAC (PIM self-activation)
 
-Wonder production AKS clusters authorize with **Azure RBAC for Kubernetes**. You
+The company's production AKS clusters authorize with **Azure RBAC for Kubernetes**. You
 get **READ** by default (via an AAD group), but **WRITE** — `kubectl patch`,
 `scale`, `set env`, `exec`, `delete`, `rollout restart`, etc. — requires the
 **Azure Kubernetes Service RBAC Writer** role. That role is handed out as a
@@ -24,7 +24,8 @@ The subscription, cluster, resource-group, role-definition, and scope IDs are
 environment-specific and **deliberately not stored in this repo**. They live in
 one Confluence page, which is the single source of truth:
 
-**Runbook:** [Azure Kubernetes (AKS) prod RBAC self-escalation via PIM](https://wonder.atlassian.net/wiki/spaces/Platform/pages/5386600450) — Confluence space `Platform`, page id `5386600450`.
+**Runbook:** "Azure Kubernetes (AKS) prod RBAC self-escalation via PIM" in Confluence, page id
+`5386600450`.
 
 Two ways to read it:
 

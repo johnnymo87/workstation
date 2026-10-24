@@ -26,12 +26,12 @@ Compaction has two parts, and understanding both keeps you from doing redundant 
 1. **Assess what matters.** Look at the conversation. What are you in the middle of? What decisions were made and why? What tricky context would be hard to reconstruct? What's the user's intent (especially any *narrowing* of scope) that might not be obvious from the messages alone?
 
 2. **Persist to durable storage.** Pick the vehicle that fits — often more than one:
-   - **Beads** (`bd create`, `bd update --notes`): default for discrete tasks, dependencies, work-in-progress tracking. Prefer if beads are active in the project.
+   - **Beads** (`bd create`, `bd note` to append; `bd update --notes` replaces the field): default for discrete tasks, dependencies, work-in-progress tracking. Prefer if beads are active in the project.
    - **Plan file** (`docs/plans/YYYY-MM-DD-*.md`): for design context, architectural decisions, multi-step plans.
    - **HANDOFF.md** (or similar) in the relevant project/output directory: for incident response, exploratory investigations, anything where a plan-style document doesn't fit.
    - **Git commit message**: a well-crafted commit message is itself durable context for uncommitted work.
 
-3. **Commit and push.** Persisted context that isn't pushed doesn't survive. Follow the session close protocol.
+3. **Commit where you are allowed to.** Compaction does not touch the disk: plan files and the local beads DB survive it uncommitted. A git commit protects files from a pruned worktree or a lost machine; `bd dolt push` does the same for the beads DB. Commit and push when the repo's instructions or the user permit it; where they don't (a conservative beads profile, "no git ops without being asked"), leave the files uncommitted and name each path in the resumption prompt.
 
 4. **Draft and apply a resumption prompt.** Draft a concise message for the post-compaction session and pass it as the `prompt` argument to the `self_compact_and_resume` tool. See "Resumption Prompt Shape" below. Call the tool **alone**, as the last thing you do in the step, and **read its result**.
 
