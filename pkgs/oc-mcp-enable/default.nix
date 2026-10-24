@@ -132,7 +132,9 @@ pkgs.writeShellApplication {
       # of available servers was successfully retrieved.
       mcp_unknown_footer() {
         echo "A misspelled or unknown MCP server name is a caller error: retry with one of the listed" >&2
-        echo "names; only if the intended server is genuinely absent, report to the human." >&2
+        echo "names; only if the intended server is genuinely absent, report to the human. Do not work" >&2
+        echo "around it by calling the service's API directly (curl/REST with credentials from the" >&2
+        echo "environment)." >&2
       }
 
       revoke=0
