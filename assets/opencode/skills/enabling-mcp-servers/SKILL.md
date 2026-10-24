@@ -70,8 +70,8 @@ server's tools are usable from your next step (no need to end the turn).
   don't call those unless that is the task.
 - **Grant late and narrow.** Turn a server on only when the task needs it, and turn it off when
   done if the session lives on.
-- **Coordinators:** write-capable servers are turned off at the next wake by default, so
-  re-grant per wake when needed.
+- **Coordinators:** a server you turn on stays on across your wakes, read or write. Turn off
+  one you won't need again.
 
 ### Handling errors
 
