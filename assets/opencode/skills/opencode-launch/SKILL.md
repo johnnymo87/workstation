@@ -164,15 +164,16 @@ connect returned 200 after 48 s, and the server's state was
 
 ### When `oc-mcp-enable` fails: stop and report
 
-If it exits non-zero, **stop and report its error to the human verbatim**. Do
-not retry in a loop. Above all, do not work around the server by calling the
-service's API with credentials from your environment (for example the Jira REST
-API with `ATLASSIAN_API_TOKEN`). On 2026-10-22 an agent did exactly that after
-three failed atlassian connects, and the human did not want it. The error names
-its cause:
+If it exits non-zero, **stop and report its error to the human verbatim** (unless you
+misnamed the server — see table below; retry once with a listed name). Do not retry in a
+loop. Above all, do not work around the server by calling the service's API with
+credentials from your environment (for example the Jira REST API with `ATLASSIAN_API_TOKEN`).
+On 2026-10-22 an agent did exactly that after three failed atlassian connects, and the human
+did not want it. The error names its cause:
 
 | Error says | Meaning |
 |---|---|
+| `not configured` with `did you mean` / `configured servers` | You named it wrong; retry once with a listed name, preferring a read-only one |
 | `status=failed (...)` | The MCP server started but did not work. Usually its upstream is down or slow, as with mcp.atlassian.com on 2026-10-22 |
 | `status=needs_auth` / `needs_client_registration` | The server needs re-authentication, which only the human can do |
 | `front door gave up waiting ... (its first-byte timeout)` | The connect took longer than the door allows. **Not** pigeon. Newer doors exempt MCP connects from that timeout, so this means the running door is older. The door unit has `restartIfChanged = false`, so a rebuild alone does not update it; it needs an explicit restart, which is the human's call |

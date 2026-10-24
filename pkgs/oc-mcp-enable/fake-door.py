@@ -30,6 +30,8 @@ SCENARIOS = {
     "door-timeout": (503, DOOR_TIMEOUT, {"status": "disabled"}),
     "pigeon-down": (503, DOOR_PIGEON, {"status": "disabled"}),
     "not-configured": (404, {"name": "NotFoundError"}, {"status": "disabled"}),
+    "not-configured-list-fails": (404, {"name": "NotFoundError"}, None),
+    "did-you-mean": (404, {"name": "NotFoundError"}, {"status": "disabled"}),
     # Connect OK, but the status read itself fails: state unknown, not failed.
     "status-unreadable": (200, True, None),
 }
@@ -56,6 +58,17 @@ class Handler(BaseHTTPRequestHandler):
             state = SCENARIOS[SCENARIO][2]
             if state is None:
                 return self._send(500, {"name": "UnknownError"})
+            if SCENARIO == "not-configured":
+                return self._send(200, {"slack-ro": {"status": "disabled"}})
+            if SCENARIO == "did-you-mean":
+                return self._send(
+                    200,
+                    {
+                        "chrome-devtools-9222": {"status": "disabled"},
+                        "chrome-devtools-9223": {"status": "disabled"},
+                        "slack-ro": {"status": "disabled"},
+                    },
+                )
             return self._send(200, {"atlassian": state, "slack-ro": {"status": "disabled"}})
         return self._send(404, {"name": "NotFoundError"})
 
