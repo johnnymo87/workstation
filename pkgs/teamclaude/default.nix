@@ -91,7 +91,7 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.21-balanced"; # upstream v1.1.21 + local patches + balanced port
+  version = "1.1.21-balanced-fw"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours
 
   src = fetchFromGitHub {
     # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
@@ -163,12 +163,23 @@ stdenvNoCC.mkDerivation rec {
     # failure a rebase of this size exists to catch. Covered by a test that
     # fails without the fix.
     #
+    # FINAL WINDOW (johnnymo87/teamclaude#2, merged 2026-10-25, 466bdbd): new
+    # `finalWindowHours` knob, default 0 = off and byte-identical routing. Under
+    # balanced, an account whose shared weekly window resets within that many
+    # hours is spent first (margin bypassed; entry needs 5h < 0.90 and 3 points
+    # of weekly headroom; the current account holds until unavailable). cloudbox
+    # sets 5 in ~/.config/teamclaude.json; it hot-reloads, so its rollback is
+    # setting 0 there -- no rebuild, no restart. Bead claude-failover-proxy-jlc.
+    #
     # Rollback, cheapest first:
+    #   0. finalWindowHours -> 0 in ~/.config/teamclaude.json (hot-reloads).
     #   1. CONFIG ONLY -- drop routingStrategy from ~/.config/teamclaude.json
     #      (or set it to "expiry"). No rebuild. This is the real rollback for
     #      anything balanced does wrong, and it is why the port ships behind a
     #      default rather than as a replacement.
-    #   2. PREVIOUS PIN = rev 51d3aa6f42d0c9bb252fdead7c7d2a292f5c6ddb, hash
+    #   2. PREVIOUS PIN = rev bf29fca5d1445d0372c54740cacde99668d83938, hash
+    #      sha256-ArYh97z6KvkjupY3x7maY3u5HNtQH0f8F1vnwGu2Pac=, version
+    #      "1.1.21-balanced". Before that: rev 51d3aa6f42d0c9bb252fdead7c7d2a292f5c6ddb, hash
     #      sha256-l2IU8NmMtQ6+7+O5IJ9cMsBN4xuJNHyOIqr4g/RLZe4=, version
     #      "1.1.20-balanced" (branch feat/balanced-on-v1120). Before that:
     #      rev 2fc0258715590215b77d4f2ee7f169b4789924c1, hash
@@ -184,8 +195,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "bf29fca5d1445d0372c54740cacde99668d83938"; # feat/balanced-on-v1121
-    hash = "sha256-ArYh97z6KvkjupY3x7maY3u5HNtQH0f8F1vnwGu2Pac=";
+    rev = "466bdbd651b949712aa427d007de296677c52b29"; # feat/balanced-on-v1121
+    hash = "sha256-Bz+ZwRYm0Jd62HZnJfq6We+NMxtXwYgcVi4IE9loT2I=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
