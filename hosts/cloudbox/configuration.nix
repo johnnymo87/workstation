@@ -4189,6 +4189,13 @@ Check:
         # recorded beside it as `canary_healthy`, with `canary_serving`, so a
         # reader joining this series against the canary journal can see the
         # exact values the gate compared (bead claude-failover-proxy-mbt).
+        #
+        # `fwh`, and per-account `fw`/`r7d`/`r5h`, record teamclaude's own
+        # finalWindowHours setting, its "in final window" flag, and the
+        # weekly/5h reset instants. The finalWindowHours readout
+        # (claude-failover-proxy scripts/finalwindow-readout.py, bead tw9) can
+        # then observe whether the rule fired instead of inferring it. `fw` is
+        # read without `// null` on purpose: jq's `//` treats false as missing.
         SAMPLES="$STATE/quota-samples.jsonl"
         if jq -c --arg ts "$(date -Is)" \
               --argjson canary_healthy "$HEALTHY" --argjson canary_serving "$SERVING" '{
@@ -4198,12 +4205,16 @@ Check:
               canary_serving: $canary_serving,
               roster: ((.accounts // []) | length),
               current: (.currentAccount // null),
+              fwh: (.finalWindowHours // null),
               accounts: [(.accounts // [])[] | {
                 n: ((.name // "?") | split("@")[0]),
                 s: .status,
                 u5h: ((.quota // {}).unified5h),
                 u7d: ((.quota // {}).unified7d),
-                u7dF: ((.quota // {}).unified7dFable)
+                u7dF: ((.quota // {}).unified7dFable),
+                fw: .finalWindow,
+                r7d: ((.quota // {}).unified7dReset),
+                r5h: ((.quota // {}).unified5hReset)
               }]
             }' "$BODY" >> "$SAMPLES" 2>/dev/null; then
           # Keep the WORKING file to roughly the last 30 days of 5-minutely
