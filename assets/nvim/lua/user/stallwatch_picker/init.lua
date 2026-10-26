@@ -271,10 +271,11 @@ function M.open(opts)
       return
     end
     exec.notify_warnings(snap.warnings)
+    local by_id = model.index_rows(snap.rows)
     local state = {
       snap = snap,
-      prows = model.program_rows(snap.doc),
-      by_id = model.index_rows(snap.rows),
+      prows = model.program_rows(snap.doc, by_id),
+      by_id = by_id,
       client = client,
       controller = controller,
       opts = opts,

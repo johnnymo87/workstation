@@ -94,7 +94,7 @@ do
   check(vim.tbl_contains(list_argv, "--goose"), "--goose, so goose:<id> tags resolve (honk-9qf.15.11)")
   local i = vim.fn.index(list_argv, "--ids")
   check(i >= 0, "--ids present")
-  check(list_argv[i + 2] == "ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1",
+  check(list_argv[i + 2] == "goose:20990101_1,ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1",
     "--ids is the deduped union of item and tagged ids, got " .. tostring(list_argv[i + 2]))
 end
 

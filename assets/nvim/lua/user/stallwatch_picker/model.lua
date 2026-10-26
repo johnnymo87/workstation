@@ -51,6 +51,7 @@ M.READS = {
   "programs[].items[].sessions[].title",
   "programs[].items[].sessions[].directory",
   "programs[].items[].sessions[].directory_exists",
+  "programs[].coordinator.goose_id",
 }
 
 --- Rank of a kind; unknown kinds sort after every known one (additive contract
@@ -155,6 +156,36 @@ function M.counts(program)
   return { total = total, by_kind = by_kind }
 end
 
+function M.coord_row_id(goose_id)
+  return "goose:" .. goose_id
+end
+
+--- A row good enough for flow:accept. accept re-resolves only via discovery
+--- (b:oc_session_id == "goose:<id>"); decide reads id + dir_missing; dispatch
+--- reads anchor_msg_id. No dir claim: unknown is not "missing".
+function M.minimal_coord_row(tag, goose_id)
+  return { id = M.coord_row_id(goose_id), title = "📋 " .. (nonempty(tag) or "?") }
+end
+
+--- Coordinator state of one program, by what <C-o> will do (design §2).
+--- @return { goose_id: string|nil, row: table|nil, state: string }
+function M.coord_of(p, by_id)
+  p = type(p) == "table" and p or {}
+  local c = p.coordinator
+  if c == nil or c == vim.NIL then
+    return { state = "unsupported" }
+  end
+  local gid = type(c) == "table" and nonempty(c.goose_id) or nil
+  if not gid then
+    return { state = "none" }
+  end
+  local row = type(by_id) == "table" and by_id[M.coord_row_id(gid)] or nil
+  if type(row) ~= "table" then
+    return { goose_id = gid, state = "unresolved" }
+  end
+  return { goose_id = gid, row = row, state = row.dir_missing == true and "dir_missing" or "live" }
+end
+
 --- Screen 1 rows: one per program, in the READ COMMAND'S ORDER (stable
 --- between opens, so cursor restore by position is meaningful). Urgency is
 --- carried in the row text, never by re-sorting.
@@ -162,7 +193,7 @@ end
 --- Each row also carries `top`, the ONE item stall-watch wants the human to
 --- look at (see M.top_item), and `top_reason`, why it was picked (nil when
 --- the pick came from the fallback order).
-function M.program_rows(doc)
+function M.program_rows(doc, by_id)
   local out = {}
   for _, p in ipairs(list(type(doc) == "table" and doc.programs)) do
     if type(p) == "table" then
@@ -186,6 +217,7 @@ function M.program_rows(doc)
         counts = M.counts(p),
         top = M.top_item(p.items, p.top_fingerprint),
         top_reason = nonempty(p.top_reason),
+        coord = M.coord_of(p, by_id),
       })
     end
   end
@@ -380,6 +412,11 @@ function M.union_ids(doc, tagged)
     end
   end
   for _, p in ipairs(list(type(doc) == "table" and doc.programs)) do
+    local c = type(p) == "table" and p.coordinator
+    local gid = type(c) == "table" and nonempty(c.goose_id)
+    if gid then
+      add(M.coord_row_id(gid))
+    end
     for _, it in ipairs(list(type(p) == "table" and p.items)) do
       for _, s in ipairs(list(type(it) == "table" and it.sessions)) do
         add(type(s) == "table" and s.id)
