@@ -105,7 +105,7 @@
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
-      lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
+      lgtm-gh = import ./pkgs/lgtm-gh { pkgs = p; };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
@@ -1463,6 +1463,7 @@
         } ''
           cd ${self}
           bash pkgs/lgtm-gh/test.sh ${launcher}/bin/lgtm-gh ${launcherMissing}/bin/lgtm-gh ${stubGh} \
+            ${devboxPkgs.coreutils} ${devboxPkgs.jq} ${devboxPkgs.nodejs_22} \
             2>&1 | tee "$TMPDIR/out.txt"
           grep -q '^all lgtm-gh launcher tests passed' "$TMPDIR/out.txt" || {
             echo "GATE FAILURE: lgtm-gh launcher suite did not reach its final pass line." >&2
@@ -1470,8 +1471,8 @@
           }
           # Pinned so a silently dropped assertion cannot leave a green check
           # testing less than it claims. Update deliberately, in the same commit.
-          grep -q '^13 passed, 0 failed' "$TMPDIR/out.txt" || {
-            echo "GATE FAILURE: expected '13 passed, 0 failed'." >&2
+          grep -q '^14 passed, 0 failed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: expected '14 passed, 0 failed'." >&2
             exit 1
           }
           touch $out

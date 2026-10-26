@@ -11,13 +11,19 @@
 #      approval gate runs node under `env -i` with only node's directory);
 #   3. it refuses, and runs nothing, when that script is absent.
 #
-# Usage: test.sh <launcher-with-fixture-script> <launcher-with-missing-script> <stub-gh>
-# flake.nix (lgtm-gh-launcher-tests) builds all three.
+# Usage: test.sh <launcher-with-fixture-script> <launcher-with-missing-script> \
+#                <stub-gh> <coreutils> <jq> <nodejs_22>
+# flake.nix (lgtm-gh-launcher-tests) passes them all. The tool paths are
+# compared exactly, and coreutils also by its position on PATH, because the
+# check sandbox has the very same coreutils on its own PATH.
 set -o errexit -o nounset -o pipefail
 
 launcher="${1:?usage: test.sh <launcher> <launcher-missing> <stub-gh>}"
 launcher_missing="${2:?usage: test.sh <launcher> <launcher-missing> <stub-gh>}"
 stub_gh="${3:?usage: test.sh <launcher> <launcher-missing> <stub-gh>}"
+coreutils="${4:?missing <coreutils>}"
+jq_pkg="${5:?missing <jq>}"
+node_pkg="${6:?missing <nodejs_22>}"
 
 pass=0
 fail=0
@@ -48,17 +54,23 @@ assert_contains "$out" "STDIN=from-stdin" "stdin reaches the script"
 
 # 2. Pinned tools first on PATH.
 assert_eq "$stub_gh/bin/gh" "$(sed -n 's/^GH=//p' <<<"$out")" "gh is the pinned one, not the decoy earlier on PATH"
-for tool in jq node tr timeout; do
-  where="$(sed -n "s/^$tool=//p" <<<"$out")"
-  assert_contains "$where" "/nix/store/" "$tool resolves to a pinned store path"
-done
-assert_contains "$(sed -n 's/^PATH=//p' <<<"$out")" "$sandbox/decoy" "inherited PATH is kept after the pinned entries"
+assert_eq "$jq_pkg/bin/jq" "$(sed -n 's/^jq=//p' <<<"$out")" "jq is the pinned one"
+assert_eq "$node_pkg/bin/node" "$(sed -n 's/^node=//p' <<<"$out")" "node is the pinned nodejs_22"
+assert_eq "$coreutils/bin/tr" "$(sed -n 's/^tr=//p' <<<"$out")" "tr is the pinned coreutils"
+assert_eq "$coreutils/bin/timeout" "$(sed -n 's/^timeout=//p' <<<"$out")" "timeout is the pinned coreutils"
+script_path="$(sed -n 's/^PATH=//p' <<<"$out")"
+assert_contains "$script_path" "$sandbox/decoy" "inherited PATH is kept after the pinned entries"
+# The same coreutils is also on the check sandbox's own PATH, so "tr resolves
+# to it" alone cannot tell whether the launcher pinned it. Its position can:
+# a pinned entry comes before the inherited decoy.
+pinned_part="${script_path%%"$sandbox/decoy"*}"
+assert_contains "$pinned_part" "$coreutils/bin" "coreutils is pinned ahead of the inherited PATH"
 
 # 3. Missing script: refuse, name the path, run nothing.
 err="$("$launcher_missing" pr merge 1 2>&1 1>/dev/null)" && rc=0 || rc=$?
 assert_eq "1" "$rc" "missing script -> exit 1"
-assert_contains "$err" "lgtm-gh: /nonexistent/lgtm/scripts/lgtm-gh/lgtm-gh.sh not found" "missing script names the path"
-assert_contains "$err" "lgtm checkout" "missing script says where the wrapper is expected to come from"
+assert_contains "$err" "lgtm-gh: not installed here (/nonexistent/lgtm/scripts/lgtm-gh/lgtm-gh.sh is missing" "missing script names the path"
+assert_contains "$err" "Do NOT use plain gh" "missing script forbids the plain-gh fallback"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

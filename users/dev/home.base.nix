@@ -587,8 +587,9 @@ in
     # Dispatched review sessions invoke `lgtm-gh` (not `gh`) so the review
     # posts under the reviewer identity lgtm wrote into .lgtm-reviewer; it
     # resolves that login's PAT from ~/.config/lgtm/tokens/<login>.pat.
-    # This is only a launcher for the wrapper in the lgtm checkout, so it
-    # works on cloudbox (where lgtm runs) and refuses to run elsewhere.
+    # This is only a launcher for the wrapper in ~/projects/lgtm. It is live
+    # on cloudbox (where lgtm runs and the reviewer tokens are); where there
+    # is no checkout it refuses to run.
     localPkgs.lgtm-gh
 
     # nvim wrapper with deterministic --listen socket (used by oc-auto-attach)

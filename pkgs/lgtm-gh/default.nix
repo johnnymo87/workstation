@@ -14,9 +14,15 @@
 #     runs node under `env -i` with only node's directory on PATH, so node must
 #     come from here (the same major lgtm-run uses). writeShellApplication
 #     prepends these; the inherited PATH is kept after them.
-#   - a pinned bash to run the script.
+#   - runtimeShell (the bash writeShellApplication itself uses) to run it.
 #
-# Where there is no lgtm checkout (devbox, macOS) it refuses and runs nothing.
+# Where the script is missing it refuses and runs nothing. That happens on a
+# host with no lgtm checkout (macOS), and on cloudbox if this lands before the
+# lgtm change that added the script is pulled. The message tells the session
+# NOT to fall back to plain `gh`: sessions on cloudbox carry the human's own
+# GH_TOKEN, so plain gh would post as the human, unrecorded and ungated.
+# (devbox may have a checkout, and then runs whatever it has checked out;
+# devbox has no reviewer tokens, so the wrapper stops at the token lookup.)
 # Behaviour is locked by test.sh (flake check lgtm-gh-launcher-tests); the
 # wrapper's own suites run under `npm test` in the lgtm repo.
 pkgs.writeShellApplication {
@@ -25,9 +31,9 @@ pkgs.writeShellApplication {
   text = ''
     script=${pkgs.lib.escapeShellArg script}
     if [ ! -f "$script" ]; then
-      echo "lgtm-gh: $script not found. The wrapper runs from the lgtm checkout, which only cloudbox has." >&2
+      echo "lgtm-gh: not installed here ($script is missing; it comes from the lgtm checkout). Do NOT use plain gh or any other route instead: nothing posted without lgtm-gh is attributed or gated. Post nothing further, end your session, and say in your final report that lgtm-gh was unavailable." >&2
       exit 1
     fi
-    exec ${pkgs.bash}/bin/bash "$script" "$@"
+    exec ${pkgs.runtimeShell} "$script" "$@"
   '';
 }
