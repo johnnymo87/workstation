@@ -554,19 +554,12 @@ in
     # Cloudflare Workers CLI
     pkgs.wrangler
 
-    # Cloud-provider CLIs for boldco infra provisioning (Supabase, Vercel,
-    # Clerk). All install binaries only — they authenticate at runtime from
-    # env vars the user supplies; no secrets live in this config.
-    pkgs.supabase-cli   # nixpkgs; binary `supabase`
-    localPkgs.vercel    # pkgs/vercel (buildNpmPackage, current npm release)
-    localPkgs.clerk     # pkgs/clerk (pinned release binary)
-
     # DevCycle CLI for feature-flag reads/writes. Authenticates off the SSO
     # credentials in ~/.config/devcycle/auth.yml (`dvc login sso`) — no token in
     # this config. Same derivation backs the devcycle-mcp entry in
     # users/dev/opencode-config.nix, so CLI and MCP share one version pin.
     localPkgs.dvc       # pkgs/dvc (buildNpmPackage; bins `dvc` + `dvc-mcp`)
-    pkgs.cloudflared    # nixpkgs; Cloudflare Tunnel (expose Clerk-gated demo)
+    pkgs.cloudflared    # nixpkgs; Cloudflare Tunnel CLI (ad-hoc tunnels)
 
     # Remote clipboard (gclpr client talks to macOS server over SSH tunnel)
     localPkgs.gclpr

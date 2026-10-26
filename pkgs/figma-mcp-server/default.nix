@@ -79,7 +79,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Under libexec/<pname>/, not lib/node_modules: home-manager merges every
   # package into one buildEnv, and a transitive dep here could otherwise collide
-  # with another package's lib/node_modules/<dep> (see pkgs/vercel, pkgs/dvc).
+  # with another package's lib/node_modules/<dep> (see pkgs/dvc).
   installPhase = ''
     runHook preInstall
 

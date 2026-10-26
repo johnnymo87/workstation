@@ -591,8 +591,8 @@ in
   #     the CCR webhook architecture (Telegram now posts to the Worker and the
   #     daemon POLLS outbound), and it was exposing pigeon unauthenticated to
   #     the internet -- see #502. The tunnel was deleted outright on 2026-09-13.
-  #   - `boldco.mohrbacher.dev` is a DEVBOX-only service. It never had an origin
-  #     here.
+  #   - `boldco.mohrbacher.dev` was a DEVBOX-only service (retired 2026-10-26).
+  #     It never had an origin here.
   # No cloudbox-specific hostname has ever existed in the mohrbacher.dev zone.
   #
   # Removing the service rather than fixing it also deletes, rather than
@@ -602,9 +602,8 @@ in
   # `--token-file` in #502; cloudbox never needs the fix because it no longer
   # holds a token at all.
   #
-  # Consequence worth knowing when boldco returns (bead workstation-bak3): the
-  # NEW tunnel token goes to devbox ONLY. There is no longer a two-host
-  # coordination problem.
+  # Any future tunnel token goes to devbox ONLY; there is no longer a
+  # two-host coordination problem.
   #
   # The sops ENTRY for cloudflared_tunnel_token is removed from this host's
   # declarations below, so it stops being decrypted into /run/secrets. The
