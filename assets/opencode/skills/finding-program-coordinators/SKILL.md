@@ -35,29 +35,38 @@ queried the registry.
 
 ## The lookup
 
-Run the bundled script. It is read-only:
+Run `coordinator`, printing its exit code. It is on PATH on cloudbox, and it is
+read-only:
 
 ```bash
-~/.agents/skills/finding-program-coordinators/find-coordinator.py <tag>
-~/.agents/skills/finding-program-coordinators/find-coordinator.py --all
+coordinator <tag>; echo "exit=$?"
+coordinator --all; echo "exit=$?"
 ```
 
-| Output | Exit | Meaning |
-|---|---|---|
-| `<tag>  to=gse_…  heartbeat=on\|off` | 0 | `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
-| `<tag>: no bound coordinator`, or a line saying nothing reads the mailbox or pigeon can't route to it | 1 | Don't send. See "No coordinator found". |
-| `no stall-watch on THIS host…` | 2 | You are not on cloudbox. See "No coordinator found". |
+Your shell tool may not show you the exit code on its own, and one output reads
+the same under exit 1 and exit 3. **Classify the result by the `exit=` line,
+not by the text.**
 
-A `warning:` on stderr means one cross-check was skipped, either because
-`programs.toml` was unreadable or because pigeon was unreachable. The id is
-still the registry's, but treat it as unverified.
+| Exit | Output | Meaning |
+|---|---|---|
+| 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
+| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox or pigeon can't route to it | Don't send. See "No coordinator found". |
+| 2 | `no stall-watch on THIS host…` | You are not on cloudbox. See "No coordinator found". |
+| 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
+| 127 | `coordinator: command not found` | Run `hostname`. On `cloudbox`, the install is broken: treat it as exit 3, and include `ls -l ~/.local/bin/coordinator` in what you tell the human. On any other host, treat it as exit 2, because only cloudbox installs the command. |
+
+A Python traceback counts as exit 3, whatever the exit code says.
+
+`--all` prints one line per bound program. It exits 0, or 3 when a cross-check
+was skipped and it still printed a `to=` line.
 
 What it checks: the registry is stall-watch's
 `~/.local/state/stall-watch/state.db`, table `program`, column `pigeon_session`.
-The coordinators' own `./sw peers` reads the same column. (`./sw` refuses to
-run outside its coordinator.) The script then checks the program is enabled
-and in tools mode in `programs.toml`, because a row can outlive its program.
-Last, it checks that pigeon `GET /sessions` has the id `running` with a
+The coordinators' own `./sw peers` reads the same column through the same code.
+(`./sw` refuses to run outside its coordinator.) `coordinator` then checks that
+the program is enabled and in tools mode in `programs.toml`, because a row can
+outlive its program, and that the stall-watch tick would actually drain the
+mailbox. Last, it checks that pigeon `GET /sessions` has the id `running` with a
 `swarm` mailbox. Every coordinator is registered there under the label
 `📋 <tag>`, with a working directory under
 `~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`.
@@ -98,10 +107,18 @@ the tag.
 
 ## No coordinator found
 
-Report the absence only after the lookup above says so on cloudbox: no row for
-the tag, `pigeon_session` empty, or the program disabled. Then **tell the
-human** that program X has no bound coordinator, give the evidence (the query
-output), and wait for them to say where the finding should go.
+Report the absence only after `coordinator` exits 1 on cloudbox. Exit 3 is not
+an absence.
+
+- **`no such program in programs.toml`** usually means the tag is wrong. Run
+  `coordinator --all`, which lists only programs that have a coordinator, or
+  check `programs.toml` (see "Which tag?") for the right tag before you tell
+  anyone anything.
+- **`not routable in pigeon`** can be temporary while a coordinator is being
+  rebound. Retry once after a few minutes.
+- **Otherwise,** tell the human that program X has no reachable coordinator.
+  Quote the line `coordinator` printed rather than paraphrasing it, and wait
+  for them to say where the finding should go.
 
 On macOS or devbox there is no state DB. That does **not** mean there is no
 coordinator. It means this host cannot reach one. Say exactly that, and ask
