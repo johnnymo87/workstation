@@ -633,7 +633,18 @@ do
 
   local test_ctrl = { accept = function() end }
   local test_state = {
-    snap = { doc = { programs = {} }, rows = {}, tagged = {}, warnings = {} },
+    snap = {
+      doc = {
+        programs = {
+          { tag = "alpha", coordinator = { goose_id = "20990101_1" } },
+          { tag = "beta", coordinator = { goose_id = nil } },
+          { tag = "gamma", coordinator = { goose_id = "20990101_3" } },
+        },
+      },
+      rows = {},
+      tagged = {},
+      warnings = {},
+    },
     prows = { alpha_prog, beta_prog, gamma_prog },
     by_id = {},
     client = "client_fixture",
@@ -697,6 +708,49 @@ do
   end, 5)
   local lines_2c = vim.api.nvim_buf_get_lines(buf2_c, 0, -1, false)
   check(lines_2c[2] == "Coordinator assistant message for alpha", "debounce: final buffer updated")
+
+  -- 2b. Debounce coalescing across different programs: select alpha, then gamma within debounce window
+  -- -> exactly 1 export spawn for gamma.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local buf2b_a = vim.api.nvim_create_buf(false, true)
+  local buf2b_g = vim.api.nvim_create_buf(false, true)
+
+  previewer.define_preview({ state = { bufnr = buf2b_a } }, { value = alpha_prog })
+  previewer.define_preview({ state = { bufnr = buf2b_g } }, { value = gamma_prog })
+
+  vim.wait(80, function() return false end, 10) -- wait past debounce
+  check(#goose_spawns == 1, "debounce coalescing: exactly one export spawn for alpha -> gamma")
+  check(goose_spawns[1].argv[5] == "20990101_3", "debounce coalescing: spawn was for gamma")
+
+  -- 2c. Debounce timer after picker close: telescope teardown sets self.state.bufnr = nil
+  -- (and deletes the buffers). fire() must not spawn goose session export.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local fake_close_self = { state = { bufnr = vim.api.nvim_create_buf(false, true) } }
+  previewer.define_preview(fake_close_self, { value = alpha_prog })
+  fake_close_self.state.bufnr = nil
+  vim.wait(80, function() return false end, 10)
+  check(#goose_spawns == 0, "debounce timer aborted on picker close: zero goose spawns")
+
+  -- Also verify deleted buffer before debounce elapses: zero goose spawns.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local buf_invalid = vim.api.nvim_create_buf(false, true)
+  local fake_invalid_self = { state = { bufnr = buf_invalid } }
+  previewer.define_preview(fake_invalid_self, { value = alpha_prog })
+  vim.api.nvim_buf_delete(buf_invalid, { force = true })
+  vim.wait(80, function() return false end, 10)
+  check(#goose_spawns == 0, "debounce timer aborted on invalid buffer: zero goose spawns")
 
   -- 3. Dedupe + render-on-completion: select alpha (export hangs), wait past debounce (spawn #1),
   -- move to beta, move back to alpha with a NEW scratch bufnr, wait past debounce again ->

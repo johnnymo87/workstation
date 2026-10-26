@@ -225,7 +225,10 @@ function M.programs(state, select_tag)
 
         if gid and state.coord_cache[gid] == nil and not state.coord_inflight[gid] then
           local function fire()
-            if not (state.preview and state.preview.gid == gid) then
+            if not (state.preview and state.preview.gid == gid
+              and state.preview.self and state.preview.self.state
+              and state.preview.self.state.bufnr
+              and vim.api.nvim_buf_is_valid(state.preview.self.state.bufnr)) then
               return
             end
             if state.coord_inflight[gid] or state.coord_cache[gid] ~= nil then
