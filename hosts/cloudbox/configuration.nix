@@ -347,8 +347,8 @@ in
       # lgtm multi-reviewer PATs (classic, repo + read:org, SSO-authorized),
       # one per reviewer GitHub login. Decrypted to /run/secrets and then
       # materialized to ~/.config/lgtm/tokens/<login>.pat (chmod 600, owner
-      # dev) by home.activation.deployLgtmTokens, where the nix-managed
-      # `lgtm-gh` wrapper reads them. The wrapper resolves the login from a
+      # dev) by home.activation.deployLgtmTokens, where the `lgtm-gh`
+      # wrapper reads them. The wrapper resolves the login from a
       # worktree's .lgtm-reviewer and execs `gh` with GH_TOKEN set so a review
       # posts under that identity. See lgtm:
       # docs/plans/2026-04-30-multi-reviewer-identity-design.md and the
@@ -1769,9 +1769,9 @@ Check, in this order:
     # so nix-managed binaries always win on name collisions.
     #
     # `~/.local/bin` is KEPT (not the temporary lgtm-gh stub workaround it was
-    # originally added for in aafe051 — lgtm-gh now ships nix-managed to
-    # ~/.nix-profile/bin, already on this PATH via the /home/dev/.nix-profile
-    # entry). It stays because several user-bin tools are deployed there *only*
+    # originally added for in aafe051 — lgtm-gh's launcher now ships
+    # nix-managed to ~/.nix-profile/bin, already on this PATH via the
+    # /home/dev/.nix-profile entry). It stays because several user-bin tools are deployed there *only*
      # (via home.file, never into the nix profile) and headless sessions running
      # inside this serve legitimately invoke them — notably `oc-search`,
      # `lgtm-sessions`, and `ba`. (Swarm messaging no longer uses CLIs: it goes
