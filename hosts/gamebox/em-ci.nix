@@ -20,12 +20,17 @@
   #   job also ran 15% slower), 4 runners 3 h.
   # - CPU: a busy runner averaged 0.9 cores and sat at its 3-core cap in 3-7%
   #   of minutes (CFS-throttled 8% of busy time), so a third runner rather than
-  #   bigger ones. CPUWeight=50 keeps the host ahead when they contend.
+  #   bigger ones. CPUWeight=50 keeps the host ahead when they contend. This
+  #   predates epic kdubj's in-job parallelism (AgentOS xargs -P, Elixir
+  #   partitions), which pushes jobs toward their cap: re-measure before
+  #   adding a fourth runner.
   # - RAM: peak anonymous memory 2.9 GiB (lint job), 0.9 GiB (Elixir,
   #   conformance, agno, frontend), 3.6 GiB both runners together; host
   #   MemAvailable never fell below 9.4 GiB. memory.peak reads ~4.5 GiB only
   #   because it counts reclaimable page cache. nix-daemon's anon stayed under
   #   20 MiB; its MemoryMax hits are page-cache reclaim (oom 0).
+  #   Only a warm run was sampled; a cold one (after any container start, which
+  #   wipes the checkout) compiles more.
   # - Gaming: the pause (em-ci-pause.nix) stops all runners for a stream, so
   #   these caps never compete with a game.
   # Adding a runner: next free pair is 10.233.71.13/.14; container names must

@@ -53,7 +53,7 @@
 #
 # VERIFY after a deploy (see the bead for the full list):
 #   gh api repos/johnnymo87/eternal-machinery/actions/runners \
-#     --jq '.runners[]|.name+" "+.status'                      # both online
+#     --jq '.runners[]|.name+" "+.status'                      # all online
 #   sudo nixos-container run em-ci-1 -- curl -sm3 10.233.71.1:5434; echo $?  # must fail
 #   sudo nixos-container run em-ci-1 -- runuser -u em-ci -- cat /run/em-ci/pat  # denied
 { config, lib, pkgs, nixpkgs-unstable, devenvPkg, ... }:
@@ -415,7 +415,8 @@ in
       # watchdog guards against both container writes and host nix store growth.
       # Stops all containers, which fails their in-flight jobs; GitHub shows
       # them failed or queued. They stay stopped until someone starts them again:
-      #   sudo systemctl start container@em-ci-1 container@em-ci-2
+      #   sudo systemctl start container@em-ci-{1,2}     # devbox
+      #   sudo systemctl start container@em-ci-{1,2,3}   # gamebox
       # Exits non-zero when it fires so the unit shows failed. Telegram
       # alerting hooks in with bead eternal-machinery-0oycj.5.
       em-ci-disk-watchdog = {
