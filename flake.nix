@@ -1451,7 +1451,7 @@
           launcherPkgs = devboxPkgs // { gh = stubGh; };
           launcher = import ./pkgs/lgtm-gh {
             pkgs = launcherPkgs;
-            script = "${./pkgs/lgtm-gh/test-fixture.sh}";
+            script = "${./pkgs/lgtm-gh/fixture-script.sh}";
           };
           launcherMissing = import ./pkgs/lgtm-gh {
             pkgs = launcherPkgs;
