@@ -124,7 +124,7 @@ check(s1.defaults.sorting_strategy == "descending", "Screen 1 uses the switcher'
 check(s1.defaults.default_selection_index == nil, "first open forces no selection")
 check(s1.defaults.sorter and s1.defaults.sorter.stub == "sorter", "a real sorter reaches pickers.new (else no filtering)")
 check(s1.defaults.previewer and s1.defaults.previewer.stub == "previewer", "previewer wired")
-check(s1.prompt_title == "Stall-watch programs [⚠ 1]", "partial failure shows ⚠ in the title")
+check(s1.prompt_title == "Stall-watch programs  <C-o> coordinator [⚠ 1]", "partial failure shows ⚠ in the title")
 check(#notified == 1, "warnings notified once")
 
 -- previewer writes the program's lines into the preview buffer.

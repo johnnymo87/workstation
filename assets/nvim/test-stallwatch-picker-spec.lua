@@ -26,12 +26,12 @@ local prows = model.program_rows(doc)
 -- 1. PROGRAM ROW TEXT.
 do
   local a = spec.program_display(prows[1], NOW)
-  check(a == "alpha · 4 open (1 decision, 1 blocker, 1 follow_up, 1 info) · checked 12m ago",
+  check(a == "? alpha · 4 open (1 decision, 1 blocker, 1 follow_up, 1 info) · checked 12m ago",
     "alpha row text, got: " .. a)
   check(not a:find(spec.NOT_ARMED_MARK, 1, true) and not a:find(spec.NOT_ENABLED_MARK, 1, true),
     "armed+enabled program carries no marker")
   local b = spec.program_display(prows[2], NOW)
-  check(b:find("^beta · 1 open %(1 stalled%)") ~= nil, "beta counts, got: " .. b)
+  check(b:find("^○ beta · 1 open %(1 stalled%)") ~= nil, "beta counts, got: " .. b)
   check(not b:find("checked", 1, true), "null last tick -> no 'checked' clause")
   check(b:find(spec.NOT_ARMED_MARK, 1, true) ~= nil, "not armed -> log-only marker")
   check(b:find(spec.NOT_ENABLED_MARK, 1, true) ~= nil, "not enabled -> disabled marker")
@@ -232,16 +232,16 @@ end
 
 -- 4. TITLES.
 do
-  check(spec.programs_title({}) == "Stall-watch programs", "programs title")
-  check(spec.programs_title({ "x", "y" }) == "Stall-watch programs [⚠ 2]", "programs title warns")
+  check(spec.programs_title({}) == "Stall-watch programs  <C-o> coordinator", "programs title")
+  check(spec.programs_title({ "x", "y" }) == "Stall-watch programs  <C-o> coordinator [⚠ 2]", "programs title warns")
   check(spec.sessions_title("alpha", "flagged", {}) == "alpha · flagged", "flagged title")
   check(spec.sessions_title("alpha", "all", { "x" }) == "alpha · all tagged [⚠ 1]", "all title warns")
   check(spec.digest_title(NOW - 3600000, NOW) == "stall-watch digest · 1h old", "digest title age")
   check(spec.digest_title(nil, NOW) == "stall-watch digest", "digest title without mtime")
 
   -- Hardening: vim.NIL and nil title handling.
-  check(spec.programs_title(nil) == "Stall-watch programs", "nil warnings")
-  check(spec.programs_title(vim.NIL) == "Stall-watch programs", "vim.NIL warnings")
+  check(spec.programs_title(nil) == "Stall-watch programs  <C-o> coordinator", "nil warnings")
+  check(spec.programs_title(vim.NIL) == "Stall-watch programs  <C-o> coordinator", "vim.NIL warnings")
   check(spec.sessions_title(nil, nil, nil) == "(unnamed) · flagged", "nil sessions_title")
   check(spec.sessions_title(vim.NIL, vim.NIL, vim.NIL) == "(unnamed) · flagged", "vim.NIL sessions_title")
   check(spec.digest_title(vim.NIL, NOW) == "stall-watch digest", "vim.NIL mtime")
@@ -270,6 +270,54 @@ do
   check(spec.programs_picker_opts(vim.NIL, vim.NIL).sorting_strategy == "descending", "vim.NIL prows picker opts")
   check(spec.selection_index(prows, vim.NIL) == nil, "vim.NIL tag selection index")
   check(spec.selection_index(vim.NIL, "beta") == nil, "vim.NIL prows selection index")
+end
+
+-- 6. COORDINATOR PRESENTATION (Task 3).
+do
+  local now = 1000 * 3600 * 10
+  local function disp(state) return spec.program_display({ tag = "alpha", counts = { total = 0, by_kind = {} }, coord = { state = state } }, now) end
+  check(disp("live"):sub(1, #"● ") == "● ", "live marker leads the row")
+  check(disp("dir_missing"):sub(1, #"✗ ") == "✗ ", "dir_missing marker")
+  check(disp("unresolved"):sub(1, #"? ") == "? ", "unresolved marker")
+  check(disp("none"):sub(1, #"○ ") == "○ ", "none marker")
+  check(disp("unsupported"):sub(1, #"○ ") == "○ ", "unsupported marker")
+  check(spec.program_display({ tag = "alpha" }, now):sub(1, 5) == "alpha", "no coord -> no marker, row unchanged")
+  check(spec.programs_title({}):find("<C%-o> coordinator", 1, false) ~= nil, "title advertises <C-o>")
+  check(spec.coord_absent_message("alpha", "none"):find("no coordinator session bound for alpha", 1, true) ~= nil, "none message")
+  check(spec.coord_absent_message("alpha", "unsupported"):find("does not report coordinators", 1, true) ~= nil, "unsupported message")
+end
+
+-- last assistant text: skip toolRequest-only and userVisible=false; join text parts.
+do
+  local doc = { conversation = {
+    { role = "user", content = { { type = "text", text = "hi" } } },
+    { role = "assistant", content = { { type = "thinking", thinking = "x" }, { type = "text", text = "FIRST" }, { type = "text", text = "PART2" } } },
+    { role = "assistant", content = { { type = "toolRequest" } } },
+    { role = "assistant", metadata = { userVisible = false }, content = { { type = "text", text = "SUMMARY" } } },
+  } }
+  check(spec.last_assistant_text(doc) == "FIRST\nPART2", "picks last visible assistant text, joins text parts")
+  check(spec.last_assistant_text({ conversation = {} }) == nil, "empty -> nil")
+  check(spec.last_assistant_text(nil) == nil, "nil doc -> nil")
+end
+
+-- coordinator block: header + capped body + rule, above the items.
+do
+  local now = 1000 * 3600 * 10
+  local prow = { coord = { state = "live", goose_id = "20990101_1", row = { effective_state = "idle", lastActivity = now - 7200 * 1000 } } }
+  local long = {}
+  for i = 1, 40 do long[i] = "line" .. i end
+  local lines = spec.coord_block_lines(prow, now, { text = table.concat(long, "\n") })
+  check(lines[1]:find("coordinator goose:20990101_1", 1, true) and lines[1]:find("idle", 1, true), "header names id and state")
+  check(#lines == 1 + spec.COORD_PREVIEW_MAX + 1 + 1, "header + capped body + ellipsis + rule")
+  check(spec.coord_block_lines(prow, now, nil)[2] == "(loading…)", "no cache entry -> loading")
+  check(spec.coord_block_lines(prow, now, { err = "timed out" })[2] == "(transcript unavailable: timed out)", "error line")
+  check(spec.coord_block_lines({ coord = { state = "none" } }, now, nil)[1]:find("no coordinator session", 1, true), "none -> one line, no export")
+  check(#spec.coord_block_lines({}, now, nil) == 0, "no coord field at all -> no block")
+  check(spec.coord_block_lines(prow, now, { text = nil })[2] == "(no assistant message yet)", "no text -> placeholder")
+  local exact20 = {}
+  for i = 1, 20 do exact20[i] = "line" .. i end
+  local lines20 = spec.coord_block_lines(prow, now, { text = table.concat(exact20, "\n") })
+  check(#lines20 == 1 + 20 + 1, "exact-20-line text produces no ellipsis (#lines == 1+20+1)")
 end
 
 print("LUA_TEST_OK " .. N)
