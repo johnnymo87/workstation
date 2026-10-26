@@ -1,39 +1,39 @@
-{ pkgs }:
+{ pkgs, script ? "/home/dev/projects/lgtm/scripts/lgtm-gh/lgtm-gh.sh" }:
 
-# lgtm-gh: identity-resolving `gh` wrapper for lgtm's multi-reviewer feature.
+# lgtm-gh: launcher for lgtm's identity-resolving `gh` wrapper.
 #
-# A dispatched (headless) OpenCode review session is told to use `lgtm-gh`
-# instead of `gh` for any GitHub state-changing operation. This wrapper reads
-# the reviewer login that lgtm wrote into the worktree's `.lgtm-reviewer`,
-# resolves that login's classic PAT at `~/.config/lgtm/tokens/<login>.pat`
-# (deployed from sops on cloudbox), and execs `gh` with `GH_TOKEN` set so the
-# review posts under that identity. The token never enters the agent's
-# reasoning context — the agent only ever sees the identity *name*.
+# A dispatched (headless) review session uses `lgtm-gh` instead of `gh` for any
+# GitHub state-changing operation; the wrapper posts under the reviewer
+# identity lgtm assigned to that worktree, and enforces lgtm's review policy.
+# The wrapper itself lives in the lgtm repo (scripts/lgtm-gh/lgtm-gh.sh) and
+# runs from the lgtm checkout, so it deploys when that checkout is pulled.
+# This package only gives it a fixed environment:
 #
-# It ALSO records the id of every review artifact it creates to a JSONL ledger,
-# REFUSES a merge whose target repo is not one of the two the assist lane is
-# allowed to merge in, and GATES every APPROVE on lgtm's ownership verdict for
-# the PR's live head (lgtm-f6ue). All three are explained where implemented.
+#   - coreutils, gh, jq and nodejs_22 first on PATH. Dispatched sessions can
+#     run under a restricted systemd PATH, and the wrapper's approval check
+#     runs node under `env -i` with only node's directory on PATH, so node must
+#     come from here (the same major lgtm-run uses). writeShellApplication
+#     prepends these; the inherited PATH is kept after them.
+#   - runtimeShell (the bash writeShellApplication itself uses) to run it.
 #
-# The script body is `lgtm-gh.sh`, read verbatim. It is a separate file so that
-# pkgs/lgtm-gh/test.sh can execute the real source with a fake `gh` on PATH —
-# the shipped binary cannot be intercepted that way, because
-# writeShellApplication prepends its runtimeInputs to PATH and the pinned real
-# `gh` wins. That is what the mirror this suite used to carry existed to work
-# around.
-#
-# Design: lgtm repo docs/plans/2026-04-30-multi-reviewer-identity-design.md.
-# Behavior is locked by pkgs/lgtm-gh/test.sh (source) and test-real.sh (binary).
+# Where the script is missing it refuses and runs nothing. That happens on a
+# host with no lgtm checkout (macOS), and on cloudbox if this lands before the
+# lgtm change that added the script is pulled. The message tells the session
+# NOT to fall back to plain `gh`: sessions on cloudbox carry the human's own
+# GH_TOKEN, so plain gh would post as the human, unrecorded and ungated.
+# (devbox may have a checkout, and then runs whatever it has checked out;
+# devbox has no reviewer tokens, so the wrapper stops at the token lookup.)
+# Behaviour is locked by test.sh (flake check lgtm-gh-launcher-tests); the
+# wrapper's own suites run under `npm test` in the lgtm repo.
 pkgs.writeShellApplication {
   name = "lgtm-gh";
-  # coreutils: cat/tr/env/date/mktemp/mkdir/timeout. gh: the wrapped CLI
-  # itself, pinned so the wrapper works even under a restricted systemd PATH.
-  # jq: parses the id out of gh's response, the approval gate's payload, and
-  # emits the ledger lines. nodejs_22: the approval gate runs lgtm's
-  # `--approval-policy` under `env -i` with ONLY node's directory on PATH, so
-  # node must come from here, not the session's PATH -- the same major lgtm-run
-  # uses. writeShellApplication prepends these to PATH (it does not clobber the
-  # inherited PATH).
   runtimeInputs = [ pkgs.coreutils pkgs.gh pkgs.jq pkgs.nodejs_22 ];
-  text = builtins.readFile ./lgtm-gh.sh;
+  text = ''
+    script=${pkgs.lib.escapeShellArg script}
+    if [ ! -f "$script" ]; then
+      echo "lgtm-gh: not installed here ($script is missing; it comes from the lgtm checkout). Do NOT use plain gh or any other route instead: nothing posted without lgtm-gh is attributed or gated. Post nothing further, end your session, and say in your final report that lgtm-gh was unavailable." >&2
+      exit 1
+    fi
+    exec ${pkgs.runtimeShell} "$script" "$@"
+  '';
 }

@@ -105,7 +105,7 @@
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
-      lgtm-gh = p.callPackage ./pkgs/lgtm-gh { };
+      lgtm-gh = import ./pkgs/lgtm-gh { pkgs = p; };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
@@ -678,7 +678,7 @@
       #
       # Wired anyway, following the precedent set by the lgtm-gh mirror suite in
       # PR #370 (that mirror is gone -- its body was extracted to a real .sh
-      # file the tests execute, and the check is now lgtm-gh-source-tests):
+      # file the tests executed, and later moved to the private lgtm repo):
       # leaving the file unwired ran the honest greps NOWHERE AT ALL.
       # Execution and fidelity are orthogonal problems, and the *-mirror-tests
       # suffix exists so a green here cannot be misread as "production is
@@ -1439,82 +1439,44 @@
         touch $out
       '';
 
-      # lgtm-gh, REAL BINARY. default.nix takes `{ pkgs }` and reads `pkgs.gh`,
-      # so overriding just that attribute yields the shipped wrapper with a
-      # stub CLI underneath it. The binary under test is the one that ships;
-      # only the `gh` it wraps is substituted.
-      #
-      # THE SIBLING SUITE IS NO LONGER A MIRROR. pkgs/lgtm-gh/test.sh used to
-      # drive a hand-copied COPY of the wrapper logic, because production could
-      # not be intercepted (writeShellApplication prepends its runtimeInputs to
-      # PATH, so a fake `gh` loses to the pinned real one). The body now lives
-      # in pkgs/lgtm-gh/lgtm-gh.sh, which default.nix reads verbatim and
-      # test.sh executes directly, so both suites are production coverage and
-      # there is no copy left to drift. This one still earns its keep: it is
-      # the only check that the DERIVATION -- runtime inputs, PATH, the built
-      # artifact -- behaves, rather than the source text.
-      lgtm-gh-real-tests =
+      # lgtm-gh, THE LAUNCHER. The wrapper itself moved to the private lgtm repo
+      # (scripts/lgtm-gh/, with its own suites under `npm test`), so all that
+      # ships from here is default.nix: pinned tools on PATH, then the
+      # checkout's script. Built twice -- once aimed at a fixture script that
+      # reports what it was handed, once at a path that does not exist -- with
+      # `pkgs.gh` swapped for a stub so "the pinned gh wins" is checkable.
+      lgtm-gh-launcher-tests =
         let
-          stubGh = devboxPkgs.writeShellScriptBin "gh" ''
-            { echo "GH_TOKEN=$GH_TOKEN"; echo "ARGS=$*"; echo "GH_CONFIG_DIR=''${GH_CONFIG_DIR:-}"; echo "XDG_DATA_HOME=''${XDG_DATA_HOME:-}"; } > "$GH_RECORD"
-            if [ -n "''${FAKE_GH_BODY:-}" ]; then printf '%s' "$FAKE_GH_BODY"; fi
-            exit "''${FAKE_GH_RC:-0}"
-          '';
-          realWrapper = import ./pkgs/lgtm-gh {
-            pkgs = devboxPkgs // { gh = stubGh; };
+          stubGh = devboxPkgs.writeShellScriptBin "gh" "exit 0";
+          launcherPkgs = devboxPkgs // { gh = stubGh; };
+          launcher = import ./pkgs/lgtm-gh {
+            pkgs = launcherPkgs;
+            script = "${./pkgs/lgtm-gh/fixture-script.sh}";
+          };
+          launcherMissing = import ./pkgs/lgtm-gh {
+            pkgs = launcherPkgs;
+            script = "/nonexistent/lgtm/scripts/lgtm-gh/lgtm-gh.sh";
           };
         in
-        devboxPkgs.runCommand "lgtm-gh-real-tests" {
-          nativeBuildInputs = [
-            devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.jq
-          ];
+        devboxPkgs.runCommand "lgtm-gh-launcher-tests" {
+          nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
         } ''
           cd ${self}
-          bash pkgs/lgtm-gh/test-real.sh ${realWrapper}/bin/lgtm-gh 2>&1 | tee "$TMPDIR/out.txt"
-          grep -q '^all lgtm-gh real-binary tests passed' "$TMPDIR/out.txt" || {
-            echo "lgtm-gh real-binary tests did not report success" >&2
+          bash pkgs/lgtm-gh/test.sh ${launcher}/bin/lgtm-gh ${launcherMissing}/bin/lgtm-gh ${stubGh} \
+            ${devboxPkgs.coreutils} ${devboxPkgs.jq} ${devboxPkgs.nodejs_22} \
+            2>&1 | tee "$TMPDIR/out.txt"
+          grep -q '^all lgtm-gh launcher tests passed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: lgtm-gh launcher suite did not reach its final pass line." >&2
+            exit 1
+          }
+          # Pinned so a silently dropped assertion cannot leave a green check
+          # testing less than it claims. Update deliberately, in the same commit.
+          grep -q '^14 passed, 0 failed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: expected '14 passed, 0 failed'." >&2
             exit 1
           }
           touch $out
         '';
-
-      lgtm-gh-source-tests = devboxPkgs.runCommand "lgtm-gh-source-tests" {
-        nativeBuildInputs = [
-          # jq: the ledger assertions read it back. Without it here the suite
-          # still passes on a dev box (jq is on the ambient PATH) and fails
-          # only in the sandbox -- green under the shell I ran it in, red in
-          # the one that counts.
-          # gawk: builds the copy under test (GATE PINS block swap).
-          # findutils: the gate's no-leaked-temp-file assertion.
-          devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.jq
-          devboxPkgs.gawk devboxPkgs.findutils
-        ];
-      } ''
-        cd ${self}
-        export HOME="$TMPDIR"
-        bash pkgs/lgtm-gh/test.sh 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q '^all lgtm-gh tests passed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: lgtm-gh suite did not reach its final pass line." >&2
-          exit 1
-        }
-        # Pinned like oc-cost: a silently dropped assertion would leave a
-        # green check testing less than it claims.
-        #
-        # 31 -> 147 deliberately. The suite stopped being a mirror (it now runs
-        # lgtm-gh.sh, the real body), and gained the merge-policy cases: 92 of
-        # these 147 fail if the policy block is neutered, which is the number
-        # that makes them evidence rather than decoration.
-        #
-        # 147 -> 490 deliberately: the approval gate (lgtm-f6ue) -- every
-        # review surface, every refusal cause, the ledger shape, and the
-        # shipped GATE PINS block byte for byte.
-        grep -q '^490 passed, 0 failed' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected '490 passed, 0 failed'." >&2
-          echo "Update deliberately, in the same commit." >&2
-          exit 1
-        }
-        touch $out
-      '';
 
       # git-work: the `work` worktree helper, sourced from its BUILT script.
       #

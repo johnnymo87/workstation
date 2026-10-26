@@ -772,7 +772,7 @@ lib.mkIf isCloudbox {
   '';
 
   # Materialize lgtm reviewer PATs from sops to the runtime location the
-  # nix-managed `lgtm-gh` wrapper (pkgs/lgtm-gh) reads. The wrapper does
+  # `lgtm-gh` wrapper (lgtm repo, launched by pkgs/lgtm-gh) reads. The wrapper does
   # `cat ~/.config/lgtm/tokens/<login>.pat`, so decrypt the per-login sops
   # secrets (system-decrypted to /run/secrets) into that dir as real files
   # owned by dev, chmod 600, with the parent dir chmod 700 — exactly the
