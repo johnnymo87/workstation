@@ -46,6 +46,10 @@ pause).
 - **Sizing on gamebox:** two runners at 3 CPU / 5 GiB each. Keeps today's
   parallelism (ci.yml fans a PR into up to six heavy jobs; one runner would
   roughly double a cold full run). Host nix-daemon capped at `MemoryMax=3G`.
+  **Amended 2026-10-26: three runners**, same 3 CPU / 5 GiB each. Queueing
+  had become the dominant CI cost (56 h of waiting in a week); the measured
+  CPU and RAM use behind the change is in `hosts/gamebox/em-ci.nix`
+  (eternal-machinery bead `kdubj.5`).
 - **Fallback when gamebox is away:** devbox (not hosted).
 - **Gaming contention:** gamebox runners are paused while a Sunshine stream is
   active. In-flight jobs are cancelled ("runner received a shutdown signal");
