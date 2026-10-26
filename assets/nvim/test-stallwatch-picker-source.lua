@@ -9,6 +9,12 @@ local function check(cond, msg) N = N + 1; assert(cond, msg) end
 
 local model = loadfile("assets/nvim/lua/user/stallwatch_picker/model.lua")()
 package.preload["user.stallwatch_picker.model"] = function() return model end
+local ss_model = loadfile("assets/nvim/lua/user/session_switcher/model.lua")()
+package.preload["user.session_switcher.model"] = function() return ss_model end
+local ss_spec = loadfile("assets/nvim/lua/user/session_switcher/spec.lua")()
+package.preload["user.session_switcher.spec"] = function() return ss_spec end
+local spec = loadfile("assets/nvim/lua/user/stallwatch_picker/spec.lua")()
+package.preload["user.stallwatch_picker.spec"] = function() return spec end
 -- The REAL switcher cli.fetch serves step 3, so its --ids argv is exercised.
 local cli = loadfile("assets/nvim/lua/user/session_switcher/cli.lua")()
 package.preload["user.session_switcher.cli"] = function() return cli end
@@ -349,6 +355,190 @@ do
   source.wake(hang_sys, "beta", function(o, e) hang_out, hang_err = o, e end, { timeout_ms = 50 })
   vim.wait(500, function() return hang_err ~= nil end)
   check(hang_err ~= nil and hang_err.kind == "timeout", "wake times out")
+end
+
+-- 18. COORDINATOR_ID: keypress-time re-read of coordinator goose_id.
+do
+  check(source.REREAD_TIMEOUT_MS == 5000, "REREAD_TIMEOUT_MS is 5000")
+
+  -- 18a. Happy path: alpha bound to 20990101_1 in fixture
+  local calls = {}
+  local fake_sys = router({ [ITEMS] = { 0, FIXTURE, "" } }, calls)
+  local n, gid, err = 0, nil, nil
+  source.coordinator_id(fake_sys, "alpha", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id alpha cb called once")
+  check(gid == "20990101_1" and err == nil, "coordinator_id alpha returns goose_id, nil")
+  check(#calls == 1 and calls[1][1] == ITEMS and calls[1][2] == "--json", "items spawned with --json")
+
+  -- 18b. Unbound: beta has coordinator.goose_id = null -> returns nil, nil
+  calls = {}
+  fake_sys = router({ [ITEMS] = { 0, FIXTURE, "" } }, calls)
+  n, gid, err = 0, "sentinel", "sentinel"
+  source.coordinator_id(fake_sys, "beta", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id beta cb called once")
+  check(gid == nil and err == nil, "coordinator_id beta returns nil, nil (unbound)")
+
+  -- 18c. Items exit 1 -> non-nil err table
+  calls = {}
+  fake_sys = router({ [ITEMS] = { 1, "", "boom\n" } }, calls)
+  n, gid, err = 0, "sentinel", nil
+  source.coordinator_id(fake_sys, "alpha", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id exit 1 cb called once")
+  check(gid == nil and type(err) == "table" and err.kind ~= nil, "items exit 1 -> non-nil err table")
+
+  -- 18d. Items hang (timeout) -> non-nil err table
+  calls = {}
+  fake_sys = router({ [ITEMS] = "hang" }, calls)
+  n, gid, err = 0, "sentinel", nil
+  source.coordinator_id(fake_sys, "alpha", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 50 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id hang cb called once")
+  check(gid == nil and type(err) == "table" and err.kind == "timeout", "items hang -> timeout err")
+
+  -- 18e. Items raise mode -> non-nil err table
+  calls = {}
+  fake_sys = router({ [ITEMS] = "raise" }, calls)
+  n, gid, err = 0, "sentinel", nil
+  source.coordinator_id(fake_sys, "alpha", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id raise cb called once")
+  check(gid == nil and type(err) == "table" and err.kind ~= nil, "items raise -> non-nil err table")
+
+  -- 18f. Tag missing from doc -> kind="missing"
+  calls = {}
+  fake_sys = router({ [ITEMS] = { 0, FIXTURE, "" } }, calls)
+  n, gid, err = 0, "sentinel", nil
+  source.coordinator_id(fake_sys, "missing_tag", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id missing tag cb called once")
+  check(gid == nil and type(err) == "table" and err.kind == "missing", "tag missing -> kind='missing'")
+
+  -- 18g. Program coordinator key absent -> kind="missing"
+  local doc_no_coord = vim.json.encode({
+    version = 1,
+    programs = {
+      { tag = "delta", items = {} },
+    },
+  })
+  calls = {}
+  fake_sys = router({ [ITEMS] = { 0, doc_no_coord, "" } }, calls)
+  n, gid, err = 0, "sentinel", nil
+  source.coordinator_id(fake_sys, "delta", function(g, e) n = n + 1; gid, err = g, e end, { env = ENV, timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "coordinator_id absent coordinator key cb called once")
+  check(gid == nil and type(err) == "table" and err.kind == "missing", "coordinator key absent -> kind='missing'")
+end
+
+-- 19. EXPORT: transcript export for preview.
+do
+  check(source.EXPORT_TIMEOUT_MS == 3000, "EXPORT_TIMEOUT_MS is 3000")
+
+  -- 19a. Guard goose_id being a non-string or empty: cb({err="no session id"}) without spawning
+  local calls = {}
+  local fake_sys = router({}, calls)
+  local n, res = 0, nil
+  source.export(fake_sys, nil, function(r) n = n + 1; res = r end)
+  vim.wait(500, function() return n > 0 end)
+  check(n == 1 and res ~= nil and res.err == "no session id", "nil goose_id -> err='no session id'")
+  check(#calls == 0, "no process spawned when goose_id is nil")
+
+  local n_empty, res_empty = 0, nil
+  source.export(fake_sys, "", function(r) n_empty = n_empty + 1; res_empty = r end)
+  vim.wait(500, function() return n_empty > 0 end)
+  check(n_empty == 1 and res_empty ~= nil and res_empty.err == "no session id", "empty goose_id -> err='no session id'")
+  check(#calls == 0, "no process spawned when goose_id is empty")
+
+  -- 19b. Happy path: argv is exactly { "goose", "session", "export", "--session-id", "20990101_1", "--format", "json" }
+  -- and JSON stdout with assistant message -> cb({ text = "..." })
+  local export_doc = vim.json.encode({
+    conversation = {
+      {
+        role = "assistant",
+        content = {
+          { type = "text", text = "Preview assistant text." },
+        },
+      },
+    },
+  })
+  calls = {}
+  fake_sys = router({ ["goose"] = { 0, export_doc, "" } }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export cb called once")
+  check(res ~= nil and res.text == "Preview assistant text." and res.err == nil, "export returns assistant text")
+  check(#calls == 1, "goose spawned once")
+  local expected_argv = { "goose", "session", "export", "--session-id", "20990101_1", "--format", "json" }
+  check(#calls[1] == #expected_argv, "argv length is 7")
+  for i, v in ipairs(expected_argv) do
+    check(calls[1][i] == v, "argv[" .. i .. "] == " .. v)
+  end
+
+  -- 19c. Unparseable stdout -> cb({ err = "unparseable export" })
+  calls = {}
+  fake_sys = router({ ["goose"] = { 0, "corrupted json {", "" } }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export unparseable cb called once")
+  check(res ~= nil and res.err == "unparseable export", "unparseable stdout -> err='unparseable export'")
+
+  -- 19d. Exit 1 with stderr "a\nboom\n" -> cb({ err = "boom" }) (last non-empty stderr line)
+  calls = {}
+  fake_sys = router({ ["goose"] = { 1, "", "a\nboom\n" } }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export exit 1 stderr cb called once")
+  check(res ~= nil and res.err == "boom", "exit 1 with stderr -> last non-empty line 'boom', got: " .. tostring(res and res.err))
+
+  -- 19e. Exit 1 with empty stderr -> cb({ err = "exit 1" })
+  calls = {}
+  fake_sys = router({ ["goose"] = { 1, "", "" } }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export exit 1 empty stderr cb called once")
+  check(res ~= nil and res.err == "exit 1", "exit 1 with empty stderr -> 'exit 1', got: " .. tostring(res and res.err))
+
+  -- 19f. Hang -> cb({ err = "timed out" })
+  calls = {}
+  fake_sys = router({ ["goose"] = "hang" }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 50 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export hang cb called once")
+  check(res ~= nil and res.err == "timed out", "hang -> err='timed out', got: " .. tostring(res and res.err))
+
+  -- 19g. Valid doc with no assistant text -> cb({ text = nil })
+  local no_asst_doc = vim.json.encode({
+    conversation = {
+      { role = "user", content = { { type = "text", text = "hello" } } },
+    },
+  })
+  calls = {}
+  fake_sys = router({ ["goose"] = { 0, no_asst_doc, "" } }, calls)
+  n, res = 0, nil
+  source.export(fake_sys, "20990101_1", function(r) n = n + 1; res = r end, { timeout_ms = 100 })
+  vim.wait(500, function() return n > 0 end)
+  vim.wait(150)
+  check(n == 1, "export no assistant text cb called once")
+  check(res ~= nil and res.err == nil and res.text == nil, "valid doc with no assistant text -> err=nil, text=nil")
 end
 
 print("LUA_TEST_OK " .. N)
