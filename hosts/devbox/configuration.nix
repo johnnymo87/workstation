@@ -315,7 +315,9 @@ in
       # lets the holder register a new connector from anywhere and serve every
       # hostname on the tunnel.
       #
-      # Verified on cloudflared 2025.11.1: `--token-file value [$TUNNEL_TOKEN_FILE]`.
+      # Verified on cloudflared 2025.11.1 and 2026.10.4:
+      # `--token-file value [$TUNNEL_TOKEN_FILE]`. pkgs.cloudflared is
+      # overridden by overlays/cloudflared.nix (eMudhra security release).
       # EnvironmentFile= is the wrong tool here -- the sops file is a bare
       # token, not KEY=value, so it would need a template. The secret has no
       # trailing newline (184 bytes, checked), so the file is read as-is.
