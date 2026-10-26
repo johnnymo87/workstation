@@ -38,6 +38,11 @@
     # depends on. Everything else stays on the stable nixpkgs above.
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+    # Used ONLY by overlays/cloudflared.nix, for the Go 1.27.3 toolchain the
+    # cloudflared security release needs. Locked separately from
+    # nixpkgs-unstable so bumping one never moves the other.
+    nixpkgs-cloudflared.url = "github:NixOS/nixpkgs/nixos-unstable";
+
     honk = {
       url = "github:johnnymo87/honk";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -46,11 +51,19 @@
 
   outputs = { self, nixpkgs, home-manager, nix-darwin, disko, sops-nix, devenv, honk, ... }@inputs:
   let
+    # cloudflared security release; see overlays/cloudflared.nix. Applied to
+    # every package set that provides cloudflared: pkgsFor (standalone
+    # home-manager), the devbox NixOS system (the tunnel connector), and the
+    # darwin system (whose pkgs home-manager reuses via useGlobalPkgs).
+    cloudflaredOverlay = import ./overlays/cloudflared.nix {
+      inherit (inputs) nixpkgs-cloudflared;
+    };
+
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
       inherit system;
       config.allowUnfree = true;
-      overlays = [];
+      overlays = [ cloudflaredOverlay ];
     };
 
     devboxSystem = "aarch64-linux";
@@ -2645,6 +2658,7 @@
         devenvPkg = devenv.packages.${devboxSystem}.devenv;
       };
       modules = [
+        { nixpkgs.overlays = [ cloudflaredOverlay ]; }
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         ./hosts/devbox/configuration.nix
@@ -2741,6 +2755,7 @@
     darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
       specialArgs = { inherit inputs mac; };
       modules = [
+        { nixpkgs.overlays = [ cloudflaredOverlay ]; }
         ./hosts/Y0FMQX93RR-2/configuration.nix
         home-manager.darwinModules.home-manager
         {
