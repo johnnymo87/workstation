@@ -86,7 +86,6 @@
       darwin-switch = p.callPackage ./pkgs/darwin-switch {
         cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
       };
-      clerk = p.callPackage ./pkgs/clerk { };
       codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
       # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
@@ -137,7 +136,6 @@
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
       slack-mcp-server = p.callPackage ./pkgs/slack-mcp-server { };
       teamclaude = p.callPackage ./pkgs/teamclaude { };
-      vercel = p.callPackage ./pkgs/vercel { };
     } // nixpkgs.lib.optionalAttrs (system == devboxSystem || system == darwinSystem) {
       terraform = p.callPackage ./pkgs/terraform { };
     };

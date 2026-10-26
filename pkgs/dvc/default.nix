@@ -72,8 +72,7 @@ buildNpmPackage {
 
   nativeBuildInputs = [ makeWrapper ];
 
-  # As in pkgs/vercel, node_modules is nested under a package-unique
-  # `libexec/dvc/` path rather than the conventional `lib/node_modules`:
+  # node_modules is nested under a package-unique `libexec/dvc/` path rather than the conventional `lib/node_modules`:
   # home-manager merges every package into one buildEnv, and this closure's
   # transitive `typescript` would otherwise collide with wrangler's
   # `lib/node_modules/typescript`.

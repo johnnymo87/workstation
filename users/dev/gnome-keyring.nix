@@ -6,11 +6,11 @@
 #   gnome-keyring's `secrets` component and auto-unlocked at graphical login by
 #   pam_gnome_keyring. On a HEADLESS box (devbox/cloudbox: SSH only, no greeter,
 #   no PAM keyring integration) there is no such daemon and no unlock, so the
-#   name org.freedesktop.secrets is unregistered. The concrete casualty is the
-#   `clerk` CLI (pkgs/clerk): `clerk auth login` reports success but silently
-#   fails to persist its OAuth token (no secret service to write to), so every
-#   later `clerk config pull/patch` dies with "Session expired". Any other
-#   libsecret/keyring client (git-credential-libsecret, etc.) has the same gap.
+#   name org.freedesktop.secrets is unregistered. The original casualty was the
+#   `clerk` CLI (since removed with BoldCo, 2026-10-26): `clerk auth login`
+#   reported success but silently failed to persist its OAuth token. Any other
+#   libsecret/keyring client (gws, git-credential-libsecret, etc.) has the same
+#   gap without this unit.
 #
 # WHY NOT home-manager's `services.gnome-keyring.enable`
 #   That module is desktop-oriented and unusable here on two counts:

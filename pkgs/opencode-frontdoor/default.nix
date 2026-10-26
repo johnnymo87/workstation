@@ -30,7 +30,7 @@ buildNpmPackage rec {
     runHook preInstall
 
     mkdir -p "$out/libexec/opencode-frontdoor" "$out/bin"
-    # Unlike pkgs/vercel (which vendors node_modules at runtime), opencode-frontdoor
+    # Unlike pkgs/dvc (which vendors node_modules at runtime), opencode-frontdoor
     # has ZERO runtime dependencies — the emitted dist/ imports only its own modules
     # and node stdlib (devDeps are build-only: typescript/@types/node/vitest). So we
     # ship dist/ alone; no node_modules in the runtime closure.
