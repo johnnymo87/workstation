@@ -18,6 +18,8 @@ local flow = loadfile("assets/nvim/lua/user/session_switcher/flow.lua")()
 package.preload["user.session_switcher.flow"] = function() return flow end
 local cli = loadfile("assets/nvim/lua/user/session_switcher/cli.lua")()
 package.preload["user.session_switcher.cli"] = function() return cli end
+local act = loadfile("assets/nvim/lua/user/session_switcher/act.lua")()
+package.preload["user.session_switcher.act"] = function() return act end
 
 -- exec: only tmux_client and notify_warnings are reached from this layer.
 local tmux_calls = 0
@@ -46,8 +48,14 @@ package.preload["user.stallwatch_picker.source"] = function()
     wake = source.wake,
     wake_cmd = source.wake_cmd,
     run = source.run,
+    coordinator_id = source.coordinator_id,
+    items_cmd = source.items_cmd,
+    decode_items = source.decode_items,
     WAKE_ENV = source.WAKE_ENV,
     DEFAULT_WAKE_CMD = source.DEFAULT_WAKE_CMD,
+    ENV = source.ENV,
+    DEFAULT_CMD = source.DEFAULT_CMD,
+    REREAD_TIMEOUT_MS = source.REREAD_TIMEOUT_MS,
   }
 end
 
@@ -338,6 +346,212 @@ do
     "timeout -> WARN 'timed out'")
   check(#closed == closed_before, "picker stays open on timeout")
 
+  vim.notify = orig_notify
+end
+
+-- 9. <C-o> coordinator mapping
+do
+  local test_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = { goose_id = "20990101_1" }, items = {} },
+      { tag = "beta", coordinator = {}, items = {} },
+      { tag = "gamma", coordinator = { goose_id = "20990101_2" }, items = {} },
+      { tag = "delta", coordinator = { goose_id = "20990101_3" }, items = {} },
+      { tag = "epsilon", items = {} }, -- coordinator key absent -> unsupported
+    },
+  }
+  local test_rows = {
+    { id = "goose:20990101_1", title = "Coord Alpha", directory = "/fixture/alpha/coord", dir_missing = false },
+    { id = "goose:20990101_3", title = "Coord Delta", directory = "/fixture/delta/coord", dir_missing = true },
+  }
+  local test_snap = {
+    doc = test_doc,
+    tagged = { alpha = {}, beta = {}, gamma = {}, delta = {}, epsilon = {} },
+    rows = test_rows,
+    warnings = {},
+  }
+
+  local shared_order_log = {}
+  local spawn_calls = {}
+  local fake_sys_response
+  local fake_sys = function(argv, _o, on_exit)
+    table.insert(spawn_calls, argv)
+    table.insert(shared_order_log, { event = "spawn", argv = argv })
+    local resp = fake_sys_response or { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+    vim.schedule(function()
+      on_exit(resp)
+    end)
+    return { pid = 1, kill = function() end }
+  end
+
+  local notify_calls = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notify_calls, { msg = msg, level = level })
+  end
+
+  local orig_close = stub_actions.close
+  stub_actions.close = function(bufnr)
+    table.insert(shared_order_log, { event = "close", bufnr = bufnr })
+    orig_close(bufnr)
+  end
+
+  local coord_accepted = {}
+  local coord_ctrl = {
+    accept = function(_, row, cb)
+      table.insert(coord_accepted, row)
+      cb({ kind = "attach", sid = row.id })
+    end,
+  }
+
+  init.open({
+    flow = coord_ctrl,
+    fetch = function(_o, cb) cb(test_snap, nil) end,
+    system = fake_sys,
+  })
+
+  local coord_picker = new_calls[#new_calls]
+  local prompt_bufnr = 150
+  local cm = mappings_of(coord_picker, prompt_bufnr)
+
+  -- 1. Screen 1 maps <C-o> (i and n).
+  check(cm["<C-o>"] ~= nil, "Screen 1 maps <C-o>")
+  check(vim.tbl_contains(cm["<C-o>"].modes, "i") and vim.tbl_contains(cm["<C-o>"].modes, "n"),
+    "Screen 1 maps <C-o> in insert and normal mode")
+
+  local prows = coord_picker.defaults.finder.results
+
+  -- 2. On beta (none): exactly one notify containing 'no coordinator session bound for beta';
+  --    the picker is NOT closed (actions.close not called); fake system saw no spawn.
+  local closed_before = #closed
+  local spawn_before = #spawn_calls
+  local notify_before = #notify_calls
+  selected_entry = { value = prows[2] } -- beta
+  cm["<C-o>"].fn()
+  check(#notify_calls == notify_before + 1, "beta (none): exactly one notify")
+  check(notify_calls[#notify_calls].msg:find("no coordinator session bound for beta", 1, true) ~= nil,
+    "beta notify says 'no coordinator session bound for beta'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "beta notify is INFO")
+  check(#closed == closed_before, "beta (none): picker is NOT closed")
+  check(#spawn_calls == spawn_before, "beta (none): fake system saw no spawn")
+
+  -- 3. On alpha (live), with fake system answering items.sh with alpha-bound doc:
+  --    actions.close is called BEFORE items.sh spawn (record order in one shared log);
+  --    ctrl.accept receives the snapshot's joined row (same table, rawequal);
+  --    dispatched has sid == "goose:20990101_1".
+  shared_order_log = {}
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[1] } -- alpha
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 1 end)
+  check(#shared_order_log >= 2, "alpha (live): close and spawn logged")
+  check(shared_order_log[1].event == "close" and shared_order_log[2].event == "spawn",
+    "alpha (live): actions.close is called BEFORE items.sh spawn")
+  check(shared_order_log[1].bufnr == prompt_bufnr, "actions.close called with prompt_bufnr")
+  check(#coord_accepted == 1, "alpha (live): ctrl.accept called once")
+  check(rawequal(coord_accepted[1], test_rows[1]), "alpha (live): ctrl.accept receives snapshot's joined row (rawequal)")
+  check(dispatched[#dispatched] ~= nil and dispatched[#dispatched].desc.sid == "goose:20990101_1",
+    "alpha (live): dispatched sid == goose:20990101_1")
+  check(dispatched[#dispatched].row.id == "goose:20990101_1",
+    "alpha (live): dispatched row.id == goose:20990101_1")
+
+  -- 4. Re-read returns a different id (20990101_7) ->
+  --    accept receives a row equal to model.minimal_coord_row("alpha", "20990101_7") (compare fields).
+  local diff_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = { goose_id = "20990101_7" } },
+    },
+  }
+  fake_sys_response = { code = 0, stdout = vim.json.encode(diff_doc), stderr = "" }
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 2 end)
+  check(#coord_accepted == 2, "re-read different id: accept called")
+  local exp_diff = model.minimal_coord_row("alpha", "20990101_7")
+  check(coord_accepted[2].id == exp_diff.id and coord_accepted[2].title == exp_diff.title,
+    "re-read different id -> minimal row matching 20990101_7")
+  check(not rawequal(coord_accepted[2], test_rows[1]),
+    "re-read different id -> not the snapshot row")
+
+  -- 5. Re-read fails (items exits 1) -> accept receives the snapshot row for 20990101_1.
+  fake_sys_response = { code = 1, stdout = "", stderr = "read error" }
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 3 end)
+  check(#coord_accepted == 3, "re-read fails: accept called")
+  check(rawequal(coord_accepted[3], test_rows[1]),
+    "re-read fails -> accept receives snapshot row for 20990101_1 (rawequal)")
+
+  -- 6. Re-read returns unbound -> a notify follows, no accept, and the picker was already closed.
+  local unbound_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = {} },
+    },
+  }
+  fake_sys_response = { code = 0, stdout = vim.json.encode(unbound_doc), stderr = "" }
+  closed_before = #closed
+  notify_before = #notify_calls
+  local accept_before = #coord_accepted
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  check(#closed == closed_before + 1, "re-read returns unbound: picker was already closed")
+  vim.wait(200, function() return #notify_calls > notify_before end)
+  check(#notify_calls == notify_before + 1, "re-read returns unbound: a notify follows")
+  check(notify_calls[#notify_calls].msg:find("no coordinator session bound for alpha", 1, true) ~= nil,
+    "unbound notify contains 'no coordinator session bound for alpha'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "unbound notify is INFO")
+  check(#coord_accepted == accept_before, "re-read returns unbound: no accept")
+
+  -- 7. unresolved (alpha/gamma bound but not in rows) -> still accepts and dispatches a minimal row.
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[3] } -- gamma
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 4 end)
+  check(#coord_accepted == 4, "unresolved: accept called")
+  local exp_gamma = model.minimal_coord_row("gamma", "20990101_2")
+  check(coord_accepted[4].id == exp_gamma.id and coord_accepted[4].title == exp_gamma.title,
+    "unresolved -> minimal row matches gamma 20990101_2")
+  check(dispatched[#dispatched] ~= nil and dispatched[#dispatched].desc.sid == "goose:20990101_2",
+    "unresolved -> dispatched sid == goose:20990101_2")
+
+  -- 8. dir_missing: run the REAL require("user.session_switcher.act").decide(row, nil) on the accepted row
+  --    (snapshot row with dir_missing=true) and expect kind == "refuse_dir_missing".
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[4] } -- delta
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 5 end)
+  check(#coord_accepted == 5, "dir_missing: accept called")
+  check(rawequal(coord_accepted[5], test_rows[2]), "dir_missing: accept receives snapshot row")
+  local real_act = require("user.session_switcher.act")
+  local act_desc = real_act.decide(coord_accepted[5], nil)
+  check(type(act_desc) == "table" and act_desc.kind == "refuse_dir_missing",
+    "dir_missing: real act.decide yields kind == refuse_dir_missing")
+
+  -- 9. unsupported (coordinator key absent): notify contains "does not report coordinators", no close, no spawn.
+  closed_before = #closed
+  spawn_before = #spawn_calls
+  notify_before = #notify_calls
+  selected_entry = { value = prows[5] } -- epsilon
+  cm["<C-o>"].fn()
+  check(#notify_calls == notify_before + 1, "unsupported: exactly one notify")
+  check(notify_calls[#notify_calls].msg:find("does not report coordinators", 1, true) ~= nil,
+    "unsupported: notify contains 'does not report coordinators'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "unsupported notify is INFO")
+  check(#closed == closed_before, "unsupported: picker is NOT closed")
+  check(#spawn_calls == spawn_before, "unsupported: no spawn")
+
+  -- 10. Across every case, no spawn whose argv[1] ends in wake.sh, and no spawn other than items.sh.
+  check(#spawn_calls > 0, "fake system was called for items.sh re-reads")
+  for _, argv in ipairs(spawn_calls) do
+    check(not tostring(argv[1]):match("wake%.sh$"), "fake system: no spawn ends in wake.sh")
+    check(tostring(argv[1]):match("items%.sh$") ~= nil or argv[2] == "--json",
+      "fake system: no spawn other than items.sh")
+  end
+
+  stub_actions.close = orig_close
   vim.notify = orig_notify
 end
 

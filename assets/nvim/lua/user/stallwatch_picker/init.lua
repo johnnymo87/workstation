@@ -7,11 +7,13 @@
 -- does I/O, so there is no in-flight callback to race.
 --
 -- Keys:
---   Screen 1: <CR> drill into a program, <C-d> latest digest, <C-g> wake program.
+--   Screen 1: <CR> drill into a program, <C-d> latest digest, <C-g> wake program,
+--             <C-o> coordinator.
 --   Screen 2: <CR> jump, <C-f> flagged/all, <C-b> back (cursor restored).
 -- <C-d> (Screen 1) and <C-f> (Screen 2) shadow telescope's
 -- preview_scrolling_down/_left defaults in those pickers only; the session
--- switcher already shadows <C-f> the same way. <C-g> is free in telescope.
+-- switcher already shadows <C-f> the same way. <C-g> and <C-o> are free in
+-- telescope.
 --
 -- Jumping is the session switcher's own path, not a copy of it:
 -- flow:accept (fresh discovery re-resolve + act.decide) and then
@@ -100,6 +102,16 @@ local function trim(s)
   return t ~= "" and t or nil
 end
 
+local function picker_system(state)
+  local o = state.opts or {}
+  return o.system or (o.source_opts and o.source_opts.system) or vim.system
+end
+
+local function picker_env(state)
+  local o = state.opts or {}
+  return o.env or (o.source_opts and o.source_opts.env)
+end
+
 local function wake_mapping(state, _prompt_bufnr)
   return function()
     local entry = action_state.get_selected_entry()
@@ -107,8 +119,8 @@ local function wake_mapping(state, _prompt_bufnr)
       return true
     end
     local tag = entry.value.tag
-    local system = (state.opts and (state.opts.system or (state.opts.source_opts and state.opts.source_opts.system))) or vim.system
-    local env = state.opts and (state.opts.env or (state.opts.source_opts and state.opts.source_opts.env))
+    local system = picker_system(state)
+    local env = picker_env(state)
     local timeout = state.opts and (state.opts.wake_timeout_ms or (state.opts.source_opts and state.opts.source_opts.wake_timeout_ms))
     source.wake(system, tag, function(out, err)
       if not err and out and out.code == 0 and (not out.signal or out.signal == 0) then
@@ -130,6 +142,36 @@ local function wake_mapping(state, _prompt_bufnr)
         vim.notify(msg, vim.log.levels.WARN)
       end
     end, { env = env, timeout_ms = timeout })
+    return true
+  end
+end
+
+local function coord_mapping(state, prompt_bufnr)
+  return function()
+    local entry = action_state.get_selected_entry()
+    local prow = entry and entry.value
+    if not prow then
+      return true
+    end
+    local c = prow.coord or { state = "unsupported" }
+    if c.state == "none" or c.state == "unsupported" then
+      vim.notify(spec.coord_absent_message(prow.tag, c.state), vim.log.levels.INFO)
+      return true
+    end
+    actions.close(prompt_bufnr)
+    source.coordinator_id(picker_system(state), prow.tag, function(gid, err)
+      if err then
+        gid = c.goose_id
+      elseif not gid then
+        vim.notify(spec.coord_absent_message(prow.tag, "none"), vim.log.levels.INFO)
+        return
+      end
+      local row = (type(c.row) == "table" and c.row.id == model.coord_row_id(gid)) and c.row
+        or model.minimal_coord_row(prow.tag, gid)
+      state.controller:accept(row, function(desc)
+        switcher.dispatch(desc, row, state.client, state.opts)
+      end)
+    end, { env = picker_env(state) })
     return true
   end
 end
@@ -168,6 +210,7 @@ function M.programs(state, select_tag)
       end)
       map({ "i", "n" }, "<C-d>", digest_mapping(state, prompt_bufnr))
       map({ "i", "n" }, "<C-g>", wake_mapping(state, prompt_bufnr))
+      map({ "i", "n" }, "<C-o>", coord_mapping(state, prompt_bufnr))
       return true
     end,
   })
