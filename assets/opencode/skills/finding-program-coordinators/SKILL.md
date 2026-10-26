@@ -35,29 +35,30 @@ queried the registry.
 
 ## The lookup
 
-Run the bundled script. It is read-only:
+Run `coordinator`. It is on PATH on cloudbox and is read-only:
 
 ```bash
-~/.agents/skills/finding-program-coordinators/find-coordinator.py <tag>
-~/.agents/skills/finding-program-coordinators/find-coordinator.py --all
+coordinator <tag>
+coordinator --all
 ```
 
 | Output | Exit | Meaning |
 |---|---|---|
-| `<tag>  to=gse_…  heartbeat=on\|off` | 0 | `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
+| `<tag>  to=gse_…  heartbeat=on\|off` | 0 | Verified. `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
 | `<tag>: no bound coordinator`, or a line saying nothing reads the mailbox or pigeon can't route to it | 1 | Don't send. See "No coordinator found". |
 | `no stall-watch on THIS host…` | 2 | You are not on cloudbox. See "No coordinator found". |
+| An `error:` or `warning:` on stderr, with or without a `to=` line | 3 | The lookup failed or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once; if it still exits 3, tell the human what it printed. |
+| `coordinator: command not found` | 127 | The same as exit 2. Only cloudbox installs it. |
 
-A `warning:` on stderr means one cross-check was skipped, either because
-`programs.toml` was unreadable or because pigeon was unreachable. The id is
-still the registry's, but treat it as unverified.
+`--all` prints one line per bound program. It exits 0, or 3 when a cross-check was skipped and it printed a `to=` line anyway.
 
 What it checks: the registry is stall-watch's
 `~/.local/state/stall-watch/state.db`, table `program`, column `pigeon_session`.
-The coordinators' own `./sw peers` reads the same column. (`./sw` refuses to
-run outside its coordinator.) The script then checks the program is enabled
-and in tools mode in `programs.toml`, because a row can outlive its program.
-Last, it checks that pigeon `GET /sessions` has the id `running` with a
+The coordinators' own `./sw peers` reads the same column through the same code.
+(`./sw` refuses to run outside its coordinator.) `coordinator` then checks that
+the program is enabled and in tools mode in `programs.toml`, because a row can
+outlive its program, and that the stall-watch tick would actually drain the
+mailbox. Last, it checks that pigeon `GET /sessions` has the id `running` with a
 `swarm` mailbox. Every coordinator is registered there under the label
 `📋 <tag>`, with a working directory under
 `~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`.
@@ -98,8 +99,9 @@ the tag.
 
 ## No coordinator found
 
-Report the absence only after the lookup above says so on cloudbox: no row for
-the tag, `pigeon_session` empty, or the program disabled. Then **tell the
+Report the absence only after `coordinator` exits 1 on cloudbox: no row for
+the tag, `pigeon_session` empty, or nothing reads the mailbox. Exit 3 is not an
+absence. Then **tell the
 human** that program X has no bound coordinator, give the evidence (the query
 output), and wait for them to say where the finding should go.
 
