@@ -284,7 +284,6 @@ in
   #
   # What the tunnel actually serves is dashboard-managed and invisible to this
   # repo. As of 2026-09-24 it is:
-  #   boldco.mohrbacher.dev -> http://localhost:3000
   #   coffee.mohrbacher.dev -> http://127.0.0.1:18473
   #   http_status:404 catch-all
   # Every origin here must also be allowlisted in nixos-fw-cflared-lo below, or
@@ -298,7 +297,7 @@ in
   # Cloudflare Tunnel: Read. The API token in sops is 1001-denied on
   # /cfd_tunnel/{id}/configurations.
   systemd.services.cloudflared-tunnel = {
-    description = "Cloudflare Tunnel (devbox: boldco + coffee)";
+    description = "Cloudflare Tunnel (devbox: coffee)";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
@@ -1319,8 +1318,8 @@ Check:
   # ingress rule someone adds in the dashboard; default-deny means a new ingress
   # rule pointing anywhere else fails CLOSED (as a 502). Keep the allowlist
   # below in sync with the live ingress list (see the cloudflared-tunnel unit
-  # above for how to read it). Today: boldco -> localhost:3000 and
-  # coffee -> 127.0.0.1:18473.
+  # above for how to read it). Today: coffee -> 127.0.0.1:18473
+  # (boldco -> :3000 was retired 2026-10-26).
   #
   # `-o lo` rather than `-d 127.0.0.1/8`: the loopback INTERFACE also carries
   # traffic addressed to this host's own public IP (the hairpin path that made
@@ -1409,7 +1408,6 @@ Check:
       }
 
     # IPv4 allowlist, one ACCEPT per tunnel ingress rule (see comment above):
-    #   3000  boldco.mohrbacher.dev  -> http://localhost:3000
     #   18473 coffee.mohrbacher.dev  -> http://127.0.0.1:18473
     # coffee is pinned to 127.0.0.1 in BOTH the ingress rule and here, so it is
     # deliberately absent from the IPv6 chain below: cloudflared never dials
@@ -1418,7 +1416,6 @@ Check:
     # else binds the port is what coffee.mohrbacher.dev serves.
     { iptables -w -N nixos-fw-cflared-lo 2>/dev/null || true; } \
       && iptables -w -F nixos-fw-cflared-lo \
-      && iptables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT \
       && iptables -w -A nixos-fw-cflared-lo -d 127.0.0.1/32 -p tcp --dport 18473 -j ACCEPT \
       && iptables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset \
       && iptables -w -A nixos-fw-cflared-lo -j REJECT \
@@ -1439,7 +1436,6 @@ Check:
 
     { ip6tables -w -N nixos-fw-cflared-lo 2>/dev/null || true; } \
       && ip6tables -w -F nixos-fw-cflared-lo \
-      && ip6tables -w -A nixos-fw-cflared-lo -p tcp --dport 3000 -j ACCEPT \
       && ip6tables -w -A nixos-fw-cflared-lo -p tcp -j REJECT --reject-with tcp-reset \
       && ip6tables -w -A nixos-fw-cflared-lo -j REJECT \
       && { ip6tables -w -C OUTPUT -o lo -m owner --uid-owner cloudflared -j nixos-fw-cflared-lo 2>/dev/null \
