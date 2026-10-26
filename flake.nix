@@ -1809,20 +1809,20 @@
           echo "GATE FAILURE: session_switcher.spec did not report expected 914 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.model unit tests (136 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.model did not report expected 136 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.model unit tests (154 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.model did not report expected 154 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.spec unit tests (121 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 121 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.spec unit tests (148 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.spec did not report expected 148 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.source unit tests (91 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.source did not report expected 91 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.source unit tests (133 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.source did not report expected 133 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  stallwatch_picker\.init unit tests (65 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: stallwatch_picker.init did not report expected 65 assertions." >&2
+        grep -q '^PASS  stallwatch_picker\.init unit tests (154 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: stallwatch_picker.init did not report expected 154 assertions." >&2
           exit 1
         }
         touch $out

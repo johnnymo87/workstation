@@ -17,6 +17,8 @@ M.SEP = "│"
 M.NOT_ARMED_MARK = "[log-only]"
 M.NOT_ENABLED_MARK = "[disabled]"
 M.WAKE_PENDING_MARK = "⏳"
+M.COORD_MARK = { live = "●", dir_missing = "✗", unresolved = "?", none = "○", unsupported = "○" }
+M.COORD_PREVIEW_MAX = 20
 
 local function oneline(s)
   if type(s) == "string" then
@@ -72,6 +74,7 @@ end
 --- A missing last_run_at drops the "ran" part.
 function M.program_display(prow, now_ms)
   prow = type(prow) == "table" and prow or {}
+  local mark = type(prow.coord) == "table" and M.COORD_MARK[prow.coord.state]
   local tag = nonempty(prow.tag) or "(unnamed)"
   local parts = { tag, M.counts_text(prow.counts) }
   if type(prow.last_tick_ms) == "number" then
@@ -91,6 +94,9 @@ function M.program_display(prow, now_ms)
   end
   if prow.wake_pending == true then
     s = s .. " " .. M.WAKE_PENDING_MARK
+  end
+  if mark then
+    s = mark .. " " .. s
   end
   return s
 end
@@ -254,7 +260,72 @@ local function warn_suffix(warnings)
 end
 
 function M.programs_title(warnings)
-  return "Stall-watch programs" .. warn_suffix(warnings)
+  return "Stall-watch programs  <C-o> coordinator" .. warn_suffix(warnings)
+end
+
+function M.coord_absent_message(tag, state)
+  local t = nonempty(tag) or "(unnamed)"
+  if state == "unsupported" then
+    return "stall-watch: this stall-watch does not report coordinators (update it)"
+  end
+  return "stall-watch: no coordinator session bound for " .. t .. " (check its migration status)"
+end
+
+function M.last_assistant_text(doc)
+  local conv = type(doc) == "table" and doc.conversation
+  if type(conv) ~= "table" then return nil end
+  for i = #conv, 1, -1 do
+    local m = conv[i]
+    local meta = type(m) == "table" and type(m.metadata) == "table" and m.metadata or {}
+    if type(m) == "table" and m.role == "assistant" and meta.userVisible ~= false then
+      local parts = {}
+      for _, c in ipairs(type(m.content) == "table" and m.content or {}) do
+        if type(c) == "table" and c.type == "text" and type(c.text) == "string" and c.text:match("%S") then
+          table.insert(parts, c.text)
+        end
+      end
+      if #parts > 0 then return table.concat(parts, "\n") end
+    end
+  end
+  return nil
+end
+
+--- @param cached nil | { text = string|nil } | { err = string }
+function M.coord_block_lines(prow, now_ms, cached)
+  cached = type(cached) == "table" and cached or nil
+  local c = type(prow) == "table" and prow.coord
+  if type(c) ~= "table" then return {} end
+  local rule = string.rep("─", 48)
+  if c.state == "none" or c.state == "unsupported" then
+    return { "── no coordinator session ──", rule }
+  end
+  local head = "── coordinator goose:" .. tostring(c.goose_id)
+  if type(c.row) == "table" then
+    head = head .. " · " .. tostring(c.row.effective_state or "?")
+    if type(c.row.lastActivity) == "number" then
+      head = head .. " · " .. ss_spec.idle_age(c.row.lastActivity, now_ms) .. " ago"
+    end
+  elseif c.state == "unresolved" then
+    head = head .. " · state unknown"
+  end
+  local lines = { head .. " ──" }
+  if cached == nil then
+    table.insert(lines, "(loading…)")
+  elseif cached.err ~= nil and cached.err ~= vim.NIL then
+    table.insert(lines, "(transcript unavailable: " .. tostring(cached.err) .. ")")
+  elseif type(cached.text) ~= "string" or not cached.text:match("%S") then
+    table.insert(lines, "(no assistant message yet)")
+  else
+    local text = (cached.text:gsub("\r", ""):gsub("%s+$", ""))
+    local n = 0
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+      n = n + 1
+      if n > M.COORD_PREVIEW_MAX then table.insert(lines, "…"); break end
+      table.insert(lines, line)
+    end
+  end
+  table.insert(lines, rule)
+  return lines
 end
 
 --- @param view "flagged"|"all"

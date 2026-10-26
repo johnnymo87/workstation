@@ -5,6 +5,7 @@
   "programs": [
     {
       "tag": "alpha",
+      "coordinator": { "goose_id": "20990101_1" },
       "armed": true,
       "enabled": true,
       "last_tick_activity": "2026-01-01T11:48:00.000000+00:00",
@@ -78,6 +79,7 @@
     },
     {
       "tag": "beta",
+      "coordinator": { "goose_id": null },
       "top_fingerprint": "fp-beta-stalled",
       "top_reason": "Synthetic reason: oldest ask in the program.",
       "armed": false,

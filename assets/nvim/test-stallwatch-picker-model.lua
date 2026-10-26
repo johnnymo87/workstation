@@ -237,9 +237,9 @@ end
 do
   local u = model.union_ids(doc, TAGGED)
   check(table.concat(u, ",") ==
-    "ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1,ses_fixture_t2",
+    "goose:20990101_1,ses_fixture_a1,ses_fixture_a2,ses_fixture_arch,ses_fixture_gone,ses_fixture_b1,ses_fixture_t1,ses_fixture_t2",
     "union: item ids then tagged ids, deduped, got " .. table.concat(u, ","))
-  check(#model.union_ids(doc, nil) == 5, "no tagged map -> item ids only")
+  check(#model.union_ids(doc, nil) == 6, "no tagged map -> item ids only")
 end
 
 -- 8. SUBAGENT CHILD -> ROOT mapping via matched_ids.
@@ -331,6 +331,46 @@ do
     "all view: top first, flagged in CLI order, then tagged, got " .. ids(all))
   local noprow = model.flagged_rows({ items = { i1, i3 } }, {})
   check(ids(noprow) == "ses_fixture_t_a,ses_fixture_t_c", "no top on the row -> order untouched")
+end
+
+-- coord state: decided by what <C-o> will do (design §2).
+do
+  local live_row = { id = "goose:20990101_1", dir_missing = false }
+  local gone_row = { id = "goose:20990101_2", dir_missing = true }
+  local by_id = { ["goose:20990101_1"] = live_row, ["goose:20990101_2"] = gone_row }
+  local function st(p) return model.coord_of(p, by_id).state end
+  check(st({ tag = "a", coordinator = { goose_id = "20990101_1" } }) == "live", "joined + dir present -> live")
+  check(st({ tag = "a", coordinator = { goose_id = "20990101_2" } }) == "dir_missing", "joined + dir_missing -> dir_missing")
+  check(st({ tag = "a", coordinator = { goose_id = "20990101_9" } }) == "unresolved", "id not in rows -> unresolved")
+  check(st({ tag = "a", coordinator = {} }) == "none", "null goose_id (luanil -> nil) -> none")
+  check(st({ tag = "a", coordinator = { goose_id = "" } }) == "none", "empty goose_id -> none")
+  check(st({ tag = "a" }) == "unsupported", "absent key -> unsupported")
+  check(model.coord_of({ coordinator = vim.NIL }, {}).state == "unsupported", "vim.NIL coordinator -> unsupported")
+  check(model.coord_of({ coordinator = { goose_id = vim.NIL } }, {}).state == "none", "vim.NIL goose_id -> none")
+  check(model.coord_of({ tag = "a", coordinator = { goose_id = "20990101_1" } }, by_id).row == live_row, "live carries its joined row")
+  check(model.coord_of({ tag = "a", coordinator = { goose_id = "20990101_1" } }, nil).state == "unresolved", "no rows at all -> unresolved, never live")
+  check(model.coord_row_id("20990101_1") == "goose:20990101_1", "coord_row_id prefixes goose:")
+  local m = model.minimal_coord_row("alpha", "20990101_1")
+  check(m.id == "goose:20990101_1" and m.title == "📋 alpha" and m.dir_missing == nil, "minimal row: id + title, no dir claim")
+end
+
+-- program_rows carries coord; union_ids includes coordinator ids once.
+do
+  local d = { programs = {
+    { tag = "alpha", coordinator = { goose_id = "20990101_1" }, items = {} },
+    { tag = "beta", coordinator = { goose_id = "20990101_1" }, items = {} }, -- same id twice
+  } }
+  local pr = model.program_rows(d, {})
+  check(pr[1].coord.state == "unresolved" and pr[1].coord.goose_id == "20990101_1", "program_rows sets coord")
+  local coord_table = { id = "goose:20990101_1", dir_missing = false }
+  local pr_live = model.program_rows(d, { ["goose:20990101_1"] = coord_table })
+  check(pr_live[1].coord.state == "live", "program_rows with live coordinator in by_id -> live")
+  check(pr_live[1].coord.row == coord_table, "program_rows coord.row is that table")
+  local ids = model.union_ids(d, {})
+  local n = 0
+  for _, x in ipairs(ids) do if x == "goose:20990101_1" then n = n + 1 end end
+  check(n == 1, "union_ids includes a coordinator id exactly once")
+  check(model.program_rows(d)[1].coord.state == "unresolved", "program_rows(doc) without by_id still works") -- old call shape
 end
 
 print("LUA_TEST_OK " .. N)

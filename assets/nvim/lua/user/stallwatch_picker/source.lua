@@ -18,6 +18,7 @@
 -- session_switcher/cli.lua.
 
 local model = require("user.stallwatch_picker.model")
+local spec = require("user.stallwatch_picker.spec")
 local cli = require("user.session_switcher.cli")
 
 local M = {}
@@ -30,6 +31,8 @@ M.ITEMS_TIMEOUT_MS = 5000
 M.TAGS_TIMEOUT_MS = 5000
 M.LIST_TIMEOUT_MS = 5000
 M.WAKE_TIMEOUT_MS = 5000
+M.EXPORT_TIMEOUT_MS = 3000
+M.REREAD_TIMEOUT_MS = 5000
 M.BUSY_MESSAGE = "stall-watch busy, retry"
 
 --- Absolute path of the read command: $STALLWATCH_ITEMS_CMD, else the default.
@@ -268,6 +271,76 @@ function M.fetch(opts, cb)
         end
       end)
     end
+  end)
+end
+
+--- Keypress-time re-read of the program's current coordinator goose_id.
+--- @param system function vim.system seam
+--- @param tag string program tag
+--- @param cb function(goose_id|nil, err|nil) called via vim.schedule
+--- @param opts table|nil { env?: table, timeout_ms?: integer }
+function M.coordinator_id(system, tag, cb, opts)
+  opts = opts or {}
+  local cmd = M.items_cmd(opts.env)
+  local argv = { cmd, "--json" }
+  local timeout = opts.timeout_ms or M.REREAD_TIMEOUT_MS
+  M.run(system, argv, timeout, function(out, err)
+    if err then
+      return cb(nil, err)
+    end
+    local doc, derr = M.decode_items(out)
+    if derr then
+      return cb(nil, derr)
+    end
+    local programs = (type(doc) == "table" and type(doc.programs) == "table") and doc.programs or {}
+    for _, p in ipairs(programs) do
+      if type(p) == "table" and p.tag == tag then
+        if type(p.coordinator) ~= "table" then
+          return cb(nil, { kind = "missing" })
+        end
+        local gid = p.coordinator.goose_id
+        return cb((type(gid) == "string" and gid ~= "") and gid or nil, nil)
+      end
+    end
+    cb(nil, { kind = "missing" })
+  end)
+end
+
+--- Transcript export used by the coordinator preview.
+--- @param system function vim.system seam
+--- @param goose_id string goose session id
+--- @param cb function(res: { text?: string|nil, err?: string }) called via vim.schedule
+--- @param opts table|nil { timeout_ms?: integer }
+function M.export(system, goose_id, cb, opts)
+  opts = opts or {}
+  if type(goose_id) ~= "string" or goose_id == "" then
+    vim.schedule(function()
+      cb({ err = "no session id" })
+    end)
+    return
+  end
+  local argv = { "goose", "session", "export", "--session-id", goose_id, "--format", "json" }
+  local timeout = opts.timeout_ms or M.EXPORT_TIMEOUT_MS
+  M.run(system, argv, timeout, function(out, err)
+    if err then
+      return cb({ err = err.kind == "timeout" and "timed out" or (err.message or tostring(err.kind)) })
+    end
+    out = type(out) == "table" and out or {}
+    if (out.code and out.code ~= 0) or (out.signal and out.signal ~= 0) then
+      local last
+      for l in tostring(out.stderr or ""):gmatch("[^\r\n]+") do
+        local trimmed = trim(l)
+        if trimmed then
+          last = trimmed
+        end
+      end
+      return cb({ err = last or ("exit " .. tostring(out.code or out.signal)) })
+    end
+    local ok, doc = pcall(vim.json.decode, out.stdout or "", { luanil = { object = true, array = true } })
+    if not ok or type(doc) ~= "table" then
+      return cb({ err = "unparseable export" })
+    end
+    cb({ text = spec.last_assistant_text(doc) })
   end)
 end
 

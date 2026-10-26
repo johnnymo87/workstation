@@ -18,6 +18,8 @@ local flow = loadfile("assets/nvim/lua/user/session_switcher/flow.lua")()
 package.preload["user.session_switcher.flow"] = function() return flow end
 local cli = loadfile("assets/nvim/lua/user/session_switcher/cli.lua")()
 package.preload["user.session_switcher.cli"] = function() return cli end
+local act = loadfile("assets/nvim/lua/user/session_switcher/act.lua")()
+package.preload["user.session_switcher.act"] = function() return act end
 
 -- exec: only tmux_client and notify_warnings are reached from this layer.
 local tmux_calls = 0
@@ -46,8 +48,16 @@ package.preload["user.stallwatch_picker.source"] = function()
     wake = source.wake,
     wake_cmd = source.wake_cmd,
     run = source.run,
+    coordinator_id = source.coordinator_id,
+    items_cmd = source.items_cmd,
+    decode_items = source.decode_items,
     WAKE_ENV = source.WAKE_ENV,
     DEFAULT_WAKE_CMD = source.DEFAULT_WAKE_CMD,
+    ENV = source.ENV,
+    DEFAULT_CMD = source.DEFAULT_CMD,
+    REREAD_TIMEOUT_MS = source.REREAD_TIMEOUT_MS,
+    export = source.export,
+    EXPORT_TIMEOUT_MS = source.EXPORT_TIMEOUT_MS,
   }
 end
 
@@ -114,7 +124,11 @@ local ctrl = { accept = function(_, row, cb) table.insert(accepted, row); cb({ k
 
 -- 1. OPEN: fetch once, capture tmux client once, Screen 1 with source order.
 local fetch_calls = 0
-init.open({ flow = ctrl, fetch = function(_o, cb) fetch_calls = fetch_calls + 1; cb(SNAP, nil) end })
+init.open({
+  flow = ctrl,
+  fetch = function(_o, cb) fetch_calls = fetch_calls + 1; cb(SNAP, nil) end,
+  system = function() return { pid = 1, kill = function() end } end,
+})
 check(fetch_calls == 1, "snapshot fetched once at open")
 check(tmux_calls == 1, "tmux client captured once at open")
 check(#new_calls == 1 and new_calls[1].found, "Screen 1 opened")
@@ -124,7 +138,7 @@ check(s1.defaults.sorting_strategy == "descending", "Screen 1 uses the switcher'
 check(s1.defaults.default_selection_index == nil, "first open forces no selection")
 check(s1.defaults.sorter and s1.defaults.sorter.stub == "sorter", "a real sorter reaches pickers.new (else no filtering)")
 check(s1.defaults.previewer and s1.defaults.previewer.stub == "previewer", "previewer wired")
-check(s1.prompt_title == "Stall-watch programs [⚠ 1]", "partial failure shows ⚠ in the title")
+check(s1.prompt_title == "Stall-watch programs  <C-o> coordinator [⚠ 1]", "partial failure shows ⚠ in the title")
 check(#notified == 1, "warnings notified once")
 
 -- previewer writes the program's lines into the preview buffer.
@@ -132,7 +146,8 @@ do
   local buf = vim.api.nvim_create_buf(false, true)
   s1.defaults.previewer.define_preview({ state = { bufnr = buf } }, { value = s1.defaults.finder.results[1] })
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  check(lines[1]:find("^%[decision%]") ~= nil, "program previewer renders items")
+  check(lines[1]:find("coordinator goose:20990101_1", 1, true) ~= nil and lines[4]:find("^%[decision%]") ~= nil,
+    "program previewer renders coordinator block above items")
 end
 
 -- previewers soft-wrap long item text at word boundaries (both screens).
@@ -339,6 +354,543 @@ do
   check(#closed == closed_before, "picker stays open on timeout")
 
   vim.notify = orig_notify
+end
+
+-- 9. <C-o> coordinator mapping
+do
+  local test_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = { goose_id = "20990101_1" }, items = {} },
+      { tag = "beta", coordinator = {}, items = {} },
+      { tag = "gamma", coordinator = { goose_id = "20990101_2" }, items = {} },
+      { tag = "delta", coordinator = { goose_id = "20990101_3" }, items = {} },
+      { tag = "epsilon", items = {} }, -- coordinator key absent -> unsupported
+    },
+  }
+  local test_rows = {
+    { id = "goose:20990101_1", title = "Coord Alpha", directory = "/fixture/alpha/coord", dir_missing = false },
+    { id = "goose:20990101_3", title = "Coord Delta", directory = "/fixture/delta/coord", dir_missing = true },
+  }
+  local test_snap = {
+    doc = test_doc,
+    tagged = { alpha = {}, beta = {}, gamma = {}, delta = {}, epsilon = {} },
+    rows = test_rows,
+    warnings = {},
+  }
+
+  local shared_order_log = {}
+  local spawn_calls = {}
+  local fake_sys_response
+  local fake_sys = function(argv, _o, on_exit)
+    table.insert(spawn_calls, argv)
+    table.insert(shared_order_log, { event = "spawn", argv = argv })
+    local resp = fake_sys_response or { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+    vim.schedule(function()
+      on_exit(resp)
+    end)
+    return { pid = 1, kill = function() end }
+  end
+
+  local notify_calls = {}
+  local orig_notify = vim.notify
+  vim.notify = function(msg, level)
+    table.insert(notify_calls, { msg = msg, level = level })
+  end
+
+  local orig_close = stub_actions.close
+  stub_actions.close = function(bufnr)
+    table.insert(shared_order_log, { event = "close", bufnr = bufnr })
+    orig_close(bufnr)
+  end
+
+  local coord_accepted = {}
+  local coord_ctrl = {
+    accept = function(_, row, cb)
+      table.insert(coord_accepted, row)
+      cb({ kind = "attach", sid = row.id })
+    end,
+  }
+
+  init.open({
+    flow = coord_ctrl,
+    fetch = function(_o, cb) cb(test_snap, nil) end,
+    system = fake_sys,
+  })
+
+  local coord_picker = new_calls[#new_calls]
+  local prompt_bufnr = 150
+  local cm = mappings_of(coord_picker, prompt_bufnr)
+
+  -- 1. Screen 1 maps <C-o> (i and n).
+  check(cm["<C-o>"] ~= nil, "Screen 1 maps <C-o>")
+  check(vim.tbl_contains(cm["<C-o>"].modes, "i") and vim.tbl_contains(cm["<C-o>"].modes, "n"),
+    "Screen 1 maps <C-o> in insert and normal mode")
+
+  local prows = coord_picker.defaults.finder.results
+
+  -- 2. On beta (none): exactly one notify containing 'no coordinator session bound for beta';
+  --    the picker is NOT closed (actions.close not called); fake system saw no spawn.
+  local closed_before = #closed
+  local spawn_before = #spawn_calls
+  local notify_before = #notify_calls
+  selected_entry = { value = prows[2] } -- beta
+  cm["<C-o>"].fn()
+  check(#notify_calls == notify_before + 1, "beta (none): exactly one notify")
+  check(notify_calls[#notify_calls].msg:find("no coordinator session bound for beta", 1, true) ~= nil,
+    "beta notify says 'no coordinator session bound for beta'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "beta notify is INFO")
+  check(#closed == closed_before, "beta (none): picker is NOT closed")
+  check(#spawn_calls == spawn_before, "beta (none): fake system saw no spawn")
+
+  -- 3. On alpha (live), with fake system answering items.sh with alpha-bound doc:
+  --    actions.close is called BEFORE items.sh spawn (record order in one shared log);
+  --    ctrl.accept receives the snapshot's joined row (same table, rawequal);
+  --    dispatched has sid == "goose:20990101_1".
+  shared_order_log = {}
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[1] } -- alpha
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 1 end)
+  check(#shared_order_log >= 2, "alpha (live): close and spawn logged")
+  check(shared_order_log[1].event == "close" and shared_order_log[2].event == "spawn",
+    "alpha (live): actions.close is called BEFORE items.sh spawn")
+  check(shared_order_log[1].bufnr == prompt_bufnr, "actions.close called with prompt_bufnr")
+  check(#coord_accepted == 1, "alpha (live): ctrl.accept called once")
+  check(rawequal(coord_accepted[1], test_rows[1]), "alpha (live): ctrl.accept receives snapshot's joined row (rawequal)")
+  check(dispatched[#dispatched] ~= nil and dispatched[#dispatched].desc.sid == "goose:20990101_1",
+    "alpha (live): dispatched sid == goose:20990101_1")
+  check(dispatched[#dispatched].row.id == "goose:20990101_1",
+    "alpha (live): dispatched row.id == goose:20990101_1")
+
+  -- 4. Re-read returns a different id (20990101_7) ->
+  --    accept receives a row equal to model.minimal_coord_row("alpha", "20990101_7") (compare fields).
+  local diff_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = { goose_id = "20990101_7" } },
+    },
+  }
+  fake_sys_response = { code = 0, stdout = vim.json.encode(diff_doc), stderr = "" }
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 2 end)
+  check(#coord_accepted == 2, "re-read different id: accept called")
+  local exp_diff = model.minimal_coord_row("alpha", "20990101_7")
+  check(coord_accepted[2].id == exp_diff.id and coord_accepted[2].title == exp_diff.title,
+    "re-read different id -> minimal row matching 20990101_7")
+  check(not rawequal(coord_accepted[2], test_rows[1]),
+    "re-read different id -> not the snapshot row")
+
+  -- 5. Re-read fails (items exits 1) -> accept receives the snapshot row for 20990101_1.
+  fake_sys_response = { code = 1, stdout = "", stderr = "read error" }
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 3 end)
+  check(#coord_accepted == 3, "re-read fails: accept called")
+  check(rawequal(coord_accepted[3], test_rows[1]),
+    "re-read fails -> accept receives snapshot row for 20990101_1 (rawequal)")
+
+  -- 6. Re-read returns unbound -> a notify follows, no accept, and the picker was already closed.
+  local unbound_doc = {
+    version = 1,
+    programs = {
+      { tag = "alpha", coordinator = {} },
+    },
+  }
+  fake_sys_response = { code = 0, stdout = vim.json.encode(unbound_doc), stderr = "" }
+  closed_before = #closed
+  notify_before = #notify_calls
+  local accept_before = #coord_accepted
+  selected_entry = { value = prows[1] }
+  cm["<C-o>"].fn()
+  check(#closed == closed_before + 1, "re-read returns unbound: picker was already closed")
+  vim.wait(200, function() return #notify_calls > notify_before end)
+  check(#notify_calls == notify_before + 1, "re-read returns unbound: a notify follows")
+  check(notify_calls[#notify_calls].msg:find("no coordinator session bound for alpha", 1, true) ~= nil,
+    "unbound notify contains 'no coordinator session bound for alpha'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "unbound notify is INFO")
+  check(#coord_accepted == accept_before, "re-read returns unbound: no accept")
+
+  -- 7. unresolved (alpha/gamma bound but not in rows) -> still accepts and dispatches a minimal row.
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[3] } -- gamma
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 4 end)
+  check(#coord_accepted == 4, "unresolved: accept called")
+  local exp_gamma = model.minimal_coord_row("gamma", "20990101_2")
+  check(coord_accepted[4].id == exp_gamma.id and coord_accepted[4].title == exp_gamma.title,
+    "unresolved -> minimal row matches gamma 20990101_2")
+  check(dispatched[#dispatched] ~= nil and dispatched[#dispatched].desc.sid == "goose:20990101_2",
+    "unresolved -> dispatched sid == goose:20990101_2")
+
+  -- 8. dir_missing: run the REAL require("user.session_switcher.act").decide(row, nil) on the accepted row
+  --    (snapshot row with dir_missing=true) and expect kind == "refuse_dir_missing".
+  fake_sys_response = { code = 0, stdout = vim.json.encode(test_doc), stderr = "" }
+  selected_entry = { value = prows[4] } -- delta
+  cm["<C-o>"].fn()
+  vim.wait(200, function() return #coord_accepted == 5 end)
+  check(#coord_accepted == 5, "dir_missing: accept called")
+  check(rawequal(coord_accepted[5], test_rows[2]), "dir_missing: accept receives snapshot row")
+  local real_act = require("user.session_switcher.act")
+  local act_desc = real_act.decide(coord_accepted[5], nil)
+  check(type(act_desc) == "table" and act_desc.kind == "refuse_dir_missing",
+    "dir_missing: real act.decide yields kind == refuse_dir_missing")
+
+  -- 9. unsupported (coordinator key absent): notify contains "does not report coordinators", no close, no spawn.
+  closed_before = #closed
+  spawn_before = #spawn_calls
+  notify_before = #notify_calls
+  selected_entry = { value = prows[5] } -- epsilon
+  cm["<C-o>"].fn()
+  check(#notify_calls == notify_before + 1, "unsupported: exactly one notify")
+  check(notify_calls[#notify_calls].msg:find("does not report coordinators", 1, true) ~= nil,
+    "unsupported: notify contains 'does not report coordinators'")
+  check(notify_calls[#notify_calls].level == vim.log.levels.INFO, "unsupported notify is INFO")
+  check(#closed == closed_before, "unsupported: picker is NOT closed")
+  check(#spawn_calls == spawn_before, "unsupported: no spawn")
+
+  -- 10. Across every case, no spawn whose argv[1] ends in wake.sh, and no spawn other than items.sh.
+  check(#spawn_calls > 0, "fake system was called for items.sh re-reads")
+  for _, argv in ipairs(spawn_calls) do
+    check(not tostring(argv[1]):match("wake%.sh$"), "fake system: no spawn ends in wake.sh")
+    check(tostring(argv[1]):match("items%.sh$") ~= nil or argv[2] == "--json",
+      "fake system: no spawn other than items.sh")
+  end
+
+  stub_actions.close = orig_close
+  vim.notify = orig_notify
+end
+
+-- 10. Screen 1 async coordinator preview
+do
+  local orig_debounce = init.PREVIEW_DEBOUNCE_MS
+  init.PREVIEW_DEBOUNCE_MS = 20
+
+  local export_doc = {
+    conversation = {
+      {
+        role = "assistant",
+        content = {
+          { type = "text", text = "Coordinator assistant message for alpha" },
+        },
+      },
+    },
+  }
+  local export_json = vim.json.encode(export_doc)
+
+  local alpha_prog = {
+    tag = "alpha",
+    coord = {
+      state = "live",
+      goose_id = "20990101_1",
+      row = { effective_state = "idle", lastActivity = os.time() * 1000 - 60000 },
+    },
+    items = {
+      { kind = "decision", text = "Fix the widget", status = "open", sessions = {} },
+    },
+  }
+
+  local beta_prog = {
+    tag = "beta",
+    coord = { state = "none" },
+    items = {
+      { kind = "review", text = "Review the patch", status = "open", sessions = {} },
+    },
+  }
+
+  local gamma_prog = {
+    tag = "gamma",
+    coord = {
+      state = "live",
+      goose_id = "20990101_3",
+      row = { effective_state = "working" },
+    },
+    items = {
+      { kind = "question", text = "Is this broken?", status = "open", sessions = {} },
+    },
+  }
+
+  local all_spawns = {}
+  local goose_spawns = {}
+  local pending_replies = {}
+  local fake_sys = function(argv, _o, on_exit)
+    table.insert(all_spawns, argv)
+    if argv[1] == "goose" then
+      local call = { argv = argv, on_exit = on_exit }
+      table.insert(goose_spawns, call)
+      local reply_fn = pending_replies[argv[5]]
+      if reply_fn then
+        reply_fn(on_exit)
+      else
+        vim.schedule(function()
+          on_exit({ code = 0, signal = 0, stdout = export_json, stderr = "" })
+        end)
+      end
+    end
+    return { pid = 1, kill = function() end }
+  end
+
+  local test_ctrl = { accept = function() end }
+  local test_state = {
+    snap = {
+      doc = {
+        programs = {
+          { tag = "alpha", coordinator = { goose_id = "20990101_1" } },
+          { tag = "beta", coordinator = { goose_id = nil } },
+          { tag = "gamma", coordinator = { goose_id = "20990101_3" } },
+        },
+      },
+      rows = {},
+      tagged = {},
+      warnings = {},
+    },
+    prows = { alpha_prog, beta_prog, gamma_prog },
+    by_id = {},
+    client = "client_fixture",
+    controller = test_ctrl,
+    opts = { system = fake_sys },
+    coord_cache = {},
+    coord_inflight = {},
+    preview = nil,
+  }
+
+  local picker1 = init.programs(test_state, nil)
+  local previewer = picker1.defaults.previewer
+
+  -- 1. Select alpha (live): buffer immediately shows "(loading…)" above items.
+  -- After debounce + reply, exactly one goose spawn happened, buffer shows extracted text,
+  -- and item lines are still below.
+  local buf1 = vim.api.nvim_create_buf(false, true)
+  previewer.define_preview({ state = { bufnr = buf1 } }, { value = alpha_prog })
+
+  local lines_imm = vim.api.nvim_buf_get_lines(buf1, 0, -1, false)
+  check(#lines_imm >= 4, "alpha preview immediately has lines")
+  check(lines_imm[1]:find("coordinator goose:20990101_1", 1, true) ~= nil, "alpha preview header shows goose id")
+  check(lines_imm[2] == "(loading…)", "alpha preview line 2 is (loading…)")
+  check(lines_imm[4]:find("^%[decision%]") ~= nil, "alpha preview line 4 has decision item")
+  check(#goose_spawns == 0, "no goose spawn before debounce window")
+
+  vim.wait(500, function() return #goose_spawns == 1 end, 5)
+  check(#goose_spawns == 1, "exactly one goose spawn after debounce")
+  check(goose_spawns[1].argv[1] == "goose" and goose_spawns[1].argv[3] == "export" and goose_spawns[1].argv[5] == "20990101_1",
+    "goose export argv has correct session id")
+
+  vim.wait(500, function()
+    local l = vim.api.nvim_buf_get_lines(buf1, 0, -1, false)
+    return l[2] ~= "(loading…)"
+  end, 5)
+  local lines_done = vim.api.nvim_buf_get_lines(buf1, 0, -1, false)
+  check(lines_done[2] == "Coordinator assistant message for alpha", "alpha preview line 2 shows extracted text")
+  check(lines_done[4]:find("^%[decision%]") ~= nil, "alpha preview items still below")
+
+  -- 2. Debounce: select alpha, then beta, then alpha within debounce window -> exactly 1 export spawn for alpha.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local buf2_a = vim.api.nvim_create_buf(false, true)
+  local buf2_b = vim.api.nvim_create_buf(false, true)
+  local buf2_c = vim.api.nvim_create_buf(false, true)
+
+  previewer.define_preview({ state = { bufnr = buf2_a } }, { value = alpha_prog })
+  previewer.define_preview({ state = { bufnr = buf2_b } }, { value = beta_prog })
+  previewer.define_preview({ state = { bufnr = buf2_c } }, { value = alpha_prog })
+
+  vim.wait(500, function() return #goose_spawns > 0 end, 5)
+  vim.wait(80, function() return false end, 10) -- wait extra past debounce
+  check(#goose_spawns == 1, "debounce: exactly one export spawn for alpha")
+  check(goose_spawns[1].argv[5] == "20990101_1", "debounce: spawn was for alpha")
+  vim.wait(500, function()
+    local l = vim.api.nvim_buf_get_lines(buf2_c, 0, -1, false)
+    return l[2] ~= "(loading…)"
+  end, 5)
+  local lines_2c = vim.api.nvim_buf_get_lines(buf2_c, 0, -1, false)
+  check(lines_2c[2] == "Coordinator assistant message for alpha", "debounce: final buffer updated")
+
+  -- 2b. Debounce coalescing across different programs: select alpha, then gamma within debounce window
+  -- -> exactly 1 export spawn for gamma.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local buf2b_a = vim.api.nvim_create_buf(false, true)
+  local buf2b_g = vim.api.nvim_create_buf(false, true)
+
+  previewer.define_preview({ state = { bufnr = buf2b_a } }, { value = alpha_prog })
+  previewer.define_preview({ state = { bufnr = buf2b_g } }, { value = gamma_prog })
+
+  vim.wait(80, function() return false end, 10) -- wait past debounce
+  check(#goose_spawns == 1, "debounce coalescing: exactly one export spawn for alpha -> gamma")
+  check(goose_spawns[1].argv[5] == "20990101_3", "debounce coalescing: spawn was for gamma")
+
+  -- 2c. Debounce timer after picker close: telescope teardown sets self.state.bufnr = nil
+  -- (and deletes the buffers). fire() must not spawn goose session export.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local fake_close_self = { state = { bufnr = vim.api.nvim_create_buf(false, true) } }
+  previewer.define_preview(fake_close_self, { value = alpha_prog })
+  fake_close_self.state.bufnr = nil
+  vim.wait(80, function() return false end, 10)
+  check(#goose_spawns == 0, "debounce timer aborted on picker close: zero goose spawns")
+
+  -- Also verify deleted buffer before debounce elapses: zero goose spawns.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local buf_invalid = vim.api.nvim_create_buf(false, true)
+  local fake_invalid_self = { state = { bufnr = buf_invalid } }
+  previewer.define_preview(fake_invalid_self, { value = alpha_prog })
+  vim.api.nvim_buf_delete(buf_invalid, { force = true })
+  vim.wait(80, function() return false end, 10)
+  check(#goose_spawns == 0, "debounce timer aborted on invalid buffer: zero goose spawns")
+
+  -- 3. Dedupe + render-on-completion: select alpha (export hangs), wait past debounce (spawn #1),
+  -- move to beta, move back to alpha with a NEW scratch bufnr, wait past debounce again ->
+  -- still exactly one spawn; release the hang -> text lands in the NEW buffer.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local alpha_hung_exit
+  pending_replies["20990101_1"] = function(on_exit)
+    alpha_hung_exit = on_exit
+  end
+
+  local buf3_old = vim.api.nvim_create_buf(false, true)
+  local buf3_beta = vim.api.nvim_create_buf(false, true)
+  local buf3_new = vim.api.nvim_create_buf(false, true)
+
+  previewer.define_preview({ state = { bufnr = buf3_old } }, { value = alpha_prog })
+  vim.wait(500, function() return #goose_spawns == 1 end, 5)
+  check(#goose_spawns == 1, "alpha export spawned while hanging")
+  check(alpha_hung_exit ~= nil, "alpha reply callback captured")
+
+  previewer.define_preview({ state = { bufnr = buf3_beta } }, { value = beta_prog })
+  previewer.define_preview({ state = { bufnr = buf3_new } }, { value = alpha_prog })
+
+  vim.wait(80, function() return false end, 10) -- wait past debounce again
+  check(#goose_spawns == 1, "still exactly one spawn while alpha in flight")
+
+  -- Release hang
+  local rel_exit = alpha_hung_exit
+  alpha_hung_exit = nil
+  pending_replies["20990101_1"] = nil
+  vim.schedule(function()
+    rel_exit({ code = 0, signal = 0, stdout = export_json, stderr = "" })
+  end)
+
+  vim.wait(500, function()
+    local l = vim.api.nvim_buf_get_lines(buf3_new, 0, -1, false)
+    return l[2] ~= "(loading…)"
+  end, 5)
+  local lines_3new = vim.api.nvim_buf_get_lines(buf3_new, 0, -1, false)
+  check(lines_3new[2] == "Coordinator assistant message for alpha", "text landed in the NEW buffer")
+
+  local lines_3old = vim.api.nvim_buf_get_lines(buf3_old, 0, -1, false)
+  check(lines_3old[2] == "(loading…)", "old buffer was not overwritten")
+
+  -- 4. Moving away before completion: alpha export hangs, move to beta (beta buffer), release ->
+  -- result cached (later selecting alpha renders text immediately with no new spawn), and beta
+  -- buffer is not overwritten with alpha's text.
+  test_state.coord_cache = {}
+  test_state.coord_inflight = {}
+  test_state.preview = nil
+  goose_spawns = {}
+
+  local alpha4_exit
+  pending_replies["20990101_1"] = function(on_exit)
+    alpha4_exit = on_exit
+  end
+
+  local buf4_alpha = vim.api.nvim_create_buf(false, true)
+  local buf4_beta = vim.api.nvim_create_buf(false, true)
+
+  previewer.define_preview({ state = { bufnr = buf4_alpha } }, { value = alpha_prog })
+  vim.wait(500, function() return #goose_spawns == 1 end, 5)
+  check(#goose_spawns == 1, "alpha export spawned")
+
+  previewer.define_preview({ state = { bufnr = buf4_beta } }, { value = beta_prog })
+
+  -- Release
+  local r4 = alpha4_exit
+  alpha4_exit = nil
+  pending_replies["20990101_1"] = nil
+  vim.schedule(function()
+    r4({ code = 0, signal = 0, stdout = export_json, stderr = "" })
+  end)
+
+  vim.wait(500, function() return test_state.coord_cache["20990101_1"] ~= nil end, 5)
+  check(test_state.coord_cache["20990101_1"] ~= nil, "alpha result cached despite moving away")
+
+  -- Beta buffer is not overwritten with alpha's text
+  local lines_4b = vim.api.nvim_buf_get_lines(buf4_beta, 0, -1, false)
+  check(lines_4b[1]:find("no coordinator session", 1, true) ~= nil, "beta buffer preserved header")
+  check(lines_4b[3]:find("^%[review%]") ~= nil, "beta buffer preserved items")
+
+  -- Later selecting alpha renders immediately with no new spawn
+  local spawns_before_4 = #goose_spawns
+  local buf4_alpha_later = vim.api.nvim_create_buf(false, true)
+  previewer.define_preview({ state = { bufnr = buf4_alpha_later } }, { value = alpha_prog })
+  local lines_4later = vim.api.nvim_buf_get_lines(buf4_alpha_later, 0, -1, false)
+  check(lines_4later[2] == "Coordinator assistant message for alpha", "later select renders cached text immediately")
+  check(#goose_spawns == spawns_before_4, "no new spawn when cached")
+
+  -- 5. Cache across <C-b>: after alpha's text is cached, call M.programs(state, "alpha") again
+  -- (fresh previewer) and preview alpha -> no new spawn, text shown immediately.
+  local picker2 = init.programs(test_state, "alpha")
+  local previewer2 = picker2.defaults.previewer
+  local spawns_before_5 = #goose_spawns
+  local buf5 = vim.api.nvim_create_buf(false, true)
+  previewer2.define_preview({ state = { bufnr = buf5 } }, { value = alpha_prog })
+  check(#goose_spawns == spawns_before_5, "cache across <C-b>: no new spawn")
+  local lines_5 = vim.api.nvim_buf_get_lines(buf5, 0, -1, false)
+  check(lines_5[2] == "Coordinator assistant message for alpha", "cache across <C-b>: text shown immediately")
+
+  -- 6. A none program never spawns an export (even after waiting past debounce).
+  local buf6 = vim.api.nvim_create_buf(false, true)
+  local spawns_before_6 = #goose_spawns
+  previewer.define_preview({ state = { bufnr = buf6 } }, { value = beta_prog })
+  vim.wait(80, function() return false end, 10)
+  check(#goose_spawns == spawns_before_6, "none program never spawns an export")
+  local lines_6 = vim.api.nvim_buf_get_lines(buf6, 0, -1, false)
+  check(lines_6[1]:find("no coordinator session", 1, true) ~= nil, "none shows no coordinator session")
+
+  -- 7. Export failure (exit 1, stderr "boom") shows "(transcript unavailable: boom)" and item lines are still present.
+  pending_replies["20990101_3"] = function(on_exit)
+    vim.schedule(function()
+      on_exit({ code = 1, signal = 0, stdout = "", stderr = "boom\n" })
+    end)
+  end
+  local buf7 = vim.api.nvim_create_buf(false, true)
+  previewer.define_preview({ state = { bufnr = buf7 } }, { value = gamma_prog })
+  local lines_7imm = vim.api.nvim_buf_get_lines(buf7, 0, -1, false)
+  check(lines_7imm[2] == "(loading…)", "gamma preview immediately loading")
+
+  vim.wait(500, function()
+    local l = vim.api.nvim_buf_get_lines(buf7, 0, -1, false)
+    return l[2] ~= "(loading…)"
+  end, 5)
+  local lines_7done = vim.api.nvim_buf_get_lines(buf7, 0, -1, false)
+  check(lines_7done[2] == "(transcript unavailable: boom)", "failure shows (transcript unavailable: boom)")
+  check(lines_7done[4]:find("^%[question%]") ~= nil, "gamma items still present below")
+  check(test_state.coord_cache["20990101_3"] ~= nil and test_state.coord_cache["20990101_3"].err == "boom",
+    "error is cached")
+
+  -- 8. No spawn of wake.sh anywhere.
+  for _, argv in ipairs(all_spawns) do
+    check(not tostring(argv[1]):match("wake%.sh$"), "no spawn of wake.sh anywhere in preview tests")
+  end
+
+  init.PREVIEW_DEBOUNCE_MS = orig_debounce
 end
 
 print("LUA_TEST_OK " .. N)

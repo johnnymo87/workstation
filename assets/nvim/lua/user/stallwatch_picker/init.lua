@@ -7,11 +7,13 @@
 -- does I/O, so there is no in-flight callback to race.
 --
 -- Keys:
---   Screen 1: <CR> drill into a program, <C-d> latest digest, <C-g> wake program.
+--   Screen 1: <CR> drill into a program, <C-d> latest digest, <C-g> wake program,
+--             <C-o> coordinator.
 --   Screen 2: <CR> jump, <C-f> flagged/all, <C-b> back (cursor restored).
 -- <C-d> (Screen 1) and <C-f> (Screen 2) shadow telescope's
 -- preview_scrolling_down/_left defaults in those pickers only; the session
--- switcher already shadows <C-f> the same way. <C-g> is free in telescope.
+-- switcher already shadows <C-f> the same way. <C-g> and <C-o> are free in
+-- telescope.
 --
 -- Jumping is the session switcher's own path, not a copy of it:
 -- flow:accept (fresh discovery re-resolve + act.decide) and then
@@ -35,6 +37,8 @@ local source = require("user.stallwatch_picker.source")
 
 local M = {}
 
+M.PREVIEW_DEBOUNCE_MS = 150
+
 --- Fill the preview buffer and soft-wrap its window. Item text is prose
 --- (1-2 sentences), so an unwrapped preview cuts most of it off at the right
 --- edge. linebreak wraps at word boundaries; breakindent keeps a wrapped
@@ -51,6 +55,21 @@ end
 
 local function now_ms()
   return os.time() * 1000
+end
+
+local function render_program_preview(state, preview)
+  local prow = preview.prow
+  local gid = preview.gid
+  local now = now_ms()
+  local cache_val = (gid and state.coord_cache) and state.coord_cache[gid] or nil
+  local lines = {}
+  for _, l in ipairs(spec.coord_block_lines(prow, now, cache_val)) do
+    table.insert(lines, l)
+  end
+  for _, l in ipairs(spec.program_preview_lines(prow)) do
+    table.insert(lines, l)
+  end
+  set_preview(preview.self.state, lines)
 end
 
 --- Show `latest_digest` in a scratch buffer.
@@ -100,6 +119,16 @@ local function trim(s)
   return t ~= "" and t or nil
 end
 
+local function picker_system(state)
+  local o = state.opts or {}
+  return o.system or (o.source_opts and o.source_opts.system) or vim.system
+end
+
+local function picker_env(state)
+  local o = state.opts or {}
+  return o.env or (o.source_opts and o.source_opts.env)
+end
+
 local function wake_mapping(state, _prompt_bufnr)
   return function()
     local entry = action_state.get_selected_entry()
@@ -107,8 +136,8 @@ local function wake_mapping(state, _prompt_bufnr)
       return true
     end
     local tag = entry.value.tag
-    local system = (state.opts and (state.opts.system or (state.opts.source_opts and state.opts.source_opts.system))) or vim.system
-    local env = state.opts and (state.opts.env or (state.opts.source_opts and state.opts.source_opts.env))
+    local system = picker_system(state)
+    local env = picker_env(state)
     local timeout = state.opts and (state.opts.wake_timeout_ms or (state.opts.source_opts and state.opts.source_opts.wake_timeout_ms))
     source.wake(system, tag, function(out, err)
       if not err and out and out.code == 0 and (not out.signal or out.signal == 0) then
@@ -134,6 +163,36 @@ local function wake_mapping(state, _prompt_bufnr)
   end
 end
 
+local function coord_mapping(state, prompt_bufnr)
+  return function()
+    local entry = action_state.get_selected_entry()
+    local prow = entry and entry.value
+    if not prow then
+      return true
+    end
+    local c = prow.coord or { state = "unsupported" }
+    if c.state == "none" or c.state == "unsupported" then
+      vim.notify(spec.coord_absent_message(prow.tag, c.state), vim.log.levels.INFO)
+      return true
+    end
+    actions.close(prompt_bufnr)
+    source.coordinator_id(picker_system(state), prow.tag, function(gid, err)
+      if err then
+        gid = c.goose_id
+      elseif not gid then
+        vim.notify(spec.coord_absent_message(prow.tag, "none"), vim.log.levels.INFO)
+        return
+      end
+      local row = (type(c.row) == "table" and c.row.id == model.coord_row_id(gid)) and c.row
+        or model.minimal_coord_row(prow.tag, gid)
+      state.controller:accept(row, function(desc)
+        switcher.dispatch(desc, row, state.client, state.opts)
+      end)
+    end, { env = picker_env(state) })
+    return true
+  end
+end
+
 --- Screen 1.
 --- @param state table { snap, prows, by_id, client, controller, opts }
 --- @param select_tag string|nil program to put the cursor on (after <C-b>)
@@ -151,7 +210,47 @@ function M.programs(state, select_tag)
     previewer = previewers.new_buffer_previewer({
       title = "Open items",
       define_preview = function(self, entry)
-        set_preview(self.state, spec.program_preview_lines(entry.value))
+        state.coord_cache = state.coord_cache or {}
+        state.coord_inflight = state.coord_inflight or {}
+
+        local prow = entry and entry.value
+        local c = type(prow) == "table" and prow.coord or nil
+        local gid
+        if type(c) == "table" and c.state ~= "none" and c.state ~= "unsupported" then
+          gid = c.goose_id
+        end
+
+        state.preview = { self = self, prow = prow, gid = gid }
+        render_program_preview(state, state.preview)
+
+        if gid and state.coord_cache[gid] == nil and not state.coord_inflight[gid] then
+          local function fire()
+            if not (state.preview and state.preview.gid == gid
+              and state.preview.self and state.preview.self.state
+              and state.preview.self.state.bufnr
+              and vim.api.nvim_buf_is_valid(state.preview.self.state.bufnr)) then
+              return
+            end
+            if state.coord_inflight[gid] or state.coord_cache[gid] ~= nil then
+              return
+            end
+            state.coord_inflight[gid] = true
+            local export_timeout = state.opts and (state.opts.export_timeout_ms or (state.opts.source_opts and state.opts.source_opts.export_timeout_ms))
+            source.export(picker_system(state), gid, function(result)
+              state.coord_inflight[gid] = nil
+              state.coord_cache[gid] = result
+              if state.preview and state.preview.gid == gid
+                and state.preview.self and state.preview.self.state
+                and state.preview.self.state.bufnr
+                and vim.api.nvim_buf_is_valid(state.preview.self.state.bufnr) then
+                pcall(function()
+                  render_program_preview(state, state.preview)
+                end)
+              end
+            end, { timeout_ms = export_timeout })
+          end
+          vim.defer_fn(fire, M.PREVIEW_DEBOUNCE_MS)
+        end
       end,
     }),
     attach_mappings = function(prompt_bufnr, map)
@@ -168,6 +267,7 @@ function M.programs(state, select_tag)
       end)
       map({ "i", "n" }, "<C-d>", digest_mapping(state, prompt_bufnr))
       map({ "i", "n" }, "<C-g>", wake_mapping(state, prompt_bufnr))
+      map({ "i", "n" }, "<C-o>", coord_mapping(state, prompt_bufnr))
       return true
     end,
   })
@@ -271,13 +371,17 @@ function M.open(opts)
       return
     end
     exec.notify_warnings(snap.warnings)
+    local by_id = model.index_rows(snap.rows)
     local state = {
       snap = snap,
-      prows = model.program_rows(snap.doc),
-      by_id = model.index_rows(snap.rows),
+      prows = model.program_rows(snap.doc, by_id),
+      by_id = by_id,
       client = client,
       controller = controller,
       opts = opts,
+      coord_cache = {},
+      coord_inflight = {},
+      preview = nil,
     }
     M.programs(state, nil)
   end)
