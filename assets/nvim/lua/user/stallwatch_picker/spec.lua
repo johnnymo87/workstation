@@ -292,6 +292,7 @@ end
 
 --- @param cached nil | { text = string|nil } | { err = string }
 function M.coord_block_lines(prow, now_ms, cached)
+  cached = type(cached) == "table" and cached or nil
   local c = type(prow) == "table" and prow.coord
   if type(c) ~= "table" then return {} end
   local rule = string.rep("─", 48)
@@ -310,13 +311,14 @@ function M.coord_block_lines(prow, now_ms, cached)
   local lines = { head .. " ──" }
   if cached == nil then
     table.insert(lines, "(loading…)")
-  elseif cached.err then
+  elseif cached.err ~= nil and cached.err ~= vim.NIL then
     table.insert(lines, "(transcript unavailable: " .. tostring(cached.err) .. ")")
-  elseif not cached.text then
+  elseif type(cached.text) ~= "string" or not cached.text:match("%S") then
     table.insert(lines, "(no assistant message yet)")
   else
+    local text = (cached.text:gsub("\r", ""):gsub("%s+$", ""))
     local n = 0
-    for line in (cached.text .. "\n"):gmatch("([^\n]*)\n") do
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
       n = n + 1
       if n > M.COORD_PREVIEW_MAX then table.insert(lines, "…"); break end
       table.insert(lines, line)

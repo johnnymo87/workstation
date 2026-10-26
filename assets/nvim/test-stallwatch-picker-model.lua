@@ -345,6 +345,8 @@ do
   check(st({ tag = "a", coordinator = {} }) == "none", "null goose_id (luanil -> nil) -> none")
   check(st({ tag = "a", coordinator = { goose_id = "" } }) == "none", "empty goose_id -> none")
   check(st({ tag = "a" }) == "unsupported", "absent key -> unsupported")
+  check(model.coord_of({ coordinator = vim.NIL }, {}).state == "unsupported", "vim.NIL coordinator -> unsupported")
+  check(model.coord_of({ coordinator = { goose_id = vim.NIL } }, {}).state == "none", "vim.NIL goose_id -> none")
   check(model.coord_of({ tag = "a", coordinator = { goose_id = "20990101_1" } }, by_id).row == live_row, "live carries its joined row")
   check(model.coord_of({ tag = "a", coordinator = { goose_id = "20990101_1" } }, nil).state == "unresolved", "no rows at all -> unresolved, never live")
   check(model.coord_row_id("20990101_1") == "goose:20990101_1", "coord_row_id prefixes goose:")
@@ -360,6 +362,10 @@ do
   } }
   local pr = model.program_rows(d, {})
   check(pr[1].coord.state == "unresolved" and pr[1].coord.goose_id == "20990101_1", "program_rows sets coord")
+  local coord_table = { id = "goose:20990101_1", dir_missing = false }
+  local pr_live = model.program_rows(d, { ["goose:20990101_1"] = coord_table })
+  check(pr_live[1].coord.state == "live", "program_rows with live coordinator in by_id -> live")
+  check(pr_live[1].coord.row == coord_table, "program_rows coord.row is that table")
   local ids = model.union_ids(d, {})
   local n = 0
   for _, x in ipairs(ids) do if x == "goose:20990101_1" then n = n + 1 end end

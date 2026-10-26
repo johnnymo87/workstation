@@ -310,14 +310,24 @@ do
   check(lines[1]:find("coordinator goose:20990101_1", 1, true) and lines[1]:find("idle", 1, true), "header names id and state")
   check(#lines == 1 + spec.COORD_PREVIEW_MAX + 1 + 1, "header + capped body + ellipsis + rule")
   check(spec.coord_block_lines(prow, now, nil)[2] == "(loading…)", "no cache entry -> loading")
+  check(spec.coord_block_lines(prow, now, vim.NIL)[2] == "(loading…)", "vim.NIL cached -> loading")
   check(spec.coord_block_lines(prow, now, { err = "timed out" })[2] == "(transcript unavailable: timed out)", "error line")
+  check(spec.coord_block_lines(prow, now, { err = vim.NIL })[2] == "(no assistant message yet)", "vim.NIL err ignored -> placeholder")
   check(spec.coord_block_lines({ coord = { state = "none" } }, now, nil)[1]:find("no coordinator session", 1, true), "none -> one line, no export")
   check(#spec.coord_block_lines({}, now, nil) == 0, "no coord field at all -> no block")
   check(spec.coord_block_lines(prow, now, { text = nil })[2] == "(no assistant message yet)", "no text -> placeholder")
+  check(spec.coord_block_lines(prow, now, { text = vim.NIL })[2] == "(no assistant message yet)", "vim.NIL text -> placeholder")
+  local hello_lines = spec.coord_block_lines(prow, now, { text = "hello\n" })
+  check(#hello_lines == 3 and hello_lines[2] == "hello", "hello with trailing newline is exactly 3 lines (header, hello, rule)")
   local exact20 = {}
   for i = 1, 20 do exact20[i] = "line" .. i end
   local lines20 = spec.coord_block_lines(prow, now, { text = table.concat(exact20, "\n") })
   check(#lines20 == 1 + 20 + 1, "exact-20-line text produces no ellipsis (#lines == 1+20+1)")
+  local lines20_trail = spec.coord_block_lines(prow, now, { text = table.concat(exact20, "\n") .. "\n" })
+  check(#lines20_trail == 22, "20 lines with trailing newline produces 22 lines, got " .. #lines20_trail)
+  check(not table.concat(lines20_trail, "\n"):find("…", 1, true), "20 lines with trailing newline produces no ellipsis")
+  local unres_lines = spec.coord_block_lines({ coord = { state = "unresolved", goose_id = "20990101_1" } }, now, nil)
+  check(unres_lines[1]:find("state unknown", 1, true) ~= nil, "unresolved state header contains 'state unknown'")
 end
 
 print("LUA_TEST_OK " .. N)
