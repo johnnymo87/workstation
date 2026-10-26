@@ -37,6 +37,8 @@ local source = require("user.stallwatch_picker.source")
 
 local M = {}
 
+M.PREVIEW_DEBOUNCE_MS = 150
+
 --- Fill the preview buffer and soft-wrap its window. Item text is prose
 --- (1-2 sentences), so an unwrapped preview cuts most of it off at the right
 --- edge. linebreak wraps at word boundaries; breakindent keeps a wrapped
@@ -53,6 +55,21 @@ end
 
 local function now_ms()
   return os.time() * 1000
+end
+
+local function render_program_preview(state, preview)
+  local prow = preview.prow
+  local gid = preview.gid
+  local now = now_ms()
+  local cache_val = (gid and state.coord_cache) and state.coord_cache[gid] or nil
+  local lines = {}
+  for _, l in ipairs(spec.coord_block_lines(prow, now, cache_val)) do
+    table.insert(lines, l)
+  end
+  for _, l in ipairs(spec.program_preview_lines(prow)) do
+    table.insert(lines, l)
+  end
+  set_preview(preview.self.state, lines)
 end
 
 --- Show `latest_digest` in a scratch buffer.
@@ -193,7 +210,44 @@ function M.programs(state, select_tag)
     previewer = previewers.new_buffer_previewer({
       title = "Open items",
       define_preview = function(self, entry)
-        set_preview(self.state, spec.program_preview_lines(entry.value))
+        state.coord_cache = state.coord_cache or {}
+        state.coord_inflight = state.coord_inflight or {}
+
+        local prow = entry and entry.value
+        local c = type(prow) == "table" and prow.coord or nil
+        local gid
+        if type(c) == "table" and c.state ~= "none" and c.state ~= "unsupported" then
+          gid = c.goose_id
+        end
+
+        state.preview = { self = self, prow = prow, gid = gid }
+        render_program_preview(state, state.preview)
+
+        if gid and state.coord_cache[gid] == nil and not state.coord_inflight[gid] then
+          local function fire()
+            if not (state.preview and state.preview.gid == gid) then
+              return
+            end
+            if state.coord_inflight[gid] or state.coord_cache[gid] ~= nil then
+              return
+            end
+            state.coord_inflight[gid] = true
+            local export_timeout = state.opts and (state.opts.export_timeout_ms or (state.opts.source_opts and state.opts.source_opts.export_timeout_ms))
+            source.export(picker_system(state), gid, function(result)
+              state.coord_inflight[gid] = nil
+              state.coord_cache[gid] = result
+              if state.preview and state.preview.gid == gid
+                and state.preview.self and state.preview.self.state
+                and state.preview.self.state.bufnr
+                and vim.api.nvim_buf_is_valid(state.preview.self.state.bufnr) then
+                pcall(function()
+                  render_program_preview(state, state.preview)
+                end)
+              end
+            end, { timeout_ms = export_timeout })
+          end
+          vim.defer_fn(fire, M.PREVIEW_DEBOUNCE_MS)
+        end
       end,
     }),
     attach_mappings = function(prompt_bufnr, map)
@@ -322,6 +376,9 @@ function M.open(opts)
       client = client,
       controller = controller,
       opts = opts,
+      coord_cache = {},
+      coord_inflight = {},
+      preview = nil,
     }
     M.programs(state, nil)
   end)
