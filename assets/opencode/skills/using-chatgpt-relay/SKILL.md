@@ -183,10 +183,11 @@ persistent launchd tunnel agents (`devbox-dev-tunnel`, `cloudbox-dev-tunnel`) ca
 and reconnect on their own, so check that agent on the Mac (`launchctl list | grep dev-tunnel`)
 before falling back to a manual `ssh -R`.
 
-If the connection drops before the answer arrives (the CLI retries once, so it
-shows `Attempt 2/2`, then a connection error such as `ECONNRESET` or a
-`Queue wait exceeded`), the finished answer is only in the ChatGPT tab on the Mac (chatgpt-relay bead `cgpt-6ke` tracks fixing
-that). Ask the human to copy it instead of sending the question again.
+If the connection drops before the answer arrives, the finished answer is only
+in the ChatGPT tab on the Mac (chatgpt-relay bead `cgpt-6ke` tracks fixing
+that). The CLI retries once, so the client log shows `Attempt 2/2` and then a
+connection error such as `ECONNRESET`, or `Queue wait exceeded`. Ask the human
+to copy the answer instead of sending the question again.
 
 ### Mac sleep
 
@@ -202,5 +203,5 @@ ask-question -t 1800000 -f question.md -o answer.md
 ```
 
 Your agent's bash tool has its own timeout, and when it expires, the
-`ask-question` process keeps running. See the `ask-question` skill, step 4,
+`ask-question` process may keep running. See the `ask-question` skill, step 4,
 before you send a question again.
