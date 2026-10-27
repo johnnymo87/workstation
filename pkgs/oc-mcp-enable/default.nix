@@ -36,9 +36,10 @@
 # parent's deny/external_directory rules at creation, not allows.
 #
 # All of that assumes the session runs on a POOL serve. A session run by a
-# standalone `opencode` TUI is unreachable through the door; a self-grant from
-# one is refused below (OPENCODE_SERVE_ID unset) rather than silently connecting
-# the server on some pool member.
+# standalone `opencode` TUI is unreachable through the door. A self-grant from
+# one (OPENCODE_SERVE_ID unset) skips the connect -- which would only connect
+# the server on some pool member, and place the session there -- grants the
+# permission, and exits 1 telling the human to connect it in that TUI.
 pkgs.writeShellApplication {
   name = "oc-mcp-enable";
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils ];
@@ -179,27 +180,29 @@ pkgs.writeShellApplication {
       # pigeon holds no lease for the session, so the door routes the connect to
       # a prospective pool member, and because connect is state-pinning it also
       # PLACES the session there. That serve then answers connect and status
-      # truthfully about ITSELF ("slack: connected"), the PATCH lands in the
-      # shared DB, and we would report success -- while the process actually
-      # running the turn never connects the server and the tools never appear.
-      # Worse, the placement routes the session's next swarm wake to the pool
-      # serve while the standalone TUI still holds it open.
+      # truthfully about ITSELF ("slack: connected") and we would report success,
+      # while the process actually running the turn never connects the server and
+      # the tools never appear. Worse, the placement routes the session's next
+      # swarm wake to the pool serve while the standalone TUI still holds it open.
       #
       # 2026-10-27: exactly that, for ses_e82189349ffe in a bare TUI started from
       # an nvim terminal. Detectable only for a SELF-grant: every pool serve
       # exports OPENCODE_SERVE_ID (serve start scripts, all three hosts) and its
-      # bash tool inherits it; a standalone process does not set it. A grant to
-      # ANOTHER session cannot be checked from here -- see the opencode-launch
-      # skill.
+      # bash tool inherits it; a standalone process started outside the pool does
+      # not have it. A grant to ANOTHER session cannot be checked from here -- see
+      # the opencode-launch skill.
+      #
+      # What still works from a standalone process: the PERMISSION half. The GET
+      # and PATCH do not place the session (only `connect` is state-pinning in the
+      # door), the PATCH lands in the shared DB, and the standalone run loop
+      # re-reads session.permission every step. That half is NOT optional for
+      # slack/slack-ro: opencode.base.json's `tools: {"slack_*": false}` becomes a
+      # config-level deny, so connecting from the TUI's MCP dialog alone would
+      # still hide the tools. So: skip only the connect, still grant, and tell the
+      # human to connect it in that TUI. --revoke (PATCH only) works unchanged.
+      standalone_self=0
       if [ "''${OPENCODE_SESSION_ID:-}" = "$session_id" ] && [ -z "''${OPENCODE_SERVE_ID:-}" ]; then
-        echo "Error: this session is not running on the opencode serve pool (OPENCODE_SERVE_ID is unset)," >&2
-        echo "so oc-mcp-enable cannot reach the process that runs it. It is most likely a standalone" >&2
-        echo "'opencode' TUI (started bare, not via 'opencode attach' / opencode-launch), which runs the" >&2
-        echo "session in-process. The front door would connect the server on a pool serve instead and" >&2
-        echo "report success, but the tools would never appear here." >&2
-        echo "The human can enable it in this session's TUI (MCP dialog). Stop and report this to them;" >&2
-        echo "do not work around it by calling the service's API directly." >&2
-        exit 1
+        standalone_self=1
       fi
 
       # Health check the door before anything else, so a down door reads as a
@@ -244,11 +247,19 @@ pkgs.writeShellApplication {
         echo "Session:    $session_id"
         echo "Directory:  ''${directory:-<unknown>}"
         echo ""
-        echo "MCP servers (connection state is per-directory on the owning serve):"
-        curl -s --max-time 15 "$FRONTDOOR_URL/session/$session_id/mcp" \
-          -H "x-opencode-directory: $directory" \
-          | jq -r 'to_entries[] | "  \(.key): \(.value.status)"' 2>/dev/null \
-          || echo "  (unavailable)"
+        if [ "$standalone_self" -eq 1 ]; then
+          # The door would answer with SOME pool serve's state, which says
+          # nothing about this process. Do not print a misleading "connected".
+          echo "MCP servers: not visible from here. This session runs in a standalone opencode"
+          echo "  process (OPENCODE_SERVE_ID unset); only that process's TUI (MCP dialog) shows"
+          echo "  what it has connected."
+        else
+          echo "MCP servers (connection state is per-directory on the owning serve):"
+          curl -s --max-time 15 "$FRONTDOOR_URL/session/$session_id/mcp" \
+            -H "x-opencode-directory: $directory" \
+            | jq -r 'to_entries[] | "  \(.key): \(.value.status)"' 2>/dev/null \
+            || echo "  (unavailable)"
+        fi
         echo ""
         echo "Session permission ruleset (later rules win):"
         curl -s --max-time 10 "$FRONTDOOR_URL/session/$session_id" \
@@ -264,7 +275,25 @@ pkgs.writeShellApplication {
 
       servers=("$@")
 
-      if [ "$revoke" -eq 0 ]; then
+      if [ "$revoke" -eq 0 ] && [ "$standalone_self" -eq 1 ]; then
+        # No connect (see SELF-GRANT FROM OUTSIDE THE SERVE POOL above). Still
+        # catch a misspelled name: the server catalog is host config, the same
+        # in every process, and this GET does not place the session.
+        : >"$catalog_body_file"
+        catalog_code="$(curl -s -o "$catalog_body_file" -w '%{http_code}' --max-time 15 \
+          "$FRONTDOOR_URL/session/$session_id/mcp" \
+          -H "x-opencode-directory: $directory" || true)"
+        if [ "$catalog_code" = "200" ]; then
+          for srv in $(printf '%s\n' "''${servers[@]}" | sort -u); do
+            if ! jq -e --arg s "$srv" 'type == "object" and has($s)' <"$catalog_body_file" >/dev/null 2>&1; then
+              echo "Error: MCP server '$srv' is not configured on this host" >&2
+              echo "configured servers: $(jq -r '[keys[]] | join(", ")' <"$catalog_body_file" 2>/dev/null)" >&2
+              mcp_unknown_footer
+              exit 1
+            fi
+          done
+        fi
+      elif [ "$revoke" -eq 0 ]; then
         for srv in $(printf '%s\n' "''${servers[@]}" | sort -u); do
           # --max-time is generous: connecting spawns the MCP server process
           # (several of ours are `npx -y ...`, which may hit the network on a
@@ -379,6 +408,14 @@ pkgs.writeShellApplication {
       if [ "$revoke" -eq 1 ]; then
         echo "Denied ''${servers[*]} tools on session $session_id"
         echo "Note: the MCP server stays CONNECTED (shared per-directory); only this session is denied."
+      elif [ "$standalone_self" -eq 1 ]; then
+        echo "Permission granted for ''${servers[*]} on session $session_id, but the server is NOT connected." >&2
+        echo "This session runs in a standalone 'opencode' process (OPENCODE_SERVE_ID is unset; most likely a" >&2
+        echo "TUI started bare rather than via 'opencode attach' / opencode-launch). oc-mcp-enable reaches only" >&2
+        echo "the serve pool, so it cannot connect an MCP server inside this process, and the tools will not" >&2
+        echo "appear until the human turns ''${servers[*]} on in this session's TUI (MCP dialog)." >&2
+        echo "Stop and report this to the human; do not work around it by calling the service's API directly." >&2
+        exit 1
       else
         echo "Granted ''${servers[*]} tools to session $session_id"
         echo "Takes effect on that session's next step, even mid-turn (not in its Task subagents)."
