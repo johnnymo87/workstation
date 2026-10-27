@@ -71,4 +71,11 @@ Help me draft a technical research question about a problem I've encountered, th
 
    Always use a timeout of at least 30 minutes (`-t 1800000`). ChatGPT's deep research mode regularly takes 20+ minutes for complex questions, and a too-short timeout will kill the request before the answer comes back. For especially deep questions, prefer 45-60 minutes (`-t 2700000` or `-t 3600000`).
 
+   **`-t` is not the only timeout.** Your bash tool has its own, 2 minutes by default. When that one expires, the tool stops *waiting* for `ask-question`, but the `ask-question` process keeps running and still writes the `-o` file when the answer comes back. So either:
+
+   - set the bash tool's `timeout` above `-t`, or
+   - start `ask-question` in the background and check for the `-o` file later. On NixOS use a capped `systemd-run --user` unit (AGENTS.md, "Backgrounding Long-Running Processes"). A plain `&` in the tool call can keep the call open until it times out.
+
+   **A tool timeout does not mean the request died.** Before sending again, check `pgrep -af ask-question` and whether the `-o` file exists. Never send again while the first request is alive. The server queues the copy behind the first, and if the first later fails, the copy starts a second deep-research run.
+
    After ask-question returns, discuss the response with the user. Summarize key insights and recommendations.

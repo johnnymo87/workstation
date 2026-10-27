@@ -183,9 +183,23 @@ persistent launchd tunnel agents (`devbox-dev-tunnel`, `cloudbox-dev-tunnel`) ca
 and reconnect on their own, so check that agent on the Mac (`launchctl list | grep dev-tunnel`)
 before falling back to a manual `ssh -R`.
 
+If the connection drops before the answer arrives, the finished answer is only
+in the ChatGPT tab on the Mac (chatgpt-relay bead `cgpt-6ke` tracks fixing
+that). Ask the human to copy it instead of sending the question again.
+
+### Mac sleep
+
+The server holds `caffeinate -i -s` for as long as it runs (chatgpt-relay
+`c866bae`), so the Mac does not idle-sleep under it. Closing the lid on
+battery still puts it to sleep.
+
 ### Response timeout
 
 Default is 20 minutes. For complex questions:
 ```bash
 ask-question -t 1800000 -f question.md -o answer.md
 ```
+
+Your agent's bash tool has its own timeout, and when it expires, the
+`ask-question` process keeps running. See the `ask-question` skill, step 4,
+before you send a question again.
