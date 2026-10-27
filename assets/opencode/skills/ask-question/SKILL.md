@@ -71,11 +71,17 @@ Help me draft a technical research question about a problem I've encountered, th
 
    Always use a timeout of at least 30 minutes (`-t 1800000`). ChatGPT's deep research mode regularly takes 20+ minutes for complex questions, and a too-short timeout will kill the request before the answer comes back. For especially deep questions, prefer 45-60 minutes (`-t 2700000` or `-t 3600000`).
 
-   **`-t` is not the only timeout.** Your bash tool has its own, 2 minutes by default. When that one expires, the tool stops *waiting* for `ask-question`, but the `ask-question` process keeps running and still writes the `-o` file when the answer comes back. So either:
+   **`-t` is not the only timeout.** Your bash tool has its own, 2 minutes by default. When that one expires, the tool stops *waiting* for `ask-question`, but the `ask-question` process may keep running and still write the `-o` file when the answer comes back (on devbox it does). Use absolute paths and an `-o` file that does not exist yet, then either:
 
-   - set the bash tool's `timeout` above `-t`, or
-   - start `ask-question` in the background and check for the `-o` file later. On NixOS use a capped `systemd-run --user` unit (AGENTS.md, "Backgrounding Long-Running Processes"). A plain `&` in the tool call can keep the call open until it times out.
+   - set the bash tool's `timeout` to at least `-t` plus 60 s (the CLI itself gives up at `-t` plus 10 s), or
+   - start `ask-question` in the background and check for the `-o` file later. On NixOS use a capped `systemd-run --user` unit (AGENTS.md, "Backgrounding Long-Running Processes"). Elsewhere redirect all three streams (`</dev/null >log 2>&1 &`): a background job that still holds the tool's stdout keeps the tool call open until it times out, even under `nohup`.
 
-   **A tool timeout does not mean the request died.** Before sending again, check `pgrep -af ask-question` and whether the `-o` file exists. Never send again while the first request is alive. The server queues the copy behind the first, and if the first later fails, the copy starts a second deep-research run.
+   **A tool timeout does not mean the request died.** Before sending again, check whether your own request is alive and whether the `-o` file exists:
+
+   ```bash
+   pgrep -f '[a]sk-question.mjs.*research-{topic-slug}-answer' || echo gone
+   ```
+
+   The bracket keeps `pgrep` from matching the shell that runs it, and the `-o` name keeps it from matching another session's request. Never send again while the first request is alive. The server queues the copy behind the first, and the copy usually fails with `Queue wait exceeded`. That error means a duplicate, not a dead request: wait for the first answer instead of sending a third time.
 
    After ask-question returns, discuss the response with the user. Summarize key insights and recommendations.
