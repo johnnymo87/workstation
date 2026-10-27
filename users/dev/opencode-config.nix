@@ -854,24 +854,31 @@ let
       # cycle check. In a devenv worktree that walk enters .devenv/profile,
       # whose include/ comes from ncurses-dev, where include/ncurses and
       # include/ncursesw are symlinks to "." (a loop). The walk never ends: it
-      # grows until node runs out of heap. Measured: 962 CPU-s and 2.2 GB RSS
-      # in 508 s before it died, without finding the 500 files that would stop
-      # it. With 10-40 agent worktrees that is many CPU-minutes per session.
+      # grows until node runs out of heap. Measured in two built worktrees:
+      # 962 and 1011 CPU-s, 2.2 GB RSS, in 508 and 291 s before node aborted,
+      # without finding the 500 files that would stop it. With 10-40 agent worktrees that is many CPU-minutes per session.
       #
       # Value lost: none today. The server's only output opencode uses is
       # diagnostics, which come from shellcheck, and shellcheck is not on any
       # host's PATH; with no shellcheck it publishes zero diagnostics even for
-      # a broken script. To get shellcheck diagnostics back, keep the server
-      # but skip the walk: put shellcheck on PATH and replace this line with
-      #   lsp.bash = { command = [ "${pkgs.bash-language-server}/bin/bash-language-server" "start" ];
-      #                env.BACKGROUND_ANALYSIS_MAX_FILES = "0"; };
-      # (measured: 2.3 CPU-s, 4 diagnostics on a bad script).
+      # a broken script (and opencode shows the agent only error-level ones).
+      # If shellcheck diagnostics are ever wanted, the server itself can skip
+      # the walk (env BACKGROUND_ANALYSIS_MAX_FILES=0, or bashIde setting
+      # backgroundAnalysisMaxFiles = 0; measured 2.3 CPU-s and, with
+      # shellcheck on PATH, 4 diagnostics on a bad script). Wiring that as a
+      # custom opencode `lsp.bash` entry is NOT verified: a quick try with
+      # `command` + `initialization` attached no server at all. Test it with
+      # `opencode debug lsp diagnostics <file>.sh` before relying on it.
       #
       # Rollback: deleting this line does NOT re-enable the server, because
       # mergeOpencode keeps keys the managed config no longer sets. Delete the
       # line AND run `jq 'del(.lsp.bash)'` on ~/.config/opencode/opencode.json
-      # on each host. Do not set `disabled = false`: opencode then treats the
-      # entry as a custom server and spawns `command[0]`, which is unset.
+      # on each host. Do not set `disabled = false` alone: an entry with
+      # neither `disabled = true` nor `command` fails opencode's config schema.
+      #
+      # Takes effect for opencode instances started after the switch; a running
+      # serve keeps its loaded config until the pool restarts, and a server
+      # already looping runs until node aborts (`pkill -f '[b]ash-language-server start'`).
       lsp.bash.disabled = true;
     }
     // (lib.optionalAttrs isDevbox {
