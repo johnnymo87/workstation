@@ -140,6 +140,28 @@ with, and a prompt sent to a busy session joins that run rather than starting a
 new one — so a grant following an earlier `--revoke` stayed invisible
 ("Model tried to call unavailable tool …") until the run ended.
 
+**Only sessions running on the serve pool can be granted.** `oc-mcp-enable`
+reaches a session through the front door, and the door only reaches pool
+serves. A session run by a **standalone** process is invisible to it. The usual
+standalone process is a bare `opencode` TUI, started without `attach` (say, from
+an nvim terminal), which runs the session in-process. The door then connects
+the server on whichever pool serve it guesses. Because a connect pins state,
+it also places the session there. That serve truthfully reports
+`slack: connected`, the permission PATCH lands in the shared database, and the
+tool reports success. The process actually running the turn never connects the
+server, so the model gets "Model tried to call unavailable tool". This happened
+to a self-grant on cloudbox on 2026-10-27. Its later swarm wake was then routed
+to the pool serve while the standalone TUI still had the session open.
+
+- **Self-grant:** `oc-mcp-enable` now refuses when `$OPENCODE_SESSION_ID` is the
+  target and `$OPENCODE_SERVE_ID` is unset (pool serves export it, and standalone
+  processes don't). It exits before touching the door. Stop and report: the human can
+  enable the server from that TUI's MCP dialog.
+- **Granting another session:** the target's process can't be checked from the
+  caller. If the target was started as a bare `opencode` TUI, the grant will not
+  reach it, whatever `--status` says. `--status` shows the pool serve's state,
+  not the target process's.
+
 **Task subagents never get the grant.** A child session copies only its
 parent's `deny` (and `external_directory`) rules when it is created
 (`deriveSubagentSessionPermission`), never its `allow` rules — so the grant does

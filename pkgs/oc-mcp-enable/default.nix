@@ -34,6 +34,11 @@
 # started the run with, so a grant after an earlier --revoke was invisible
 # until the run ended. Task subagents never see it: a child copies only its
 # parent's deny/external_directory rules at creation, not allows.
+#
+# All of that assumes the session runs on a POOL serve. A session run by a
+# standalone `opencode` TUI is unreachable through the door; a self-grant from
+# one is refused below (OPENCODE_SERVE_ID unset) rather than silently connecting
+# the server on some pool member.
 pkgs.writeShellApplication {
   name = "oc-mcp-enable";
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.coreutils ];
@@ -164,6 +169,37 @@ pkgs.writeShellApplication {
       if [ "$status_only" -eq 0 ] && [ $# -lt 1 ]; then
         echo "Error: at least one <server> is required" >&2
         usage
+      fi
+
+      # SELF-GRANT FROM OUTSIDE THE SERVE POOL (bead workstation-8hw9).
+      #
+      # Every route below goes through the front door, which can only reach pool
+      # serves. A session run by a STANDALONE process -- a bare `opencode` TUI
+      # (which embeds its own server), or `opencode run` -- is invisible to it:
+      # pigeon holds no lease for the session, so the door routes the connect to
+      # a prospective pool member, and because connect is state-pinning it also
+      # PLACES the session there. That serve then answers connect and status
+      # truthfully about ITSELF ("slack: connected"), the PATCH lands in the
+      # shared DB, and we would report success -- while the process actually
+      # running the turn never connects the server and the tools never appear.
+      # Worse, the placement routes the session's next swarm wake to the pool
+      # serve while the standalone TUI still holds it open.
+      #
+      # 2026-10-27: exactly that, for ses_e82189349ffe in a bare TUI started from
+      # an nvim terminal. Detectable only for a SELF-grant: every pool serve
+      # exports OPENCODE_SERVE_ID (serve start scripts, all three hosts) and its
+      # bash tool inherits it; a standalone process does not set it. A grant to
+      # ANOTHER session cannot be checked from here -- see the opencode-launch
+      # skill.
+      if [ "''${OPENCODE_SESSION_ID:-}" = "$session_id" ] && [ -z "''${OPENCODE_SERVE_ID:-}" ]; then
+        echo "Error: this session is not running on the opencode serve pool (OPENCODE_SERVE_ID is unset)," >&2
+        echo "so oc-mcp-enable cannot reach the process that runs it. It is most likely a standalone" >&2
+        echo "'opencode' TUI (started bare, not via 'opencode attach' / opencode-launch), which runs the" >&2
+        echo "session in-process. The front door would connect the server on a pool serve instead and" >&2
+        echo "report success, but the tools would never appear here." >&2
+        echo "The human can enable it in this session's TUI (MCP dialog). Stop and report this to them;" >&2
+        echo "do not work around it by calling the service's API directly." >&2
+        exit 1
       fi
 
       # Health check the door before anything else, so a down door reads as a
