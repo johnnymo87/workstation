@@ -140,6 +140,35 @@ with, and a prompt sent to a busy session joins that run rather than starting a
 new one — so a grant following an earlier `--revoke` stayed invisible
 ("Model tried to call unavailable tool …") until the run ended.
 
+**Only sessions running on the serve pool can be granted.** `oc-mcp-enable`
+reaches a session through the front door, and the door only reaches pool
+serves. A session run by a **standalone** process is invisible to it. The usual
+standalone process is a bare `opencode` TUI, started without `attach` (say, from
+an nvim terminal), which runs the session in-process. The door then connects
+the server on whichever pool serve it guesses. Because a connect pins state,
+it also places the session there. That serve truthfully reports
+`slack: connected`, the permission PATCH lands in the shared database, and the
+tool reports success. The process actually running the turn never connects the
+server, so the model gets "Model tried to call unavailable tool". This happened
+to a self-grant on cloudbox on 2026-10-27. Its later swarm wake was then routed
+to the pool serve while the standalone TUI still had the session open.
+
+- **Self-grant:** `oc-mcp-enable` detects this when `$OPENCODE_SESSION_ID` is the
+  target and `$OPENCODE_SERVE_ID` is unset. Pool serves export that variable,
+  and a process started outside the pool normally lacks it. In that case the
+  tool skips the connect, still grants the permission, and **exits 1** with a
+  message saying the server is not connected. Stop and report: the human has to
+  turn the server on in that TUI's MCP dialog. The permission half is still
+  needed, because `slack_*` and `slack-ro_*` are denied in the base config, so
+  turning the server on in the TUI alone would leave them hidden. `--revoke`
+  works as usual from a standalone process. `--status` shows the ruleset but
+  not the connection state, which only that TUI can show.
+- **Granting another session:** the target's process can't be checked from the
+  caller. Don't grant a session you know was started as a bare `opencode` TUI.
+  The grant will not reach it, whatever `--status` says. The connect also places
+  that session on a pool serve, so its next swarm wake runs there while its TUI
+  still has it open.
+
 **Task subagents never get the grant.** A child session copies only its
 parent's `deny` (and `external_directory`) rules when it is created
 (`deriveSubagentSessionPermission`), never its `allow` rules — so the grant does

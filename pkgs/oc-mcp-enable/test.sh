@@ -153,18 +153,24 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
     local scenario="$1"
     local srv="${2:-atlassian}"
     [ -n "$door_pid" ] && kill "$door_pid" 2>/dev/null && wait "$door_pid" 2>/dev/null || true
-    rm -f "$work/port" "$work/patches"
+    rm -f "$work/port" "$work/patches" "$work/posts"
     : >"$work/patches"
-    SCENARIO="$scenario" PATCH_LOG="$work/patches" python3 "$here/fake-door.py" "$work/port" &
+    : >"$work/posts"
+    SCENARIO="$scenario" PATCH_LOG="$work/patches" POST_LOG="$work/posts" python3 "$here/fake-door.py" "$work/port" &
     door_pid=$!
     for _ in $(seq 1 100); do [ -s "$work/port" ] && break; sleep 0.05; done
     [ -s "$work/port" ] || { printf 'FAIL  fake door did not start (%s)\n' "$scenario"; exit 1; }
     set +e
-    FRONTDOOR_URL="http://127.0.0.1:$(cat "$work/port")" \
-      "$OC_MCP_ENABLE_BIN" ses_fake123 "$srv" >"$work/out" 2>"$work/err"
+    # Scrub the caller's own session identity (this test may itself run inside
+    # an opencode session); a scenario opts back in via $scenario_env.
+    env -u OPENCODE_SESSION_ID -u OPENCODE_SERVE_ID "${scenario_env[@]}" \
+      FRONTDOOR_URL="http://127.0.0.1:$(cat "$work/port")" \
+      "$OC_MCP_ENABLE_BIN" "${scenario_args[@]}" ses_fake123 "$srv" >"$work/out" 2>"$work/err"
     rc=$?
     set -e
   }
+  scenario_env=()
+  scenario_args=()
 
   assert_contains() {
     local file="$1" needle="$2" msg="$3"
@@ -252,6 +258,52 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
   assert_not_contains "$work/out" "Connected" "status-unreadable: does not claim connected"
   assert_contains "$work/err" "could not be read back" "status-unreadable: says the state is unknown"
   assert_contains "$work/patches" '"atlassian_*"' "status-unreadable: still grants"
+
+  # 2026-10-27 (workstation-8hw9): a session run by a standalone `opencode` TUI
+  # self-granted; the door connected slack on a pool serve (and placed the
+  # session there), reported success, and the tools never appeared. A
+  # self-grant without OPENCODE_SERVE_ID must NOT connect, must still grant the
+  # permission (slack_* is config-denied, so the TUI toggle alone is not enough),
+  # and must not claim success.
+  scenario_env=(OPENCODE_SESSION_ID=ses_fake123)
+  run_scenario ok
+  assert_eq 1 "$rc" "self-grant-standalone: exits 1"
+  assert_contains "$work/err" "NOT connected" "self-grant-standalone: says the server is not connected"
+  assert_contains "$work/err" "MCP dialog" "self-grant-standalone: points the human at the TUI"
+  assert_not_contains "$work/out" "Granted" "self-grant-standalone: does not claim success"
+  assert_eq 0 "$(wc -l <"$work/posts")" "self-grant-standalone: no connect sent to the door"
+  assert_contains "$work/patches" '"atlassian_*"' "self-grant-standalone: still grants the permission"
+
+  run_scenario ok atlasian
+  assert_eq 1 "$rc" "self-grant-standalone-typo: exits 1"
+  assert_contains "$work/err" "not configured on this host" "self-grant-standalone-typo: catches a misspelled name"
+  no_grant self-grant-standalone-typo
+
+  scenario_args=(--revoke)
+  run_scenario ok
+  assert_eq 0 "$rc" "revoke-standalone: exits 0 (PATCH-only, reaches the session)"
+  assert_contains "$work/patches" '"deny"' "revoke-standalone: denies"
+  scenario_args=(--status)
+  run_scenario ok
+  assert_eq 0 "$rc" "status-standalone: exits 0"
+  assert_not_contains "$work/out" "atlassian: connected" "status-standalone: does not report a pool serve's connection state"
+  assert_contains "$work/out" "Session permission ruleset" "status-standalone: still shows the ruleset"
+  scenario_args=()
+
+  # Same self-grant from a pool serve's bash tool (OPENCODE_SERVE_ID inherited).
+  scenario_env=(OPENCODE_SESSION_ID=ses_fake123 OPENCODE_SERVE_ID=serve-0)
+  run_scenario ok
+  assert_eq 0 "$rc" "self-grant-pool: exits 0"
+  assert_contains "$work/out" "Connected MCP server 'atlassian'" "self-grant-pool: connects"
+  assert_contains "$work/patches" '"atlassian_*"' "self-grant-pool: grants"
+
+  # Granting ANOTHER session from a standalone process is unchanged: the
+  # caller's own process says nothing about where the target runs.
+  scenario_env=(OPENCODE_SESSION_ID=ses_caller999)
+  run_scenario ok
+  assert_eq 0 "$rc" "grant-other-from-standalone: exits 0"
+  assert_contains "$work/out" "Connected MCP server 'atlassian'" "grant-other-from-standalone: connects"
+  scenario_env=()
 
   echo "oc-mcp-enable behaviour tests ran"
 else

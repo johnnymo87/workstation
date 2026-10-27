@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCENARIO = os.environ["SCENARIO"]
 PATCH_LOG = os.environ["PATCH_LOG"]
+POST_LOG = os.environ["POST_LOG"]
 SID = "ses_fake123"
 
 # Response bodies copied from pkgs/opencode-frontdoor/src/proxy.ts.
@@ -73,6 +74,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"name": "NotFoundError"})
 
     def do_POST(self):
+        # Record every POST: a connect is itself a mutation (the real door
+        # PLACES the session on the serve it connects on), so a refused grant
+        # must not reach the door at all.
+        with open(POST_LOG, "a") as f:
+            f.write(self.path + "\n")
         if self.path == f"/session/{SID}/mcp/atlassian/connect":
             code, body, _ = SCENARIOS[SCENARIO]
             return self._send(code, body)
