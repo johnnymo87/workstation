@@ -845,6 +845,34 @@ let
   opencodeOverlay =
     {
       plugin = pluginSpecs;
+      # Turn off opencode's built-in bash LSP (bash-language-server) on every
+      # host. Bead eternal-machinery-kdubj.34, measured on devbox 2026-10-27.
+      #
+      # Cost: opencode starts one server per session directory the first time a
+      # session reads or edits a .sh/.bash/.zsh/.ksh file. On start the server
+      # globs the whole directory for shell files, following symlinks, with no
+      # cycle check. In a devenv worktree that walk enters .devenv/profile,
+      # whose include/ comes from ncurses-dev, where include/ncurses and
+      # include/ncursesw are symlinks to "." (a loop). The walk never ends: it
+      # grows until node runs out of heap. Measured: 962 CPU-s and 2.2 GB RSS
+      # in 508 s before it died, without finding the 500 files that would stop
+      # it. With 10-40 agent worktrees that is many CPU-minutes per session.
+      #
+      # Value lost: none today. The server's only output opencode uses is
+      # diagnostics, which come from shellcheck, and shellcheck is not on any
+      # host's PATH; with no shellcheck it publishes zero diagnostics even for
+      # a broken script. To get shellcheck diagnostics back, keep the server
+      # but skip the walk: put shellcheck on PATH and replace this line with
+      #   lsp.bash = { command = [ "${pkgs.bash-language-server}/bin/bash-language-server" "start" ];
+      #                env.BACKGROUND_ANALYSIS_MAX_FILES = "0"; };
+      # (measured: 2.3 CPU-s, 4 diagnostics on a bad script).
+      #
+      # Rollback: deleting this line does NOT re-enable the server, because
+      # mergeOpencode keeps keys the managed config no longer sets. Delete the
+      # line AND run `jq 'del(.lsp.bash)'` on ~/.config/opencode/opencode.json
+      # on each host. Do not set `disabled = false`: opencode then treats the
+      # entry as a custom server and spawns `command[0]`, which is unset.
+      lsp.bash.disabled = true;
     }
     // (lib.optionalAttrs isDevbox {
       model = devboxModel;
