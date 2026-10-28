@@ -184,6 +184,11 @@ const bodyText = async () => {
 };
 
 let handoffToHuman = false;
+const challengeOutcome = () => (result.idp_login_required ? 'idp_login_required'
+  : result.password_demanded ? 'password_demanded'
+  : result.mfa_demanded ? 'mfa_demanded'
+  : (result.captcha || result.bot_blocked) ? 'bot_blocked'
+  : null);
 const result = {
   ts: new Date().toISOString(),
   flow: FLOW,
@@ -199,7 +204,12 @@ const result = {
   clicks: [],
   outcome: null,
   page_mode: pageMode,
+  // 'hidden' when the tab is not the window's active tab, or the display is
+  // off or locked. Kept so a future stall can be attributed (workstation-jmtu).
+  page_visibility: null,
 };
+try { result.page_visibility = await page.evaluate(() => document.visibilityState); } catch {}
+log('page visibility', result.page_visibility);
 
 // Element handles die when the page navigates under them -- and these pages
 // redirect on their own for a while after each click. Using a stale handle
@@ -216,12 +226,44 @@ const textOf = async (h) => {
 const queryAll = async (sel) => {
   try { return await page.$$(sel); } catch { return []; }
 };
+// CLICK WITHOUT NEEDING A RENDERED PAGE. puppeteer's ElementHandle.click()
+// first asks whether the element is in the viewport, using an
+// IntersectionObserver, and that callback only fires when the page renders.
+// A hidden page never renders. Our tab is hidden whenever it is not the
+// window's active tab, and also when the display is off or the screen is
+// locked. Each click() then blocks for the full 90s protocolTimeout, and two
+// candidates on one page used up the whole 200s budget. That is the
+// 2026-10-26 23:40Z and 2026-10-28 08:10Z/11:10Z `no_authcode (unknown)` runs
+// (bead workstation-jmtu). Measured 2026-10-28 in a hidden tab: click() hung
+// past 120s; scrollIntoView + clickablePoint + a mouse click took 10-33ms and
+// delivered a trusted click. On Google's real pages in a hidden tab, the
+// mouse MOVE that page.mouse.click() starts with took 5.0s every time, while
+// press and release took well under 0.2s. So this sends only press and
+// release, at the element's clickable point. The 15s bound is there so that no
+// other stall can eat the whole budget the same way.
+const CLICK_BOUND_MS = 15000;
+const input = await page.createCDPSession();
+const press = (type, x, y) => input.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+const clickEl = async (h) => {
+  let timer;
+  try {
+    await Promise.race([
+      (async () => {
+        await h.evaluate((e) => e.scrollIntoView({ block: 'center', inline: 'center' }));
+        const pt = await h.clickablePoint();
+        await press('mousePressed', pt.x, pt.y);
+        await press('mouseReleased', pt.x, pt.y);
+      })(),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('click timed out')), CLICK_BOUND_MS); }),
+    ]);
+  } finally { clearTimeout(timer); }
+};
 const clickByText = async (patterns) => {
   const hs = await queryAll('button, div[role="button"], li, div[role="link"], span[jsname]');
   for (const h of hs) {
     const t = (await textOf(h)).trim();
     if (patterns.some((p) => p.test(t))) {
-      try { await h.click(); return t.replace(/\s+/g, ' ').slice(0, 60); } catch {}
+      try { await clickEl(h); return t.replace(/\s+/g, ' ').slice(0, 60); } catch {}
     }
   }
   return null;
@@ -276,6 +318,63 @@ const signinUrl = (() => {
   return u.toString();
 })();
 
+// Writes the result row and e2e-result.json exactly once: from the finally
+// block below, or from SIGTERM. refresh.sh runs this under `timeout 200`, and
+// before this existed a killed run left no result, so refresh.sh could only
+// report `no_authcode (outcome: unknown)` with no clue where it stopped.
+let finished = false;
+const finish = async () => {
+  if (finished) return;
+  finished = true;
+  console.log('RESULT:', JSON.stringify(result));
+  const LOG = process.env.GCLOUD_REAUTH_PROBE_LOG
+    || `${process.env.HOME}/.local/state/gcloud-reauth/reauth-probe.jsonl`;
+  fs.mkdirSync(LOG.replace(/\/[^/]+$/, ''), { recursive: true });
+  fs.appendFileSync(LOG, JSON.stringify({
+    ts: result.ts,
+    account: process.env.SPIKE_ACCOUNT ?? null,
+    probe: 'browser_e2e',
+    flow: FLOW,
+    token_ok: null,
+    reauth_required: null,
+    completed_on_cookies: result.completed_on_cookies,
+    password_demanded: result.password_demanded,
+    mfa_demanded: result.mfa_demanded,
+    captcha: result.captcha,
+    bot_blocked: result.bot_blocked,
+    idp_redirect: result.idp_redirect,
+    idp_login_required: result.idp_login_required,
+    fresh_signin: result.fresh_signin,
+    awaiting_human: result.awaiting_human,
+    clicks: result.clicks,
+    outcome: result.outcome,
+    page_mode: result.page_mode,
+    page_visibility: result.page_visibility,
+  }) + '\n');
+  fs.writeFileSync(`${WORK}/e2e-result.json`, JSON.stringify(result));
+  if (handoffToHuman) {
+    // Left open, NOT raised: the alert's "Open sign-in page" button raises it
+    // (raise-signin.mjs finds this tab), so focus moves only when the human
+    // asks for it.
+    console.log('HANDOFF: left the sign-in page open in the background for the human');
+  } else {
+    try { await page.close(); } catch {}
+  }
+  browser.disconnect();
+};
+// The event loop is idle while a CDP call is pending, so this runs even
+// mid-hang. A challenge already seen still wins, as in the catch block below.
+process.on('SIGTERM', async () => {
+  if (finished) return;
+  const challenge = challengeOutcome();
+  if (challenge) { result.outcome = challenge; handoffToHuman = true; result.awaiting_human = true; }
+  else result.outcome = 'timeout';
+  result.error = `killed by SIGTERM after ${((Date.now() - t0) / 1000).toFixed(0)}s (the wrapper's timeout)`;
+  log('ERROR', result.error);
+  await Promise.race([finish(), sleep(3000)]);
+  process.exit(124);
+});
+
 try {
   await page.goto('https://accounts.google.com/Logout', { waitUntil: 'networkidle2', timeout: 60000 });
   log('signed the isolated profile out of Google');
@@ -295,7 +394,7 @@ try {
     if (!/\/accountchooser/.test(page.url())) return false;
     for (const h of await queryAll('li, div[role="link"], div[data-identifier]')) {
       if ((await textOf(h)).includes(ACCT)) {
-        try { await h.click(); result.clicks.push('account-row'); return true; } catch {}
+        try { await clickEl(h); result.clicks.push('account-row'); return true; } catch {}
       }
     }
     return false;
@@ -365,11 +464,7 @@ try {
   // to sign in. Reporting `error` instead sent refresh.sh down its 2h
   // non-human backoff on 2026-10-16, rather than raising the page and waiting
   // for the sign-in. Same precedence as the normal path above.
-  const challenge = result.idp_login_required ? 'idp_login_required'
-    : result.password_demanded ? 'password_demanded'
-    : result.mfa_demanded ? 'mfa_demanded'
-    : (result.captcha || result.bot_blocked) ? 'bot_blocked'
-    : null;
+  const challenge = challengeOutcome();
   if (challenge) {
     result.outcome = challenge;
     handoffToHuman = true;
@@ -378,38 +473,5 @@ try {
     result.outcome = 'error';
   }
 } finally {
-  console.log('RESULT:', JSON.stringify(result));
-  const LOG = process.env.GCLOUD_REAUTH_PROBE_LOG
-    || `${process.env.HOME}/.local/state/gcloud-reauth/reauth-probe.jsonl`;
-  fs.mkdirSync(LOG.replace(/\/[^/]+$/, ''), { recursive: true });
-  fs.appendFileSync(LOG, JSON.stringify({
-    ts: result.ts,
-    account: process.env.SPIKE_ACCOUNT ?? null,
-    probe: 'browser_e2e',
-    flow: FLOW,
-    token_ok: null,
-    reauth_required: null,
-    completed_on_cookies: result.completed_on_cookies,
-    password_demanded: result.password_demanded,
-    mfa_demanded: result.mfa_demanded,
-    captcha: result.captcha,
-    bot_blocked: result.bot_blocked,
-    idp_redirect: result.idp_redirect,
-    idp_login_required: result.idp_login_required,
-    fresh_signin: result.fresh_signin,
-    awaiting_human: result.awaiting_human,
-    clicks: result.clicks,
-    outcome: result.outcome,
-    page_mode: result.page_mode,
-  }) + '\n');
-  fs.writeFileSync(`${WORK}/e2e-result.json`, JSON.stringify(result));
-  if (handoffToHuman) {
-    // Left open, NOT raised: the alert's "Open sign-in page" button raises it
-    // (raise-signin.mjs finds this tab), so focus moves only when the human
-    // asks for it.
-    console.log('HANDOFF: left the sign-in page open in the background for the human');
-  } else {
-    try { await page.close(); } catch {}
-  }
-  browser.disconnect();
+  await finish();
 }
