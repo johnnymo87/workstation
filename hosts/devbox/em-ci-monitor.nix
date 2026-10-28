@@ -66,7 +66,18 @@ let
       Type = "oneshot";
       ExecStart = lib.getExe monitor;
       TimeoutStartSec = "5min";
-      DynamicUser = true;
+      # A STATIC user, not DynamicUser. The monitor's systemctl queries go over
+      # the system D-Bus, and dbus-daemon must resolve the caller's uid. Its
+      # NSS lookup bypasses io.systemd.DynamicUser (deadlock avoidance) and
+      # asks only io.systemd.Machine, which answers NoRecordFound, so the
+      # daemon dropped every DynamicUser client at Hello ("Transport endpoint
+      # is not connected"). Every check then read blank: "container em-ci-1
+      # is ", "cannot inspect em-ci-failover.timer". It first showed on the
+      # 2026-10-28 reboot (the previous dbus-daemon dated from Oct 11, on an
+      # older systemd). A uid in /etc/passwd always resolves. systemd moves
+      # the old /var/lib/private/em-ci-monitor state into place itself.
+      User = "em-ci-monitor";
+      Group = "em-ci-monitor";
       StateDirectory = "em-ci-monitor";
       LoadCredential = [
         "gh_token:${config.sops.secrets.em_ci_monitor_gh_token.path}"
@@ -98,6 +109,9 @@ in
 {
   sops.secrets.em_ci_monitor_gh_token = secret;
   sops.secrets.em_ci_hc_ping_url = secret;
+
+  users.users.em-ci-monitor = { isSystemUser = true; group = "em-ci-monitor"; };
+  users.groups.em-ci-monitor = { };
 
   systemd.services.em-ci-monitor = unit { };
 
