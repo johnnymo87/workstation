@@ -253,6 +253,7 @@ If you do need to refresh:
 | `attachment_get_data tool is disabled` | `SLACK_MCP_ATTACHMENT_TOOL` missing; re-run the home-manager switch. |
 | `refusing to send credentials to non-Slack attachment host` | Working as intended — our host guard. The file's `url_private` points off Slack. Do **not** "fix" it by relaxing the guard; treat the file as hostile. |
 | `not_authed` | Token not injected. Check Keychain/sops storage, re-apply config. |
+| `status=failed (Operation timed out after 30000ms)` from `oc-mcp-enable` | Almost always a **cold cache**, not a token or network problem. In stdio mode the server answers nothing until its users + channels caches load, and with no cache file it fetches them first (~37s measured). At opencode's default 30s it is killed before the cache is written, so every retry fails the same way. The generated config sets `"timeout": 75000` on both variants to fix this; if the `mcp.slack-ro` block lacks it, re-apply config. The cache lives in `~/Library/Caches/slack-mcp-server/` (macOS) or `~/.cache/slack-mcp-server/` (Linux), keyed by team id. An expired cache is fine (served stale, refreshed in the background); only a missing one blocks. |
 | No Slack config after switch | macOS: `security find-generic-password -s slack-mcp-xoxp-token`. Cloudbox: `cat /run/secrets/slack_mcp_xoxp_token`. |
 
 ## Using Slack
