@@ -66,7 +66,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 
 | Skill | Scope | Purpose |
 |-------|-------|---------|
-| [working-with-kubernetes](skills/working-with-kubernetes/SKILL.md) | work-only | Running commands in company pods: the internal `ba` CLI estate, the Azure AKS estate, and generic `kubectl` (pod interaction, file transfer, distroless debugging, kubeconfig). Which CLI/kubeconfig/namespace a given repo uses is in the skill's Confluence-fetched `INTERNAL.md` — check it before concluding a pod is unreachable. |
+| [working-with-kubernetes](skills/working-with-kubernetes/SKILL.md) | work-only | Running commands in company pods: the internal `ba` CLI estate, the Azure AKS estate, and generic `kubectl` (pod interaction, file transfer, distroless debugging, kubeconfig), and how read-only DB queries connect (read-only role, port 5432, transaction-scoped read-only mode, never a session SET through the pooler). Which CLI/kubeconfig/namespace a given repo uses is in the skill's Confluence-fetched `INTERNAL.md` — check it before concluding a pod is unreachable. |
 | [using-gcloud-bq-cli](skills/using-gcloud-bq-cli/SKILL.md) | work-only | Gotchas for `gcloud` and `bq`: service-account auth, IAM permission checks, BigQuery access errors. |
 | [using-buildbuddy](skills/using-buildbuddy/SKILL.md) | work-only | Fetch raw, untruncated test logs from a BuildBuddy invocation by URL/ID via the `bb-test-log` helper or the enterprise API directly. |
 | [reading-jenkins-builds](skills/reading-jenkins-builds/SKILL.md) | work-only | Explain a pending/failed/stuck `continuous-integration/jenkins/*` check from the Jenkins side: eight-call recipe (`curl -g`, `wfapi`, node/queue state), failure signatures that separate controller trouble (disk full, `StreamException`, dropped runs) from real PR failures, and the tunnel-refused-means-retry rule. Hostname, job folders, token scope and contacts are in its Confluence-fetched `INTERNAL.md`. |
@@ -364,6 +364,18 @@ connection table tells them apart — do not retry a hang. Everything else — r
 and must not do, and the org-specific facts (hostname, job folders, contacts;
 fetched from Confluence into `INTERNAL.md`) — is in the `reading-jenkins-builds`
 skill. Load it before touching Jenkins.
+
+## Read-Only Database Queries Use the Read-Only Role
+
+**Read-only queries against a shared PostgreSQL database behind a pooler (dev, UAT,
+staging, prod) log in as its read-only role, usually `analyst`, connect on 5432 rather
+than the pooler (6432), and get read-only mode from `BEGIN TRANSACTION READ ONLY`
+(`SET LOCAL` is for timeouts and does not make a transaction read-only). Never issue a
+session-level `SET` through a pooler.** If the read-only credential is unreachable from
+this host, or isn't yet granted the schema you need, the app's login is allowed in
+exactly that shape, and your report says so. This overrides older recipes in repo
+skills, INTERNAL.md and scripts. On work hosts, load `working-with-kubernetes` before
+querying.
 
 ## On cloudbox, `bazel test` does not build non-test targets
 
