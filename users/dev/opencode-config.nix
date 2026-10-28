@@ -1722,6 +1722,28 @@ in
       # Neither variant sets SLACK_MCP_ENABLED_TOOLS. Do not add it to slack-ro:
       # the runtime gate treats a tool named there as enabled, so it is a second
       # door into the write tools that bypasses the per-tool env vars above.
+      #
+      # "timeout": 75000 is the CONNECT timeout (opencode's default is 30s), and
+      # without it a cold cache can never recover. In stdio mode the server does
+      # not answer `initialize` until its users + channels caches are loaded. With
+      # no cache file it fetches them first: measured 2026-10-28 on macOS at 36.7s
+      # (users ~3s, channels ~33s for ~2.5k channels under Slack's Tier-2 rate
+      # limit). opencode kills it at 30s, BEFORE the cache file is written, so
+      # every retry is cold again and fails identically. An EXPIRED cache is fine
+      # (served stale, refreshed in the background, ~0.4s); only a MISSING one
+      # blocks. That happens on a new host, after ~/Library/Caches/slack-mcp-server
+      # (macOS) / ~/.cache/slack-mcp-server is cleared, or when the cache key
+      # changes (it is the Slack team id, so the npx-era files were not reused).
+      # 75s is ~2x the measured cold start (the fetch is paced by the server's
+      # own Tier-2 limiter, ~3s/page, so it scales with channel count, not
+      # network). The connect phase stays under oc-mcp-enable's and
+      # opencode-launch's 90s curl; listTools has its own 75s but returns at
+      # once when the server is ready. opencode also uses this value as the
+      # per-tool-call timeout. A workspace too big for 75s needs a one-time
+      # manual warm-up (slack-mcp-setup troubleshooting), not a bigger number.
+      # Rejected alternative: patching out the stdio readiness wait. It removes
+      # the limit but adds a third vendored patch to a token-holding binary, and
+      # early tool calls would fail with "not ready" instead.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         # The one allowlisted upload root. A root that cannot be resolved is
@@ -1741,6 +1763,7 @@ in
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
             "enabled": false,
+            "timeout": 75000,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
@@ -1754,6 +1777,7 @@ in
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
             "enabled": false,
+            "timeout": 75000,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
@@ -1814,6 +1838,9 @@ in
       # the journal: the logger middleware logs every call's params at INFO.
       # Do not add SLACK_MCP_ENABLED_TOOLS to slack-ro -- naming a tool there
       # enables it regardless of the per-tool gates.
+      # "timeout": 75000 (connect; default 30s) lets a cold-cache start (~37s)
+      # finish and write its cache instead of being killed and staying cold
+      # forever. Full reasoning in the Darwin block above.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         # The one allowlisted upload root. A root that cannot be resolved is
@@ -1833,6 +1860,7 @@ in
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
             "enabled": false,
+            "timeout": 75000,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
@@ -1846,6 +1874,7 @@ in
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
             "enabled": false,
+            "timeout": 75000,
             "environment": {
               "SLACK_MCP_XOXP_TOKEN": $xoxp,
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
