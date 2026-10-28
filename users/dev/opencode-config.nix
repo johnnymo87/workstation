@@ -1734,10 +1734,16 @@ in
       # blocks. That happens on a new host, after ~/Library/Caches/slack-mcp-server
       # (macOS) / ~/.cache/slack-mcp-server is cleared, or when the cache key
       # changes (it is the Slack team id, so the npx-era files were not reused).
-      # 75s is ~2x the measured cold start and stays under oc-mcp-enable's and
-      # opencode-launch's 90s connect curl, so an overrun is still reported as
-      # opencode's own status=failed. opencode also uses this value as the
-      # per-tool-call timeout, which leaves room for slow searches.
+      # 75s is ~2x the measured cold start (the fetch is paced by the server's
+      # own Tier-2 limiter, ~3s/page, so it scales with channel count, not
+      # network). The connect phase stays under oc-mcp-enable's and
+      # opencode-launch's 90s curl; listTools has its own 75s but returns at
+      # once when the server is ready. opencode also uses this value as the
+      # per-tool-call timeout. A workspace too big for 75s needs a one-time
+      # manual warm-up (slack-mcp-setup troubleshooting), not a bigger number.
+      # Rejected alternative: patching out the stdio readiness wait. It removes
+      # the limit but adds a third vendored patch to a token-holding binary, and
+      # early tool calls would fail with "not ready" instead.
       # elif (not `exit 0` + separate if): an exit aborts the whole HM activation.
       elif [[ -f "$runtime" ]]; then
         # The one allowlisted upload root. A root that cannot be resolved is
