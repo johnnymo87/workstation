@@ -204,12 +204,19 @@ const result = {
   clicks: [],
   outcome: null,
   page_mode: pageMode,
-  // 'hidden' when the tab is not the window's active tab, or the display is
-  // off or locked. Kept so a future stall can be attributed (workstation-jmtu).
-  page_visibility: null,
+  // Every document.visibilityState seen during the run. 'hidden' when the tab
+  // is not the window's active tab, or the display is off or locked. Kept so
+  // a future stall can be attributed (workstation-jmtu).
+  page_visibility: [],
 };
-try { result.page_visibility = await page.evaluate(() => document.visibilityState); } catch {}
-log('page visibility', result.page_visibility);
+const noteVisibility = async () => {
+  try {
+    const v = await page.evaluate(() => document.visibilityState);
+    if (!result.page_visibility.includes(v)) result.page_visibility.push(v);
+    return v;
+  } catch { return null; }
+};
+log('page visibility', await noteVisibility());
 
 // Element handles die when the page navigates under them -- and these pages
 // redirect on their own for a while after each click. Using a stale handle
@@ -242,28 +249,46 @@ const queryAll = async (sel) => {
 // release, at the element's clickable point. The 15s bound is there so that no
 // other stall can eat the whole budget the same way.
 const CLICK_BOUND_MS = 15000;
-const input = await page.createCDPSession();
-const press = (type, x, y) => input.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+// A fresh CDP session per click: a session is bound to the target that
+// existed when it was created, and the page's target can be swapped.
+// scrollIntoView is 'instant' so the point is read after the scroll, never
+// mid-animation (a smooth scroll would never advance in a hidden page).
 const clickEl = async (h) => {
   let timer;
+  const input = await page.createCDPSession();
+  const press = (type, x, y) => input.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
   try {
     await Promise.race([
       (async () => {
-        await h.evaluate((e) => e.scrollIntoView({ block: 'center', inline: 'center' }));
+        await h.evaluate((e) => e.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }));
         const pt = await h.clickablePoint();
         await press('mousePressed', pt.x, pt.y);
         await press('mouseReleased', pt.x, pt.y);
       })(),
       new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('click timed out')), CLICK_BOUND_MS); }),
     ]);
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    input.detach().catch(() => {});
+  }
+};
+// Logs why a click failed. Returns false when the next candidate should not
+// be tried: a timed-out click may still land late, so trying a different
+// element on the same page could put two clicks on it.
+const tryClick = async (h, what) => {
+  try { await clickEl(h); return true; } catch (e) {
+    log(`click on ${what} failed: ${e.message}`);
+    if (e.message === 'click timed out') throw e;
+    return false;
+  }
 };
 const clickByText = async (patterns) => {
   const hs = await queryAll('button, div[role="button"], li, div[role="link"], span[jsname]');
   for (const h of hs) {
     const t = (await textOf(h)).trim();
     if (patterns.some((p) => p.test(t))) {
-      try { await clickEl(h); return t.replace(/\s+/g, ' ').slice(0, 60); } catch {}
+      const label = t.replace(/\s+/g, ' ').slice(0, 60);
+      try { if (await tryClick(h, label)) return label; } catch { return null; }
     }
   }
   return null;
@@ -272,6 +297,7 @@ const clickByText = async (patterns) => {
 const inspect = async (label) => {
   const txt = await bodyText();
   const u = page.url();
+  await noteVisibility();
   if (/type the text you hear or see/i.test(txt)) result.captcha = true;
   if (/browser or app may not be secure/i.test(txt)) result.bot_blocked = true;
   if (/enter your password|show password|forgot password/i.test(txt)) result.password_demanded = true;
@@ -365,11 +391,12 @@ const finish = async () => {
 // The event loop is idle while a CDP call is pending, so this runs even
 // mid-hang. A challenge already seen still wins, as in the catch block below.
 process.on('SIGTERM', async () => {
-  if (finished) return;
+  // Handling SIGTERM turns off node's default exit, so every path must exit.
+  if (finished) { setTimeout(() => process.exit(124), 3000); return; }
   const challenge = challengeOutcome();
   if (challenge) { result.outcome = challenge; handoffToHuman = true; result.awaiting_human = true; }
   else result.outcome = 'timeout';
-  result.error = `killed by SIGTERM after ${((Date.now() - t0) / 1000).toFixed(0)}s (the wrapper's timeout)`;
+  result.error = `killed by SIGTERM after ${((Date.now() - t0) / 1000).toFixed(0)}s (refresh.sh's timeout, unless something else sent it)`;
   log('ERROR', result.error);
   await Promise.race([finish(), sleep(3000)]);
   process.exit(124);
@@ -394,7 +421,7 @@ try {
     if (!/\/accountchooser/.test(page.url())) return false;
     for (const h of await queryAll('li, div[role="link"], div[data-identifier]')) {
       if ((await textOf(h)).includes(ACCT)) {
-        try { await clickEl(h); result.clicks.push('account-row'); return true; } catch {}
+        try { if (await tryClick(h, 'account-row')) { result.clicks.push('account-row'); return true; } } catch { return false; }
       }
     }
     return false;
