@@ -922,6 +922,15 @@ in
         # It is half of a two-part switch: the lane only reads banked messages
         # when its own flag file exists, so set and unset the two together.
         "PIGEON_PULL_ALLOWED_USER_IDS=8248645256"
+        # Cross-machine swarm relay (pigeon-k0qn.11). ACCEPT_FROM: machines whose
+        # swarm messages this daemon takes from the worker; SEND=1: relay a
+        # message whose target is on another machine instead of failing it.
+        # Receive is safe only because every machine is in the worker's
+        # SHARED_KEY_REFUSED_MACHINES (per-machine keys). Rollback: delete both
+        # lines and rebuild; queued relays then come back to their senders as
+        # delivery.failed (never_collected), nothing is lost silently.
+        "PIGEON_SWARM_RELAY_ACCEPT_FROM=devbox,macbook"
+        "PIGEON_SWARM_RELAY_SEND=1"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"

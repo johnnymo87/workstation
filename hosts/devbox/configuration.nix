@@ -391,6 +391,15 @@ in
         # <= serveLeaseTtl(30s) − serveRenewInterval(10s) = 20s, else a dead serve
         # can linger in listHealthy past its lease expiry and get re-picked.
         "PIGEON_SERVE_STALE_MS=20000"
+        # Cross-machine swarm relay (pigeon-k0qn.11). ACCEPT_FROM: machines whose
+        # swarm messages this daemon takes from the worker; SEND=1: relay a
+        # message whose target is on another machine instead of failing it.
+        # Receive is safe only because every machine is in the worker's
+        # SHARED_KEY_REFUSED_MACHINES (per-machine keys). Rollback: delete both
+        # lines and rebuild; queued relays then come back to their senders as
+        # delivery.failed (never_collected), nothing is lost silently.
+        "PIGEON_SWARM_RELAY_ACCEPT_FROM=cloudbox,macbook"
+        "PIGEON_SWARM_RELAY_SEND=1"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
