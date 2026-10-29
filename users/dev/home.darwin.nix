@@ -539,6 +539,15 @@ lib.mkIf isDarwin {
           # anthropic/openai default. (devbox has no Vertex creds and keeps the
           # default.) Parsed by packages/daemon/src/config.ts.
           PIGEON_ALLOWED_PROVIDERS = "anthropic,openai,google-vertex,google-vertex-anthropic";
+          # Cross-machine swarm relay (pigeon-k0qn.11). ACCEPT_FROM: machines whose
+          # swarm messages this daemon takes from the worker; SEND=1: relay a
+          # message whose target is on another machine instead of failing it.
+          # Receive is safe only because every machine is in the worker's
+          # SHARED_KEY_REFUSED_MACHINES (per-machine keys). Rollback: delete both
+          # lines and rebuild; queued relays then come back to their senders as
+          # delivery.failed (never_collected), nothing is lost silently.
+          PIGEON_SWARM_RELAY_ACCEPT_FROM = "cloudbox,devbox";
+          PIGEON_SWARM_RELAY_SEND = "1";
           # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
           # sessionVariables for rationale). pigeon revive spawns opencode that
           # must hit the same DB; a launchd agent doesn't source ~/.profile.
