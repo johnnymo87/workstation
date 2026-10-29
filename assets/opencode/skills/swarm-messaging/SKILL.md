@@ -352,11 +352,17 @@ configured. Check before you send; do not assume it works.
   even to an `offline` machine "to see". Tell the human, and leave what you
   have where the other session can read it (a bead, a pushed branch, a plan
   file). Switching the relay on is a host-configuration change for the human;
-  do not attempt it.
+  do not attempt it. If `swarm_list remote: true` errors, or its output does
+  not start with "Sessions on machines other than" or "No sessions on other
+  machines", the machine's pigeon predates remote discovery: treat
+  cross-machine as unavailable.
 - **Send as usual.** Use the same `swarm_send` with the session's `ses_` id.
   `msg_id`, `kind`, `priority` and `reply_to` are carried across unchanged.
-  Allow a few seconds extra latency. If the machine goes offline after you
-  send, pigeon retries for about 15 minutes and then reports a failure.
+  Normally it lands within seconds. If the target's machine falls asleep around
+  the time you send, pigeon's worker can hold the message for up to 24 hours.
+  It is then delivered late, or you get a failure notice up to about a day
+  later. So silence proves nothing, and a payload whose meaning depends on time
+  should say when it was written.
 - **Goose sessions are reachable from their own machine only.** That includes
   every stall-watch program coordinator (`gse_…`). A `gse_` id that is not on
   your machine is refused at once.
@@ -367,7 +373,12 @@ configured. Check before you send; do not assume it works.
     already have it. Resend only if a duplicate would be harmless.
   - "Do not resend it via swarm; it will fail the same way": the refusal is
     structural, for example sending is off, the target machine does not accept
-    yours, or a pull lane accepts its own machine only. Reach the target another way.
+    yours, or a pull lane accepts its own machine only. Reach the target another
+    way. The exception is a reason that names something you control: a payload
+    that is too long, a `msg_id` you supplied that is taken, or a scheduled
+    message to a pull lane. Fix that and send once more.
+  - "Check the id and resend with the complete one": the id was truncated or
+    mangled. Get the full id from `swarm_list` and resend.
 - **A message from another machine** carries `from_machine="<machine>"` in its
   envelope, and `from` is a session on that machine. `from_machine` is
   established by pigeon from that machine's worker credential, not typed by the
