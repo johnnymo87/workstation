@@ -1,15 +1,15 @@
 ---
 name: swarm-messaging
-description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions on the same machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions (on this machine or, where the relay is on, another one), when looking for a session on another machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
 
-Pigeon hosts a durable, replayable message channel between opencode sessions on the same machine. The opencode-pigeon plugin exposes three always-on tools:
+Pigeon hosts a durable, replayable message channel between opencode sessions on the same machine, and can relay it to sessions on other machines where that is switched on (see "Sessions on other machines"). The opencode-pigeon plugin exposes three always-on tools:
 
 - **`swarm_send`** — send a message to another session.
 - **`swarm_read`** — read your own inbox (replay messages you may have missed); returns the newest 10 by default, with `before`/`since` cursor pagination.
-- **`swarm_list`** — discover other local sessions (and their ids) to message.
+- **`swarm_list`** — discover other local sessions (and their ids) to message; with `remote: true`, sessions on other machines.
 
 The daemon serializes deliveries per target session (at-most-one in-flight) and persists every message to SQLite for retry and replay.
 
@@ -109,7 +109,9 @@ human's standing infrastructure, not a session routing a swarm. When something
 you found belongs to another program, that program's coordinator is the right
 recipient. Look it up with the `finding-program-coordinators` skill (deployed
 on work hosts). Never conclude "there is no coordinator" from `swarm_list` or
-from bead notes.
+from bead notes. A coordinator can be messaged only from cloudbox: goose
+sessions are not reachable from another machine (see "Sessions on other
+machines").
 
 A coordinator is a session that holds shared context, turns direction into
 `task.assign` messages, aggregates worker reports, and owns the upward channel
@@ -306,7 +308,7 @@ Call the **`swarm_send`** tool:
 
 Your own session is filled in as `from` automatically (from the calling session id), so you can't spoof or typo it. `swarm_send` returns `Queued msg_<id> -> <to>` once the daemon accepts the message (HTTP 202).
 
-Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first. It lists **opencode sessions only**, and only recent ones: goose sessions, including every program coordinator, never appear there. For a program's coordinator, use `finding-program-coordinators`.
+Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first. It lists **opencode sessions only**, and only recent ones: goose sessions, including every program coordinator, never appear there. For a program's coordinator, use `finding-program-coordinators`. For sessions on other machines, call `swarm_list` with `remote: true` (next section).
 
 ### Message kinds
 
@@ -323,6 +325,56 @@ Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, 
 
 - `priority: urgent` for blocking work; `normal` (default); `low` for chatter the receiver can pull on demand.
 - `reply_to: <msg_id>` threads off a previous message — use the `msg_id` from the envelope you're answering.
+
+## Sessions on other machines
+
+The machines (cloudbox, devbox, the Mac) cannot reach each other directly, so
+pigeon relays a cross-machine `swarm_send` through its worker. A pair of
+machines can relay only when **both** halves are switched on: sending on your
+machine, and accepting from your machine on the target's. Each half is off unless
+configured. Check before you send; do not assume it works.
+
+- **Find and check: `swarm_list` with `remote: true`.** It lists opencode
+  sessions held by other machines in the last 7 days (id, seen, machine,
+  directory name). Then, per machine, it shows what a send from here would get now:
+
+  | Status | Meaning |
+  |---|---|
+  | `available` | The worker will take it. A pull lane on that machine can still refuse a sender from another machine |
+  | `not_accepted` | That machine does not accept relays from yours |
+  | `not_retired` | That machine cannot receive relays yet |
+  | `offline` | That machine is not polling (asleep or down) |
+  | `unknown` | The relay is not set up on the worker |
+
+  A trailing `WARNING: … does not relay` means *your* machine has sending off,
+  so every send to the sessions listed fails. **Send only when the target's
+  machine is `available` and there is no WARNING.** Otherwise do not send, not
+  even to an `offline` machine "to see". Tell the human, and leave what you
+  have where the other session can read it (a bead, a pushed branch, a plan
+  file). Switching the relay on is a host-configuration change for the human;
+  do not attempt it.
+- **Send as usual.** Use the same `swarm_send` with the session's `ses_` id.
+  `msg_id`, `kind`, `priority` and `reply_to` are carried across unchanged.
+  Allow a few seconds extra latency. If the machine goes offline after you
+  send, pigeon retries for about 15 minutes and then reports a failure.
+- **Goose sessions are reachable from their own machine only.** That includes
+  every stall-watch program coordinator (`gse_…`). A `gse_` id that is not on
+  your machine is refused at once.
+- **Read the failure notice's verb; it tells you what to do.** A cross-machine
+  `delivery.failed` comes from the receiving machine or the worker:
+  - "was NOT received … safe to resend": resend once.
+  - "DELIVERY UNCONFIRMED … may or may not have been received": the target may
+    already have it. Resend only if a duplicate would be harmless.
+  - "Do not resend it via swarm; it will fail the same way": the refusal is
+    structural, for example sending is off, the target machine does not accept
+    yours, or a pull lane accepts its own machine only. Reach the target another way.
+- **A message from another machine** carries `from_machine="<machine>"` in its
+  envelope, and `from` is a session on that machine. `from_machine` is
+  established by pigeon from that machine's worker credential, not typed by the
+  sender. `from` is self-asserted, as it is for every swarm message. Replying is a
+  cross-machine send, so the same checks apply: a message arriving from
+  a machine does not mean yours can send back. Your `swarm_read` shows only
+  your half of the thread; the other half is on the sender's machine.
 
 ## Scheduling a wake — messages to the future
 
@@ -377,7 +429,7 @@ To see more, paginate with cursors — each value is a `msg_id`:
 
 Messages always come back in chronological (oldest-first) order regardless of paging direction. When more exist beyond the page you got, `swarm_read`'s output ends with a hint telling you exactly which cursor to pass next.
 
-Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a session wondering how a peer is doing reads that peer's session directly rather than pinging it — this is what replaces a coordinator's status-chasing:
+Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a session wondering how a peer is doing reads that peer's session directly rather than pinging it — this is what replaces a coordinator's status-chasing (same machine only; a peer on another machine can't be read this way, so share state through a bead or pushed branch instead):
 
 ```bash
 curl -sf "http://127.0.0.1:4700/session/$SID/message?limit=3" | jq '.[].info.role'
@@ -408,12 +460,19 @@ curl -sf "http://127.0.0.1:4700/session/$SID/message?limit=3" | jq '.[].info.rol
     the swarm is down — check `GET /health` (deliberately anonymous) to separate
     the two.
 
-  `limit=N` returns the **newest** N messages (so `limit=5` shows the 5 most recent); the response also carries `has_more`, and you can add `&before=<msg_id>` to page further back. A non-null `handed_off_at` (Unix ms) means the arbiter POSTed `prompt_async` and the receiving serve returned 2xx — treat it as proof-of-delivery.
+  `limit=N` returns the **newest** N messages (so `limit=5` shows the 5 most recent); the response also carries `has_more`, and you can add `&before=<msg_id>` to page further back. For a message to a session on **another** machine, see the exception below. Otherwise, a non-null `handed_off_at` (Unix ms) means the arbiter POSTed `prompt_async` and the receiving serve returned 2xx — treat it as proof-of-delivery.
 
 If `handed_off_at` stays null, the arbiter is retrying (backoff `[1s, 2s, 5s, 15s, 60s]`, max 10 attempts). The daemon routes each message to the serve that **owns** the target session (via its routing tables), so a healthy multi-serve pool delivers cross-serve fine. A message fails permanently when:
 
 - The payload contains the literal `</swarm_message>` close tag — rejected immediately (don't pre-wrap the envelope; `swarm_send` adds it).
 - The target id is wrong / unresolvable, or no healthy serve owns it after retries.
+- The target is on another machine and cannot be relayed (see "Sessions on other machines").
+
+For a **cross-machine** send, the inbox check above runs against your own
+machine's daemon. It shows the message with `handed_off_at` set as soon as
+pigeon's worker has stored it, so there it is **not** proof of delivery. Only
+a reply tells you it arrived. A `delivery.failed` coming back tells you it did
+not, or might not have.
 
 On terminal failure the daemon sends a `delivery.failed` message **back to you**, so a dropped send is no longer silent — watch for it (or `swarm_read`).
 
