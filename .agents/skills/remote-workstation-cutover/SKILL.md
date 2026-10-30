@@ -25,7 +25,7 @@ that usually breaks Claude access is user config:
 | opencode plugins, skills, agents | `assets/opencode/`, `users/dev/opencode-skills.nix` | `home-switch` | **No** |
 | opencode serve / frontdoor / cfp / tunnels (launchd agents) | `users/dev/home.darwin.nix` | `home-switch`, or `launchctl kickstart -k gui/$(id -u)/org.nix-community.home.<name>` | **No** |
 | the opencode binary itself | `users/dev/home.base.nix` | `home-switch` | **No** |
-| Remote Login (sshd) itself is off | macOS setting | System Settings / `systemsetup` at the Mac | **Yes** |
+| Remote Login (sshd) itself is off | macOS setting | Sharing pane, or `sudo launchctl enable` + `bootstrap` (see below) | **Yes** |
 | nix.conf, nix-daemon, /etc/bashrc, /etc/shells, login shell, sudoers | `hosts/Y0FMQX93RR-2/` | `darwin-switch` | **Yes** |
 
 A home-level repair is: open the window (step 2 below), then from cloudbox
@@ -34,9 +34,9 @@ A home-level repair is: open the window (step 2 below), then from cloudbox
 ssh mac 'cd ~/Code/workstation && git pull --ff-only && ~/.nix-profile/bin/home-switch'
 ```
 
-No toggle, no sudoers change, no Admin By Request window. Full paths matter:
-an `ssh mac '<cmd>'` shell is non-interactive and may not have the profile on
-`PATH`. If `home-switch` itself is broken, use
+No toggle, no sudoers change, no Admin By Request window. The non-interactive
+`ssh mac '<cmd>'` shell does get `~/.nix-profile/bin` and the system profile
+on `PATH` (verified 2026-10-30); full paths are belt-and-braces. If `home-switch` itself is broken, use
 `nix run ~/Code/workstation#home-switch` (with
 `/run/current-system/sw/bin` on `PATH` for `nix`).
 
@@ -49,12 +49,16 @@ an `ssh mac '<cmd>'` shell is non-interactive and may not have the profile on
   `google-cloud-project` item. Run `security unlock-keychain
   ~/Library/Keychains/login.keychain-db` in the SSH session first (prompts for
   the login password). The same unlock lets the cfp seed work.
-- **launchd agents re-bootstrapped from an SSH session: unverified.**
-  home-manager boots out a changed agent and `launchctl bootstrap gui/$UID`s
-  the new plist, ignoring failures. Whether that bootstrap succeeds from a
-  non-GUI SSH session has not been tested on this Mac. After a remote
-  `home-switch`, check the agents you care about:
+- **The GUI launchd domain is readable over SSH** (verified 2026-10-30), so
+  this check works remotely:
   `launchctl print gui/$(id -u)/org.nix-community.home.opencode-serve-0 | grep state`.
+  Still **unverified**: whether home-manager's `launchctl bootstrap gui/$UID`
+  of a *changed* agent succeeds from a non-GUI SSH session (it ignores
+  failures). After a remote `home-switch` that changes agents, run that check.
+- **The over-SSH "Keychain locked" signature** is `security
+  find-generic-password` exiting 36, and `security show-keychain-info` saying
+  "User interaction is not allowed". `home-switch` refused in exactly that
+  state in the 2026-10-30 test, as designed.
 - **`home-switch` restarts the opencode serves if their plists changed** — fine
   when the point is to repair them, but do not drive it from an opencode
   session *on the Mac*.
@@ -115,13 +119,21 @@ they are real. The toggle is the only path that needs no later elevation.
 
 ### SSH access after admin removal (what is verifiable)
 
-**First, sshd has to be running at all.** As of 2026-10-30 Remote Login is
-**disabled** on this Mac (`launchctl print-disabled system` shows
-`"com.openssh.sshd" => disabled`; `nc -z 127.0.0.1 22` is refused), so the
-cutover tunnel has nothing to reach. Enabling it is root-only
-(`sudo systemsetup -setremotelogin on`, or System Settings → General →
-Sharing), i.e. an Admin By Request window, and IT's MDM may own the setting.
-The migration plan does it optionally in its elevated step. Check:
+**First, sshd has to be running at all.** Remote Login was enabled on
+2026-10-30, while admin still existed, and is deliberately left on so remote
+repair never needs an elevation window first. If it is ever off again, turning
+it on is root-only, i.e. an Admin By Request window, and IT's MDM may own the
+setting. What works (and what does not):
+
+- `sudo /usr/sbin/systemsetup -setremotelogin on` **fails** (`-60007`
+  authorization error): it needs Full Disk Access for the terminal, which sudo
+  does not provide.
+- `sudo launchctl enable system/com.openssh.sshd` followed by
+  `sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist`
+  **works**, and the enable persists across reboots. System Settings →
+  General → Sharing → Remote Login also works.
+
+Check:
 
 ```bash
 launchctl print-disabled system | grep sshd   # want: enabled, or no line
@@ -174,16 +186,46 @@ need it, so a locked Keychain over SSH does not block a later remote
 # Refresh the generated ssh config if cloudbox's IP may have changed:
 bash ~/Code/workstation/scripts/update-ssh-config.sh
 
-# Open the window in the background:
-ssh -f -N -o ExitOnForwardFailure=yes cloudbox-cutover
+# sshd must be up on the Mac, or the window "opens" but carries nothing:
+nc -z 127.0.0.1 22 || echo "Remote Login is off -- see 'SSH access' above"
+
+# Kill any previous window first (a stale one can squat cloudbox's :2222):
+pkill -f 'ssh .*-N.*cloudbox-cutover'
+
+# Open the window. ServerAlive keeps the IAP path from idling out.
+ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=4 cloudbox-cutover
 ```
 
-Verify from cloudbox that it reaches back:
+**Keep the launching shell alive, or launch it detached.** `ssh -f`
+backgrounds itself, but the IAP `ProxyCommand` (gcloud) stays in the launching
+shell's process group. Closing that Terminal tab, or an agent tool killing its
+command on timeout, kills the proxy: the window dies (`Broken pipe` in its
+log) **and** cloudbox's sshd keeps a stale `127.0.0.1:2222` listener that
+accepts connections and never answers. An agent on the Mac should launch it
+with `setsid` (e.g. a Python double-fork) instead of `ssh -f`. Found
+2026-10-30, when exactly this broke the first two remote tests.
+
+Verify from cloudbox that it reaches back, and that cloudbox's 2222 listener
+is the session you just opened (not a stale one):
 
 ```bash
-ssh cloudbox 'ssh -o BatchMode=yes mac "echo REACHED_MAC"'
+ssh -o ClearAllForwardings=yes cloudbox 'ssh -o BatchMode=yes mac "echo REACHED_MAC"'
 # expect: REACHED_MAC
+ssh -o ClearAllForwardings=yes cloudbox \
+  'for s in $(ss -tlnpe | grep 127.0.0.1:2222 | grep -o "session-[0-9]*" | cut -d- -f2); do loginctl show-session $s -p Timestamp; done'
+# expect: one session, started when you opened the window
 ```
+
+`ClearAllForwardings=yes` matters: the plain `cloudbox` host block carries its
+own RemoteForwards, which collide with the always-on tunnel.
+
+**Failure signatures, as seen from cloudbox:**
+
+| `ssh mac` error | 2222 on cloudbox | Meaning |
+|---|---|---|
+| `Connection refused` | not listening | no window open |
+| `timed out during banner exchange` / `reset by peer` | listening | the Mac end is dead (stale session) or sshd is off. Check `nc -z 127.0.0.1 22` at the Mac, and the listener's session start time |
 
 ### 3. Do the remote work
 
@@ -195,9 +237,14 @@ table above), or — with the toggle on — `darwin-switch` /
 
 ```bash
 # Close the reverse-SSH window:
-pkill -f 'ssh -f -N.*cloudbox-cutover'
-ssh cloudbox 'ssh -o BatchMode=yes -o ConnectTimeout=5 mac true' \
+pkill -f 'ssh .*-N.*cloudbox-cutover'
+# Killing the Mac end can leave cloudbox's sshd session (and :2222) half-open,
+# which "times out" instead of refusing. End it on the cloudbox side too:
+ssh -o ClearAllForwardings=yes cloudbox \
+  'for s in $(ss -tlnpe | grep ":2222" | grep -o "session-[0-9]*" | sort -u | cut -d- -f2); do loginctl terminate-session $s; done'
+ssh -o ClearAllForwardings=yes cloudbox 'ssh -o BatchMode=yes -o ConnectTimeout=5 mac true' \
   && echo "STILL OPEN (bad)" || echo "window closed (good)"
+# want "Connection refused", not "timed out"
 ```
 
 If you flipped the root toggle, set `enableUnattendedRemoteRoot = false;` again

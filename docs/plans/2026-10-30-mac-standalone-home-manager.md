@@ -84,8 +84,11 @@ darwin-switch
 #    Same window, OPTIONAL but needed for remote repair from cloudbox: Remote
 #    Login (sshd) is currently DISABLED on this Mac, and enabling it needs root.
 #    The cutover tunnel targets :22. Only if IT policy allows it:
-#      sudo systemsetup -setremotelogin on
-#      launchctl print-disabled system | grep sshd   # want => enabled (or absent)
+#      sudo launchctl enable system/com.openssh.sshd
+#      sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist
+#      launchctl print-disabled system | grep sshd   # want => enabled
+#    (`systemsetup -setremotelogin on` fails under sudo without Full Disk
+#    Access for the terminal. Done 2026-10-30; left on.)
 
 # 5. Verify (no root). Open NEW shells first (or `hash -r` in old ones): bash
 #    caches command paths under /etc/profiles/per-user/..., which step 4
