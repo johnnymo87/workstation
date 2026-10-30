@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions (on this machine or, where the relay is on, another one), when looking for a session on another machine, when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions (on this machine or, where the relay is on, another one), when looking for a session on another machine, when starting a fresh session on another machine (swarm_launch), when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
@@ -10,6 +10,8 @@ Pigeon hosts a durable, replayable message channel between opencode sessions on 
 - **`swarm_send`** — send a message to another session.
 - **`swarm_read`** — read your own inbox (replay messages you may have missed); returns the newest 10 by default, with `before`/`since` cursor pagination.
 - **`swarm_list`** — discover other local sessions (and their ids) to message; with `remote: true`, sessions on other machines.
+
+A fourth, **`swarm_launch`**, starts a fresh session on another machine where that is switched on (see "Starting a session on another machine").
 
 The daemon serializes deliveries per target session (at-most-one in-flight) and persists every message to SQLite for retry and replay.
 
@@ -386,6 +388,45 @@ configured. Check before you send; do not assume it works.
   cross-machine send, so the same checks apply: a message arriving from
   a machine does not mean yours can send back. Your `swarm_read` shows only
   your half of the thread; the other half is on the sender's machine.
+
+## Starting a session on another machine: `swarm_launch`
+
+`swarm_launch {machine, directory, prompt, tag?}` starts a **fresh** headless
+opencode session on another machine with your prompt. Use it when work has to
+happen on that machine (a deploy, a rebuild check, something only it can
+reach) instead of asking the human to paste commands, or borrowing an existing
+session there that was doing something else.
+
+- **It is off unless both machines opt in.** Yours needs
+  `PIGEON_REMOTE_LAUNCH_SEND=1` (otherwise the tool errors with
+  `launch_send_disabled`), and the target must list your machine in
+  `PIGEON_REMOTE_LAUNCH_FROM` (otherwise `not_accepted`). Both are
+  host-configuration changes for the human; do not attempt them. If the tool is
+  missing from your tool list, your session predates it: it appears after the
+  serve pool restarts (the nightly reset at the latest).
+- **`directory` is on the target machine**: an absolute path, `~/…`, or a bare
+  project name meaning `~/projects/<name>`. The Mac keeps its checkouts under
+  `~/Code`, so say `~/Code/<repo>` there. It must already exist.
+- **Write the prompt for a reader with no context.** The launched session knows
+  nothing about your conversation. Say what to do, what not to touch, and to
+  report back to you with `swarm_send` (give your session id; pigeon also adds a
+  `[Remote launch requested by …]` line).
+- **Call it once per launch.** The tool answers at once with `accepted` or
+  `pending`. The outcome arrives later as a `launch.result` swarm message from
+  `pigeon`, saying the session started (with its `ses_` id to `swarm_send`), was
+  refused, or is unconfirmed. `pending` means the daemon may already have the
+  request, so **do not call again**: a second call is a new launch and can start
+  a duplicate session. Read the result's verb as with relay failures: "Safe to
+  retry" means retry once; "UNCONFIRMED … Do NOT launch again" means message the
+  session it names, or check `swarm_list remote: true` first.
+- **A serve pool restart on the target kills the launched session**, because it
+  runs inside that pool. A launched session that upgrades pigeon may restart the
+  pigeon daemon, but must restart the pool last, from a delayed detached job,
+  after it has reported. See pigeon's `cross-device-deployment` skill.
+- **Every launch is visible.** The target posts a `🚀 Remote launch from …`
+  notice to Telegram, and the launched session gets its own topic. There is no
+  per-launch approval, so the human sees launches only after they start; launch
+  only what the human would expect you to.
 
 ## Scheduling a wake — messages to the future
 
