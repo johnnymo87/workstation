@@ -1,6 +1,6 @@
 ---
 name: rebuilding
-description: How to apply configuration changes to NixOS hosts (devbox, cloudbox). Use when you need to rebuild the system, apply home-manager changes, or recover from issues.
+description: How to apply configuration changes to NixOS hosts (devbox, cloudbox) and the macOS host (home-switch with no root, darwin-switch inside an Admin By Request window). Use when you need to rebuild the system, apply home-manager changes, or recover from issues.
 ---
 
 # Rebuilding NixOS Hosts
@@ -24,20 +24,40 @@ There are NixOS activation guards that will abort if you use the wrong target, b
 | `devbox` | `sudo nixos-rebuild switch --flake .#devbox` | `home-manager switch --flake .#dev` |
 | `cloudbox` | `sudo nixos-rebuild switch --flake .#cloudbox` | `home-manager switch --flake .#cloudbox` |
 
-**macOS** uses `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (system + home combined).
+**macOS** splits the same way as the NixOS hosts, with one extra constraint:
+the Mac has no local admin, so root exists only inside an **Admin By Request**
+elevation window.
 
-### macOS: use `darwin-switch`, which seeds the cfp asset first
+| What changed | Command | Root? |
+|---|---|---|
+| `users/`, `assets/`, `projects.nix`, skills, opencode config, plugins, launchd agents | `home-switch` | **No** |
+| `hosts/Y0FMQX93RR-2/` (nix.conf, /etc/bashrc, /etc/shells, login shell, nix-daemon, nix-gc, sudoers) | `darwin-switch` | Yes: run it inside an Admin By Request window |
+| `flake.lock` | both, `home-switch` first | the second one |
 
-```bash
-darwin-switch              # = cfp-prefetch-darwin, then sudo darwin-rebuild switch
-```
+`home-switch` = `cfp-prefetch-darwin`, then
+`home-manager switch --flake ~/Code/workstation#Y0FMQX93RR-2 -b hm-backup`
+(standalone `homeConfigurations.Y0FMQX93RR-2`).
+`darwin-switch` = `sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2`
+(system only; home-manager is no longer a nix-darwin module).
 
-`darwin-switch` (pkgs/darwin-switch) deploys `~/Code/workstation` by default
-(`--flake DIR` to override), asks the flake for its darwinConfiguration name
-instead of trusting `hostname -s` (they have drifted: hostname `Y0FMQX93RR`,
-target `Y0FMQX93RR-2`), and passes args after `--` to darwin-rebuild. Plain
-`sudo darwin-rebuild switch` still works, but only if you run
-`cfp-prefetch-darwin` first yourself — the rest of this section is why.
+Both deploy `~/Code/workstation` by default (`--flake DIR` to override), ask
+the flake for the configuration name instead of trusting `hostname -s` (they
+have drifted: hostname `Y0FMQX93RR`, target `Y0FMQX93RR-2`), and pass args
+after `--` through. Neither may be run under `sudo` (both refuse).
+
+**Do not run `home-switch` from inside an opencode session you care about** if
+the change touches the opencode serve agents: home-manager re-bootstraps a
+launchd agent whose plist changed, which restarts the serve the session lives
+on. Plain terminal, or accept the restart.
+
+The one-time move from the old combined (module) setup, and its rollback, is
+`docs/plans/2026-10-30-mac-standalone-home-manager.md`.
+
+### macOS: the cfp asset must be seeded before a home build
+
+`home-switch` runs `cfp-prefetch-darwin` for you and stops if it fails;
+`darwin-switch` runs it best-effort (cfp is no longer in the system closure).
+The rest of this section is why the seed exists.
 
 `claude-failover-proxy` is fetched from a **private** GitHub repo. cloudbox's
 nix-daemon carries a `GITHUB_TOKEN` (sops `EnvironmentFile`) so its fetch is
@@ -46,9 +66,9 @@ obvious escape is closed — `sudo` strips the user's env, `--option impure-env`
 needs an experimental feature that is not enabled here, and `pkgs.fetchurl`
 ignores `nix.settings.netrc-file`.
 
-**An un-fetchable source fails the whole system build, not just cfp**, so
-skipping this step does not "leave cfp stale" — it leaves you unable to rebuild
-anything at all, with a 404 that reads like a network problem:
+**An un-fetchable source fails the whole home build, not just cfp**, so
+skipping this step does not "leave cfp stale" — it leaves you unable to deploy
+any user config at all, with a 404 that reads like a network problem:
 
 ```
 curl: (22) The requested URL returned error: 404
@@ -60,26 +80,44 @@ and places it in the store under the exact name+hash the flake expects, which is
 all a fixed-output derivation needs to consider itself already built.
 
 **This re-arms on every cfp release.** The daily auto-bump PR merges a new
-version, and the next rebuild after that needs a fresh seed. It also re-arms
-whenever garbage collection reaps the seeded path, which is unrooted — and note
-a plain nixpkgs bump rebuilds cfp's wrapper too, so "I didn't touch cfp" is not
-a reason to skip it. Just run it before every macOS rebuild; it costs nothing
-when the asset is already present.
+version, and the next home build after that needs a fresh seed. It also re-arms
+whenever garbage collection reaps the seeded path — and note a plain nixpkgs
+bump rebuilds cfp's wrapper too, so "I didn't touch cfp" is not a reason to
+skip it. `home-switch` always runs it; it costs nothing when already seeded.
 
-Two footguns:
+**Over SSH the login Keychain is usually locked**, so the seed fails there
+(remote repair from cloudbox). Either seed once at the Mac before opening the
+window, or `security unlock-keychain ~/Library/Keychains/login.keychain-db`
+in the SSH session first.
 
-- **Not on `PATH` yet** (the helpers are installed *by* the rebuild they
-  unblock): `nix run ~/Code/workstation#darwin-switch`. On a Mac with no
-  nix-darwin at all there is no `darwin-rebuild` for it to call; seed with
-  `nix run ~/Code/workstation#cfp-prefetch-darwin`, then bootstrap with
-  `sudo nix run nix-darwin#darwin-rebuild -- switch --flake ~/Code/workstation#Y0FMQX93RR-2`.
-- **Don't `sudo darwin-switch`.** It calls sudo itself, and must read the token
-  from *your* Keychain; it refuses to run as root.
+Footguns:
+
+- **Not on `PATH` yet** (the helpers are installed *by* the deploy they
+  unblock): `nix run ~/Code/workstation#home-switch` /
+  `nix run ~/Code/workstation#darwin-switch`. On a Mac with no nix-darwin at all
+  there is no `darwin-rebuild` to call; bootstrap the system with
+  `sudo nix run nix-darwin#darwin-rebuild -- switch --flake ~/Code/workstation#Y0FMQX93RR-2`
+  inside an elevation window, then `nix run ~/Code/workstation#home-switch`.
+- **Don't `sudo home-switch` / `sudo darwin-switch`.** `darwin-switch` calls sudo
+  itself; `home-switch` needs no root at all. Both read the token from *your*
+  Keychain, and both refuse to run as root.
 - **Both default to `~/Code/workstation` regardless of your cwd.** If you call
   `cfp-prefetch-darwin` by hand for a worktree that bumps cfp, pass `--flake .`
-  — otherwise it seeds the version the main checkout wants and the rebuild
-  still 404s on yours. `darwin-switch --flake DIR` hands the same DIR to both
+  — otherwise it seeds the version the main checkout wants and the build
+  still 404s on yours. `home-switch --flake DIR` hands the same DIR to both
   steps, so it cannot get them out of sync.
+- **An old checkout's `darwin-rebuild` re-installs module-mode home-manager.**
+  A system generation built from a tree older than the standalone migration
+  still contains the home-manager module, and activating it (including
+  `darwin-rebuild --rollback` to such a generation) re-activates the old home
+  config over the standalone one. Recover with `home-switch`.
+
+### macOS: garbage collection
+
+nix-darwin runs `nix.gc` (weekly, `--delete-older-than 30d`) and
+`nix.optimise` as root launchd daemons, and home-manager's `autoExpire`
+expires home generations nightly as the user. Neither needs a human `sudo`.
+See the `cleaning-disk` skill.
 
 ## Deploy From The Main Worktree, Never A Worktree Or Scratch Checkout
 

@@ -53,11 +53,16 @@
   let
     # cloudflared security release; see overlays/cloudflared.nix. Applied to
     # every package set that provides cloudflared: pkgsFor (standalone
-    # home-manager), the devbox NixOS system (the tunnel connector), and the
-    # darwin system (whose pkgs home-manager reuses via useGlobalPkgs).
+    # home-manager on every host), the devbox NixOS system (the tunnel
+    # connector), and the darwin system.
     cloudflaredOverlay = import ./overlays/cloudflared.nix {
       inherit (inputs) nixpkgs-cloudflared;
     };
+
+    # setproctitle's fork tests segfault on Darwin and block azure-cli, which
+    # is a HOME package (home.base.nix). Shared by the darwin system and the
+    # Mac's standalone home-manager so the two evaluate one package set.
+    setproctitleDarwinOverlay = import ./overlays/setproctitle-darwin.nix;
 
     # Centralized pkgs definition to prevent drift
     pkgsFor = system: import nixpkgs {
@@ -72,6 +77,20 @@
     # Darwin (macOS) pkgs
     darwinSystem = "aarch64-darwin";
     darwinPkgs = pkgsFor darwinSystem;
+
+    # The package set the Mac's standalone home-manager evaluates against.
+    # It must equal the darwin system's pkgs (same nixpkgs, same allowUnfree,
+    # same overlays in the same order: the flake-level module below puts
+    # cloudflared first, then configuration.nix adds setproctitle). Home-manager
+    # used to be a nix-darwin module with useGlobalPkgs, which guaranteed that;
+    # standalone it has to be kept true by hand. Drift here does not break
+    # anything loudly -- it silently rebuilds, and silently changes the store
+    # path in every launchd plist, which re-bootstraps (restarts) those agents.
+    darwinHomePkgs = import nixpkgs {
+      system = darwinSystem;
+      config.allowUnfree = true;
+      overlays = [ cloudflaredOverlay setproctitleDarwinOverlay ];
+    };
 
     # Self-packaged tools (updated via nix-update in CI)
     localPkgsFor = system: let
@@ -93,11 +112,21 @@
       # run BEFORE a rebuild -- the whole point is that the rebuild it unblocks
       # cannot build it first. See pkgs/cfp-prefetch-darwin/default.nix.
       cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
-      # `sudo darwin-rebuild switch` with the cfp seed run first, so the private
-      # asset can never 404 the rebuild. `nix run .#darwin-switch` works before
-      # it is on PATH. See pkgs/darwin-switch/default.nix.
+      # SYSTEM-only deploy on macOS: `sudo darwin-rebuild switch` (needs an
+      # Admin By Request window once local admin is gone). See
+      # pkgs/darwin-switch/default.nix.
       darwin-switch = p.callPackage ./pkgs/darwin-switch {
         cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
+      };
+      # USER-level deploy on macOS, no root: cfp seed, then standalone
+      # `home-manager switch`. `nix run .#home-switch` works before it is on
+      # PATH (the one-time migration needs exactly that). The home-manager CLI
+      # comes from the SAME flake input that builds the configuration, so the
+      # CLI and the activation script it drives cannot skew. See
+      # pkgs/home-switch/default.nix.
+      home-switch = p.callPackage ./pkgs/home-switch {
+        cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
+        home-manager = home-manager.packages.${system}.home-manager;
       };
       codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
@@ -260,7 +289,16 @@
     #     eval-level checking `nix flake check` already did. Restoring a real
     #     build needs a CI credential; tracked separately.
     #
-    #   darwinConfigurations -- needs a macOS builder. Tracked separately.
+    #   The Mac's configurations (darwinConfigurations.<host>.system and
+    #     homeConfigurations.<host>) -- BUILDING them needs a macOS builder,
+    #     and the home one also contains claude-failover-proxy (the same
+    #     credential wall as cloudbox). Even forcing their full derivation
+    #     graph here is out: devenv's aarch64-darwin package is
+    #     import-from-derivation of a darwin-only drv, so plain EVALUATION of
+    #     the home closure needs a darwin builder too. They are built by
+    #     checks.${darwinSystem} further down, which `nix flake check` realises
+    #     when it runs on the Mac. (Single attributes still evaluate fine on
+    #     this leg -- see bazelrc-disk-cache-tests.)
     checks.${devboxSystem} = {
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
@@ -920,8 +958,8 @@
       # the bytes that ship, and the check's dependency graph does the evaluating.
       #
       # BOTH HOSTS ARE CHECKED AGAINST REAL EVALUATED OUTPUT, including Darwin.
-      # The note elsewhere in this file that darwinConfigurations "needs a macOS
-      # builder" is about BUILDING the activation package; EVALUATING one string
+      # The note elsewhere in this file that the Mac's configurations "need a
+      # macOS builder" is about BUILDING the activation package; EVALUATING one string
       # attribute out of it works fine on aarch64-linux and costs seconds. A
       # first draft of this check asserted the Darwin half against the Nix source
       # text with an awk extractor, on the false assumption that evaluation was
@@ -985,9 +1023,7 @@
         BAZELRC_CLOUDBOX_SRC = devboxPkgs.writeText "cloudbox-bazelrc-activation"
           self.homeConfigurations.cloudbox.config.home.activation.generateBazelrc.data;
         BAZELRC_DARWIN_SRC = devboxPkgs.writeText "darwin-bazelrc-activation"
-          self.darwinConfigurations.${mac.hostname}
-            .config.home-manager.users.${mac.username}
-            .home.activation.generateBazelrc.data;
+          self.homeConfigurations.${mac.hostname}.config.home.activation.generateBazelrc.data;
       } ''
         cd ${self}
         export HOME="$TMPDIR"
@@ -2648,6 +2684,15 @@
       '';
     };
 
+    # Build-level gate for the Mac, realised by `nix flake check` when it runs
+    # ON the Mac (nix only builds checks for the current system; the CI leg
+    # skips these and relies on mac-*-eval above). Run cfp-prefetch-darwin
+    # first: home-mac contains the private claude-failover-proxy asset.
+    checks.${darwinSystem} = {
+      home-mac = self.homeConfigurations.${mac.hostname}.activationPackage;
+      darwin-system = self.darwinConfigurations.${mac.hostname}.system;
+    };
+
     # NixOS system configuration
     nixosConfigurations.devbox = nixpkgs.lib.nixosSystem {
       system = devboxSystem;
@@ -2751,38 +2796,55 @@
       };
     };
 
-    # Darwin (macOS) system configuration
+    # Home-manager configuration for the Mac (standalone).
+    #
+    # Standalone, NOT a nix-darwin module, so that user-level changes deploy
+    # with no root: `home-switch` (pkgs/home-switch). This Mac is losing local
+    # admin; after that, root exists only inside a short Admin By Request
+    # window, and a module-mode home-manager would have put every dotfile,
+    # skill, plugin and launchd-agent change behind that window.
+    #
+    # Named after the darwinConfiguration (not the username, which contains a
+    # dot and would need quoting in every flake ref).
+    #
+    # pkgs is darwinHomePkgs, not pkgsFor: it must stay identical to the darwin
+    # system's package set (see darwinHomePkgs above). The migration off the
+    # module and its rollback are in
+    # docs/plans/2026-10-30-mac-standalone-home-manager.md.
+    homeConfigurations.${mac.hostname} = home-manager.lib.homeManagerConfiguration {
+      pkgs = darwinHomePkgs;
+      modules = [
+        sops-nix.homeManagerModules.sops
+        ./users/dev/home.nix
+        ({ lib, ... }: {
+          home.username = lib.mkForce mac.username;
+          home.homeDirectory = lib.mkForce mac.homeDir;
+          home.stateVersion = lib.mkForce "25.11";
+        })
+      ];
+      extraSpecialArgs = {
+        localPkgs = localPkgsFor darwinSystem;
+        devenvPkg = devenv.packages.${darwinSystem}.devenv;
+        honkPkg = honk.packages.${darwinSystem}.honkd;
+        assetsPath = ./assets;
+        projects = projectsFor "darwin";
+        isLinux = false;
+        isDarwin = true;
+        isDevbox = false;
+        isCloudbox = false;
+      };
+    };
+
+    # Darwin (macOS) system configuration -- SYSTEM ONLY (nix.conf, /etc,
+    # shells, login shell, nix-daemon, sudoers, nix-gc). Home-manager is
+    # deliberately NOT imported here any more: two owners of one home profile
+    # would fight over the same files, launchd agents and generation gcroot.
+    # The user side is homeConfigurations.${mac.hostname} above.
     darwinConfigurations.${mac.hostname} = nix-darwin.lib.darwinSystem {
       specialArgs = { inherit inputs mac; };
       modules = [
         { nixpkgs.overlays = [ cloudflaredOverlay ]; }
         ./hosts/Y0FMQX93RR-2/configuration.nix
-        home-manager.darwinModules.home-manager
-        {
-          home-manager.useGlobalPkgs = true;
-          home-manager.useUserPackages = true;
-          home-manager.backupFileExtension = "hm-backup";
-          home-manager.extraSpecialArgs = {
-            localPkgs = localPkgsFor darwinSystem;
-            devenvPkg = devenv.packages.${darwinSystem}.devenv;
-            honkPkg = honk.packages.${darwinSystem}.honkd;
-            assetsPath = ./assets;
-        projects = projectsFor "darwin";
-        isLinux = false;
-        isDarwin = true;
-            isDevbox = false;
-            isCloudbox = false;
-          };
-          home-manager.users.${mac.username} = { lib, ... }: {
-            home.username = lib.mkForce mac.username;
-            home.homeDirectory = lib.mkForce mac.homeDir;
-            home.stateVersion = lib.mkForce "25.11";
-            imports = [
-              sops-nix.homeManagerModules.sops
-              ./users/dev/home.nix
-            ];
-          };
-        }
       ];
     };
   };

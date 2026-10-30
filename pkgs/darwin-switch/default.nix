@@ -1,22 +1,30 @@
-# darwin-switch -- `sudo darwin-rebuild switch`, with the cfp asset seeded first.
+# darwin-switch -- the Mac's SYSTEM deploy: `sudo darwin-rebuild switch`.
 #
-# == Why this exists ==
-# pkgs/claude-failover-proxy fetches a binary from a PRIVATE GitHub repo, and
-# this Mac has no GITHUB_TOKEN anywhere the Nix builder can see (full story in
-# pkgs/cfp-prefetch-darwin/default.nix). So after every cfp release -- the daily
-# auto-bump PR -- a plain `sudo darwin-rebuild switch` dies with a 404 that
-# takes the WHOLE system build down, until someone remembers to run
-# `cfp-prefetch-darwin` first.
+# == Scope: system only ==
+# Since home-manager became standalone on the Mac (flake.nix
+# homeConfigurations.<host>, docs/plans/2026-10-30-mac-standalone-home-manager.md),
+# this deploys ONLY nix-darwin's half: nix.conf, /etc/bashrc, /etc/shells, the
+# login shell, the nix-daemon, sudoers, the nix-gc/nix-optimise daemons. User
+# config (dotfiles, skills, opencode, launchd agents) is `home-switch`, which
+# needs no root.
 #
-# darwin-rebuild has no pre-build hook to hang that on: activation scripts run
-# only AFTER the build succeeds, and the build is what fails. So the prefetch
-# has to happen outside darwin-rebuild, in a wrapper. The wrapper also has to run
-# the prefetch as the invoking USER, not under sudo: the token comes from the
-# user's login Keychain, which root cannot read.
+# Once local admin is gone, the sudo below works only inside an Admin By
+# Request window (or with the enableUnattendedRemoteRoot rule installed, see
+# hosts/Y0FMQX93RR-2/configuration.nix).
 #
-# The alternative -- handing the nix-daemon a token, as cloudbox does -- was
-# considered and declined: it needs a root-only token file, a wrapped daemon
-# launch, and NIX_REMOTE=daemon for sudo, to save typing one command.
+# == The cfp seed is best-effort here ==
+# pkgs/claude-failover-proxy fetches a binary from a PRIVATE GitHub repo that
+# the Mac's builder cannot fetch without the seed (pkgs/cfp-prefetch-darwin).
+# cfp used to be in the system closure via the home-manager module, so a missing
+# seed 404'd every system rebuild and this wrapper had to stop on it. cfp is now
+# a HOME package, so the system build does not need it; the seed still runs (it
+# is a no-op when already seeded, and harmless) but a failure only warns. That
+# matters for remote system repair over SSH, where the login Keychain is usually
+# locked: a pending cfp bump must not block a fix that has nothing to do with
+# cfp. home-switch, which does need it, keeps the seed fatal.
+#
+# The prefetch runs as the invoking USER, not under sudo: the token comes from
+# the user's login Keychain, which root cannot read.
 #
 # == Usage ==
 #   darwin-switch                         # deploys ~/Code/workstation
@@ -51,9 +59,10 @@ writeShellApplication {
         -h|--help)
           echo "usage: darwin-switch [--flake DIR] [--host NAME] [-- DARWIN-REBUILD-ARGS...]"
           echo
-          echo "Seeds the private claude-failover-proxy asset (cfp-prefetch-darwin),"
-          echo "then runs: sudo darwin-rebuild switch --flake DIR#NAME"
+          echo "SYSTEM deploy: sudo darwin-rebuild switch --flake DIR#NAME"
+          echo "(needs an Admin By Request window once local admin is removed)."
           echo "NAME defaults to the flake's only darwinConfiguration."
+          echo "User config (dotfiles, skills, opencode, launchd agents) is home-switch: no root."
           exit 0 ;;
         *) echo "darwin-switch: unknown argument: $1 (pass darwin-rebuild args after --)" >&2; exit 2 ;;
       esac
@@ -119,16 +128,19 @@ writeShellApplication {
       host="''${name_list[0]}"
     fi
 
-    # A failed seed means the rebuild would 404 anyway; stop here, where the
-    # error message names the actual problem (token, scope, hash).
-    cfp-prefetch-darwin --flake "$flake"
+    # Best-effort: the system closure no longer contains cfp (see header).
+    if ! cfp-prefetch-darwin --flake "$flake"; then
+      echo "darwin-switch: WARNING: cfp seed failed; continuing (the system build does not need it)." >&2
+      echo "  If the build below 404s on claude-failover-proxy, cfp is back in the system closure." >&2
+    fi
 
     echo "darwin-switch: sudo darwin-rebuild switch --flake $flake#$host ''${extra[*]}"
+    echo "darwin-switch: (system only -- user config is home-switch)"
     exec sudo "$rebuild" switch --flake "$flake#$host" "''${extra[@]}"
   '';
 
   meta = with lib; {
-    description = "Seed the private cfp asset, then sudo darwin-rebuild switch";
+    description = "macOS system deploy: sudo darwin-rebuild switch (user config is home-switch)";
     platforms = platforms.darwin;
     mainProgram = "darwin-switch";
   };

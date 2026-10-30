@@ -13,7 +13,7 @@ token comes from platform secret storage, and the entry is disabled by default.
 
 | Platform | Token storage | Injection trigger |
 |----------|---------------|-------------------|
-| macOS | Keychain item `figma-access-token` | `darwin-rebuild switch` |
+| macOS | Keychain item `figma-access-token` | `home-switch` (no root) |
 | cloudbox | sops key `figma_access_token` (`/run/secrets/`) | `nixos-rebuild switch` + `home-manager switch` |
 
 devbox gets no entry (personal host).
@@ -125,7 +125,7 @@ wait for the 3 AM nightly reset.
 
 ```bash
 security add-generic-password -a "$USER" -s figma-access-token -w "FIGMA_PAT" -U
-sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2
+home-switch
 ```
 
 ## Verify
@@ -157,7 +157,7 @@ Then grant it to a session and call `figma_get_figma_data` on a known node.
    home-manager switch is needed (opencode.json holds only a file reference),
    but running serves expanded that reference at startup and still hold the
    old token: restart them (`reset-workspace`, or the nightly reset). macOS:
-   `darwin-rebuild switch`, then restart OpenCode.
+   `home-switch`, then restart OpenCode.
 4. Only then revoke the old token in Figma. Revoking first makes every figma
    call 403 until the serves restart.
 

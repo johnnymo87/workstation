@@ -83,7 +83,7 @@ That's it.
 5. Apply on the host you're logged into:
    - **devbox:** `nix run home-manager -- switch --flake .#dev`
    - **cloudbox:** `nix run home-manager -- switch --flake .#cloudbox`
-   - **macOS:** `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2`
+   - **macOS:** `home-switch` (no root; deploys `~/Code/workstation`, or `home-switch --flake .`)
 6. **Verify the deployment is symlinks**, not regular files (see Gotchas §1):
    ```bash
    ls -la ~/.agents/skills/your-new-skill/
@@ -95,7 +95,7 @@ That's it.
 | Skill location | What to do |
 |---|---|
 | `<repo>/.agents/skills/<name>/SKILL.md` | Edit, commit. Effective immediately for any new OpenCode session run from that repo. |
-| `workstation/assets/opencode/skills/<name>/` | Edit the source, then apply it as in Workflow B step 5 (home-manager switch on NixOS hosts, `darwin-rebuild switch` on macOS) to refresh the symlink target. |
+| `workstation/assets/opencode/skills/<name>/` | Edit the source, then apply it as in Workflow B step 5 (home-manager switch on NixOS hosts, `home-switch` on macOS) to refresh the symlink target. |
 | `~/.agents/skills/<name>/` directly | **Don't.** It's either a Nix store symlink (read-only) or it'll be skipped/clobbered on next switch. Edit the source in workstation. |
 | `~/projects/superpowers/skills/<name>/` | That's the upstream superpowers repo (deployed via `mkOutOfStoreSymlink`). Commit and push there separately; live immediately on next session. |
 
@@ -187,7 +187,7 @@ new generation copies real content and the symlink resolves.
 | System-wide registration | `~/projects/workstation/users/dev/opencode-skills.nix` |
 | Apply system-wide changes (devbox) | `nix run home-manager -- switch --flake .#dev` |
 | Apply system-wide changes (cloudbox) | `nix run home-manager -- switch --flake .#cloudbox` |
-| Apply system-wide changes (macOS) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` |
+| Apply system-wide changes (macOS) | `home-switch` (no root) |
 | Verify deployment | `ls -la ~/.agents/skills/<name>/` (must be symlinks) |
 | List all deployed skills | `ls ~/.agents/skills/` |
 

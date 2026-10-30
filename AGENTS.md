@@ -10,9 +10,9 @@ NixOS hosts (devbox on Hetzner, cloudbox on GCP) + nix-darwin (macOS), all shari
 |---|---|---|---|
 | `devbox` | NixOS on Hetzner | `sudo nixos-rebuild switch --flake .#devbox` | `nix run home-manager -- switch --flake .#dev` |
 | `cloudbox` | NixOS on GCP ARM | `sudo nixos-rebuild switch --flake .#cloudbox` | `nix run home-manager -- switch --flake .#cloudbox` |
-| `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` (covers both) | (combined) |
+| `Y0FMQX93RR-2` (or similar) | macOS (nix-darwin) | `darwin-switch` (= `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2`; needs an Admin By Request window) | `home-switch` (= standalone `home-manager switch --flake .#Y0FMQX93RR-2`; **no root**) |
 
-Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`. See the [Rebuilding](.agents/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
+Note the home-manager target name is asymmetric: devbox uses `.#dev` (legacy name kept for compatibility), cloudbox uses `.#cloudbox`, the Mac uses `.#Y0FMQX93RR-2` (same name as its darwinConfiguration). See the [Rebuilding](.agents/skills/rebuilding/SKILL.md) skill for the canonical commands and their host-detection logic.
 
 ## Quick Start
 
@@ -24,10 +24,19 @@ nix run home-manager -- switch --flake .#dev           # devbox
 nix run home-manager -- switch --flake .#cloudbox      # cloudbox
 ```
 
-**macOS (nix-darwin):**
+**macOS (nix-darwin + standalone home-manager):**
 ```bash
-darwin-switch      # cfp-prefetch-darwin + sudo darwin-rebuild switch (system + user)
+home-switch        # USER config, no root: cfp-prefetch-darwin + home-manager switch
+darwin-switch      # SYSTEM config: sudo darwin-rebuild switch (Admin By Request window)
 ```
+
+The Mac has no local admin, so root exists only inside an Admin By Request
+window. Almost everything (dotfiles, skills, opencode config, plugins, launchd
+agents, `projects.nix`) is user config and deploys with `home-switch`. Only
+`hosts/Y0FMQX93RR-2/` changes (nix.conf, /etc, shells, nix-daemon, nix-gc,
+sudoers) need `darwin-switch`. The one-time move off the old combined
+nix-darwin-module setup is
+`docs/plans/2026-10-30-mac-standalone-home-manager.md`.
 
 ## Work in a Worktree, Not the Primary Root
 
@@ -88,7 +97,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 |----------|-------------|---------|
 | Devbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
 | Cloudbox | `~/projects/` | Login (systemd service) or `~/.local/bin/ensure-projects` |
-| macOS | `~/Code/` | `darwin-rebuild switch` (activation script) |
+| macOS | `~/Code/` | `home-switch` (activation script) |
 
 **Add a project:**
 1. Edit `projects.nix`:
@@ -96,7 +105,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
    my-new-project = { url = "git@github.com:org/repo.git"; };
    ```
 2. Push to GitHub
-3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox) or `darwin-rebuild switch` (macOS)
+3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox) or `home-switch` (macOS)
 
 **Devbox projects live on the local SSD** (`~/projects` on root filesystem). They are reconstructable from git and do not survive full reprovisioning — `ensure-projects` reclones declared projects on login.
 
@@ -190,9 +199,12 @@ See [Setting Up Cloudbox](.agents/skills/setting-up-cloudbox/SKILL.md) for the f
 
 1. Install Nix: `curl -L https://nixos.org/nix/install | sh`
 2. Clone workstation: `git clone ... ~/Code/workstation`
-3. Apply: `sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2`
-4. Projects auto-clone during activation (to `~/Code/`)
-5. For devenv projects: `cd ~/Code/<project> && direnv allow`
+3. Seed the private cfp asset: `nix run ~/Code/workstation#cfp-prefetch-darwin`
+4. System (needs root, so an Admin By Request window on a managed Mac):
+   `sudo nix run nix-darwin#darwin-rebuild -- switch --flake ~/Code/workstation#Y0FMQX93RR-2`
+5. User, no root: `nix run ~/Code/workstation#home-switch`
+6. Projects auto-clone during home activation (to `~/Code/`)
+7. For devenv projects: `cd ~/Code/<project> && direnv allow`
 
 ## Running `nix flake check` Locally
 

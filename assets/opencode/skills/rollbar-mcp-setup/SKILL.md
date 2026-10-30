@@ -12,7 +12,7 @@ disabled by default.
 
 | Platform | Token storage | Injection trigger |
 |----------|---------------|-------------------|
-| macOS | Keychain | `darwin-rebuild switch` |
+| macOS | Keychain | `home-switch` (no root) |
 | cloudbox | sops (`/run/secrets/`) | `nixos-rebuild switch` + `home-manager switch` |
 
 ## Architecture
@@ -64,7 +64,7 @@ security add-generic-password -a "$USER" -s rollbar-access-token -w "ROLLBAR_PRO
 Apply:
 
 ```bash
-sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2
+home-switch
 ```
 
 Verify without printing the token:

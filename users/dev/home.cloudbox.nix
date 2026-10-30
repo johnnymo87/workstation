@@ -380,7 +380,9 @@ lib.mkIf isCloudbox {
   # Additionally, unattended passwordless root via darwin-rebuild is disabled on
   # the Mac (enableUnattendedRemoteRoot in hosts/Y0FMQX93RR-2/configuration.nix).
   # Auth: ~/.ssh/id_mac (trusted in the Mac's JumpCloud-managed authorized_keys).
-  # For operator-initiated remote cutovers / darwin-rebuild.
+  # For operator-initiated remote repairs: usually `home-switch` (no root on the
+  # Mac), rarely darwin-rebuild (needs that toggle). See the
+  # remote-workstation-cutover skill.
   programs.ssh.matchBlocks.mac = {
     hostname = "127.0.0.1";
     port = 2222;

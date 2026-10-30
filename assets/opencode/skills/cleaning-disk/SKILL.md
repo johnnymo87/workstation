@@ -44,9 +44,22 @@ Run these in order until you have enough space:
 
 ### 1. Nix garbage collection (typically 0.5-5 GB)
 
-**macOS:**
+**macOS (no root needed):**
 ```bash
 nix-collect-garbage -d
+```
+
+This runs as you and is usually all you need: it deletes your own old profile
+generations (home-manager, `~/.nix-profile`) and frees every store path nothing
+else roots. It cannot delete old **system** generations
+(`/nix/var/nix/profiles/system-N-link` are root-owned GC roots), and those pin
+everything they reference. nix-darwin's `nix.gc` daemon removes system
+generations older than 30 days every Sunday (see "macOS: automatic GC" below),
+so a manual root GC is rarely needed. When it is, it needs an **Admin By
+Request** window (no local admin on the Mac):
+
+```bash
+sudo nix-collect-garbage --delete-older-than 7d   # inside an elevation window
 ```
 
 **Devbox/Cloudbox (NixOS) -- clean both system and HM generations:**
@@ -103,6 +116,23 @@ du -sh ~/.local/share/devenv 2>/dev/null       # devenv state
 ```
 
 ## macOS-Only Cleanup
+
+### macOS: automatic GC (what already runs)
+
+| Job | Runs as | Schedule | What it does |
+|---|---|---|---|
+| `org.nixos.nix-gc` (nix-darwin `nix.gc`) | root launchd daemon | Sunday 03:15 | `nix-collect-garbage --delete-older-than 30d`: root's profiles (`/nix/var/nix/profiles`, i.e. **system** generations) older than 30 days, then a store GC |
+| `org.nixos.nix-optimise` (nix-darwin `nix.optimise`) | root launchd daemon | Sunday 04:15 | `nix-store --optimise` (hard-link identical files) |
+| `home-manager-auto-expire` (`home.darwin.nix`) | you, launchd agent | daily | expires home-manager generations older than 7 days, then `nix-collect-garbage --delete-older-than 7d` |
+
+The two root daemons are installed by `darwin-switch` and fired by launchd; no
+human sudo is involved when they run, so they keep working without local admin.
+A Mac asleep at the scheduled time runs them at next wake. Check them without root:
+
+```bash
+ls /Library/LaunchDaemons/ | grep -E 'nix-(gc|optimise)'
+ls /nix/var/nix/profiles/ | grep -c '^system-'   # system generation count
+```
 
 ### Bazel (if present)
 
@@ -217,6 +247,8 @@ sudo nix-env --delete-generations +5 \
   --profile /nix/var/nix/profiles/system
 sudo nix-collect-garbage
 
-# Clean old Nix generations (macOS)
+# Clean old Nix generations (macOS): usually nothing to do -- nix.gc and
+# home-manager autoExpire already run. If the store is still large, as you:
 nix-collect-garbage -d
+# System generations need root, i.e. an Admin By Request window; rarely needed.
 ```
