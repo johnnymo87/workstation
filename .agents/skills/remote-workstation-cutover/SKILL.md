@@ -25,7 +25,7 @@ that usually breaks Claude access is user config:
 | opencode plugins, skills, agents | `assets/opencode/`, `users/dev/opencode-skills.nix` | `home-switch` | **No** |
 | opencode serve / frontdoor / cfp / tunnels (launchd agents) | `users/dev/home.darwin.nix` | `home-switch`, or `launchctl kickstart -k gui/$(id -u)/org.nix-community.home.<name>` | **No** |
 | the opencode binary itself | `users/dev/home.base.nix` | `home-switch` | **No** |
-| Remote Login (sshd) itself is off | macOS setting | System Settings / `systemsetup` at the Mac | **Yes** |
+| Remote Login (sshd) itself is off | macOS setting | Sharing pane, or `sudo launchctl enable` + `bootstrap` (see below) | **Yes** |
 | nix.conf, nix-daemon, /etc/bashrc, /etc/shells, login shell, sudoers | `hosts/Y0FMQX93RR-2/` | `darwin-switch` | **Yes** |
 
 A home-level repair is: open the window (step 2 below), then from cloudbox
@@ -115,13 +115,21 @@ they are real. The toggle is the only path that needs no later elevation.
 
 ### SSH access after admin removal (what is verifiable)
 
-**First, sshd has to be running at all.** As of 2026-10-30 Remote Login is
-**disabled** on this Mac (`launchctl print-disabled system` shows
-`"com.openssh.sshd" => disabled`; `nc -z 127.0.0.1 22` is refused), so the
-cutover tunnel has nothing to reach. Enabling it is root-only
-(`sudo systemsetup -setremotelogin on`, or System Settings → General →
-Sharing), i.e. an Admin By Request window, and IT's MDM may own the setting.
-The migration plan does it optionally in its elevated step. Check:
+**First, sshd has to be running at all.** Remote Login was enabled on
+2026-10-30, while admin still existed, and is deliberately left on so remote
+repair never needs an elevation window first. If it is ever off again, turning
+it on is root-only, i.e. an Admin By Request window, and IT's MDM may own the
+setting. What works (and what does not):
+
+- `sudo /usr/sbin/systemsetup -setremotelogin on` **fails** (`-60007`
+  authorization error): it needs Full Disk Access for the terminal, which sudo
+  does not provide.
+- `sudo launchctl enable system/com.openssh.sshd` followed by
+  `sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist`
+  **works**, and the enable persists across reboots. System Settings →
+  General → Sharing → Remote Login also works.
+
+Check:
 
 ```bash
 launchctl print-disabled system | grep sshd   # want: enabled, or no line
