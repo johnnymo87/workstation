@@ -145,10 +145,25 @@ fi
 # already carries `project` in its [core] section, which is where a
 # machine-local identifier belongs.
 #
-# The gcloud path is the per-user profile symlink, deliberately NOT the
-# /nix/store path it points at: a store path baked into ~/.ssh/config would be
-# garbage-collected out from under the tunnel on the next GC.
-GCLOUD_BIN="/etc/profiles/per-user/$USER/bin/gcloud"
+# The gcloud path is a profile symlink, deliberately NOT the /nix/store path it
+# points at: a store path baked into ~/.ssh/config would be garbage-collected
+# out from under the tunnel on the next GC.
+#
+# Which profile depends on how home-manager is installed. Standalone (the Mac
+# since the 2026-10-30 migration, docs/plans/2026-10-30-mac-standalone-home-manager.md)
+# puts it in ~/.nix-profile; the old nix-darwin-module install put it in
+# /etc/profiles/per-user/$USER, which the migration DELETES -- so a ~/.ssh/config
+# generated before it must be regenerated after `home-switch`, or every IAP
+# cloudbox block (and with it the cloudbox tunnels) breaks.
+GCLOUD_BIN=""
+for cand in "$HOME/.nix-profile/bin/gcloud" "/etc/profiles/per-user/$USER/bin/gcloud"; do
+    if [ -x "$cand" ]; then GCLOUD_BIN="$cand"; break; fi
+done
+if [ -z "$GCLOUD_BIN" ]; then
+    GCLOUD_BIN="$HOME/.nix-profile/bin/gcloud"
+    echo "Warning: gcloud not found in ~/.nix-profile or /etc/profiles/per-user/$USER;"
+    echo "         emitting $GCLOUD_BIN anyway. Run home-switch, then re-run this script."
+fi
 IAP_CONFIG="$HOME/.config/gcloud-tunnel/config"
 IAP_PROXY="    ProxyCommand env CLOUDSDK_CONFIG=$IAP_CONFIG $GCLOUD_BIN compute start-iap-tunnel cloudbox 22 --listen-on-stdin --zone=us-east1-b"
 

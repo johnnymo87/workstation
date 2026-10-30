@@ -212,5 +212,5 @@ In Feb 2025 we inherited 6 agents from "Oh My OpenCode" (OMO) and cut them all:
 
 1. Create `assets/opencode/agents/<name>.md` with YAML frontmatter (description, mode, model, permission). For Anthropic-pinned agents, pin `anthropic/claude-<model>` and let `patchAgent` route it (see "Host-correct model routing").
 2. Add `xdg.configFile."opencode/agents/<name>.md".source = patchAgent "<name>" "${assetsPath}/opencode/agents/<name>.md";` to `users/dev/opencode-config.nix` (route it through `patchAgent`, not a bare `source`, so host model rewriting applies)
-3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox), `nix run home-manager -- switch --flake .#cloudbox` (cloudbox), or `darwin-rebuild switch` (macOS)
+3. Apply: `nix run home-manager -- switch --flake .#dev` (devbox), `nix run home-manager -- switch --flake .#cloudbox` (cloudbox), or `home-switch` (macOS)
 4. Update this skill with the agent's purpose and rationale

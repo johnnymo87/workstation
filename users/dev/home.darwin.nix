@@ -270,12 +270,16 @@ lib.mkIf isDarwin {
     # server. Nix-packaged (pkgs/teamclaude, platforms = unix), zero runtime deps.
     localPkgs.teamclaude
     # Seeds the PRIVATE cfp release asset into the store. MUST be run before a
-    # `darwin-rebuild switch` that picks up a new cfp version, because this Mac
-    # has no GITHUB_TOKEN anywhere the builder can see and the failed fetch
-    # takes the whole system build down with it, not just cfp. Idempotent.
+    # home build that picks up a new cfp version, because this Mac has no
+    # GITHUB_TOKEN anywhere the builder can see and the failed fetch takes the
+    # whole home build down with it, not just cfp. Idempotent. home-switch runs
+    # it for you.
     localPkgs.cfp-prefetch-darwin
-    # The everyday rebuild command: runs cfp-prefetch-darwin, then
-    # `sudo darwin-rebuild switch --flake ~/Code/workstation#<host>`.
+    # The everyday deploy command, NO ROOT: cfp-prefetch-darwin, then a
+    # standalone `home-manager switch` of homeConfigurations.<host>.
+    localPkgs.home-switch
+    # SYSTEM-only deploy: `sudo darwin-rebuild switch`. Needs an Admin By
+    # Request window once local admin is gone.
     localPkgs.darwin-switch
     (pkgs.writeShellApplication {
       name = "pigeon-setup-secrets";
@@ -747,7 +751,7 @@ lib.mkIf isDarwin {
     #   1. touch ~/.codex-lb/enabled
     #   2. launchctl kickstart -k gui/$(id -u)/org.nix-community.home.codex-lb
     #   3. open http://127.0.0.1:2455 and log in ChatGPT account(s)
-    #   4. darwin-rebuild switch  (wires opencode via injectCodexLbBaseUrlDarwin)
+    #   4. home-switch  (wires opencode via injectCodexLbBaseUrlDarwin)
     codex-lb = {
       enable = true;
       config = {
@@ -806,7 +810,7 @@ lib.mkIf isDarwin {
     # same binary, so the three sites cannot drift apart again. Bootstrap:
     #   1. teamclaude login    # PKCE OAuth, needs TTY + browser; repeat per account
     #   2. launchctl kickstart -k gui/$(id -u)/org.nix-community.home.teamclaude
-    #   3. darwin-rebuild switch  (wires opencode via injectTeamclaudeBaseUrlDarwin)
+    #   3. home-switch  (wires opencode via injectTeamclaudeBaseUrlDarwin)
     teamclaude = {
       enable = true;
       config = {
@@ -941,7 +945,7 @@ lib.mkIf isDarwin {
         # Without this there is a real hole: the wrapper exits 0 when teamclaude
         # is unseeded, home-manager skips re-bootstrapping an agent whose plist
         # is unchanged, and nothing else starts it -- so the sequence
-        # `teamclaude login` -> `darwin-rebuild switch` would leave activation
+        # `teamclaude login` -> `home-switch` would leave activation
         # pointing opencode at :8789 (marker says seeded) while cfp is still not
         # running, and every Claude request would get ECONNREFUSED until someone
         # ran `launchctl kickstart` by hand. While unseeded this costs one exit-0
@@ -1212,7 +1216,7 @@ launchctl kickstart -k gui/\$(id -u)/$LABEL
 
 IMPORTANT: Also check the serve pool. Restarting only the front door creates dangerous version skew if the serves remain on old code -- an old serve 404s the door's session-scoped routes. Both are launchd agents; \`launchctl kickstart -k\` each of org.nix-community.home.opencode-serve-0/-1 too if they are also stale.
 
-If a kickstart does not clear this, the installed plist itself is stale (home-manager's bootstrap failed). Re-run: darwin-switch
+If a kickstart does not clear this, the installed plist itself is stale (home-manager's bootstrap failed). Re-run: home-switch
 
 Running store path: $RUNNING_VER
 Installed store path: $INSTALLED_PATH
@@ -1286,7 +1290,12 @@ EOF
               "${pkgs.ripgrep}/bin"
               "${pkgs.gh}/bin"
               "${pkgs.bun}/bin"
-              "/etc/profiles/per-user/${config.home.username}/bin"
+              # The home profile, wherever this mode of home-manager puts
+              # it: ~/.nix-profile standalone (now), /etc/profiles/per-user/
+              # $USER as a nix-darwin module (before). Was hardcoded to the
+              # latter, which would have left every serve unable to find
+              # `opencode` the moment that directory disappeared.
+              "${config.home.profileDirectory}/bin"
               "/usr/bin"
               "/bin"
             ]}"
@@ -1345,7 +1354,7 @@ EOF
     # Homebrew bash (used by iTerm2 Custom Command) doesn't have SYS_BASHRC
     # compiled in, so it skips /etc/bashrc for non-login interactive shells.
     # Source it explicitly to pick up nix-darwin's set-environment (PATH with
-    # /etc/profiles/per-user/$USER/bin, TERMINFO_DIRS, XDG_*, etc.).
+    # ~/.nix-profile/bin and the system profile, TERMINFO_DIRS, XDG_*, etc.).
     # mkBefore so it runs before home.base.nix's initExtra and the
     # mkAfter block below (Keychain reads depend on /usr/bin/security on PATH).
     initExtra = lib.mkMerge [

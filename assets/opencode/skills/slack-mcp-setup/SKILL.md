@@ -10,7 +10,7 @@ No browser cookie scraping -- tokens don't expire unless revoked.
 
 | Platform | Token storage | Injection trigger |
 |----------|--------------|-------------------|
-| macOS | Keychain | `darwin-rebuild switch` |
+| macOS | Keychain | `home-switch` (no root) |
 | cloudbox | sops (`/run/secrets/`) | `nixos-rebuild switch` + `home-manager switch` |
 
 ## Architecture
@@ -197,7 +197,7 @@ The `-U` flag updates if the item already exists.
 ### Apply
 
 ```bash
-sudo darwin-rebuild switch --flake ~/Code/workstation#Y0FMQX93RR-2
+home-switch
 ```
 
 ## Cloudbox Setup

@@ -91,8 +91,8 @@ home-manager:
 nix run home-manager -- switch --flake ~/projects/workstation#dev
 # cloudbox
 nix run home-manager -- switch --flake ~/projects/workstation#cloudbox
-# macOS
-darwin-switch
+# macOS (no root)
+home-switch
 ```
 
 To bump the pinned version, edit `pkgs/ask-question/default.nix` (`rev` +

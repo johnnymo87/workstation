@@ -60,10 +60,22 @@ Home-manager is NOT a NixOS module here. This means:
 | Platform | System changes | User changes |
 |----------|---------------|--------------|
 | Devbox | `sudo nixos-rebuild switch --flake .#devbox` | `home-manager switch --flake .#dev` |
-| macOS | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` | Included in darwin-rebuild |
+| Cloudbox | `sudo nixos-rebuild switch --flake .#cloudbox` | `home-manager switch --flake .#cloudbox` |
+| macOS | `darwin-switch` (sudo; Admin By Request window) | `home-switch` (no root) |
 
-On devbox, system and user are independent (faster iteration on user config).
-On macOS, `darwin-rebuild` handles both system and home-manager in one command.
+On every host, system and user are independent. On macOS that is load-bearing,
+not just faster: the Mac has no local admin, so root exists only inside a
+temporary Admin By Request window, and keeping home-manager standalone
+(`homeConfigurations.Y0FMQX93RR-2`) is what lets dotfiles, skills, opencode
+config and launchd agents deploy without one. Home-manager was a nix-darwin
+module on the Mac until 2026-10-30; see
+`docs/plans/2026-10-30-mac-standalone-home-manager.md` for the migration.
+
+Consequences on the Mac:
+- User packages live in `~/.nix-profile` (not `/etc/profiles/per-user/$USER`).
+  Reference them via `config.home.profileDirectory`, never a hardcoded path.
+- `homeConfigurations.Y0FMQX93RR-2` uses `darwinHomePkgs` (flake.nix), which
+  must stay identical to the darwin system's pkgs (same overlays).
 
 ### Modular home.nix Structure
 
@@ -110,7 +122,7 @@ How each platform uses it:
 |----------|-----------|-------------|---------|
 | Devbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
 | Cloudbox | `~/.local/bin/ensure-projects` script + systemd service | `~/projects/` | Login (systemd) or manual script |
-| macOS | `home.activation.ensureProjects` in `home.darwin.nix` | `~/Code/` | `darwin-rebuild switch` |
+| macOS | `home.activation.ensureProjects` in `home.darwin.nix` | `~/Code/` | `home-switch` |
 
 ### assets/ vs .agents/
 
@@ -147,7 +159,7 @@ Local packages are exposed as `packages.<system>.<name>` in `flake.nix` and pass
 OpenCode settings use a merge-on-activate strategy:
 
 1. Nix generates a `*.managed.json` (read-only, in Nix store)
-2. On `home-manager switch`, an activation script merges managed → runtime
+2. On `home-manager switch` (`home-switch` on macOS), an activation script merges managed → runtime
 3. Managed keys win on conflict; runtime-only keys are preserved
 4. This lets OpenCode write its own runtime state without clobbering
 
@@ -196,8 +208,8 @@ Currently disabled on Darwin: `bash`, `ssh`, `neovim` (using existing dotfiles i
 
 | Task | Devbox | macOS |
 |------|--------|-------|
-| Apply system changes | `sudo nixos-rebuild switch --flake .#devbox` | `sudo darwin-rebuild switch --flake .#Y0FMQX93RR-2` |
-| Apply user changes | `home-manager switch --flake .#dev` | (included in darwin-rebuild) |
+| Apply system changes | `sudo nixos-rebuild switch --flake .#devbox` | `darwin-switch` (Admin By Request window) |
+| Apply user changes | `home-manager switch --flake .#dev` | `home-switch` (no root) |
 | Update nixpkgs | `nix flake update` | `nix flake update` |
 | Check flake | `nix flake check` | `nix flake check` |
 | Add a project | Edit `projects.nix`, push, apply | Edit `projects.nix`, push, apply |

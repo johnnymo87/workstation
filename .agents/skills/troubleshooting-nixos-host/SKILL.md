@@ -58,7 +58,7 @@ launchctl bootout gui/$UID/org.nix-community.home.cloudbox-chart-tunnel
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/org.nix-community.home.cloudbox-chart-tunnel.plist
 ```
 
-Re-running `darwin-rebuild switch` does the same thing if you prefer.
+Re-running `home-switch` (no root) does the same thing if you prefer.
 
 Triage:
 
@@ -503,11 +503,11 @@ ssh-keygen -l -f ~/.ssh/id_ed25519_signing.pub   # fingerprint should match the
 
 If `gpg.format` is missing or returns `openpgp`, home-manager has not
 applied the SSH-signing config yet — re-run `nix run home-manager -- switch
---flake .#<host>` (or `darwin-rebuild` on macOS).
+--flake .#<host>` (or `home-switch` on macOS).
 
 ### Add a new host's signing key
 
 1. On the new host: `ssh-keygen -t ed25519 -N '' -C '<email> (<host> signing)' -f ~/.ssh/id_ed25519_signing`
 2. Append the new pubkey to `assets/git/allowed_signers` with the format `<email> namespaces="git" <pubkey> <hostname-tag>`
-3. Apply home-manager on every host so the updated `allowed_signers` propagates: `nix run home-manager -- switch --flake .#<host>` (or `darwin-rebuild` on macOS)
+3. Apply home-manager on every host so the updated `allowed_signers` propagates: `nix run home-manager -- switch --flake .#<host>` (or `home-switch` on macOS)
 4. Register the pubkey at <https://github.com/settings/ssh/new> with type **Signing Key** (NOT Authentication Key)

@@ -19,7 +19,7 @@ assets/nvim/lua/user/*.lua    (source of truth in this repo)
 nvim loads at startup
 ```
 
-Changes go to `assets/nvim/lua/user/`. They only take effect after `home-manager switch` (devbox) or `darwin-rebuild switch` (macOS).
+Changes go to `assets/nvim/lua/user/`. They only take effect after `home-manager switch` (devbox) or `home-switch` (macOS).
 
 ## Core Technique: Headless Testing
 
@@ -67,7 +67,7 @@ nvim --startuptime /tmp/startup.log -c "quit" && tail -20 /tmp/startup.log
 1. Edit files in `assets/nvim/lua/user/`
 2. Test headlessly against the assets path (no deploy needed)
 3. Fix any errors
-4. Deploy: `home-manager switch --flake .#dev` or `darwin-rebuild switch`
+4. Deploy: `home-manager switch --flake .#dev` or `home-switch` (macOS)
 5. Test headlessly against deployed config
 6. Verify in a real nvim session
 

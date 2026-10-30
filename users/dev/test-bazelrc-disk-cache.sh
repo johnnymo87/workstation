@@ -17,7 +17,7 @@
 # TEXT, handed in via the BAZELRC_CLOUDBOX_SRC / BAZELRC_DARWIN_SRC seams (same
 # seam idea as DISK_WATCH_SRC / DISK_CLEANUP_SRC: a flake check cannot `nix eval`
 # its own subject inside the build sandbox). Evaluating one string attribute out
-# of darwinConfigurations works on Linux -- it is BUILDING the activation package
+# of the Mac's homeConfiguration works on Linux -- it is BUILDING the activation package
 # that needs a macOS builder -- so there is no need to fall back to grepping the
 # Nix source. A first draft of this file did fall back to source text, with an
 # awk extractor keyed on `lib.optionals isDarwin [`; that would have silently
@@ -33,7 +33,7 @@
 #
 # Run standalone from the repo root with:
 #   nix eval --raw .#homeConfigurations.cloudbox.config.home.activation.generateBazelrc.data > /tmp/cb.rc
-#   nix eval --raw ".#darwinConfigurations.\"$(hostname_of_mac)\".config.home-manager.users.\"<user>\".home.activation.generateBazelrc.data" > /tmp/mac.rc
+#   nix eval --raw ".#homeConfigurations.\"$(hostname_of_mac)\".config.home.activation.generateBazelrc.data" > /tmp/mac.rc
 #   BAZELRC_CLOUDBOX_SRC=/tmp/cb.rc BAZELRC_DARWIN_SRC=/tmp/mac.rc \\
 #     bash users/dev/test-bazelrc-disk-cache.sh
 set -euo pipefail
