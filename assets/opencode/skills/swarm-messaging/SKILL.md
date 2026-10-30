@@ -407,8 +407,9 @@ session there that was doing something else.
 - **Refusals at call time are final for now; do not retry in a loop.** The tool
   errors at once with the reason: `launch_send_disabled` and `not_accepted` (see
   above) and `target_offline` (that machine has not polled for over a minute,
-  usually a sleeping Mac) are the common ones; `queue_full` and `rate_limited`
-  mean you have too many launches queued or started this hour. Tell the human
+  usually a sleeping Mac) are the common ones; `queue_full` means the target
+  machine already has a full queue of launches (from anyone), and
+  `rate_limited` that this machine has started too many this hour. Tell the human
   rather than working around it.
 - **`directory` is on the target machine** and must already exist: an absolute
   path, `~/…`, or a bare project name, which expands to the target's project
@@ -418,9 +419,11 @@ session there that was doing something else.
   report back to you with `swarm_send` (pigeon also prepends a
   `[Remote launch requested by <your id> on <machine>; report back …]` line).
   **Put no secrets in it**: its first 300 characters are posted to Telegram, and
-  the whole prompt passes through pigeon's worker.
-- **A launched session does not launch further** unless its prompt says to.
-  If it needs work on yet another machine, it reports that back instead.
+  the whole prompt is stored by pigeon on both machines and in its worker.
+- **If you were launched, do not `swarm_launch` further** unless your prompt
+  says to; report the need back instead. Nothing enforces this (pigeon has no
+  hop rule for launches), so as a requester do not assume a launched session
+  cannot chain.
 - **Call it once per launch.** The tool answers at once with `accepted` or
   `pending`. The outcome arrives later as a `launch.result` swarm message from
   `pigeon`, saying the session started (with its `ses_` id to `swarm_send`), was
