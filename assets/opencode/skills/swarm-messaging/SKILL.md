@@ -404,13 +404,23 @@ session there that was doing something else.
   host-configuration changes for the human; do not attempt them. If the tool is
   missing from your tool list, your session predates it: it appears after the
   serve pool restarts (the nightly reset at the latest).
-- **`directory` is on the target machine**: an absolute path, `~/…`, or a bare
-  project name meaning `~/projects/<name>`. The Mac keeps its checkouts under
-  `~/Code`, so say `~/Code/<repo>` there. It must already exist.
+- **Refusals at call time are final for now; do not retry in a loop.** The tool
+  errors at once with the reason: `launch_send_disabled` and `not_accepted` (see
+  above) and `target_offline` (that machine has not polled for over a minute,
+  usually a sleeping Mac) are the common ones; `queue_full` and `rate_limited`
+  mean you have too many launches queued or started this hour. Tell the human
+  rather than working around it.
+- **`directory` is on the target machine** and must already exist: an absolute
+  path, `~/…`, or a bare project name, which expands to the target's project
+  root (`~/projects/<name>` on cloudbox and devbox, `~/Code/<name>` on the Mac).
 - **Write the prompt for a reader with no context.** The launched session knows
   nothing about your conversation. Say what to do, what not to touch, and to
-  report back to you with `swarm_send` (give your session id; pigeon also adds a
-  `[Remote launch requested by …]` line).
+  report back to you with `swarm_send` (pigeon also prepends a
+  `[Remote launch requested by <your id> on <machine>; report back …]` line).
+  **Put no secrets in it**: its first 300 characters are posted to Telegram, and
+  the whole prompt passes through pigeon's worker.
+- **A launched session does not launch further** unless its prompt says to.
+  If it needs work on yet another machine, it reports that back instead.
 - **Call it once per launch.** The tool answers at once with `accepted` or
   `pending`. The outcome arrives later as a `launch.result` swarm message from
   `pigeon`, saying the session started (with its `ses_` id to `swarm_send`), was
