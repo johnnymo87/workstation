@@ -400,6 +400,17 @@ in
         # delivery.failed (never_collected), nothing is lost silently.
         "PIGEON_SWARM_RELAY_ACCEPT_FROM=cloudbox,macbook"
         "PIGEON_SWARM_RELAY_SEND=1"
+        # Remote launch (pigeon-k0qn.18). FROM: machines whose agents may start a
+        # fresh headless opencode session HERE, with any prompt in any directory
+        # (pigeon's swarm_launch tool; no per-launch approval, by Jonathan's choice,
+        # so listing a machine trusts it with a shell here). SEND=1: agents here may
+        # launch on machines that list this one. Receiving also needs the relay SEND
+        # above, since the launched session reports back by swarm. Every launch posts
+        # a notice to Telegram General from this machine. Rollback: delete both lines
+        # and rebuild; launches queued for this machine return to their requesters
+        # as never_collected.
+        "PIGEON_REMOTE_LAUNCH_FROM=cloudbox,macbook"
+        "PIGEON_REMOTE_LAUNCH_SEND=1"
       ];
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail

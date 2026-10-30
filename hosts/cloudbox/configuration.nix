@@ -931,6 +931,17 @@ in
         # delivery.failed (never_collected), nothing is lost silently.
         "PIGEON_SWARM_RELAY_ACCEPT_FROM=devbox,macbook"
         "PIGEON_SWARM_RELAY_SEND=1"
+        # Remote launch (pigeon-k0qn.18). FROM: machines whose agents may start a
+        # fresh headless opencode session HERE, with any prompt in any directory
+        # (pigeon's swarm_launch tool; no per-launch approval, by Jonathan's choice,
+        # so listing a machine trusts it with a shell here). SEND=1: agents here may
+        # launch on machines that list this one. Receiving also needs the relay SEND
+        # above, since the launched session reports back by swarm. Every launch posts
+        # a notice to Telegram General from this machine. Rollback: delete both lines
+        # and rebuild; launches queued for this machine return to their requesters
+        # as never_collected.
+        "PIGEON_REMOTE_LAUNCH_FROM=devbox,macbook"
+        "PIGEON_REMOTE_LAUNCH_SEND=1"
         # Absolute path to oc-auto-attach so launch-ingest.ts can find it
         # despite the locked-down systemd PATH. See let-binding above.
         "OC_AUTO_ATTACH_BIN=${oc-auto-attach}/bin/oc-auto-attach"

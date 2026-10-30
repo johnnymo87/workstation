@@ -552,6 +552,17 @@ lib.mkIf isDarwin {
           # delivery.failed (never_collected), nothing is lost silently.
           PIGEON_SWARM_RELAY_ACCEPT_FROM = "cloudbox,devbox";
           PIGEON_SWARM_RELAY_SEND = "1";
+          # Remote launch (pigeon-k0qn.18). FROM: machines whose agents may start a
+          # fresh headless opencode session HERE, with any prompt in any directory
+          # (pigeon's swarm_launch tool; no per-launch approval, by Jonathan's choice,
+          # so listing a machine trusts it with a shell here). SEND=1: agents here may
+          # launch on machines that list this one. Receiving also needs the relay SEND
+          # above, since the launched session reports back by swarm. Every launch posts
+          # a notice to Telegram General from this machine. Rollback: delete both lines
+          # and rebuild; launches queued for this machine return to their requesters
+          # as never_collected.
+          PIGEON_REMOTE_LAUNCH_FROM = "cloudbox,devbox";
+          PIGEON_REMOTE_LAUNCH_SEND = "1";
           # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
           # sessionVariables for rationale). pigeon revive spawns opencode that
           # must hit the same DB; a launchd agent doesn't source ~/.profile.
