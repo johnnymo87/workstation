@@ -64,8 +64,9 @@ kill the session driving it.
 ```bash
 cd ~/Code/workstation && git pull --ff-only
 
-# 1. Record the current (module-mode) HM generation, for rollback.
+# 1. Record the current (module-mode) HM and system generations, for rollback.
 readlink ~/.local/state/home-manager/gcroots/current-home | tee ~/.hm-module-generation
+readlink /nix/var/nix/profiles/system | tee ~/.darwin-module-generation   # e.g. system-184-link
 
 # 2. NO ROOT. Build + activate standalone home-manager. Seeds cfp first.
 nix run ~/Code/workstation#home-switch
@@ -80,7 +81,15 @@ grep -c 'profiles/per-user' ~/.ssh/config   # want 0
 #    installs the nix-gc / nix-optimise daemons.
 darwin-switch
 
-# 5. Verify (no root).
+#    Same window, OPTIONAL but needed for remote repair from cloudbox: Remote
+#    Login (sshd) is currently DISABLED on this Mac, and enabling it needs root.
+#    The cutover tunnel targets :22. Only if IT policy allows it:
+#      sudo systemsetup -setremotelogin on
+#      launchctl print-disabled system | grep sshd   # want => enabled (or absent)
+
+# 5. Verify (no root). Open NEW shells first (or `hash -r` in old ones): bash
+#    caches command paths under /etc/profiles/per-user/..., which step 4
+#    deleted, so old tmux panes / nvim terminals print "No such file".
 test ! -e /etc/profiles/per-user/$USER && echo "per-user profile gone (good)"
 readlink ~/.nix-profile; command -v opencode gcloud home-switch
 launchctl print gui/$(id -u)/org.nix-community.home.opencode-serve-0 | grep -E 'state|pid'
@@ -104,13 +113,19 @@ by running `home-switch` again).
   "$(cat ~/.hm-module-generation)/activate"
   ```
   Then re-run `scripts/update-ssh-config.sh` if you ran step 3.
-- **After step 4 (Admin By Request window):** roll the system back, which
-  re-runs module-mode HM activation and recreates `/etc/profiles/per-user/$USER`:
+- **After step 4 (Admin By Request window):** switch the system back to the
+  generation recorded in step 1, which re-runs module-mode HM activation and
+  recreates `/etc/profiles/per-user/$USER`. Use the recorded number, not
+  `--rollback`: that only goes back one generation, which is wrong after any
+  later system deploy (e.g. flipping the remote-root toggle).
   ```bash
-  sudo darwin-rebuild --rollback
+  gen="$(sed 's/^system-\([0-9]*\)-link$/\1/' ~/.darwin-module-generation)"
+  sudo darwin-rebuild --switch-generation "$gen"
   bash ~/Code/workstation/scripts/update-ssh-config.sh
   ```
-  `nix.gc` keeps 30 days of system generations, so this works for a month.
+  `nix.gc` deletes system generations older than 30 days, so this is available
+  for roughly a month after the migration. Do not run a manual
+  `sudo nix-collect-garbage --delete-older-than <shorter>` before you are sure.
 
 ## Verification done in the PR
 

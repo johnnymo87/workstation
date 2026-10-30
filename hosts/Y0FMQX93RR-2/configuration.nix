@@ -119,6 +119,11 @@ in
   # this rule silently disappears (fails closed -- `sudo -n` starts asking for a
   # password).
   #
+  # Not the only user-to-root path: trusted-users above makes this user
+  # root-equivalent to nix (unsigned store-path import), and darwin-switch
+  # deploys a user-writable checkout. Those bite only at a LATER elevated
+  # deploy; this toggle needs none. See the remote-workstation-cutover skill.
+  #
   # Pair it with an on-demand `ssh cloudbox-cutover` window (the reverse tunnel
   # is no longer always-on; see scripts/update-ssh-config.sh) and the
   # remote-workstation-cutover skill.

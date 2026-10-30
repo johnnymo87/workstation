@@ -23,6 +23,7 @@
 #   home-switch                          # deploys ~/Code/workstation
 #   home-switch --flake DIR              # deploy another checkout
 #   home-switch --name NAME              # override the homeConfiguration
+#   home-switch --no-keychain-check      # skip the locked-Keychain preflight
 #   home-switch -- --show-trace          # extra args go to home-manager
 #
 # Not on PATH yet (first run / migration): nix run ~/Code/workstation#home-switch
@@ -45,15 +46,17 @@ writeShellApplication {
   text = ''
     flake="''${HOME}/Code/workstation"
     name=""
+    keychain_check=1
     extra=()
 
     while [ $# -gt 0 ]; do
       case "$1" in
         --flake) flake="$2"; shift 2 ;;
         --name) name="$2"; shift 2 ;;
+        --no-keychain-check) keychain_check=0; shift ;;
         --) shift; extra=("$@"); break ;;
         -h|--help)
-          echo "usage: home-switch [--flake DIR] [--name NAME] [-- HOME-MANAGER-ARGS...]"
+          echo "usage: home-switch [--flake DIR] [--name NAME] [--no-keychain-check] [-- HOME-MANAGER-ARGS...]"
           echo
           echo "Seeds the private claude-failover-proxy asset (cfp-prefetch-darwin),"
           echo "then runs: home-manager switch --flake DIR#NAME -b hm-backup"
@@ -109,6 +112,24 @@ writeShellApplication {
       echo "home-switch: $flake has no homeConfigurations.\"$name\"." >&2
       echo "  A checkout from before the standalone-home-manager change? Its home is" >&2
       echo "  still deployed by darwin-switch. See docs/plans/2026-10-30-mac-standalone-home-manager.md" >&2
+      exit 1
+    fi
+
+    # Keychain preflight. Activation reads ~20 Keychain items, and on a failed
+    # read it does not fail: it DELETES the MCP entries and their secret files
+    # and drops the claude-failover-proxy baseURL from opencode.json
+    # (opencode-config.nix). Over SSH the login Keychain is normally locked,
+    # so a remote repair would "succeed" while stripping the very Claude
+    # routing it was meant to fix. The cfp seed below does not catch this: it
+    # exits 0 on "already seeded" without touching the Keychain. Probe one
+    # item that activation depends on and refuse if it is unreadable.
+    if [ "$keychain_check" = 1 ] && \
+       ! /usr/bin/security find-generic-password -s google-cloud-project -w >/dev/null 2>&1; then
+      echo "home-switch: cannot read Keychain item 'google-cloud-project'." >&2
+      echo "  If the login Keychain is locked (normal over SSH), activation would silently" >&2
+      echo "  remove MCP secrets and the Claude proxy routing. Unlock it first:" >&2
+      echo "    security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+      echo "  If the item genuinely does not exist on this Mac, pass --no-keychain-check." >&2
       exit 1
     fi
 

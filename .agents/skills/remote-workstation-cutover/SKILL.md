@@ -25,6 +25,7 @@ that usually breaks Claude access is user config:
 | opencode plugins, skills, agents | `assets/opencode/`, `users/dev/opencode-skills.nix` | `home-switch` | **No** |
 | opencode serve / frontdoor / cfp / tunnels (launchd agents) | `users/dev/home.darwin.nix` | `home-switch`, or `launchctl kickstart -k gui/$(id -u)/org.nix-community.home.<name>` | **No** |
 | the opencode binary itself | `users/dev/home.base.nix` | `home-switch` | **No** |
+| Remote Login (sshd) itself is off | macOS setting | System Settings / `systemsetup` at the Mac | **Yes** |
 | nix.conf, nix-daemon, /etc/bashrc, /etc/shells, login shell, sudoers | `hosts/Y0FMQX93RR-2/` | `darwin-switch` | **Yes** |
 
 A home-level repair is: open the window (step 2 below), then from cloudbox
@@ -41,12 +42,19 @@ an `ssh mac '<cmd>'` shell is non-interactive and may not have the profile on
 
 **Caveats for home repair over SSH:**
 
-- **The login Keychain is normally locked over SSH**, and `home-switch` seeds
-  the private cfp asset from it. If a cfp bump is pending the seed fails and
-  `home-switch` stops. Run `security unlock-keychain
+- **The login Keychain is normally locked over SSH**, and home activation
+  reads ~20 secrets from it. On a failed read, activation does not fail — it
+  *removes* the MCP entries and the Claude proxy routing from opencode's
+  config. `home-switch` therefore refuses to run when it cannot read the
+  `google-cloud-project` item. Run `security unlock-keychain
   ~/Library/Keychains/login.keychain-db` in the SSH session first (prompts for
-  the login password), or seed at the Mac before opening the window
-  (`cfp-prefetch-darwin`).
+  the login password). The same unlock lets the cfp seed work.
+- **launchd agents re-bootstrapped from an SSH session: unverified.**
+  home-manager boots out a changed agent and `launchctl bootstrap gui/$UID`s
+  the new plist, ignoring failures. Whether that bootstrap succeeds from a
+  non-GUI SSH session has not been tested on this Mac. After a remote
+  `home-switch`, check the agents you care about:
+  `launchctl print gui/$(id -u)/org.nix-community.home.opencode-serve-0 | grep state`.
 - **`home-switch` restarts the opencode serves if their plists changed** — fine
   when the point is to repair them, but do not drive it from an opencode
   session *on the Mac*.
@@ -68,10 +76,23 @@ Only a **system-level** repair needs the passwordless-root toggle below.
    help either: interactive sudo works **only inside an Admin By Request
    window**, which the person at the Mac has to request.
 
-Net effect: a compromised cloudbox cannot reach the Mac unattended and cannot
-get root. During a window you open, it can run commands **as your user** (not
-root) — which, thanks to standalone home-manager, is enough for most repairs.
-Keep windows short and don't open one if you suspect cloudbox is compromised.
+Net effect: a compromised cloudbox cannot reach the Mac unattended. During a
+window you open, it can run commands **as your user** — which, thanks to
+standalone home-manager, is enough for most repairs. Keep windows short and
+don't open one if you suspect cloudbox is compromised.
+
+**"As your user" is not "no path to root" on this Mac**, toggle or not:
+
+- You are in nix's `trusted-users` (`hosts/Y0FMQX93RR-2/configuration.nix`),
+  which nix itself documents as essentially root-equivalent: a trusted user can
+  import unsigned store paths, e.g. plant the output that the next elevated
+  `darwin-switch` activates as root.
+- `darwin-switch` deploys `~/Code/workstation`, which you own. Anything that ran
+  as you can edit `hosts/` and have it applied as root at the next Admin By
+  Request elevation.
+
+Both are deferred (they need a later elevation or a later deploy to bite), but
+they are real. The toggle is the only path that needs no later elevation.
 
 ### How the toggle behaves without local admin
 
@@ -94,7 +115,20 @@ Keep windows short and don't open one if you suspect cloudbox is compromised.
 
 ### SSH access after admin removal (what is verifiable)
 
-Remote Login is gated by macOS's SSH service ACL, not by admin:
+**First, sshd has to be running at all.** As of 2026-10-30 Remote Login is
+**disabled** on this Mac (`launchctl print-disabled system` shows
+`"com.openssh.sshd" => disabled`; `nc -z 127.0.0.1 22` is refused), so the
+cutover tunnel has nothing to reach. Enabling it is root-only
+(`sudo systemsetup -setremotelogin on`, or System Settings → General →
+Sharing), i.e. an Admin By Request window, and IT's MDM may own the setting.
+The migration plan does it optionally in its elevated step. Check:
+
+```bash
+launchctl print-disabled system | grep sshd   # want: enabled, or no line
+nc -z 127.0.0.1 22 && echo "sshd listening"
+```
+
+Given that, access is gated by macOS's SSH service ACL, not by admin:
 `/etc/pam.d/sshd` has `account required pam_sacl.so sacl_service=ssh`, which
 checks membership of `com.apple.access_ssh`. On this Mac the user is a
 **direct** member of that group (`dscl . -read /Groups/com.apple.access_ssh

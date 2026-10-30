@@ -62,6 +62,11 @@ Request** window (no local admin on the Mac):
 sudo nix-collect-garbage --delete-older-than 7d   # inside an elevation window
 ```
 
+Caution: that also deletes older system generations you may want to roll back
+to (e.g. the pre-migration generation recorded in
+`docs/plans/2026-10-30-mac-standalone-home-manager.md`). Check
+`ls /nix/var/nix/profiles/` before shortening retention below 30 days.
+
 **Devbox/Cloudbox (NixOS) -- clean both system and HM generations:**
 ```bash
 # Keep only latest 3 generations
