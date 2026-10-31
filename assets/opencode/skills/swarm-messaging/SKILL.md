@@ -345,13 +345,23 @@ configured. Check before you send; do not assume it works.
   | `available` | The worker will take it. A pull lane on that machine can still refuse a sender from another machine |
   | `not_accepted` | That machine does not accept relays from yours |
   | `not_retired` | That machine cannot receive relays yet |
-  | `offline` | That machine is not polling (asleep or down) |
+  | `offline` | That machine is not polling (asleep or down). Shown with its last poll: within 7 days the worker **holds** a message up to 24h and delivers it when the machine wakes; past 7 days ("sends are refused") the send fails |
   | `unknown` | The relay is not set up on the worker |
 
   A trailing `WARNING: … does not relay` means *your* machine has sending off,
   so every send to the sessions listed fails. **Send only when the target's
-  machine is `available` and there is no WARNING.** Otherwise do not send, not
-  even to an `offline` machine "to see". Tell the human, and leave what you
+  machine is `available`, or `offline` with the literal text "a message sent now
+  is held up to 24h", and there is no WARNING.** An `offline` line without that
+  text (for example "is not polling the worker; asleep or down", with no last-poll
+  age) is not held: treat it as unavailable. A held message is delivered only
+  when that machine wakes, which may be hours away, so send to an `offline`
+  machine only what can usefully wait; if it cannot, tell the human instead. To
+  an `offline` machine send **one** combined message per thread and nothing more
+  until it is `available` again: everything held arrives together when it wakes,
+  each message a separate turn, and the hold queue (50 per machine) is shared
+  with every other sender. A `queue_full` failure to a sleeping machine is not
+  worth resending. For any other status do not send "to
+  see". Tell the human, and leave what you
   have where the other session can read it (a bead, a pushed branch, a plan
   file). Switching the relay on is a host-configuration change for the human;
   do not attempt it. If `swarm_list remote: true` errors, or its output does
@@ -360,17 +370,23 @@ configured. Check before you send; do not assume it works.
   cross-machine as unavailable.
 - **Send as usual.** Use the same `swarm_send` with the session's `ses_` id.
   `msg_id`, `kind`, `priority` and `reply_to` are carried across unchanged.
-  Normally it lands within seconds. If the target's machine falls asleep around
-  the time you send, pigeon's worker can hold the message for up to 24 hours.
-  It is then delivered late, or you get a failure notice up to about a day
-  later. So silence proves nothing, and a payload whose meaning depends on time
+  Normally it lands within seconds. If the target's machine is asleep (or
+  down), pigeon's worker holds the message for up to 24 hours. It is then
+  delivered when the machine wakes, or you get a failure notice about a day
+  later. You are not told separately that it is being held. So silence proves nothing, and a payload whose meaning depends on time
   should say when it was written.
 - **Goose sessions are reachable from their own machine only.** That includes
   every stall-watch program coordinator (`gse_…`). A `gse_` id that is not on
   your machine is refused at once.
 - **Read the failure notice's verb; it tells you what to do.** A cross-machine
   `delivery.failed` comes from the receiving machine or the worker:
-  - "was NOT received … safe to resend": resend once.
+  - "was NOT received … safe to resend": resend once (but see
+    `never_collected` below).
+  - Any notice naming `(never_collected)`, whatever its verb (an older pigeon
+    on your machine still words it "safe to resend"): the machine stayed asleep
+    or down for the whole 24h hold. A resend is held again, so check
+    `swarm_list remote: true` first and resend only if the message still matters
+    and the machine looks likely to wake.
   - "DELIVERY UNCONFIRMED … may or may not have been received": the target may
     already have it. Resend only if a duplicate would be harmless.
   - "Do not resend it via swarm; it will fail the same way": the refusal is
@@ -388,6 +404,12 @@ configured. Check before you send; do not assume it works.
   cross-machine send, so the same checks apply: a message arriving from
   a machine does not mean yours can send back. Your `swarm_read` shows only
   your half of the thread; the other half is on the sender's machine.
+- **`held_ms="<ms>"` in the envelope means the message waited at least that
+  long** between pigeon's worker accepting it and reaching you, usually because
+  your machine was asleep or down, sometimes because your session was busy. It
+  appears only above a minute. The sender wrote it at least that long ago:
+  before acting on anything time-sensitive in it (a deploy, a CI state, "merge
+  now"), check that it still holds.
 
 ## Starting a session on another machine: `swarm_launch`
 
