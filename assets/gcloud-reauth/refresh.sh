@@ -530,7 +530,7 @@ abort_remote() {
 slept_through() { [ $(( $(date +%s) - $1 )) -gt "$2" ]; }
 
 refresh_one() {
-  local cred="$1" login_cmd verify_cmd dir answered=0 prompts node_rc reason verdict qp_mode login_rc
+  local cred="$1" login_cmd verify_cmd dir answered=0 prompts node_rc reason verdict qp_mode login_rc why
   case "$cred" in
     cli) login_cmd="$LOGIN_CMD_CLI"; verify_cmd="$VERIFY_CMD_CLI" ;;
     adc) login_cmd="$LOGIN_CMD_ADC"; verify_cmd="$VERIFY_CMD_ADC" ;;
@@ -618,6 +618,15 @@ except Exception:
     case "$reason" in
       idp_login_required|password_demanded|mfa_demanded|bot_blocked)
         record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open in the isolated Chrome (the alert brings it forward); sign in there and this run retries by itself." ;;
+      browser_unusable)
+        # Its own outcome, not no_authcode: the fix is the browser, not the
+        # flow. chrome.sh quits a Chrome whose files an update deleted (the
+        # 2026-10-31 cause), so usually this has already fixed itself.
+        why="$(python3 -c '
+import json,sys
+print(json.load(open(sys.argv[1])).get("error") or "")' "$dir/e2e-result.json" 2>/dev/null)"
+        why="${why%.}"
+        record "$cred" "browser_unusable" "${why:-The isolated Chrome could not open a working page}. If Chrome had just updated itself, the gcloud-reauth-chrome agent restarts it within ~2 min; if not, quit the isolated Chrome and launchd starts a fresh one. The refresh retries after its usual backoff." ;;
       *)
         # 200s is the flow's own timeout; well past it, the Mac slept mid-flow.
         if slept_through "$step_t0" 260; then

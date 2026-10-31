@@ -48,8 +48,95 @@ cdp_is_chrome() {
   grep -q '"Browser": *"Chrome/' <<<"$out"
 }
 
+# --- a Chrome whose files an update deleted --------------------------------
+# THE BUG THIS FIXES (2026-10-31, bead workstation-beho): Chrome updated its
+# bundle on disk from 156.0.8078.48 to .80 and deleted Versions/156.0.8078.48
+# in the same step, while this Chrome was still running .48. A running Chrome
+# starts every renderer from the helper apps in its OWN version's directory, so
+# from then on each new tab crashed (blank, sad-face icon), while CDP kept
+# answering /json/version. Nothing here noticed. Every keepalive and refresh
+# failed for 13h, until a human saw the tabs and the process was killed.
+#
+# WHY THIS SIGNAL AND NOT "RUNNING VERSION != INSTALLED VERSION": a restart
+# costs the IdP session, which lives in a session cookie (10-30: restarted
+# 18:24Z with a session live at 17:37Z; at 18:37Z there was none). A Chrome
+# whose own version directory is still on disk can start renderers, so it is
+# not broken and is left alone, even if a newer version is installed. Only a
+# missing directory means it can't open a page. The restart waits for a
+# second check, so a check that lands mid-update cannot cause one by itself.
+#
+# Override for tests only: REAUTH_CHROME_CHECK_SECONDS (default 60).
+CHECK_SECONDS="${REAUTH_CHROME_CHECK_SECONDS:-60}"
+# .../Foo.app/Contents/MacOS/Foo -> .../Foo.app/Contents/Frameworks
+FRAMEWORKS="$(dirname "$(dirname "$CHROME")")/Frameworks"
+
+# Exit 0 = the running Chrome's own version directory is gone. Anything it
+# cannot establish (CDP down, a layout it does not recognise) is "not stale":
+# acting on a guess would cost the IdP session for nothing.
+running_files_gone() {
+  local out ver dirs
+  out="$(curl -sf --max-time 2 "http://127.0.0.1:$PORT/json/version" 2>/dev/null)" || return 1
+  ver="$(sed -n 's/.*"Browser": *"Chrome\/\([0-9.]*\)".*/\1/p' <<<"$out" | head -1)"
+  [ -n "$ver" ] || return 1
+  # The layout must be recognisable -- at least one */Versions dir -- before
+  # a missing one counts as evidence.
+  dirs="$(find "$FRAMEWORKS" -mindepth 2 -maxdepth 2 -type d -name Versions 2>/dev/null || true)"
+  [ -n "$dirs" ] || return 1
+  while IFS= read -r d; do
+    [ -d "$d/$ver" ] && return 1
+  done <<<"$dirs"
+  STALE_VERSION="$ver"
+  return 0
+}
+
+# The pid of whatever listens on the port, only if it is our Chrome: a Chrome
+# with this port on its command line. Used for an instance we adopted.
+listener_pid() {
+  local pid cmd
+  pid="$(/usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [ -n "$pid" ] || return 1
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+  case "$cmd" in
+    *"--remote-debugging-port=$PORT"*) echo "$pid" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Sleep in the background and wait: bash runs a trap only between commands,
+# so a foreground `sleep 60` would hold off launchd's SIGTERM for up to 60s.
+nap() { sleep "$1" & wait $!; }
+
+# Watch Chrome (pid $1) until it exits, or until its files are found gone,
+# in which case quit it. Returns once it is gone either way.
+watch_chrome() {
+  local pid="$1" strikes=0
+  while kill -0 "$pid" 2>/dev/null; do
+    nap "$CHECK_SECONDS"
+    kill -0 "$pid" 2>/dev/null || break
+    if running_files_gone; then
+      strikes=$((strikes + 1))
+      if [ "$strikes" -ge 2 ]; then
+        echo "gcloud-reauth-chrome: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Quitting pid $pid so a fresh one starts." >&2
+        # `|| true`: writeShellApplication runs this under errexit, and a kill
+        # of a process that has just exited by itself fails.
+        kill -TERM "$pid" 2>/dev/null || true
+        # Chrome exits within seconds on TERM; KILL only one that does not.
+        for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; nap 1; done
+        kill -KILL "$pid" 2>/dev/null || true
+        break
+      fi
+    else
+      strikes=0
+    fi
+  done
+}
+
+# --- adopt a Chrome already serving the port --------------------------------
+# Once it is gone -- by itself, or quit by watch_chrome -- fall through and
+# launch a fresh one, as before.
 while cdp_is_chrome; do
-  sleep 60
+  pid="$(listener_pid)" || { nap "$CHECK_SECONDS"; continue; }
+  watch_chrome "$pid"
 done
 
 if [ ! -x "$CHROME" ]; then
@@ -57,13 +144,24 @@ if [ ! -x "$CHROME" ]; then
   exit 1
 fi
 
+# --- launch, and stay to watch it ------------------------------------------
+# A CHILD, NOT exec. This used to exec Chrome, so the watching above existed
+# only for an adopted instance -- and the 2026-10-31 Chrome was launchd's own.
+# The wrapper now stays as launchd's process. It passes launchd's TERM on to
+# Chrome (bootout), and exits with Chrome's status, so KeepAlive behaves as
+# before: Cmd-Q, a crash or a quit below all come back after ThrottleInterval.
+#
 # --no-startup-window: no window (and no focus steal) at login or on respawn.
 # Chrome stays alive windowless and serves CDP. The reauth works in background
 # tabs; raise-signin.mjs brings a window forward only when the human asks.
-exec "$CHROME" \
+"$CHROME" \
   --user-data-dir="$PROFILE" \
   --remote-debugging-port="$PORT" \
   --no-first-run \
   --no-default-browser-check \
   --no-startup-window \
-  --hide-crash-restore-bubble
+  --hide-crash-restore-bubble &
+chrome_pid=$!
+trap 'kill -TERM "$chrome_pid" 2>/dev/null; wait "$chrome_pid"; exit 143' TERM INT
+watch_chrome "$chrome_pid"
+wait "$chrome_pid"

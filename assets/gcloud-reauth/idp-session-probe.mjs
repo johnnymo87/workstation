@@ -44,9 +44,15 @@ const row = {
   login: null,
   page_mode: null,
   error: null,
+  // True when the failure came before any page could be opened: the browser
+  // itself is broken, not the IdP. 2026-10-31 (bead workstation-beho): an
+  // update deleted the running Chrome's files, every page creation timed
+  // out, and 13 hourly rows said only "Timed out after waiting 30000ms".
+  browser_unusable: false,
 };
 
 let browser;
+let pageOpened = false;
 try {
   // protocolTimeout well under the wrapper's `timeout 120`: a stall must surface
   // as a logged error with the page closed, not as an outside SIGTERM that skips
@@ -61,6 +67,7 @@ try {
   // raise the Chrome window while someone is working. See bg-page.mjs.
   const { page, mode } = await newBackgroundPage(browser);
   row.page_mode = mode;
+  pageOpened = true;
   try {
     // about:blank cannot make a same-origin credentialed request; land on the
     // origin first, then fetch. This is a GET of a read-only endpoint.
@@ -92,6 +99,9 @@ try {
   }
 } catch (e) {
   row.error = e.message;
+  // Reachable, but no page: CDP answers and pages cannot be made. Or a page
+  // whose renderer crashed (puppeteer: "Page crashed!" / "Target crashed").
+  row.browser_unusable = row.reachable && (!pageOpened || /crashed/i.test(e.message));
 } finally {
   try { browser?.disconnect(); } catch {}
 }

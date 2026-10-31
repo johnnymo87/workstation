@@ -219,7 +219,9 @@ err = row.get("error")
 has = row.get("has_session")
 secs = row.get("seconds_remaining")
 exp = row.get("expires_at") or ""
-if err or has is None:
+if row.get("browser_unusable"):
+    print(f"browser_unusable|{err}")
+elif err or has is None:
     print(f"probe_error|{err or 'probe returned no verdict'}")
 else:
     print(f"{'ok' if has else 'no_session'}|{secs if secs is not None else ''}|{exp}")
@@ -300,6 +302,12 @@ print(last)' 2>/dev/null)"
     if [ "$prev" = held ]; then
       alert_human "gcloud reauth: sign-in needed soon" "Your IdP session in the isolated gcloud-reauth Chrome has expired. Signing in now lets the next refresh of the remote gcloud credentials run without stopping." signin
     fi
+    exit 1
+    ;;
+  browser_unusable)
+    # $secs carries the error text on this path. Its own outcome so the cause
+    # is not hidden in a generic probe_error, as for 13h on 2026-10-31.
+    record "browser_unusable" "The isolated Chrome answers but cannot open a page ($secs). If Chrome had just updated itself, the gcloud-reauth-chrome agent restarts it within ~2 min; if this repeats, quit the isolated Chrome and launchd starts a fresh one" yes
     exit 1
     ;;
   probe_error)
