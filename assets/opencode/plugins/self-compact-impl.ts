@@ -191,6 +191,23 @@ export async function lookupActiveModel(input: {
 }
 
 const STALE_MS = 30 * 60 * 1000
+// A `resuming` entry is waiting for a turn that is not ours to end (see
+// createOnCompacted's deferral). Agent turns with subagents routinely run for
+// hours, so the 30-minute bound would discard exactly the prompts the deferral
+// exists to save. A day still keeps the Map bounded across the process lifetime.
+const RESUMING_STALE_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Prepended to a resumption prompt that could not be delivered straight after
+ * compaction because another prompt (typically a swarm message) started a turn
+ * first. The agent has been working from the compaction summary in the
+ * meantime, so it needs to know this arrives late rather than act on it as if
+ * nothing had happened since.
+ */
+export const DEFERRED_RESUME_NOTE =
+  "[self-compact] This is the resumption prompt you queued with self_compact_and_resume. " +
+  "Another message started a turn right after compaction, so it is arriving late, after that " +
+  "turn. Reconcile it with anything you have done since before acting on it."
 
 // Bounded poll for the post-compaction idle. session.compacted is published from inside
 // the still-running compaction loop, so the runner needs a moment to finish and go idle
@@ -267,13 +284,23 @@ export interface PendingResume {
    * - `awaitingTurnEnd`: the tool has stashed the entry; the onStatus handler
    *   is waiting for the session to go idle so it can fire POST /summarize.
    * - `summarizing`: onStatus has fired summarize; the entry is held until
-   *   onCompacted pops it and enqueues the resumption prompt.
+   *   the `session.compacted` event arrives.
+   * - `resuming`: compaction is done and the prompt is waiting for the session
+   *   to go idle. Whichever sees idle first -- onCompacted's status poll or
+   *   onStatus's idle event -- deletes the entry synchronously and delivers it,
+   *   so exactly one of them does (v5).
    *
    * Without this field, onStatus cannot distinguish "first idle after queue"
    * (should fire summarize) from "second idle while summarize is in flight"
    * (must not double-trigger). See addendum to v1 design doc for rationale.
    */
-  phase: "awaitingTurnEnd" | "summarizing"
+  phase: "awaitingTurnEnd" | "summarizing" | "resuming"
+  /**
+   * Set when onCompacted's post-compaction idle poll timed out: another prompt
+   * started a turn straight after compaction. The entry then waits for that
+   * turn's idle, and is delivered with DEFERRED_RESUME_NOTE prepended.
+   */
+  deferred?: boolean
   createdAt: number
 }
 
@@ -317,7 +344,8 @@ export function createSelfCompactTool(deps: {
       // process lifetime. 30 minutes is generous; a real compaction takes
       // seconds to a few minutes.
       for (const [sid, entry] of deps.pending) {
-        if (now - entry.createdAt > STALE_MS) deps.pending.delete(sid)
+        const bound = entry.phase === "resuming" ? RESUMING_STALE_MS : STALE_MS
+        if (now - entry.createdAt > bound) deps.pending.delete(sid)
       }
 
       let lookup: ModelLookup
@@ -465,39 +493,69 @@ export function createOnCompacted(deps: {
       debug("onCompacted no-entry", { sessionID, pendingSize: deps.pending.size })
       return
     }
-    // Remove the entry synchronously BEFORE any await so a re-entrant
-    // session.compacted event for the same session doesn't observe it
-    // and double-deliver. If delivery later fails, the entry is still
-    // gone — matches MVP design (no automatic retry; user re-invokes the
-    // skill if the prompt fails to deliver).
-    deps.pending.delete(sessionID)
-    const text = entry.prompt
+    if (entry.phase === "resuming") {
+      // A poll for this entry is already running (or it is deferred to the next
+      // idle). A second compacted event must not start a second delivery path.
+      debug("onCompacted skip already-resuming", { sessionID, deferred: !!entry.deferred })
+      return
+    }
+    // Mark synchronously BEFORE any await. From here the entry is claimable by
+    // either the poll below or onStatus's idle event; each claims by deleting it
+    // synchronously, so only one delivers. If delivery later fails the entry is
+    // still gone (no automatic retry; the agent re-invokes the skill).
+    entry.phase = "resuming"
 
     debug("onCompacted waiting for idle", { sessionID })
     const idle = await deps.waitForIdle({ sessionID })
-    if (!idle) {
-      // Runner never went idle within the poll window; bail without firing so we
-      // don't post a message that ensureRunning would discard. User re-invokes.
-      debug("onCompacted gave up (session never went idle)", { sessionID })
+    if (deps.pending.get(sessionID) !== entry) {
+      // Claimed by onStatus's idle event while we polled, or replaced by a newer
+      // self_compact_and_resume call. Either way it is not ours to touch.
+      debug("onCompacted stand down (entry claimed or replaced)", { sessionID, idle })
       return
     }
-
-    debug("onCompacted firing prompt_async", { sessionID, promptChars: text.length })
-    try {
-      await deps.callPromptAsync({ sessionID, text })
-      debug("onCompacted prompt_async OK", { sessionID })
-    } catch (err) {
-      debug("onCompacted prompt_async FAILED", {
-        sessionID,
-        error: err instanceof Error ? err.message : String(err),
-      })
-      throw err
+    if (!idle) {
+      // Another prompt (in the 2026-10-31 incident, a swarm message that reached
+      // prompt_async 26 ms before the compaction loop ended) started a turn right
+      // after compaction, and that turn can run for hours. Firing now would race
+      // that run (see waitForIdle above), and dropping the prompt -- what v3-v4
+      // did -- loses it silently. Keep it armed: onStatus delivers it on the
+      // session's next idle, which is the same safe point summarize fires at.
+      entry.deferred = true
+      debug("onCompacted deferred to next idle (session busy after compaction)", { sessionID })
+      return
     }
+    deps.pending.delete(sessionID)
+    await deliverResume(deps.callPromptAsync, sessionID, entry, "onCompacted", { rethrow: true })
+  }
+}
+
+async function deliverResume(
+  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>,
+  sessionID: string,
+  entry: PendingResume,
+  stage: string,
+  opts: { rethrow: boolean },
+): Promise<void> {
+  const text = entry.deferred ? `${DEFERRED_RESUME_NOTE}\n\n${entry.prompt}` : entry.prompt
+  debug(`${stage} firing prompt_async`, {
+    sessionID,
+    promptChars: text.length,
+    deferred: !!entry.deferred,
+  })
+  try {
+    await callPromptAsync({ sessionID, text })
+    debug(`${stage} prompt_async OK`, { sessionID })
+  } catch (err) {
+    debug(`${stage} prompt_async FAILED`, { sessionID, error: errText(err) })
+    if (opts.rethrow) throw err
   }
 }
 
 /**
- * Idle-triggered summarize handler.
+ * Idle-triggered summarize handler, and (v5) the deferred-resume delivery.
+ *
+ * An idle session whose entry is `resuming` gets its resumption prompt now
+ * (see createOnCompacted). Otherwise:
  *
  * When the session that just went idle has a pending entry in
  * `awaitingTurnEnd` phase, this handler:
@@ -524,12 +582,22 @@ export function createOnStatus(deps: {
     providerID: string
     modelID: string
   }) => Promise<void>
+  /** Delivers a `resuming` entry (v5; see createOnCompacted). */
+  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
 }) {
   return async ({ event }: { event: PluginBusEvent }) => {
     if (!isSessionIdle(event)) return
     const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
     if (!entry) return
+    if (entry.phase === "resuming") {
+      // Compaction is done and the session just went idle: deliver. Claim by
+      // deleting synchronously so the status poll (or a re-entrant idle) can't
+      // also deliver. An event hook must not throw, so failures are logged only.
+      deps.pending.delete(sessionID)
+      await deliverResume(deps.callPromptAsync, sessionID, entry, "onStatus", { rethrow: false })
+      return
+    }
     if (entry.phase !== "awaitingTurnEnd") {
       debug("onStatus skip non-awaiting", { sessionID, phase: entry.phase })
       return

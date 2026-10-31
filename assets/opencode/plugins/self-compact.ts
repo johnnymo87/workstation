@@ -38,12 +38,17 @@ const plugin: Plugin = async (ctx) => {
   //   1. Tool execute → resolve the model (read-only GETs), stash entry, return.
   //      A failed lookup is returned to the agent instead of being stashed.
   //   2. onStatus (idle) → fire POST /summarize with that model, outside the turn.
-  //   3. onCompacted → enqueue resumption prompt via POST /prompt_async.
+  //   3. onCompacted → wait for idle, then enqueue resumption prompt via POST /prompt_async.
+  //      If another prompt started a turn right after compaction, the prompt stays
+  //      armed and onStatus delivers it on the next idle instead (v5).
   // The plugin SDK accepts a single `event` hook per plugin; we dispatch
   // internally by event type. Each handler filters its own events.
   const onStatus = createOnStatus({
     pending,
     callSummarize: (input) => callSummarizeHttp(callCtx, input),
+    // Delivers a resumption prompt that was still waiting when compaction ended
+    // because another prompt had started a turn (v5; see createOnCompacted).
+    callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
   })
 
   const onCompacted = createOnCompacted({

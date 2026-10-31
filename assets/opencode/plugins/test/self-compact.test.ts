@@ -11,6 +11,7 @@ import {
   callSummarizeHttp,
   callPromptAsyncHttp,
   waitForSessionIdleHttp,
+  DEFERRED_RESUME_NOTE,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
 
@@ -584,7 +585,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
   it("ignores non-status events", async () => {
     const pending = new Map<string, PendingResume>()
     const callSummarize = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({ event: { type: "session.compacted", properties: { sessionID: "ses_x" } } })
     expect(callSummarize).not.toHaveBeenCalled()
   })
@@ -594,7 +595,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -607,7 +608,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
   it("ignores idle status for sessions without a pending entry", async () => {
     const pending = new Map<string, PendingResume>()
     const callSummarize = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -622,7 +623,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       ["ses_x", { prompt: "p", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -637,7 +638,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn().mockResolvedValue(undefined)
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -658,7 +659,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", createdAt: Date.now() } as unknown as PendingResume],
     ])
     const callSummarize = vi.fn()
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -674,7 +675,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
     const callSummarize = vi.fn().mockRejectedValue(new Error("boom"))
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -699,7 +700,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
         },
       })
     })
-    const handler = createOnStatus({ pending, callSummarize })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
     await handler({
       event: {
         type: "session.status",
@@ -745,23 +746,186 @@ describe("createOnCompacted (v3: wait for the runner to go idle before resuming)
     const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle })
     await handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
     expect(callPromptAsync).not.toHaveBeenCalled()
-    expect(pending.has("s1")).toBe(false)
   })
 
-  it("removes the pending entry before awaiting waitForIdle (no double-delivery on re-entrant compacted)", async () => {
+  it("a re-entrant session.compacted while the first is waiting does not start a second delivery", async () => {
     const pending = new Map<string, PendingResume>([
       ["s1", { prompt: "resume", phase: "summarizing", model: MODEL, createdAt: Date.now() }],
     ])
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
-    let observedDuringWait: boolean | undefined
+    let reentrant: Promise<void> | undefined
     const waitForIdle = vi.fn().mockImplementation(async () => {
-      observedDuringWait = pending.has("s1")
+      reentrant = handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
+      await reentrant
       return true
     })
     const handler = createOnCompacted({ pending, callPromptAsync, waitForIdle })
     await handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
-    expect(observedDuringWait).toBe(false)
+    expect(waitForIdle).toHaveBeenCalledOnce()
     expect(callPromptAsync).toHaveBeenCalledOnce()
+    expect(pending.has("s1")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// v5: never drop the resumption prompt.
+//
+// Regression (devbox, 2026-10-31 02:07Z, ses_0da8fafd6ffe6PGPonX4kleAik): a swarm
+// message reached prompt_async 26 ms before the compaction loop ended, so opencode
+// started a fresh turn for it straight after compaction. The 30 s idle poll saw
+// `busy` throughout, logged "gave up (session never went idle)", and the 6,324-char
+// resumption prompt was silently discarded. Now the entry stays armed and is
+// delivered on the session's next idle, with a note that it was delayed.
+// ---------------------------------------------------------------------------
+
+describe("deferred resume (v5: a busy session after compaction delays the prompt, never drops it)", () => {
+  const idleEvent = (sessionID: string) => ({
+    event: { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+  })
+  const compacted = (sessionID: string) => ({
+    event: { type: "session.compacted", properties: { sessionID } },
+  })
+  const fresh = (): PendingResume => ({
+    prompt: "resume",
+    phase: "summarizing",
+    model: MODEL,
+    createdAt: Date.now(),
+  })
+
+  it("keeps the entry armed (phase 'resuming', deferred) when the idle poll times out", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const onCompacted = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => false })
+    await onCompacted(compacted("s1"))
+    expect(callPromptAsync).not.toHaveBeenCalled()
+    expect(pending.get("s1")).toMatchObject({ prompt: "resume", phase: "resuming", deferred: true })
+  })
+
+  it("delivers a deferred prompt on the next idle, prefixed with the delay note", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const onCompacted = createOnCompacted({ pending, callPromptAsync, waitForIdle: async () => false })
+    const onStatus = createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync })
+    await onCompacted(compacted("s1"))
+    await onStatus(idleEvent("s1"))
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+    expect(callPromptAsync).toHaveBeenCalledWith({
+      sessionID: "s1",
+      text: `${DEFERRED_RESUME_NOTE}\n\nresume`,
+    })
+    expect(pending.has("s1")).toBe(false)
+  })
+
+  it("does not summarize again when the deferred entry's idle arrives", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    const callSummarize = vi.fn()
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    await createOnStatus({ pending, callSummarize, callPromptAsync })(idleEvent("s1"))
+    expect(callSummarize).not.toHaveBeenCalled()
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+  })
+
+  it("an idle event that beats the poll delivers once, unprefixed, and the poll then stands down", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const onStatus = createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync })
+    let releaseIdle!: (v: boolean) => void
+    const waitForIdle = vi.fn().mockReturnValue(new Promise<boolean>((r) => (releaseIdle = r)))
+    const onCompacted = createOnCompacted({ pending, callPromptAsync, waitForIdle })
+
+    const polling = onCompacted(compacted("s1"))
+    await Promise.resolve()
+    await onStatus(idleEvent("s1"))
+    releaseIdle(true)
+    await polling
+
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+    expect(callPromptAsync).toHaveBeenCalledWith({ sessionID: "s1", text: "resume" })
+    expect(pending.has("s1")).toBe(false)
+  })
+
+  it("the poll does not deliver an entry that a new tool call replaced while it waited", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    const replacement: PendingResume = { ...fresh(), prompt: "newer", phase: "awaitingTurnEnd" }
+    const onCompacted = createOnCompacted({
+      pending,
+      callPromptAsync,
+      waitForIdle: async () => {
+        pending.set("s1", replacement)
+        return true
+      },
+    })
+    await onCompacted(compacted("s1"))
+    expect(callPromptAsync).not.toHaveBeenCalled()
+    expect(pending.get("s1")).toBe(replacement)
+  })
+
+  it("a timed-out poll does not mark a replacement entry as deferred", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    const replacement: PendingResume = { ...fresh(), prompt: "newer", phase: "awaitingTurnEnd" }
+    const onCompacted = createOnCompacted({
+      pending,
+      callPromptAsync: vi.fn(),
+      waitForIdle: async () => {
+        pending.set("s1", replacement)
+        return false
+      },
+    })
+    await onCompacted(compacted("s1"))
+    expect(pending.get("s1")).toBe(replacement)
+    expect(replacement.deferred).toBeUndefined()
+    expect(replacement.phase).toBe("awaitingTurnEnd")
+  })
+
+  it("claims the entry synchronously on idle (re-entrant idle does not double-deliver)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    let calls = 0
+    const callPromptAsync = vi.fn().mockImplementation(async () => {
+      calls++
+      await onStatus(idleEvent("s1"))
+    })
+    const onStatus = createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync })
+    await onStatus(idleEvent("s1"))
+    expect(calls).toBe(1)
+  })
+
+  it("logs and swallows a failed deferred delivery (event hook must not throw)", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    const callPromptAsync = vi.fn().mockRejectedValue(new Error("boom"))
+    const onStatus = createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync })
+    await expect(onStatus(idleEvent("s1"))).resolves.toBeUndefined()
+    expect(pending.has("s1")).toBe(false)
+  })
+
+  it("tool-time eviction spares a deferred entry older than 30 min", async () => {
+    const pending = new Map<string, PendingResume>([
+      [
+        "ses_deferred",
+        { ...fresh(), phase: "resuming", deferred: true, createdAt: Date.now() - 2 * 60 * 60 * 1000 },
+      ],
+    ])
+    const tool = createSelfCompactTool({ pending, lookupModel: okLookup() })
+    await tool.execute({ prompt: "other" }, { sessionID: "ses_other" })
+    expect(pending.has("ses_deferred")).toBe(true)
+  })
+
+  it("tool-time eviction still drops a deferred entry older than 24 h", async () => {
+    const pending = new Map<string, PendingResume>([
+      [
+        "ses_deferred",
+        { ...fresh(), phase: "resuming", deferred: true, createdAt: Date.now() - 25 * 60 * 60 * 1000 },
+      ],
+    ])
+    const tool = createSelfCompactTool({ pending, lookupModel: okLookup() })
+    await tool.execute({ prompt: "other" }, { sessionID: "ses_other" })
+    expect(pending.has("ses_deferred")).toBe(false)
   })
 })
 
