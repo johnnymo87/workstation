@@ -163,17 +163,11 @@ if (urlRejection) {
   process.exit(3);
 }
 
-const browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null, protocolTimeout: 90000 });
-for (const p of await browser.pages()) {
-  // Also clears an IdP login tab left open by a previous run (see the
-  // human-handoff branch below), so these cannot accumulate.
-  if (p.url().includes('accounts.google.com')
-      || (IDP_HOST_RE.source !== '(?!)' && IDP_HOST_RE.test(p.url()))) {
-    try { await p.close(); } catch {}
-  }
-}
-const { page, mode: pageMode } = await newBackgroundPage(browser);
-log('page mode', pageMode);
+// Set by the browser setup below. Declared first so that finish() and the
+// SIGTERM handler, which are registered BEFORE it, can run when it fails.
+let browser = null;
+let page = null;
+let browserReady = false;
 const bodyText = async () => {
   // A page-level evaluate can also land mid-navigation; one retry after the
   // new document settles covers it.
@@ -203,7 +197,7 @@ const result = {
   awaiting_human: false,
   clicks: [],
   outcome: null,
-  page_mode: pageMode,
+  page_mode: null,
   // Every document.visibilityState seen during the run. 'hidden' when the tab
   // is not the window's active tab, or the display is off or locked. Kept so
   // a future stall can be attributed (workstation-jmtu).
@@ -216,7 +210,6 @@ const noteVisibility = async () => {
     return v;
   } catch { return null; }
 };
-log('page visibility', await noteVisibility());
 
 // Element handles die when the page navigates under them -- and these pages
 // redirect on their own for a while after each click. Using a stale handle
@@ -321,9 +314,6 @@ const inspect = async (label) => {
 // round trip below is a chain of auto-posting redirects that is usually over
 // before the next screenshot.
 const isIdp = (u) => IDP_HOST_RE.test(u) || /\/sso\/saml|SAMLRequest/i.test(u);
-page.on('framenavigated', (f) => {
-  if (f === page.mainFrame() && isIdp(f.url())) result.idp_redirect = true;
-});
 
 // FORCE A REAL SIGN-IN. The Cloud session-length policy counts a grant's
 // lifetime from the user's last *authentication*, not from when the grant was
@@ -374,6 +364,7 @@ const finish = async () => {
     awaiting_human: result.awaiting_human,
     clicks: result.clicks,
     outcome: result.outcome,
+    error: result.error ?? null,
     page_mode: result.page_mode,
     page_visibility: result.page_visibility,
   }) + '\n');
@@ -384,9 +375,10 @@ const finish = async () => {
     // asks for it.
     console.log('HANDOFF: left the sign-in page open in the background for the human');
   } else {
-    try { await page.close(); } catch {}
+    // Bounded: closing a tab in a browser that cannot render can hang.
+    try { if (page) await Promise.race([page.close(), sleep(5000)]); } catch {}
   }
-  browser.disconnect();
+  try { browser?.disconnect(); } catch {}
 };
 // The event loop is idle while a CDP call is pending, so this runs even
 // mid-hang. A challenge already seen still wins, as in the catch block below.
@@ -395,11 +387,56 @@ process.on('SIGTERM', async () => {
   if (finished) { setTimeout(() => process.exit(124), 3000); return; }
   const challenge = challengeOutcome();
   if (challenge) { result.outcome = challenge; handoffToHuman = true; result.awaiting_human = true; }
+  else if (!browserReady) result.outcome = 'browser_unusable';
   else result.outcome = 'timeout';
   result.error = `killed by SIGTERM after ${((Date.now() - t0) / 1000).toFixed(0)}s (refresh.sh's timeout, unless something else sent it)`;
   log('ERROR', result.error);
   await Promise.race([finish(), sleep(3000)]);
   process.exit(124);
+});
+
+// --- the browser itself -------------------------------------------------------
+// Connect, sweep stale tabs, open our page, and check that it renders. This
+// used to run before the handlers above existed, so a failure here was an
+// uncaught crash with NO result: refresh.sh could only say `no_authcode
+// (outcome: unknown)`. On 2026-10-31 it did that for 13h, while the isolated
+// Chrome could no longer start renderers (an update had deleted its files;
+// bead workstation-beho) and every page creation timed out after 30s.
+// `browser_unusable` names that state. A page that exists but cannot run a
+// script is the same state: this is where it is cheapest to find out.
+const RENDER_CHECK_MS = 15000;
+try {
+  browser = await puppeteer.connect({ browserURL: CDP_URL, defaultViewport: null, protocolTimeout: 90000 });
+  for (const p of await browser.pages()) {
+    // Also clears an IdP login tab left open by a previous run (see the
+    // human-handoff branch below), so these cannot accumulate.
+    if (p.url().includes('accounts.google.com')
+        || (IDP_HOST_RE.source !== '(?!)' && IDP_HOST_RE.test(p.url()))) {
+      try { await p.close(); } catch {}
+    }
+  }
+  let mode;
+  ({ page, mode } = await newBackgroundPage(browser));
+  result.page_mode = mode;
+  log('page mode', mode);
+  let timer;
+  const v = await Promise.race([
+    page.evaluate(() => document.visibilityState),
+    new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`new page ran no script within ${RENDER_CHECK_MS / 1000}s`)), RENDER_CHECK_MS); }),
+  ]).finally(() => clearTimeout(timer));
+  result.page_visibility.push(v);
+  log('page visibility', v);
+  browserReady = true;
+} catch (e) {
+  result.outcome = 'browser_unusable';
+  result.error = `the isolated Chrome could not open a working page: ${e.message}`;
+  log('ERROR', e.stack || e.message);
+  await finish();
+  process.exit(5);
+}
+
+page.on('framenavigated', (f) => {
+  if (f === page.mainFrame() && isIdp(f.url())) result.idp_redirect = true;
 });
 
 try {
