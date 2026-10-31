@@ -12,6 +12,7 @@ import {
   callPromptAsyncHttp,
   waitForSessionIdleHttp,
   DEFERRED_RESUME_NOTE,
+  settleThenCheckIdleHttp,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
 
@@ -729,7 +730,7 @@ describe("createOnCompacted (v3: wait for the runner to go idle before resuming)
     const done = handler({ event: { type: "session.compacted", properties: { sessionID: "s1" } } })
     await Promise.resolve()
     // Runner still Running: must not have fired yet (this is the bug we are fixing).
-    expect(waitForIdle).toHaveBeenCalledWith({ sessionID: "s1" })
+    expect(waitForIdle).toHaveBeenCalledWith(expect.objectContaining({ sessionID: "s1" }))
     expect(callPromptAsync).not.toHaveBeenCalled()
 
     releaseIdle(true)
@@ -904,6 +905,105 @@ describe("deferred resume (v5: a busy session after compaction delays the prompt
     expect(pending.has("s1")).toBe(false)
   })
 
+  // processor.halt publishes `status idle` BEFORE the runner finishes (provider error,
+  // retries exhausted), so a deferred delivery waits for the run to settle and re-checks.
+  it("waits for the run to settle before delivering a deferred prompt", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    const order: string[] = []
+    const callPromptAsync = vi.fn().mockImplementation(async () => void order.push("prompt"))
+    const settle = vi.fn().mockImplementation(async () => {
+      order.push("settle")
+      return true
+    })
+    await createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync, settle })(idleEvent("s1"))
+    expect(settle).toHaveBeenCalledWith({ sessionID: "s1" })
+    expect(order).toEqual(["settle", "prompt"])
+  })
+
+  it("re-arms a deferred entry when the session is busy again after settling", async () => {
+    const pending = new Map<string, PendingResume>()
+    const entry: PendingResume = { ...fresh(), phase: "resuming", deferred: true }
+    pending.set("s1", entry)
+    const callPromptAsync = vi.fn()
+    const settle = vi.fn().mockImplementation(async () => {
+      expect(pending.has("s1")).toBe(false) // claimed during the settle
+      return false
+    })
+    await createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync, settle })(idleEvent("s1"))
+    expect(callPromptAsync).not.toHaveBeenCalled()
+    expect(pending.get("s1")).toBe(entry)
+  })
+
+  it("does not re-arm over a newer entry stashed during the settle", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    const newer: PendingResume = { ...fresh(), prompt: "newer", phase: "awaitingTurnEnd" }
+    const settle = vi.fn().mockImplementation(async () => {
+      pending.set("s1", newer)
+      return false
+    })
+    await createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync: vi.fn(), settle })(
+      idleEvent("s1"),
+    )
+    expect(pending.get("s1")).toBe(newer)
+  })
+
+  it("does not settle a non-deferred delivery (the post-compaction idle is the runner's final one)", async () => {
+    const pending = new Map<string, PendingResume>([["s1", { ...fresh(), phase: "resuming" }]])
+    const settle = vi.fn()
+    const callPromptAsync = vi.fn().mockResolvedValue(undefined)
+    await createOnStatus({ pending, callSummarize: vi.fn(), callPromptAsync, settle })(idleEvent("s1"))
+    expect(settle).not.toHaveBeenCalled()
+    expect(callPromptAsync).toHaveBeenCalledOnce()
+  })
+
+  it("tells waitForIdle to stop once the entry is no longer its to deliver", async () => {
+    const pending = new Map<string, PendingResume>([["s1", fresh()]])
+    let shouldContinue: (() => boolean) | undefined
+    const onCompacted = createOnCompacted({
+      pending,
+      callPromptAsync: vi.fn(),
+      waitForIdle: async (input) => {
+        shouldContinue = input.shouldContinue
+        expect(shouldContinue?.()).toBe(true)
+        pending.delete("s1") // claimed by onStatus
+        expect(shouldContinue?.()).toBe(false)
+        return false
+      },
+    })
+    await onCompacted(compacted("s1"))
+    expect(shouldContinue).toBeTypeOf("function")
+  })
+
+  it("tool result surfaces a deferred prompt it replaces, instead of dropping it silently", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), prompt: "OLD PROMPT TEXT", phase: "resuming", deferred: true }],
+    ])
+    const tool = createSelfCompactTool({ pending, lookupModel: okLookup() })
+    const out = await tool.execute({ prompt: "new" }, { sessionID: "s1" })
+    expect(out).toContain("Compaction queued")
+    expect(out).toContain("OLD PROMPT TEXT")
+    expect(pending.get("s1")?.prompt).toBe("new")
+  })
+
+  it("a failed lookup says a deferred prompt is waiting for idle, not for this turn's end", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...fresh(), phase: "resuming", deferred: true }],
+    ])
+    const tool = createSelfCompactTool({
+      pending,
+      lookupModel: vi.fn().mockResolvedValue({ ok: false, reason: "nope" }),
+    })
+    const out = await tool.execute({ prompt: "new" }, { sessionID: "s1" })
+    expect(out).toContain("NOT queued")
+    expect(out).not.toContain("will run when this turn ends")
+    expect(out).toContain("delivered the next time this session goes idle")
+    expect(pending.get("s1")?.phase).toBe("resuming")
+  })
+
   it("tool-time eviction spares a deferred entry older than 30 min", async () => {
     const pending = new Map<string, PendingResume>([
       [
@@ -993,6 +1093,35 @@ describe("waitForSessionIdleHttp", () => {
     )
     expect(ok).toBe(true)
     expect(fetchFn).toHaveBeenCalledTimes(2)
+  })
+
+  it("settleThenCheckIdleHttp sleeps first, then reads status once", async () => {
+    const order: string[] = []
+    const fetchFn = vi.fn().mockImplementation(async (req: Request) => {
+      order.push(`read ${new URL(req.url).searchParams.get("directory")}`)
+      return statusResponse({ s1: { type: "busy" } })
+    })
+    const sleep = vi.fn().mockImplementation(async (ms: number) => void order.push(`sleep ${ms}`))
+    const ok = await settleThenCheckIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", directory: "/d", settleMs: 1500, sleep },
+    )
+    expect(ok).toBe(false)
+    expect(order).toEqual(["sleep 1500", "read /d"])
+  })
+
+  it("stops polling (returns false) as soon as shouldContinue says so", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(statusResponse({ s1: { type: "busy" } }))
+    let keepGoing = true
+    const sleep = vi.fn().mockImplementation(async () => {
+      keepGoing = false
+    })
+    const ok = await waitForSessionIdleHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", attempts: 50, intervalMs: 0, sleep, shouldContinue: () => keepGoing },
+    )
+    expect(ok).toBe(false)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
 })
 

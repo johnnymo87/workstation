@@ -10,6 +10,7 @@ import {
   createSelfCompactTool,
   getSharedPendingResumes,
   lookupActiveModel,
+  settleThenCheckIdleHttp,
   waitForSessionIdleHttp,
 } from "./self-compact-impl"
 
@@ -49,6 +50,7 @@ const plugin: Plugin = async (ctx) => {
     // Delivers a resumption prompt that was still waiting when compaction ended
     // because another prompt had started a turn (v5; see createOnCompacted).
     callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
+    settle: (input) => settleThenCheckIdleHttp(callCtx, { ...input, directory: ctx.directory }),
   })
 
   const onCompacted = createOnCompacted({
