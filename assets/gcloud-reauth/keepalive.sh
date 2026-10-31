@@ -299,7 +299,9 @@ for line in sys.stdin:
         last = o
 print(last)' 2>/dev/null)"
     record "no_session" "No IdP session in the isolated browser; the refresh will ask for a sign-in when it needs one."
-    if [ "$prev" = held ]; then
+    # browser_unusable counts as held: the session was live until Chrome
+    # broke, and chrome.sh's restart may be what lost it.
+    if [ "$prev" = held ] || [ "$prev" = browser_unusable ]; then
       alert_human "gcloud reauth: sign-in needed soon" "Your IdP session in the isolated gcloud-reauth Chrome has expired. Signing in now lets the next refresh of the remote gcloud credentials run without stopping." signin
     fi
     exit 1

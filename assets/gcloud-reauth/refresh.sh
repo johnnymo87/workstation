@@ -619,6 +619,12 @@ except Exception:
       idp_login_required|password_demanded|mfa_demanded|bot_blocked)
         record "$cred" "human_required" "Browser flow stopped at: $reason. The sign-in page is open in the isolated Chrome (the alert brings it forward); sign in there and this run retries by itself." ;;
       browser_unusable)
+        # A sleep during setup can also end here (the timeout fires on wake);
+        # that is an interruption, not a broken browser.
+        if slept_through "$step_t0" 260; then
+          record "$cred" "interrupted" "The Mac slept during the browser flow (outcome: $reason); retrying next run"
+          return
+        fi
         # Its own outcome, not no_authcode: the fix is the browser, not the
         # flow. chrome.sh quits a Chrome whose files an update deleted (the
         # 2026-10-31 cause), so usually this has already fixed itself.

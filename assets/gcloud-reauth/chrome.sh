@@ -58,12 +58,20 @@ cdp_is_chrome() {
 # failed for 13h, until a human saw the tabs and the process was killed.
 #
 # WHY THIS SIGNAL AND NOT "RUNNING VERSION != INSTALLED VERSION": a restart
-# costs the IdP session, which lives in a session cookie (10-30: restarted
+# can cost the IdP session, which lives in a session cookie (10-30: restarted
 # 18:24Z with a session live at 17:37Z; at 18:37Z there was none). A Chrome
 # whose own version directory is still on disk can start renderers, so it is
 # not broken and is left alone, even if a newer version is installed. Only a
 # missing directory means it can't open a page. The restart waits for a
 # second check, so a check that lands mid-update cannot cause one by itself.
+#
+# WHY KILL, NOT TERM: Chrome restores session cookies on the next start only
+# when the last exit was a crash (or with "continue where you left off").
+# Measured 2026-10-31 on a scratch profile, headless Chrome 156: after a TERM restart a
+# session cookie was gone and a persistent one kept; after a KILL restart both
+# were there. So a KILL keeps the IdP session across the restart. Chrome is
+# built to survive being killed, and --hide-crash-restore-bubble below keeps
+# the "restore pages?" prompt away.
 #
 # Override for tests only: REAUTH_CHROME_CHECK_SECONDS (default 60).
 CHECK_SECONDS="${REAUTH_CHROME_CHECK_SECONDS:-60}"
@@ -116,13 +124,11 @@ watch_chrome() {
     if running_files_gone; then
       strikes=$((strikes + 1))
       if [ "$strikes" -ge 2 ]; then
-        echo "gcloud-reauth-chrome: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Quitting pid $pid so a fresh one starts." >&2
+        echo "gcloud-reauth-chrome: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Killing pid $pid so a fresh one starts." >&2
         # `|| true`: writeShellApplication runs this under errexit, and a kill
         # of a process that has just exited by itself fails.
-        kill -TERM "$pid" 2>/dev/null || true
-        # Chrome exits within seconds on TERM; KILL only one that does not.
-        for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; nap 1; done
         kill -KILL "$pid" 2>/dev/null || true
+        for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; nap 1; done
         break
       fi
     else
