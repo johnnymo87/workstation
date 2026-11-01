@@ -50,7 +50,7 @@ not by the text.**
 | Exit | Output | Meaning |
 |---|---|---|
 | 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. `heartbeat` does not affect delivery (see "Before you send"). |
-| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox or pigeon can't route to it | Don't send. See "No coordinator found". |
+| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox (the program is paused or disabled) or pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
 | 2 | `no stall-watch on THIS host…` | You are not on cloudbox. See "No coordinator found". |
 | 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
 | 127 | `coordinator: command not found` | Run `hostname`. On `cloudbox`, the install is broken: treat it as exit 3, and include `ls -l ~/.local/bin/coordinator` in what you tell the human. On any other host, treat it as exit 2, because only cloudbox installs the command. |
@@ -65,9 +65,11 @@ What it checks: the registry is stall-watch's
 The coordinators' own `./sw peers` reads the same column through the same code.
 (`./sw` refuses to run outside its coordinator.) `coordinator` then checks that
 the program is enabled and in tools mode in `programs.toml`, because a row can
-outlive its program, and that the stall-watch tick would actually drain the
-mailbox. Last, it checks that pigeon `GET /sessions` has the id `running` with a
-`swarm` mailbox. Every coordinator is registered there under the label
+outlive its program, and that the program is not paused (the CLI words this
+as "nothing reads it"; with push, pigeon would still wake a paused program's
+coordinator, but a paused program is not one to hand work to). Last, it
+checks that pigeon `GET /sessions` has the id `running` with a `swarm`
+mailbox. Every coordinator is registered there under the label
 `📋 <tag>`, with a working directory under
 `~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`.
 
@@ -85,8 +87,8 @@ the tag.
   program's heartbeat is on or off. If the coordinator is mid-turn, the message
   queues behind that turn. Its answer is also posted in the human's Telegram
   topic for that program, so the human sees the exchange without you reporting
-  it. Sending is handing off: don't also tell the human unless they asked you to
-  report.
+  it. Sending is handing off: no separate message to the human, just one line
+  in your end-of-turn report saying which coordinator you messaged.
 - **Write it so a stranger can act on it.** The coordinator has not seen your
   conversation. In one message, include the finding, the evidence (file:line,
   bead id, PR, query output), what you think it means for its program, and what
