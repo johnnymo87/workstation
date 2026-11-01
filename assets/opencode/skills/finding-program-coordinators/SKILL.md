@@ -49,8 +49,8 @@ not by the text.**
 
 | Exit | Output | Meaning |
 |---|---|---|
-| 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. See "Before you send" for what `heartbeat` changes. |
-| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox or pigeon can't route to it | Don't send. See "No coordinator found". |
+| 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. `heartbeat` does not affect delivery (see "Before you send"). |
+| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox (the program is paused or disabled) or pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
 | 2 | `no stall-watch on THIS host…` | You are not on cloudbox. See "No coordinator found". |
 | 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
 | 127 | `coordinator: command not found` | Run `hostname`. On `cloudbox`, the install is broken: treat it as exit 3, and include `ls -l ~/.local/bin/coordinator` in what you tell the human. On any other host, treat it as exit 2, because only cloudbox installs the command. |
@@ -65,9 +65,11 @@ What it checks: the registry is stall-watch's
 The coordinators' own `./sw peers` reads the same column through the same code.
 (`./sw` refuses to run outside its coordinator.) `coordinator` then checks that
 the program is enabled and in tools mode in `programs.toml`, because a row can
-outlive its program, and that the stall-watch tick would actually drain the
-mailbox. Last, it checks that pigeon `GET /sessions` has the id `running` with a
-`swarm` mailbox. Every coordinator is registered there under the label
+outlive its program, and that the program is not paused (the CLI words this
+as "nothing reads it"; with push, pigeon would still wake a paused program's
+coordinator, but a paused program is not one to hand work to). Last, it
+checks that pigeon `GET /sessions` has the id `running` with a `swarm`
+mailbox. Every coordinator is registered there under the label
 `📋 <tag>`, with a working directory under
 `~/.local/state/stall-watch/coord-sessions/<tag>-<ms>/`.
 
@@ -79,28 +81,24 @@ the tag.
 
 ## Before you send
 
-- **A coordinator is not woken by your message.** Swarm mail to a `gse_` is
-  drained by the stall-watch tick and shown to the coordinator at its **next
-  wake**. With `heartbeat=on`, that is soon. Most programs run with the
-  heartbeat **off**. Their coordinators wake when the human writes in their
-  Telegram topic, on an alert, or on a review of items they already hold. For
-  a quiet program that can be days away, or never.
-- **So with `heartbeat=off`, sending is not handing off.** Send the message,
-  **and** tell the human in one line that program X's coordinator has a message
-  from you. Do this every time, urgent or not, and above all when nobody asked
-  you to report. Your session might be gone by the time the coordinator reads
-  the message, so the human must know it is there. This matches the
-  coordinators' own rule: they treat a handoff as done only when the receiver's
-  heartbeat is on.
+- **Your message wakes the coordinator.** Since 2026-10-31, pigeon pushes swarm
+  mail into a coordinator's goose session as its own turn the moment you send
+  it, the same way it pushes into an opencode session. That holds whether the
+  program's heartbeat is on or off. If the coordinator is mid-turn, the message
+  queues behind that turn. Its answer is also posted in the human's Telegram
+  topic for that program, so the human sees the exchange without you reporting
+  it. Sending is handing off: no separate message to the human, just one line
+  in your end-of-turn report saying which coordinator you messaged.
 - **Write it so a stranger can act on it.** The coordinator has not seen your
   conversation. In one message, include the finding, the evidence (file:line,
   bead id, PR, query output), what you think it means for its program, and what
   you need back, if anything. Use kind `result` for a report and
   `clarification.request` if you need an answer. The `swarm-messaging` economy
   rules apply: one substantial message, and no follow-up pings.
-- **Expect the reply as a swarm message, possibly much later.** A coordinator
-  with swarm tools replies to your `ses_` id, and that reply wakes you if your
-  session is still alive.
+- **Expect the reply as a swarm message.** A coordinator with swarm tools
+  replies to your `ses_` id, and that reply wakes you if your session is still
+  alive. Don't answer a reply that leaves nothing to say: there is no cap on
+  coordinator turns, so two sessions acknowledging each other would loop.
 - **Report to the program through its coordinator, not its workers.** A worker
   holds one slice of the program. The coordinator holds the whole of it, and
   it is the session the human talks to about that program.
