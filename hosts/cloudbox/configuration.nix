@@ -4984,6 +4984,19 @@ Forensics: $DUMP"
         # Left UNSET rather than "false": unset is off without the startup
         # warning. Re-enable by restoring "CFP_OPUS_MAX_FIRST=true" -- likely
         # worth doing when a new Fable model makes the family split real again.
+        #
+        # Use-it-or-lose-it (cfp v0.11.0, bead claude-failover-proxy-fs1).
+        # Anthropic removed the 5h limit on 2026-10-31, so weekly is the only
+        # limit, and about a third of each Max account-week was lapsing unused
+        # at reset while the paid legs ran at budget. With this flag, Opus goes
+        # to Max while TeamClaude's NEXT target (status `defaultTarget`) is an
+        # account in its final weekly window (finalWindowHours = 24 in
+        # ~/.config/teamclaude.json; any value above 24 silently disables it),
+        # healthy and below 0.98. Otherwise the plain chain above applies.
+        # It only spends quota that is about to lapse. The leak is sessions
+        # pinned to Max for up to CFP_IDLE_MIGRATE_SECONDS after the window
+        # closes. Off = remove the line (unset is off, with no warning).
+        "CFP_OPUS_MAX_FINAL_WINDOW=true"
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
