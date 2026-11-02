@@ -228,7 +228,7 @@ Dispatch `adversarial-reviewer-opus` on the diff before `gh pr create`. This is 
 
 **The opus twin is the reviewer on every host.** The `-astra` twin (devbox, cloudbox) is opt-in: dispatch it only when the user asks for astra. What is banned is substituting the other twin because you prefer it. (On a serve started before the 2026-09-28 rename, `adversarial-reviewer-opus` may be listed as `adversarial-reviewer-fable`; that is the same slot.)
 
-**If the reviewer is unavailable, stop and report.** Say the reviewer is unavailable and the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it. There is no silent fallback to astra. If the user asked for astra and it fails, falling back to opus is fine, but say so in one clause. The astra twin can be present-but-dead: it is only reachable while `codex-lb.service` is up, its upstream model-catalog refresh is healthy, *and* a pooled account still has 5h-window quota left, and it fails at **request** time rather than at build time.
+**If the reviewer is unavailable, stop and report.** Say the reviewer is unavailable and the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it. There is no silent fallback to astra. If the user asked for astra and it fails, falling back to opus is fine, but say so in one clause (unless they asked for both twins — then report it, since two opus reviews are not a second opinion). The astra twin can be present-but-dead: it is only reachable while `codex-lb.service` is up, its upstream model-catalog refresh is healthy, *and* a pooled account still has 5h-window quota left, and it fails at **request** time rather than at build time.
 
 Either way, a failed dispatch never counts as the step having happened.
 

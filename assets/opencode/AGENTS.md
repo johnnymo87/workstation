@@ -103,7 +103,8 @@ nobody's. If you find a third, add a row here rather than following it.
 A dead `-opus` does not authorize an opt-in twin. When the human asked for
 astra and it is unavailable (not listed, `astra-probe` says DOWN, or the
 dispatch errors or returns empty — an empty result is no review), falling back
-to `-opus` is fine, but say so in one clause.
+to `-opus` is fine, but say so in one clause. If they asked for *both* twins,
+report the failure instead: two opus answers are not a second opinion.
 
 **A dead astra fails loudly, not silently.** The `subagent-failure` plugin
 runs `astra-probe` before every `-astra` dispatch and *refuses* the Task call
@@ -147,6 +148,8 @@ fable twin: say so rather than silently substituting another model.
 resumption prompt may name a suffixed handle out of habit — including
 `oracle-astra` / `adversarial-reviewer-astra`, which were devbox's defaults
 until 2026-11-02. Dispatch the host's default handle for that role, as above.
+A handle written into an agent-authored artifact (plan doc, bead note, queued
+wake) is always a role reference, not a model choice.
 The exceptions, honored on every host: the human deliberately picked the model
 ("use astra"), or asked for both twins (independent opinions). Then dispatch
 exactly what they named. Never write a suffixed handle into a
