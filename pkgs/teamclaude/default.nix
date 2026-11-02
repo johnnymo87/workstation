@@ -91,7 +91,7 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.21-balanced-fw-ub-cap"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend
+  version = "1.1.21-balanced-fw-ub-cap-seat"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst
 
   src = fetchFromGitHub {
     # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
@@ -187,13 +187,25 @@ stdenvNoCC.mkDerivation rec {
     # Wonder Enterprise seat in ~/.config/teamclaude.json; it hot-reloads, so
     # its rollback is removing that key and POST /teamclaude/reload.
     #
+    # SEAT FIRST (johnnymo87/teamclaude#5, merged 2026-11-01, 9a698c7): opt-in
+    # `usageSeatFirst: true` makes balanced routing spend a CAPPED usage-based
+    # seat first each day, up to its maxDailySpend. An account inside its
+    # finalWindowHours still comes first. cloudbox turns it on in
+    # ~/.config/teamclaude.json (bead claude-failover-proxy-fs1). It
+    # hot-reloads, so its rollback is setting it to false and POST
+    # /teamclaude/reload.
+    #
     # Rollback, cheapest first:
-    #   0. finalWindowHours -> 0 in ~/.config/teamclaude.json (hot-reloads).
+    #   0. usageSeatFirst -> false, or finalWindowHours -> 0, in
+    #      ~/.config/teamclaude.json (both hot-reload).
     #   1. CONFIG ONLY -- drop routingStrategy from ~/.config/teamclaude.json
     #      (or set it to "expiry"). No rebuild. This is the real rollback for
     #      anything balanced does wrong, and it is why the port ships behind a
     #      default rather than as a replacement.
-    #   2. PREVIOUS PIN = rev d636766a8fec94e3991c278143d6881870b48f6e, hash
+    #   2. PREVIOUS PIN = rev 8a35f5792a69cc33ba9f43a85d607d2e7369bae2, hash
+    #      sha256-hokkt50/y3vC+CpXkSWFAhbWvuATlIOf1oaxLNFPYYc=, version
+    #      "1.1.21-balanced-fw-ub-cap" (no usageSeatFirst; the key is ignored).
+    #      Before that: rev d636766a8fec94e3991c278143d6881870b48f6e, hash
     #      sha256-PJRKHDBBjXM7FZDJseoeLC4hlL5orHtXpKeGrmPE9LI=, version
     #      "1.1.21-balanced-fw-ub" (no maxDailySpend: remove that key first, or
     #      the seat runs uncapped). Before that: rev
@@ -218,8 +230,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "8a35f5792a69cc33ba9f43a85d607d2e7369bae2"; # feat/balanced-on-v1121
-    hash = "sha256-hokkt50/y3vC+CpXkSWFAhbWvuATlIOf1oaxLNFPYYc=";
+    rev = "9a698c7e00bfd149806c0e6d44ece438aa0e8f83"; # feat/balanced-on-v1121
+    hash = "sha256-ymGTzwIZTVFyIakSo+u0Y0RivJuFvrb60hAt18n/5gI=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
