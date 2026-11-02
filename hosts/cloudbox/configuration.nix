@@ -1633,7 +1633,9 @@ in
     description = "LGTM rollout config drift guard (rollout.yml vs mono origin/main)";
     onFailure = [ "lgtm-rollout-validate-failure.service" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    # pigeon: a Persistent=true catch-up fires early in boot, and its page goes
+    # through pigeon's /alert.
+    after = [ "network-online.target" "pigeon-daemon.service" ];
     path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.coreutils pkgs.bash pkgs.openssh ];
     serviceConfig = {
       Type = "oneshot";
