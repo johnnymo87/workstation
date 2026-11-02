@@ -66,7 +66,7 @@ function fallbackAdvice(agent: string): string {
   if (twin) return `Dispatch "${twin}" with the same prompt instead, and say in one clause that ${agent} was unavailable.`
   // The -opus twin IS the fallback. Its failure means stop-and-report
   // (assets/opencode/AGENTS.md); suggesting "another agent" would steer the
-  // parent back to astra (devbox) or to an opt-in twin (cloudbox).
+  // parent to an opt-in twin (astra, or fable on cloudbox).
   if (agent.endsWith("-opus"))
     return `Do not substitute another agent. Stop and report that this ${agent} dispatch did not happen.`
   return `Report the failure; do not proceed as if it had answered.`

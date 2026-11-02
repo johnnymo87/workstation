@@ -1,7 +1,7 @@
 # astra-probe -- can `openai/gpt-6-astra` be dispatched through codex-lb right now?
 #
-# WHY THIS EXISTS. On devbox `adversarial-reviewer-astra` is the DEFAULT
-# adversarial reviewer, and opencode's Task tool renders a subagent whose turn
+# WHY THIS EXISTS. `adversarial-reviewer-astra` (devbox's default reviewer
+# until 2026-11-02, opt-in since) runs through codex-lb, and opencode's Task tool renders a subagent whose turn
 # died on an API error as an EMPTY task_result with state "completed" -- no
 # error reaches the dispatching agent. A codex-lb outage therefore presents as
 # "the reviewer had nothing to say". See the incident note in

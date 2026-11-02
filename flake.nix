@@ -431,7 +431,7 @@
 
       # ---- pkgs/astra-probe -------------------------------------------------
       #
-      # astra-probe gates the DEFAULT adversarial reviewer on devbox, so its
+      # astra-probe gates every -astra reviewer/oracle dispatch, so its
       # failure mode is a false GREEN: print "astra UP" at a broken codex-lb and
       # the caller dispatches into an empty review it will read as "no findings".
       # The first draft did exactly that -- `.accounts[]` iterates a JSON OBJECT
