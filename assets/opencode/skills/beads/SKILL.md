@@ -106,6 +106,23 @@ dependents whose worktrees then branch off a trunk that lacks the prerequisite â
 and the breakage lands in the next task, not the one that caused it. Workers own
 shepherding to merge, then `bd close --reason`.
 
+### Closing a child: reconcile the epic's prose too
+
+Dependency edges say **what** is blocked. Only the epic's prose says **why**.
+When a child closes, update the parent's description or design as well as the
+graph:
+
+- mark the item done, with its verdict (what was found, not only "done");
+- splice any beads the work spawned into the through-line;
+- correct any claim the work proved wrong;
+- re-draw the ordering if it changed.
+
+A correct graph under stale prose is worse than an obviously incomplete one,
+because it reads as current, and the next cold session inherits a confident,
+wrong plan. `bd close` feels like the end of the work, which is why this is
+skipped. Append findings with `bd note`; rewrite the body only with
+`--design-file`/`--body-file` (see the runbook section below: no `$(...)`).
+
 ### The runbook: where it goes, and how to revise it without wiping it
 
 A project needs a page of prose a cold session reads first: how to launch a
