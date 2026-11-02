@@ -233,8 +233,8 @@ let
   # YAML or text outside the scalar, and the failure mode of broken agent
   # frontmatter is the racy skip-to-stub described above.
   # `caution` is the sentence appended to the description. It defaults to the
-  # opt-in CAUTION that keeps the `-opus` handle the default; devbox overrides
-  # it for adversarial-reviewer, where astra IS the default (see the call site).
+  # opt-in CAUTION that keeps the `-opus` handle the default. No host
+  # overrides it today (devbox did for its astra twins until 2026-11-02).
   #
   # It is INTERPOLATED INTO PERL SOURCE, not passed as data. The current values
   # are plain prose, but a future one containing `!` (the s/// delimiter),
@@ -311,34 +311,14 @@ let
       modelTag = "fable-5-1";
     };
 
-  # Devbox inverts the default for BOTH astra twins — astra is THE adversarial
-  # reviewer and THE oracle there (operator policy, 2026-09-28; the 2026-09-19
-  # design inverted only the reviewer, and an oracle-astra description telling
-  # devbox callers "only when explicitly asked" left a session unable to see
-  # that astra was meant). For the reviewer this covers plan-time
-  # pressure-tests and the standing pre-PR diff review alike. Deliberately wider than the pre-PR skill alone: two defaults
-  # that differ by review mode is a seam nobody holds at dispatch time. The
-  # matching prose lands via opencode-skills.nix (pre-PR dispatch line) and
-  # .agents/skills/opencode-agents/SKILL.md (host policy).
-  #
-  # Cloudbox's twins keep the opt-in CAUTION. The `-opus` twin is the base
-  # default on every host, and devbox's astra preference falls back to it
-  # (operator policy, 2026-09-28) when astra is unlisted, probed DOWN, or its
-  # dispatch errors/returns empty — announced, never silent. Before that the
-  # policy was stop-and-report, which made a dead codex-lb block review.
-  #
-  # No colon-space anywhere in this string (the build-time guard below enforces
-  # it) and no perl metacharacter (see mkAgentVariant's note).
-  # The unavailability policy is carried HERE, not only in the skills, because
-  # the description is the only part of this policy that reaches a caller in
-  # some other repo. The deployed fallback text lives under §Pre-PR
-  # Checks in shepherding-pull-requests, and the all-review version lives in
-  # this repo's own .opencode skill — a plan-time dispatch from anywhere else
-  # loads neither, and would otherwise stop, or fall back without saying so.
-  devboxAdversarialCaution =
-    "On devbox this is the DEFAULT adversarial reviewer — prefer it over adversarial-reviewer-opus for every adversarial review, plan-time and pre-PR alike. If astra-probe says DOWN, or a dispatch to this variant is refused, errors, or returns empty, fall back to adversarial-reviewer-opus and say so — a failed astra dispatch is not a review";
-  devboxOracleCaution =
-    "On devbox this is the DEFAULT oracle — prefer it over oracle-opus for every consult, including when a request or resumption prompt names oracle-opus. If astra-probe says DOWN, or a dispatch to this variant is refused, errors, or returns empty, fall back to oracle-opus and say so";
+  # Every host's astra twins carry the opt-in CAUTION: the `-opus` twin is the
+  # default oracle and adversarial reviewer everywhere. From 2026-09-19
+  # (reviewer) / 2026-09-28 (oracle) until 2026-11-02 devbox inverted that
+  # sentence and made astra its default; that was reverted by operator choice,
+  # along with the devbox-only rendering of shepherding-pull-requests in
+  # opencode-skills.nix. To reinstate a per-host default, pass a `caution` to
+  # mkAstraVariant at the call site (no colon-space, no perl metacharacter —
+  # see mkAgentVariant's note).
 
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
@@ -1055,12 +1035,9 @@ in
    #                     2026-09-26.)
    #   @<base>-astra  -> openai/gpt-6-astra via codex-lb (mkAstraVariant).
    #                     Carries an opt-in CAUTION in its description so the
-   #                     orchestrator does not reach for it on its own — EXCEPT
-   #                     on devbox, where that sentence is inverted for both
-   #                     twins and astra is the standing default
-   #                     (devboxAdversarialCaution / devboxOracleCaution above).
-   #                     That is the one place the two hosts' astra output differs.
-   #                     patchAgent is a no-op for an `openai/` pin.
+   #                     orchestrator does not reach for it on its own (on
+   #                     every host since 2026-11-02; devbox previously
+   #                     inverted it). patchAgent is a no-op for an `openai/` pin.
    #
    # THE ASTRA TWINS ARE GATED TO devbox + cloudbox, matching the hosts where
    # `codexLbModels` is injected into the openai provider — NOT the hosts that
@@ -1083,9 +1060,8 @@ in
      patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
      source = patchAgent "adversarial-reviewer-astra" (
-       mkAstraVariant
-         { caution = if isDevbox then devboxAdversarialCaution else null; }
-         "adversarial-reviewer"
+        mkAstraVariant { }
+          "adversarial-reviewer"
          "${assetsPath}/opencode/agents/adversarial-reviewer.md");
    };
    xdg.configFile."opencode/agents/adversarial-reviewer-fable.md" = lib.mkIf isCloudbox {
@@ -1099,8 +1075,7 @@ in
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
-     source = patchAgent "oracle-astra" (mkAstraVariant
-        { caution = if isDevbox then devboxOracleCaution else null; }
+     source = patchAgent "oracle-astra" (mkAstraVariant { }
         "oracle"
         "${assetsPath}/opencode/agents/oracle.md");
    };

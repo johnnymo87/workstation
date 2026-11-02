@@ -169,8 +169,8 @@
 # codex-lb attaches: `x-codex-primary-used-percent: 100.0` plus
 # `x-codex-primary-reset-at: <epoch>` means quota, not transport.
 #
-# Why this matters beyond codex-lb: on devbox `adversarial-reviewer-astra` is the
-# DEFAULT adversarial reviewer, and opencode's Task tool surfaces a subagent whose
+# Why this matters beyond codex-lb: `adversarial-reviewer-astra` (the devbox
+# default until 2026-11-02, opt-in everywhere now) runs through it, and opencode's Task tool surfaces a subagent whose
 # turn died on an API error as a task_result that is simply EMPTY, state
 # "completed". So a quota-exhausted astra presents to the dispatching agent as "the
 # reviewer returned nothing" with no error anywhere in its view. Observed

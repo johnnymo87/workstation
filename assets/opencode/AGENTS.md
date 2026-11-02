@@ -92,24 +92,21 @@ nobody's. If you find a third, add a row here rather than following it.
 
 ## Oracle and Adversarial Reviewer: Which Handle, Per Host
 
-**The `-opus` handle is the base default on every host.** A host may prefer a
-box-specific twin on top of it, and that twin falls back to `-opus`:
+**The `-opus` handle is the default on every host.** Other twins are opt-in:
 
-| Host | Oracle | Adversarial reviewer | Falls back to | Opt-in only when asked |
+| Host | Oracle | Adversarial reviewer | If unavailable | Opt-in only when asked |
 |---|---|---|---|---|
-| devbox | `oracle-astra` | `adversarial-reviewer-astra` | the `-opus` twin | — |
-| cloudbox | `oracle-opus` | `adversarial-reviewer-opus` | — (stop and report) | `-astra`, `-fable` |
-| macOS | `oracle-opus` | `adversarial-reviewer-opus` | — (stop and report) | — |
+| devbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra` |
+| cloudbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra`, `-fable` |
+| macOS | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | — |
 
-**Falling back (devbox).** Dispatch the `-opus` twin instead of astra when
-astra is not in the Task tool's list, `astra-probe` says DOWN, or the astra
-dispatch errors or returns empty (an empty result is no review, so it does not
-count as one). The fallback is not silent: say in one clause that astra was
-unavailable and opus answered. If the `-opus` twin is unavailable too, stop and
-report. There is no reverse fallback: on cloudbox a dead `-opus` does not
-authorize astra, which stays opt-in there.
+A dead `-opus` does not authorize an opt-in twin. When the human asked for
+astra and it is unavailable (not listed, `astra-probe` says DOWN, or the
+dispatch errors or returns empty — an empty result is no review), falling back
+to `-opus` is fine, but say so in one clause. If they asked for *both* twins,
+report the failure instead: two opus answers are not a second opinion.
 
-**A dead astra now fails loudly, not silently.** The `subagent-failure` plugin
+**A dead astra fails loudly, not silently.** The `subagent-failure` plugin
 runs `astra-probe` before every `-astra` dispatch and *refuses* the Task call
 when it says DOWN. The error names the `-opus` twin, so just follow it. If the
 child dies mid-dispatch, the plugin turns the empty or truncated "completed"
@@ -148,12 +145,14 @@ different case. On cloudbox, dispatch `-fable`. On devbox and macOS there is no
 fable twin: say so rather than silently substituting another model.
 
 **A handle named in a request is a role.** Humans, older prompts and your own
-resumption prompt say "oracle-opus" out of habit. Dispatch the host's preferred
-handle for that role, as above. On devbox, "consult oracle-opus" means
-`oracle-astra`, falling back to opus. The
-exceptions, honored on every host: the human deliberately picked the model
-("use opus, not astra"), or asked for both twins (independent opinions). Then
-dispatch exactly what they named. Never write a suffixed handle into a
+resumption prompt may name a suffixed handle out of habit — including
+`oracle-astra` / `adversarial-reviewer-astra`, which were devbox's defaults
+until 2026-11-02. Dispatch the host's default handle for that role, as above.
+A handle written into an agent-authored artifact (plan doc, bead note, queued
+wake) is always a role reference, not a model choice.
+The exceptions, honored on every host: the human deliberately picked the model
+("use astra"), or asked for both twins (independent opinions). Then dispatch
+exactly what they named. Never write a suffixed handle into a
 resumption prompt from memory. Write the role, or the handle the Task tool
 actually lists.
 
