@@ -50,7 +50,7 @@ not by the text.**
 | Exit | Output | Meaning |
 |---|---|---|
 | 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. `heartbeat` does not affect delivery (see "Before you send"). |
-| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, or a line saying nothing reads the mailbox (the program is paused or disabled) or pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
+| 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, a line ending `not a live coordinator, do not send` (the program is paused, disabled, or gone from `programs.toml`), or a line saying pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
 | 2 | `no stall-watch on THIS host…` | You are not on cloudbox. See "No coordinator found". |
 | 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
 | 127 | `coordinator: command not found` | Run `hostname`. On `cloudbox`, the install is broken: treat it as exit 3, and include `ls -l ~/.local/bin/coordinator` in what you tell the human. On any other host, treat it as exit 2, because only cloudbox installs the command. |
@@ -65,9 +65,9 @@ What it checks: the registry is stall-watch's
 The coordinators' own `./sw peers` reads the same column through the same code.
 (`./sw` refuses to run outside its coordinator.) `coordinator` then checks that
 the program is enabled and in tools mode in `programs.toml`, because a row can
-outlive its program, and that the program is not paused (the CLI words this
-as "nothing reads it"; with push, pigeon would still wake a paused program's
-coordinator, but a paused program is not one to hand work to). Last, it
+outlive its program, and that the program is not paused (pigeon would still
+wake a paused program's coordinator, but a paused program is not one to hand
+work to). Last, it
 checks that pigeon `GET /sessions` has the id `running` with a `swarm`
 mailbox. Every coordinator is registered there under the label
 `📋 <tag>`, with a working directory under
