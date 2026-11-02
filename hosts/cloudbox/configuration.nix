@@ -1535,6 +1535,11 @@ in
         # missing the watcher exits 2 on every merge, which surfaces as one
         # BLIND alarm rather than silence.
         "KUBECONFIG=/home/dev/.kube/config"
+        # The rollout drift guard's watchdog (lgtm-jbcr): page if
+        # lgtm-rollout-validate (daily, below) has not completed a run in this
+        # many hours. 50 = two missed days plus slack, so one late fire or a
+        # reboot over the 10:17 slot does not page. Unset to turn it off.
+        "LGTM_ROLLOUT_VALIDATE_MAX_AGE_HOURS=50"
       ];
       ExecStart = "${pkgs.writeShellScript "lgtm-shepherd" ''
         set -euo pipefail
@@ -1599,6 +1604,86 @@ in
       OnCalendar = "*:5/10";
       Persistent = false;
       RandomizedDelaySec = 60;
+    };
+  };
+
+  # Rollout config drift guard (lgtm-jbcr; follow-up B of lgtm-3woq). The
+  # shepherd's rollout watcher classifies a mono merge using
+  # ~/.config/lgtm/rollout.yml, whose per-service triggers are HAND-COPIED from
+  # each pipeline's trigger.paths.include. Mono keeps adding includes, the copy
+  # goes stale, and the symptom is merge notices wrongly saying "unwatched" (or,
+  # worse, a deploy nobody watches) weeks later. lgtm's
+  # `--validate-rollout-config` detects that drift; this runs it once a day
+  # against a freshly fetched origin/main.
+  #
+  # lgtm owns the logic (src/rolloutValidateMain.ts), including the page. It
+  # pages Jonathan on drift, a missing rollout.yml, a failed fetch, or a
+  # validator crash, and exits 0 once the page is delivered. Exit 1 means the
+  # page could NOT be delivered (or it crashed), which is what OnFailure= below
+  # is for. The page carries mono dirs and counts ONLY: the config's cluster,
+  # namespace and deployment values never leave the host (the full report is
+  # 0600 under ~/.local/state/lgtm/rollout-validate/last.json).
+  #
+  # A timer that stops firing is silent by nature, so every run writes
+  # last-run.json and lgtm-shepherd (every 10 min) pages if it goes stale; see
+  # LGTM_ROLLOUT_VALIDATE_MAX_AGE_HOURS below.
+  #
+  # Gated on enableLgtmShepherd, not enableLgtm: it guards the shepherd's config.
+  systemd.services.lgtm-rollout-validate = lib.mkIf enableLgtmShepherd {
+    description = "LGTM rollout config drift guard (rollout.yml vs mono origin/main)";
+    onFailure = [ "lgtm-rollout-validate-failure.service" ];
+    wants = [ "network-online.target" ];
+    after = [ "network-online.target" ];
+    path = [ pkgs.nodejs pkgs.git pkgs.gh pkgs.coreutils pkgs.bash pkgs.openssh ];
+    serviceConfig = {
+      Type = "oneshot";
+      # A clean run is seconds (git show of ~50 pipeline files) plus the fetch,
+      # which lgtm bounds at 600s itself. This bound only covers a wedge outside
+      # that, and must leave room for it.
+      TimeoutStartSec = 900;
+      User = "dev";
+      Group = "dev";
+      WorkingDirectory = "/home/dev/projects/lgtm";
+      # Below the shepherd, which this must never slow down.
+      Nice = 10;
+      Environment = [
+        "HOME=/home/dev"
+        # The SAME file lgtm-shepherd loads; validating any other copy would
+        # answer a question nobody asked.
+        "LGTM_ROLLOUT_CONFIG=/home/dev/.config/lgtm/rollout.yml"
+      ];
+      ExecStart = "${pkgs.writeShellScript "lgtm-rollout-validate" ''
+        set -euo pipefail
+        export PATH="/home/dev/.nix-profile/bin:/home/dev/.local/bin:$PATH"
+        # mono's origin is https; git's credential helper is `gh auth
+        # git-credential`, which reads this.
+        export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        if [ ! -d /home/dev/projects/lgtm/node_modules ]; then
+          cd /home/dev/projects/lgtm
+          ${pkgs.nodejs}/bin/npm install
+        fi
+        # The three pipeline-file spellings mono uses; build.yaml covers the
+        # build->release chains (see rollout.yml's header and lgtm-3woq).
+        exec ${pkgs.nodejs}/bin/node \
+          /home/dev/projects/lgtm/node_modules/tsx/dist/cli.mjs \
+          /home/dev/projects/lgtm/src/rolloutValidateMain.ts \
+          /home/dev/projects/mono --ref origin/main \
+          --pipeline-file .azure/deploy.yml \
+          --pipeline-file .azure/deploy.yaml \
+          --pipeline-file .azure/build.yaml
+      ''}";
+    };
+  };
+
+  # Daily at 10:17 America/New_York (the host's zone): inside working hours so
+  # a page lands when someone can act, and off lgtm-run's :x0 and the
+  # shepherd's :x5 minutes. Persistent=true: unlike a shepherd sweep, a missed
+  # day is worth catching up -- the drift it would have found is still there.
+  systemd.timers.lgtm-rollout-validate = lib.mkIf enableLgtmShepherd {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*-*-* 10:17:00";
+      Persistent = true;
     };
   };
 
@@ -1751,6 +1836,36 @@ Check, in this order:
   # a day with fewer than 144 runs means fires were swallowed by a long run:
   journalctl -u lgtm-shepherd --no-pager -o short-iso | grep -c Starting" \
           900 14400
+      ''}";
+    };
+  };
+
+  systemd.services.lgtm-rollout-validate-failure = lib.mkIf enableLgtmShepherd {
+    description = "Alert that the LGTM rollout config drift guard failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "lgtm-failure";
+      # See lgtm-run-failure above: the alerter itself needs a bound.
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "lgtm-rollout-validate-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show lgtm-rollout-validate -p Result --value 2>/dev/null || echo unknown)"
+        # Daily unit: a flat once-a-day nag is the right rate, so no backoff.
+        ${driftAlert} /var/lib/lgtm-failure/alert-rollout-validate "lgtm-rollout-validate:''$RESULT:$(date +%F)" \
+          "LGTM rollout config drift guard FAILED (Result=''$RESULT).
+
+Today nobody checked whether ~/.config/lgtm/rollout.yml still matches mono's
+pipeline triggers. lgtm pages drift, a missing config and a failed fetch
+itself and exits 0 once delivered, so reaching this alert means it crashed,
+timed out, or could not deliver its own page (pigeon down?).
+
+Check:
+  journalctl -u lgtm-rollout-validate -n 60 --no-pager
+  cat ~/.local/state/lgtm/rollout-validate/last-run.json" \
+          0
       ''}";
     };
   };
