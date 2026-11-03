@@ -5416,6 +5416,92 @@ EOF
               ;;
           esac
           rm -f "$FAILFILE"
+
+          # ---- 4. Vertex leg failures (cfp >= v0.12.0, bead claude-failover-proxy-end)
+          # cfp now falls back off a failing Vertex leg to enterprise/Max, so the
+          # client usually no longer sees the failure. The condition for shipping
+          # that was that failures stay LOUD: page on growth of
+          # counters.vertexFailures. Unknown (field missing on an older cfp,
+          # unparseable) never alerts.
+          #
+          # State ($STATE/vertex-failures, one value per line):
+          #   day      cfp's .day; the counter is day-scoped and resets at resetHour
+          #   paged    counter value covered by the last page that actually went out
+          #   seen     counter value at the last pass
+          #   seen_ts  epoch of the last pass that saw growth
+          # `paged` advances only when the alert helper really sent a page (its
+          # state file changed), so a pigeon outage or a backoff-suppressed repeat
+          # is retried, and the next page's +N covers everything since the last one.
+          # An episode ends after 30 min without growth: the helper's state is
+          # cleared so the next failure pages fresh instead of as "#N unresolved".
+          # The signature is the day only, NOT the reason: an incident that
+          # alternates reasons must not reset the backoff every minute.
+          VF_DAY=$(jq -r '.day // ""' "$BODY_FILE" 2>/dev/null || echo "")
+          VF_N=$(jq -r '.counters.vertexFailures // ""' "$BODY_FILE" 2>/dev/null || echo "")
+          case "$VF_N" in ""|*[!0-9]*) VF_N="" ;; esac
+          if [ -n "$VF_DAY" ] && [ -n "$VF_N" ]; then
+            VF_BASE="$STATE/vertex-failures"
+            VF_ALERTED="$STATE/vertex-alerted"
+            B_DAY=""; B_PAGED=""; B_SEEN=""; B_TS=""
+            if [ -f "$VF_BASE" ]; then
+              { read -r B_DAY; read -r B_PAGED; read -r B_SEEN; read -r B_TS; } < "$VF_BASE" || true
+            fi
+            for v in B_PAGED B_SEEN B_TS; do
+              case "''${!v}" in ""|*[!0-9]*) printf -v "$v" '%s' "" ;; esac
+            done
+            if [ -z "$B_DAY" ] || [ -z "$B_PAGED" ] || [ -z "$B_SEEN" ]; then
+              # First run (or corrupt state): seed, never page on history.
+              B_DAY="$VF_DAY"; B_PAGED="$VF_N"; B_SEEN="$VF_N"; B_TS=0
+            elif [ "$B_DAY" != "$VF_DAY" ]; then
+              # New cfp day: the counter restarted from 0, so 0 is the baseline.
+              B_DAY="$VF_DAY"; B_PAGED=0; B_SEEN=0
+            elif [ "$VF_N" -lt "$B_SEEN" ]; then
+              # Went backwards on the same day (corrupt stats.json): re-seed.
+              B_PAGED="$VF_N"; B_SEEN="$VF_N"
+            fi
+            [ -n "$B_TS" ] || B_TS=0
+            if [ "$VF_N" -gt "$B_SEEN" ]; then
+              # New growth. If the last growth was >30 min ago, a new episode.
+              [ "$((NOW - B_TS))" -lt 1800 ] || rm -f "$VF_ALERTED"
+              B_SEEN="$VF_N"; B_TS="$NOW"
+            elif [ "$((NOW - B_TS))" -ge 1800 ]; then
+              rm -f "$VF_ALERTED"
+            fi
+            if [ "$VF_N" -gt "$B_PAGED" ]; then
+              VF_DELTA=$((VF_N - B_PAGED))
+              VF_REASON=$(jq -r '.vertex.lastFailure.reason // "unknown (cfp restarted since)"' "$BODY_FILE" 2>/dev/null || echo unknown)
+              VF_STATUS=$(jq -r '.vertex.lastFailure.status // "none"' "$BODY_FILE" 2>/dev/null || echo none)
+              VF_SERVED=$(jq -r '.counters.vertexFallbackServed // "?"' "$BODY_FILE" 2>/dev/null || echo "?")
+              VF_MAX=$(jq -r '.maxAvailable // "?"' "$BODY_FILE" 2>/dev/null || echo "?")
+              VF_ENT=$(jq -r 'if .enterprise.available == true and .enterprise.overBudget != true then "yes" else "no" end' "$BODY_FILE" 2>/dev/null || echo "?")
+              case "$VF_REASON" in
+                gateway_refused) VF_HINT="aigateway could not resolve the caller's identity: a bad or under-scoped Google credential, Google tokeninfo slow or down, or aigateway's tokeninfo circuit open. Check: docker logs dev-gateway-1 --since 10m" ;;
+                threw) VF_HINT="aigateway (127.0.0.1:8080) is unreachable; expect an aigateway-canary page too. Check: docker ps | grep dev-gateway" ;;
+                timeout) VF_HINT="Vertex sent no response headers within cfp's header timeout. cfp skips Vertex and re-probes it once a minute until it answers." ;;
+                status_403|status_404) VF_HINT="Vertex refused the model (403 / Google 404). This is what a Claude-on-Vertex shutoff looks like." ;;
+                status_429) VF_HINT="Vertex rate-limited the request (429)." ;;
+                *) VF_HINT="Vertex or aigateway returned status $VF_STATUS." ;;
+              esac
+              echo "WARNING: cfp vertex leg failures +$VF_DELTA (today $VF_N, last reason=$VF_REASON status=$VF_STATUS)"
+              VF_TEXT=$(cat <<EOF
+cfp's Vertex leg failed $VF_DELTA time(s) since the last page ($VF_N today). Last: reason=$VF_REASON status=$VF_STATUS.
+
+cfp retries those requests on enterprise, then Max. If neither serves, the client gets the error. Right now: Max available=$VF_MAX, enterprise usable=$VF_ENT. Requests served off Vertex today: $VF_SERVED. Fallback costs a cold prompt-cache write, and enterprise is billed.
+
+$VF_HINT
+
+Details (on cloudbox):
+  journalctl -u claude-failover-proxy --since -15min | grep 'vertex leg failed'
+  curl -s 127.0.0.1:8789/stats | jq '{vertex, c: .counters | {vertexFailures, vertexFallbackServed, vertexSkipped, errors}}'
+EOF
+)
+              BEFORE=$(cat "$VF_ALERTED" 2>/dev/null || true)
+              ${driftAlert} "$VF_ALERTED" "vertex:$VF_DAY" "$VF_TEXT" 900 14400
+              AFTER=$(cat "$VF_ALERTED" 2>/dev/null || true)
+              [ "$BEFORE" = "$AFTER" ] || B_PAGED="$VF_N"
+            fi
+            printf '%s\n%s\n%s\n%s\n' "$B_DAY" "$B_PAGED" "$B_SEEN" "$B_TS" > "$VF_BASE"
+          fi
           exit 0
         fi
 
