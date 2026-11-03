@@ -39,6 +39,7 @@ const plugin: Plugin = async (ctx) => {
   //   1. Tool execute → resolve the model (read-only GETs), stash entry, return.
   //      A failed lookup is returned to the agent instead of being stashed.
   //   2. onStatus (idle) → fire POST /summarize with that model, outside the turn.
+  //      A transient failure is retried; a final one hands the prompt back (v6).
   //   3. onCompacted → wait for idle, then enqueue resumption prompt via POST /prompt_async.
   //      If another prompt started a turn right after compaction, the prompt stays
   //      armed and onStatus delivers it on the next idle instead (v5).
@@ -51,6 +52,10 @@ const plugin: Plugin = async (ctx) => {
     // because another prompt had started a turn (v5; see createOnCompacted).
     callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
     settle: (input) => settleThenCheckIdleHttp(callCtx, { ...input, directory: ctx.directory }),
+    // Gates a summarize retry (v6): one status read, scoped like waitForIdle below.
+    // A failed read counts as busy, so the entry is re-armed rather than fired blind.
+    isIdle: (input) =>
+      waitForSessionIdleHttp(callCtx, { ...input, directory: ctx.directory, attempts: 1 }),
   })
 
   const onCompacted = createOnCompacted({

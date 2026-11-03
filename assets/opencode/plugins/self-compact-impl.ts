@@ -209,6 +209,50 @@ export const DEFERRED_RESUME_NOTE =
   "Another message started a turn right after compaction, so it is arriving late, after that " +
   "turn. Reconcile it with anything you have done since before acting on it."
 
+/**
+ * Delays before re-trying a failed POST /summarize (v6). Attempts total
+ * `length + 1`. The incident failure (a socket closed 21 ms into a request to a
+ * healthy serve) is gone within seconds, so the first retry is quick; the second
+ * covers a serve restart (canary restart + RestartSec=10 + startup).
+ */
+export const SUMMARIZE_RETRY_DELAYS_MS: readonly number[] = [2_000, 30_000]
+
+/** A non-2xx answer from POST /summarize. Anything else thrown is transport-level. */
+export class SummarizeHttpError extends Error {
+  constructor(
+    readonly status: number,
+    body: string,
+  ) {
+    super(`summarize failed: ${status} ${body}`)
+    this.name = "SummarizeHttpError"
+  }
+}
+
+/**
+ * Transport failures (no HTTP answer at all), 5xx and 429 may succeed on a
+ * retry. Any other 4xx (unknown model, session gone) will fail the same way.
+ */
+function isRetryableSummarizeError(err: unknown): boolean {
+  if (err instanceof SummarizeHttpError) return err.status >= 500 || err.status === 429
+  return true
+}
+
+/**
+ * Delivered into the session, ahead of the queued resumption prompt, when
+ * compaction could not be started (v6). The tool had already answered
+ * "Compaction queued", so this is the only way the agent -- and, through the
+ * session's Stop notification, the human -- learns that it did not happen.
+ */
+export function summarizeFailedNote(reason: string): string {
+  return (
+    `[self-compact] Compaction FAILED (${reason}), so this session was NOT compacted and its ` +
+    "context is unchanged. The resumption prompt you queued with self_compact_and_resume follows. " +
+    "Tell the user compaction failed and why. If the cause looks transient you may call " +
+    "self_compact_and_resume once more with this prompt; otherwise ask the user to run /compact. " +
+    "Do not retry it more than once."
+  )
+}
+
 // Bounded poll for the post-compaction idle. session.compacted is published from inside
 // the still-running compaction loop, so the runner needs a moment to finish and go idle
 // before prompt_async can start a fresh loop. 120 * 250ms = 30s is a generous ceiling;
@@ -301,6 +345,11 @@ export interface PendingResume {
    * turn's idle, and is delivered with DEFERRED_RESUME_NOTE prepended.
    */
   deferred?: boolean
+  /**
+   * POST /summarize attempts made so far (v6). Carried across a re-arm to
+   * `awaitingTurnEnd`, so the retry bound covers the entry's whole life.
+   */
+  summarizeAttempts?: number
   createdAt: number
 }
 
@@ -594,8 +643,10 @@ async function deliverResume(
  *   2. Fires `POST /summarize` with the model the tool resolved at execute
  *      time (v4; no HTTP model lookup here any more).
  *
- * On summarize throw the entry is evicted (no retry; the user re-invokes the
- * skill). On success, the entry is left in `summarizing` phase for
+ * On summarize failure (v6) a transport error, 5xx or 429 is retried after
+ * SUMMARIZE_RETRY_DELAYS_MS while the session stays idle (re-armed for the next
+ * idle if it is busy); a final failure hands the prompt back to the session with
+ * summarizeFailedNote. On success, the entry is left in `summarizing` phase for
  * `createOnCompacted` to pop when the `session.compacted` bus event arrives.
  *
  * This is the deadlock-free path: by the time the runner's final idle
@@ -629,7 +680,17 @@ export function createOnStatus(deps: {
    * always wires it.
    */
   settle?: (input: { sessionID: string }) => Promise<boolean>
+  /** Delay between summarize retries (v6). Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>
+  /**
+   * One status read before a summarize retry (v6): true iff the session is idle.
+   * Optional so tests that don't exercise retries need not supply it; when
+   * absent the retry is not gated. The plugin always wires it.
+   */
+  isIdle?: (input: { sessionID: string }) => Promise<boolean>
 }) {
+  const sleep = deps.sleep ?? defaultSleep
+  const isIdle = deps.isIdle ?? (async () => true)
   return async ({ event }: { event: PluginBusEvent }) => {
     if (!isSessionIdle(event)) return
     const { sessionID } = event.properties
@@ -679,31 +740,93 @@ export function createOnStatus(deps: {
       deps.pending.delete(sessionID)
       return
     }
-    debug("onStatus firing summarize", {
-      sessionID,
-      providerID: model.providerID,
-      modelID: model.modelID,
-    })
+    const maxAttempts = SUMMARIZE_RETRY_DELAYS_MS.length + 1
+    // Still ours to act on: not claimed by onCompacted, not replaced by a newer
+    // tool call, not evicted.
+    const stillOurs = () => deps.pending.get(sessionID) === entry && entry.phase === "summarizing"
 
-    try {
-      await deps.callSummarize({
+    let failure: unknown
+    for (;;) {
+      entry.summarizeAttempts = (entry.summarizeAttempts ?? 0) + 1
+      debug("onStatus firing summarize", {
         sessionID,
         providerID: model.providerID,
         modelID: model.modelID,
+        attempt: entry.summarizeAttempts,
       })
-      debug("onStatus summarize OK", { sessionID })
-      // On success, leave the entry in 'summarizing' phase. The
-      // session.compacted handler will pop it when compaction completes.
+      try {
+        await deps.callSummarize({
+          sessionID,
+          providerID: model.providerID,
+          modelID: model.modelID,
+        })
+        debug("onStatus summarize OK", { sessionID })
+        // On success, leave the entry in 'summarizing' phase. The
+        // session.compacted handler will pop it when compaction completes.
+        return
+      } catch (err) {
+        failure = err
+      }
+
+      if (!stillOurs()) {
+        // session.compacted is published before /summarize returns, so a response
+        // that fails late can arrive after onCompacted has taken the entry. Evicting
+        // it here (what v2-v5 did) dropped a prompt from a compaction that worked.
+        debug("onStatus summarize FAILED (entry moved on, left alone)", {
+          sessionID,
+          error: errText(failure),
+          phase: deps.pending.get(sessionID) === entry ? entry.phase : "replaced-or-gone",
+        })
+        return
+      }
+      const retryable = isRetryableSummarizeError(failure)
+      const attempt = entry.summarizeAttempts
+      debug("onStatus summarize FAILED", { sessionID, error: errText(failure), retryable, attempt, maxAttempts })
+      if (!retryable || attempt >= maxAttempts) break
+
+      // A session that sits idle gets no further idle event, so waiting for the
+      // next one would strand the prompt (the 2026-11-03 incident). Retry here.
+      await sleep(SUMMARIZE_RETRY_DELAYS_MS[attempt - 1])
+      if (!stillOurs()) {
+        debug("onStatus summarize retry stand down (entry moved on)", { sessionID })
+        return
+      }
+      let idle = false
+      try {
+        idle = await isIdle({ sessionID })
+      } catch (err) {
+        debug("onStatus summarize retry status read FAILED", { sessionID, error: errText(err) })
+      }
+      if (!stillOurs()) {
+        debug("onStatus summarize retry stand down (entry moved on)", { sessionID })
+        return
+      }
+      if (!idle) {
+        // Busy (or unknown). Either the failed request did reach the server and
+        // compaction is running -- then onCompacted claims the entry from this
+        // phase as usual -- or something else started a turn. Firing now could
+        // race that run, so wait for the next idle, which re-fires summarize.
+        entry.phase = "awaitingTurnEnd"
+        debug("onStatus summarize re-armed for next idle (session busy)", { sessionID, attempt })
+        return
+      }
+    }
+
+    // Final failure: give the prompt back to the session instead of dropping it.
+    deps.pending.delete(sessionID)
+    const reason = truncate(errText(failure), 300)
+    debug("onStatus summarize GAVE UP, handing prompt back", { sessionID, reason })
+    try {
+      await deps.callPromptAsync({ sessionID, text: `${summarizeFailedNote(reason)}\n\n${entry.prompt}` })
+      debug("onStatus hand-back prompt_async OK", { sessionID })
     } catch (err) {
-      // Summarize failed; evict so the next idle doesn't retry. User
-      // re-invokes the skill if they still want to compact.
-      debug("onStatus summarize FAILED evict", {
-        sessionID,
-        error: errText(err),
-      })
-      deps.pending.delete(sessionID)
+      debug("onStatus hand-back prompt_async FAILED", { sessionID, error: errText(err) })
     }
   }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
 
@@ -736,7 +859,7 @@ export async function callSummarizeHttp(
     }),
   )
   debug("callSummarizeHttp response", { sessionID: input.sessionID, status: res.status })
-  if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
+  if (!res.ok) throw new SummarizeHttpError(res.status, await res.text())
 }
 
 /**
