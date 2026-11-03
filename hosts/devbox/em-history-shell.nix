@@ -35,7 +35,9 @@
 #   sudo "$P/bin/em-history-shell-probe"
 # It runs this unit's hardening props, one at a time and all together, around the real
 # bwrap argv and a tool smoke test, and says which props break the sandbox. If
-# it fails, change the props below (it names them) before switching.
+# it fails, change the props below (it names them) before switching. Also note its
+# "+ProtectProc=invisible" and "+ProcSubset=pid" lines: they are off in the unit, and
+# if they say OK, adopting ProtectProc=invisible is a follow-up.
 #
 # Design and the EM side: docs/plans/2026-11-03-em-history-shell.md.
 { config, lib, pkgs, ... }:
@@ -50,6 +52,98 @@ let
 
   base = "/var/lib/eternal-machinery";
   user = "em-history-shell";
+
+  socketConfig = {
+    Accept = "yes";
+    SocketUser = "dev";
+    SocketMode = "0600";
+    # At most this many commands at once (each is capped at 384M, 48 tasks).
+    MaxConnections = 16;
+    # No TriggerLimit* lines, on purpose. Hitting a socket's trigger limit puts the
+    # socket unit in the failed state, and only a restart (sudo) brings it back. With
+    # Accept=yes the default poll limit throttles a client in a loop instead and
+    # the socket stays up.
+  };
+
+  # The service's settings except ExecStart (which carries the digest, so it cannot be
+  # part of it).
+  serviceConfigBase = {
+    User = user;
+    Group = user;
+    # Accept=yes hands the connected socket to the instance as fd 0 (and 1).
+    StandardInput = "socket";
+    StandardOutput = "socket";
+    StandardError = "journal";
+    SyslogIdentifier = "em-history-shell";
+    Environment = [ "PYTHONDONTWRITEBYTECODE=1" ];
+
+    # The caps of one command, as in phase 1 (these were a systemd-run scope's).
+    MemoryMax = "384M";
+    MemorySwapMax = 0;
+    TasksMax = 48;
+    CPUQuota = "100%";
+    # Backstop for the server's own 30 s kill and its reap waits.
+    RuntimeMaxSec = 60;
+    # If the kernel OOM-kills the command (the server sets oom_score_adj=1000 on
+    # it), do not take the whole instance down with it: the server is still there
+    # to answer, and its answer says what happened.
+    OOMPolicy = "continue";
+    KillMode = "control-group";
+
+    # --- the wall around bwrap ---------------------------------------------------
+    ProtectSystem = "strict";
+    # tmpfs, not "yes": "yes" makes /home mode 000, which callers see as EACCES.
+    # (Also hides /root and /run/user.)
+    ProtectHome = "tmpfs";
+    PrivateTmp = true;
+    PrivateDevices = true;
+    PrivateNetwork = true;
+    NoNewPrivileges = true;
+    # bwrap runs in a user namespace it makes itself, where it has every capability
+    # regardless of this set; the service needs none in the host namespace.
+    CapabilityBoundingSet = "";
+    # bwrap's own unshare flags, nothing else.
+    RestrictNamespaces = [ "user" "mnt" "pid" "net" "ipc" "uts" "cgroup" ];
+    # An ALLOW list, deliberately not the em-ci-runners.nix deny list: that one has
+    # ~capset, and bwrap needs capset. @system-service has clone, unshare, setns,
+    # capset, prctl (the seccomp load) and the setuid family; @mount adds mount,
+    # umount2, pivot_root and chroot; sethostname is for --unshare-uts.
+    # EPERM, not SIGSYS: a syscall missing here must show up as an error message in
+    # the probe/journal, not as a killed command.
+    SystemCallFilter = [ "@system-service" "@mount" "sethostname" ];
+    SystemCallErrorNumber = "EPERM";
+    SystemCallArchitectures = "native";
+    # The history files are read through the ACL; ProtectSystem=strict already makes
+    # them read-only, this says so (and "-" lets the unit run before the dir exists,
+    # so the server can answer "no such root" instead of the unit failing).
+    ReadOnlyPaths = [ "-${base}" ];
+
+    # Left OFF on purpose, each for a measured reason (probe.sh shows them):
+    #  - RestrictAddressFamilies: bwrap's --unshare-net sets up loopback over
+    #    AF_NETLINK; any list that omits it breaks every command.
+    #  - ProtectKernelTunables: bwrap mounts a fresh /proc inside its pid namespace, and
+    #    the kernel refuses that while the unit's own /proc is overmounted
+    #    ("Can't mount proc"). Measured by the probe.
+    #  - ProtectProc, ProcSubset: left off until the probe has run as root. A --user run
+    #    passes both, but that one is only indicative. If the sudo probe's
+    #    "+ProtectProc=invisible" line says OK, adopt ProtectProc=invisible in a
+    #    follow-up (it hides other users' processes from the service). It is not worth
+    #    a broken sandbox, so nothing is assumed here.
+  };
+
+  # sha256 of the settings that make up the sandbox's outer wall: the instance's
+  # serviceConfig without ExecStart, and the socket's socketConfig. Passed to the server
+  # as --unit-digest and put on every answer as "unit_digest", so a client that proved
+  # one unit can tell it from a changed one without reading systemd. ExecStart (the
+  # server path, --allowed-uid, --base) is left out: the server path is the answer's
+  # "server" already. The unit's [Unit] section, the user and the tmpfiles rules are not
+  # covered.
+  unitDigest = builtins.hashString "sha256" (
+    builtins.toJSON {
+      service = serviceConfigBase;
+      socket = socketConfig;
+    }
+  );
 in
 {
   users.groups.${user}.gid = serviceId;
@@ -71,17 +165,7 @@ in
     description = "em-history-shell socket (only dev may connect)";
     wantedBy = [ "sockets.target" ];
     listenStreams = [ "/run/em-history-shell/sock" ];
-    socketConfig = {
-      Accept = "yes";
-      SocketUser = "dev";
-      SocketMode = "0600";
-      # At most this many commands at once (each is capped at 384M, 48 tasks).
-      MaxConnections = 16;
-      # Stated rather than inherited (the default burst is 200 per 2 s): a client
-      # in a loop gets throttled, not an unbounded fork rate.
-      TriggerLimitIntervalSec = "2s";
-      TriggerLimitBurst = 100;
-    };
+    inherit socketConfig;
   };
 
   systemd.services."em-history-shell@" = {
@@ -94,65 +178,8 @@ in
         "${server}/bin/em-history-shell-server"
         "--allowed-uid ${toString config.users.users.dev.uid}"
         "--base ${base}"
+        "--unit-digest ${unitDigest}"
       ];
-      User = user;
-      Group = user;
-      # Accept=yes hands the connected socket to the instance as fd 0 (and 1).
-      StandardInput = "socket";
-      StandardOutput = "socket";
-      StandardError = "journal";
-      SyslogIdentifier = "em-history-shell";
-      Environment = [ "PYTHONDONTWRITEBYTECODE=1" ];
-
-      # The caps of one command, as in phase 1 (these were a systemd-run scope's).
-      MemoryMax = "384M";
-      MemorySwapMax = 0;
-      TasksMax = 48;
-      CPUQuota = "100%";
-      # Backstop for the server's own 30 s kill and its reap waits.
-      RuntimeMaxSec = 60;
-      # If the kernel OOM-kills the command (the server sets oom_score_adj=1000 on
-      # it), do not take the whole instance down with it: the server is still there
-      # to answer, and its answer says what happened.
-      OOMPolicy = "continue";
-      KillMode = "control-group";
-
-      # --- the wall around bwrap ---------------------------------------------------
-      ProtectSystem = "strict";
-      # tmpfs, not "yes": "yes" makes /home mode 000, which callers see as EACCES.
-      # (Also hides /root and /run/user.)
-      ProtectHome = "tmpfs";
-      PrivateTmp = true;
-      PrivateDevices = true;
-      PrivateNetwork = true;
-      NoNewPrivileges = true;
-      # bwrap runs in a user namespace it makes itself, where it has every capability
-      # regardless of this set; the service needs none in the host namespace.
-      CapabilityBoundingSet = "";
-      # bwrap's own unshare flags, nothing else.
-      RestrictNamespaces = [ "user" "mnt" "pid" "net" "ipc" "uts" "cgroup" ];
-      # An ALLOW list, deliberately not the em-ci-runners.nix deny list: that one has
-      # ~capset, and bwrap needs capset. @system-service has clone, unshare, setns,
-      # capset, prctl (the seccomp load) and the setuid family; @mount adds mount,
-      # umount2, pivot_root and chroot; sethostname is for --unshare-uts.
-      # EPERM, not SIGSYS: a syscall missing here must show up as an error message in
-      # the probe/journal, not as a killed command.
-      SystemCallFilter = [ "@system-service" "@mount" "sethostname" ];
-      SystemCallErrorNumber = "EPERM";
-      SystemCallArchitectures = "native";
-      # The history files are read through the ACL; ProtectSystem=strict already makes
-      # them read-only, this says so (and "-" lets the unit run before the dir exists,
-      # so the server can answer "no such root" instead of the unit failing).
-      ReadOnlyPaths = [ "-${base}" ];
-
-      # Left OFF on purpose, each for a measured reason (probe.sh shows them):
-      #  - RestrictAddressFamilies: bwrap's --unshare-net sets up loopback over
-      #    AF_NETLINK; any list that omits it breaks every command.
-      #  - ProtectKernelTunables, ProtectProc, ProcSubset: bwrap mounts a fresh /proc
-      #    inside its pid namespace, and the kernel refuses that while the unit's own
-      #    /proc is overmounted or filtered (ProtectKernelTunables: "Can't mount proc").
-      #    Whether ProtectProc/ProcSubset are safe is for the probe to say on the real
-      #    host; they are not worth a broken sandbox.
-    };
+    } // serviceConfigBase;
   };
 }

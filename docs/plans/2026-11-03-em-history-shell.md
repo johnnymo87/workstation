@@ -26,6 +26,23 @@ and its own path as `server`. Every answer carries `server`; `ping` also returns
 client refuses an answer from any other. So a change to the tools, the policy or the
 server changes the path and forces a re-proof, with no extra bookkeeping here.
 
+The unit's own settings are covered too. `hosts/devbox/em-history-shell.nix` hashes
+`{service: serviceConfig minus ExecStart, socket: socketConfig}` with
+`builtins.toJSON` and sha256, passes the hex on ExecStart as `--unit-digest`, and the
+server puts it on every answer (refusals and `ping` included) as **`unit_digest`**. A
+change to the caps, the sandbox props or the socket changes it. `ExecStart` is left out
+because it carries the digest, and the server path is `server` already. The user, the
+`[Unit]` section and the tmpfiles rules are not covered. If the server cannot start
+(bad config, fd 0 not a socket), it still tries to write one `unavailable` refusal to
+fd 0 before it exits 2, with `unit_digest` and, when the config was readable, `server`.
+
+## The socket has no trigger limit
+
+`em-history-shell.socket` sets no `TriggerLimitIntervalSec` or `TriggerLimitBurst`.
+Hitting a socket's trigger limit leaves the socket unit failed until someone restarts it
+with sudo. The default `Accept=yes` poll limit throttles a client in a loop instead, and
+`MaxConnections=16` bounds the concurrent commands.
+
 ## Copies that must stay in step with EM
 
 EM is private, so this repo cannot import from it. Three things are copies:
@@ -51,6 +68,10 @@ carries it.
 1. `P=$(nix build --no-link --print-out-paths .#em-history-shell)`, then
    `sudo "$P/bin/em-history-shell-probe"`. It must end with "hardening as written
    works". If it names props, change them in `hosts/devbox/em-history-shell.nix`.
+   Also read its `+ProtectProc=invisible` and `+ProcSubset=pid` lines. The unit leaves
+   both off. If the sudo run says OK for `+ProtectProc=invisible`, adopt it in a
+   follow-up PR (it hides other users' processes from the service). A `--user` run
+   already passes both, but that run is only indicative.
 2. `sudo nixos-rebuild switch --flake .#devbox` (creates the user, the directory and
    the ACL, and starts the socket).
 3. As dev, ping it:
