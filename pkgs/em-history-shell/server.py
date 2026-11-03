@@ -46,7 +46,7 @@ import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 PROTOCOL_VERSION = 1
 
@@ -84,6 +84,7 @@ _STORE_FILE = re.compile(
 )
 _NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 _ROOT_NAME = re.compile(r"agent-history(-[A-Za-z0-9_-]+)?")
+_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 RUN_KEYS = frozenset({"v", "op", "root", "view", "agent", "command"})
 PING_KEYS = frozenset({"v", "op"})
@@ -112,6 +113,9 @@ class Config:
     tools: str
     seccomp: str
     closure: tuple[str, ...]
+    #: sha256 (hex) of the unit's settings, from the command line (see `unit_digest_arg`).
+    #: Put on every answer, so the client can tell a changed unit from the proven one.
+    unit_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,13 @@ def _store_file(value, name: str) -> str:
         or ".." in value.split("/")
     ):
         raise ValueError(f"{name} is not a file in the nix store: {value!r}")
+    return value
+
+
+def unit_digest_arg(value: str) -> str:
+    """argparse type for `--unit-digest`: 64 lowercase hex digits (a sha256)."""
+    if not _DIGEST.fullmatch(value):
+        raise argparse.ArgumentTypeError("must be 64 lowercase hex digits")
     return value
 
 
@@ -649,7 +660,11 @@ def read_line(sock: socket.socket, *, limit: int, timeout_s: float) -> bytes | N
 
 
 def _answer(config: Config, body: dict) -> dict:
-    return {"v": PROTOCOL_VERSION, **body, "server": config.server}
+    """Every answer, refusals included, names the server and the unit it runs under."""
+    answer = {"v": PROTOCOL_VERSION, **body, "server": config.server}
+    if config.unit_digest is not None:
+        answer["unit_digest"] = config.unit_digest
+    return answer
 
 
 def refusal(config: Config, kind: str, error: str) -> dict:
@@ -691,8 +706,8 @@ def decode_request(line: bytes) -> dict:
     version = msg.get("v")
     if type(version) is not int or version != PROTOCOL_VERSION:
         raise Refused(
-            f"This history shell speaks protocol version {PROTOCOL_VERSION}; "
-            f"the request asked for {version!r}. Nothing was run.",
+            f"This history shell speaks protocol version {PROTOCOL_VERSION}. "
+            f"The request asked for {version!r}. Nothing was run.",
             "version",
         )
     return msg
@@ -709,7 +724,9 @@ def check_keys(msg: dict, wanted: frozenset) -> None:
         parts.append("missing " + ", ".join(missing))
     if extra:
         parts.append("unexpected " + ", ".join(extra))
-    raise Refused(f"The request has the wrong fields ({'; '.join(parts)}). Nothing was run.")
+    raise Refused(
+        f"The request has the wrong fields ({' and '.join(parts)}). Nothing was run."
+    )
 
 
 def handle_request(
@@ -824,10 +841,42 @@ def serve(
         sock.close()
 
 
+SAY_BROKEN = "The history shell is broken on this host. Nothing was run."
+
+
+def tell_broken(server: str | None, unit_digest: str | None) -> None:
+    """Best effort, on fd 0: an `unavailable` refusal for a server that cannot start, so
+    the client reads a sentence and not a bare hangup. Never raises. `server` is left out
+    when the config that names it could not be read."""
+    body: dict = {"v": PROTOCOL_VERSION, "ok": False, "kind": "unavailable", "error": SAY_BROKEN}
+    if server is not None:
+        body["server"] = server
+    if unit_digest is not None:
+        body["unit_digest"] = unit_digest
+    payload = (json.dumps(body, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(0, view) :]
+    except OSError:
+        return
+    try:
+        # shutdown reaches every duplicate of the descriptor, so the client reads EOF now
+        socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM).shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="em-history-shell server (one connection)")
     parser.add_argument("--allowed-uid", type=int, required=True)
     parser.add_argument("--base", required=True, help="directory holding agent-history*")
+    parser.add_argument(
+        "--unit-digest",
+        type=unit_digest_arg,
+        required=True,
+        help="sha256 of the unit's settings (hosts/devbox/em-history-shell.nix)",
+    )
     parser.add_argument(
         "--config",
         default=os.path.join(
@@ -843,7 +892,9 @@ def main(argv=None) -> int:
         config = load_config(args.config)
     except (OSError, ValueError) as err:
         print(f"em-history-shell: bad config {args.config}: {err}", file=sys.stderr)
+        tell_broken(None, args.unit_digest)
         return 2
+    config = replace(config, unit_digest=args.unit_digest)
     try:
         sock = socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM)
         peer_uid(sock)
@@ -853,6 +904,7 @@ def main(argv=None) -> int:
             "run it from em-history-shell.socket",
             file=sys.stderr,
         )
+        tell_broken(config.server, config.unit_digest)
         return 2
     serve(sock, config, allowed_uid=args.allowed_uid, base=args.base)
     return 0

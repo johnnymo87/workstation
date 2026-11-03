@@ -35,6 +35,7 @@ UID = os.getuid()
 STORE_A = "/nix/store/" + "a" * 32 + "-tools"
 STORE_B = "/nix/store/" + "b" * 32 + "-dep"
 SERVER_PATH = "/nix/store/" + "c" * 32 + "-em-history-shell"
+UNIT_DIGEST = "e" * 64
 
 FAKE_BWRAP = """\
 #!{python}
@@ -83,6 +84,7 @@ class Base(unittest.TestCase):
             tools=self.tools,
             seccomp=self.seccomp,
             closure=(self.tools,),
+            unit_digest=UNIT_DIGEST,
         )
 
     def make_root(self, name="agent-history", marker=True):
@@ -532,6 +534,7 @@ class Exchange(Base):
         answer = json.loads(data)
         self.assertEqual(answer["v"], 1)
         self.assertEqual(answer["server"], SERVER_PATH)  # on every answer
+        self.assertEqual(answer["unit_digest"], UNIT_DIGEST)  # and so is the unit digest
         return answer
 
     def assertRefused(self, answer, kind, *words):
@@ -557,6 +560,7 @@ class TestProtocol(Exchange):
                 "uid": UID,
                 "seccomp_sha256": hashlib.sha256(b"BPF-fake-program").hexdigest(),
                 "server": SERVER_PATH,
+                "unit_digest": UNIT_DIGEST,
             },
         )
         self.assertFalse(os.path.exists(self.log))  # nothing ran
@@ -598,6 +602,11 @@ class TestProtocol(Exchange):
         ):
             with self.subTest(label):
                 self.assertRefused(self.ask(msg), "refused", "wrong fields")
+        both = {k: v for k, v in good.items() if k != "agent"}
+        both["env"] = 1
+        self.assertRefused(
+            self.ask(both), "refused", "missing agent and unexpected env"
+        )
         self.assertFalse(os.path.exists(self.log))
 
     def test_oversize_request(self):
@@ -650,6 +659,7 @@ class TestProtocol(Exchange):
                 "stderr_dropped": 0,
                 "scratch_reset": False,
                 "server": SERVER_PATH,
+                "unit_digest": UNIT_DIGEST,
             },
         )
 
@@ -798,39 +808,58 @@ class TestWholeProcess(unittest.TestCase):
             self.skipTest("needs an interpreter in the nix store")
         return real
 
+    def write_config(self, tmp, py):
+        store = "/".join(py.split("/")[:4])
+        cfg = os.path.join(tmp, "config.json")
+        with open(cfg, "w") as handle:
+            json.dump(
+                {"server": store, "bwrap": py, "tools": store, "seccomp": py,
+                 "closure": [store]},
+                handle,
+            )
+        return store, cfg
+
+    def command(self, tmp, cfg, *, uid=None, digest=UNIT_DIGEST):
+        argv = [sys.executable, os.path.join(HERE, "server.py"),
+                "--allowed-uid", str(UID if uid is None else uid),
+                "--base", tmp, "--config", cfg]
+        if digest is not None:
+            argv += ["--unit-digest", digest]
+        return argv
+
+    def talk(self, argv, request):
+        srv, cli = socket.socketpair()
+        self.addCleanup(cli.close)
+        proc = subprocess.Popen(argv, stdin=srv, stdout=srv, stderr=subprocess.PIPE)
+        srv.close()
+        if request is not None:
+            cli.sendall(request)
+        cli.settimeout(20)
+        data = b""
+        while True:
+            try:
+                chunk = cli.recv(65536)
+            except ConnectionResetError:  # unread request bytes at close: answer first
+                break
+            if not chunk:
+                break
+            data += chunk
+        code = proc.wait(20)
+        err = proc.stderr.read()
+        proc.stderr.close()
+        return code, data, err
+
     def test_ping_over_fd0(self):
         py = self.store_python()
-        store = "/".join(py.split("/")[:4])
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = os.path.join(tmp, "config.json")
-            with open(cfg, "w") as handle:
-                json.dump(
-                    {"server": store, "bwrap": py, "tools": store, "seccomp": py,
-                     "closure": [store]},
-                    handle,
-                )
-            srv, cli = socket.socketpair()
-            self.addCleanup(cli.close)
-            proc = subprocess.Popen(
-                [sys.executable, os.path.join(HERE, "server.py"),
-                 "--allowed-uid", str(UID), "--base", tmp, "--config", cfg],
-                stdin=srv, stdout=srv, stderr=subprocess.PIPE,
-            )
-            srv.close()
-            cli.sendall(b'{"v":1,"op":"ping"}\n')
-            cli.settimeout(20)
-            data = b""
-            while True:
-                chunk = cli.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-            self.assertEqual(proc.wait(20), 0, proc.stderr.read())
-            proc.stderr.close()
+            store, cfg = self.write_config(tmp, py)
+            code, data, err = self.talk(self.command(tmp, cfg), b'{"v":1,"op":"ping"}\n')
+            self.assertEqual(code, 0, err)
             answer = json.loads(data)
             self.assertTrue(answer["ok"])
             self.assertEqual(answer["server"], store)
             self.assertEqual(answer["uid"], UID)
+            self.assertEqual(answer["unit_digest"], UNIT_DIGEST)
             with open(py, "rb") as handle:
                 self.assertEqual(
                     answer["seccomp_sha256"], hashlib.sha256(handle.read()).hexdigest()
@@ -838,29 +867,127 @@ class TestWholeProcess(unittest.TestCase):
 
     def test_not_a_socket_is_a_startup_error(self):
         py = self.store_python()
-        store = "/".join(py.split("/")[:4])
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = os.path.join(tmp, "config.json")
-            with open(cfg, "w") as handle:
-                json.dump({"server": store, "bwrap": py, "tools": store, "seccomp": py,
-                           "closure": [store]}, handle)
+            _, cfg = self.write_config(tmp, py)
             done = subprocess.run(
-                [sys.executable, os.path.join(HERE, "server.py"),
-                 "--allowed-uid", "1", "--base", tmp, "--config", cfg],
+                self.command(tmp, cfg, uid=1),
                 stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
             )
         self.assertEqual(done.returncode, 2)
         self.assertIn(b"not a connected unix socket", done.stderr)
 
+    def test_not_a_socket_still_tries_to_say_so_on_fd0(self):
+        py = self.store_python()
+        with tempfile.TemporaryDirectory() as tmp:
+            store, cfg = self.write_config(tmp, py)
+            path = os.path.join(tmp, "stdin")
+            with open(path, "w+b") as handle:
+                done = subprocess.run(
+                    self.command(tmp, cfg, uid=1), stdin=handle,
+                    capture_output=True, timeout=20,
+                )
+                handle.seek(0)
+                written = handle.read()
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(
+            json.loads(written),
+            {"v": 1, "ok": False, "kind": "unavailable",
+             "error": "The history shell is broken on this host. Nothing was run.",
+             "server": store, "unit_digest": UNIT_DIGEST},
+        )
+
     def test_bad_config_is_a_startup_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             done = subprocess.run(
-                [sys.executable, os.path.join(HERE, "server.py"),
-                 "--allowed-uid", "1", "--base", tmp, "--config", os.path.join(tmp, "no")],
+                self.command(tmp, os.path.join(tmp, "no"), uid=1),
                 stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
             )
         self.assertEqual(done.returncode, 2)
         self.assertIn(b"bad config", done.stderr)
+
+    def test_bad_config_answers_unavailable_on_the_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, data, err = self.talk(
+                self.command(tmp, os.path.join(tmp, "no")), b'{"v":1,"op":"ping"}\n'
+            )
+        self.assertEqual(code, 2)
+        self.assertIn(b"bad config", err)
+        self.assertEqual(data.count(b"\n"), 1)
+        answer = json.loads(data)
+        # no config, so no server to name; the digest comes from the command line
+        self.assertEqual(
+            answer,
+            {"v": 1, "ok": False, "kind": "unavailable",
+             "error": "The history shell is broken on this host. Nothing was run.",
+             "unit_digest": UNIT_DIGEST},
+        )
+
+    def test_bad_unit_digest_is_refused_at_startup(self):
+        py = self.store_python()
+        with tempfile.TemporaryDirectory() as tmp:
+            _, cfg = self.write_config(tmp, py)
+            for bad in ("", "xyz", "E" * 64, "e" * 63, "e" * 65):
+                with self.subTest(bad=bad):
+                    done = subprocess.run(
+                        self.command(tmp, cfg, digest=bad),
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+                    )
+                    self.assertEqual(done.returncode, 2)
+            done = subprocess.run(
+                self.command(tmp, cfg, digest=None),
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+            )
+            self.assertEqual(done.returncode, 2)
+
+
+class TestAgentVisibleText(Exchange):
+    """Every sentence an agent may read follows the agent-voice rule: no semicolons, no
+    dashes. (Journal lines on stderr are for humans and are not covered.)"""
+
+    BAD = (";", "\u2014", "\u2013", " - ", " -- ")
+
+    def assertPlain(self, text):
+        for mark in self.BAD:
+            self.assertNotIn(mark, text, text)
+
+    def test_source_strings_of_refusals(self):
+        import ast
+
+        with open(os.path.join(HERE, "server.py"), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        seen = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name not in ("Refused", "refusal"):
+                continue
+            for part in ast.walk(node):
+                # literal pieces of f-strings and plain strings, but not the .join(...)
+                # separators inside a replacement field
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    seen += 1
+                    self.assertPlain(part.value)
+        self.assertGreater(seen, 20)
+
+    def test_answers(self):
+        good = self.run_request()
+        cases = [
+            {"v": 2, "op": "ping"},
+            {"v": 1, "op": "ping", "x": 1},
+            {k: v for k, v in good.items() if k != "agent"},
+            {**good, "env": 1, "x": 1},
+            {**good, "view": "a"},
+            {**good, "root": "/tmp"},
+            {**good, "command": " "},
+            {"v": 1, "op": "nope"},
+        ]
+        for request in cases:
+            with self.subTest(request=request):
+                answer = self.ask(request)
+                self.assertFalse(answer["ok"])
+                self.assertPlain(answer["error"])
 
 
 if __name__ == "__main__":
