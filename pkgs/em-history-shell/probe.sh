@@ -221,7 +221,11 @@ if [ "$(verdict NONE)" != OK ]; then
   echo "bwrap does not work here even without hardening: fix that first (user namespaces? the seccomp program?)."
   exit 1
 fi
-if [ "$(verdict ALL)" = OK ]; then
+if [ "$USER_MODE" = 1 ]; then
+  echo "--user run: INDICATIVE ONLY (nested user namespace; CapabilityBoundingSet and ProtectHome were not tried)."
+  echo "Run it with sudo before the rebuild: that run is the verdict."
+  [ "$(verdict ALL)" != OK ] || exit 0
+elif [ "$(verdict ALL)" = OK ]; then
   echo "The unit's hardening as written works. Rebuild."
   exit 0
 fi
