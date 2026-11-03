@@ -106,7 +106,7 @@ whose job is to route messages between other sessions.** (The human's
 
 **This bans the role inside a swarm. It does not mean coordinators don't exist.**
 On cloudbox, stall-watch runs one **program coordinator** per program of work. Each is a
-goose session with a `gse_` id, keyed by the program's oc-tags tag. It is the
+goose session with a `gse_` id, keyed by the program's session-tags tag. It is the
 human's standing infrastructure, not a session routing a swarm. When something
 you found belongs to another program, that program's coordinator is the right
 recipient. Look it up with the `finding-program-coordinators` skill (deployed

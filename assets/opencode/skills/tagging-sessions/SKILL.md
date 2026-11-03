@@ -1,12 +1,14 @@
 ---
 name: tagging-sessions
-description: Policy and commands for oc-tags, which attributes opencode and goose session LLM spend to program-of-work tags. Use when checking or setting which spend tag an opencode session is attributed to, when an oc-tags report shows untagged (auto:) sessions or tags that look like branch names, when asked which programs of work spend is going to, or before adding, renaming, or bulk-retagging oc-tags tags.
+description: Policy and commands for session-tags, which attributes opencode and goose session LLM spend to program-of-work tags. Use when checking or setting which spend tag an opencode session is attributed to, when a session-tags report shows untagged (auto:) sessions or tags that look like branch names, when asked which programs of work spend is going to, or before adding, renaming, or bulk-retagging session-tags tags.
 ---
 
 # Tagging Sessions
 
-`oc-tags` attributes each root session's list-price LLM spend to a tag, and
-`oc-tags report` / `oc-tags serve` chart it. The report is only as good as the
+`session-tags` was called `oc-tags`; the old name still works, and its DB path and `oc-tags-serve` unit keep the old name.
+
+`session-tags` attributes each root session's list-price LLM spend to a tag, and
+`session-tags report` / `session-tags serve` chart it. The report is only as good as the
 tag vocabulary, and that vocabulary decays unless it is maintained. This skill
 is the policy; **the actual tag list — which names internal programs and ticket
 keys — is in `INTERNAL.md` beside this file**, fetched from Confluence at
@@ -16,13 +18,13 @@ policy still applies; there is just no org tag list to pick from.
 ## Commands
 
 ```bash
-oc-tags which                  # this session's effective tag ($OPENCODE_SESSION_ID)
-oc-tags set <tag>              # tag this session
-oc-tags set <tag> <session>    # tag another root session
-oc-tags set <tag> --goose-dir <dir> # tag goose sessions by working directory
-oc-tags ls --counts            # every tag in use, with session counts
-oc-tags top --days 7 --min 20  # most expensive UNTAGGED root sessions
-oc-tags report --days 7        # dollars by tag
+session-tags which                  # this session's effective tag ($OPENCODE_SESSION_ID)
+session-tags set <tag>              # tag this session
+session-tags set <tag> <session>    # tag another root session
+session-tags set <tag> --goose-dir <dir> # tag goose sessions by working directory
+session-tags ls --counts            # every tag in use, with session counts
+session-tags top --days 7 --min 20  # most expensive UNTAGGED root sessions
+session-tags report --days 7        # dollars by tag
 ```
 
 Tags attach to **root** sessions; subagent spend rolls up to its root, and
@@ -32,9 +34,9 @@ root, `auto:<repo>/<worktree>` in a worktree, `auto:tmp` under `/tmp`. Those
 look like branch names by construction; that is the fallback, not a mistag.
 Untagged goose sessions report as `auto:goose/<slug>` (derived from recipe
 title, session name, or session type). Tag goose runs with
-`oc-tags set <tag> --goose-dir <dir>` (optionally with `--since <epoch_ms>`).
+`session-tags set <tag> --goose-dir <dir>` (optionally with `--since <epoch_ms>`).
 
-A program's tag is also the key to its stall-watch **coordinator**. oc-tags
+A program's tag is also the key to its stall-watch **coordinator**. session-tags
 will not find that coordinator, because coordinator sessions are not tagged
 with their program's tag. Use `finding-program-coordinators` instead.
 
@@ -46,14 +48,14 @@ your own tag before spinning up unrelated work, and pass `--tag auto` to opt out
 ## Tagging the session you are in
 
 Only when the work clearly belongs to one tag in `INTERNAL.md`. Check first
-with `oc-tags which`; if it already has a tag, leave it. If the work does not
+with `session-tags which`; if it already has a tag, leave it. If the work does not
 obviously match an existing tag, **do not tag it and do not invent a tag** —
 mention it to the user instead. An untagged session is visible as a to-do; a
 mistagged one is invisible.
 
 **No `INTERNAL.md` here** (devbox, or a work host whose Confluence fetch has
 never succeeded): there is no vocabulary to choose from, so don't tag — tell
-the user. `oc-tags ls` is not a substitute; it lists retired tags too.
+the user. `session-tags ls` is not a substitute; it lists retired tags too.
 
 ## Naming
 
@@ -85,7 +87,7 @@ Tags for personal tooling are the deliberate exception: worth measuring, not
 worth putting on a board other people read. `INTERNAL.md` lists them.
 
 A new or renamed tag is a change to the Confluence page, not just an
-`oc-tags set`. Otherwise the next session cannot find it.
+`session-tags set`. Otherwise the next session cannot find it.
 
 ## Operating rules
 
@@ -94,12 +96,12 @@ A new or renamed tag is a change to the Confluence page, not just an
    looks wrong.
 2. **`auto:` tags are a to-do, not a category.** Seeing one in a report means
    a session needs tagging — or needs the user to say what it was.
-3. **Retagging is destructive.** `oc-tags set` is an upsert with no history.
+3. **Retagging is destructive.** `session-tags set` is an upsert with no history.
    Before any bulk retag, snapshot the store and save the report you are about
    to change:
    ```bash
    cp ~/.local/share/oc-tags/tags.db /tmp/tags.db.bak-$(date +%Y%m%d-%H%M%S)
-   oc-tags report --days 30 > /tmp/oc-tags-report-before.txt
+   session-tags report --days 30 > /tmp/session-tags-report-before.txt
    ```
    Classify with a dry run first, print the plan, and leave anything ambiguous
    untouched. Substring rules misfire (`pack` matches `package`); use word

@@ -1,4 +1,4 @@
-# oc-tags
+# session-tags
 
 Session tagging and stacked-area consumption visualization for OpenCode.
 
@@ -10,20 +10,20 @@ Session tagging and stacked-area consumption visualization for OpenCode.
 6. **Usage**:
 
 ```bash
-oc-tags top --days 7            # find what to tag
-oc-tags set billing             # tag the current session
-oc-tags which ses_abc123        # tag / source / root-id / kind, tab-separated
+session-tags top --days 7            # find what to tag
+session-tags set billing             # tag the current session
+session-tags which ses_abc123        # tag / source / root-id / kind, tab-separated
                                 # (kind = session|auto; source stays manual|auto)
-oc-tags sessions billing        # root session ids carrying a tag, one per line
-oc-tags report --days 7
-oc-tags serve                   # then, from the Mac, just open
+session-tags sessions billing        # root session ids carrying a tag, one per line
+session-tags report --days 7
+session-tags serve                   # then, from the Mac, just open
                                 # http://127.0.0.1:4710 -- the socket-activated
                                 # cloudbox-chart-tunnel LaunchAgent connects on demand
 ```
 
 ### Goose spend source
 
-In addition to opencode sessions, `oc-tags` reads Goose sessions from `~/.local/share/goose/sessions/sessions.db` (override with `--goose-db`). If the database does not exist or is unreadable, it is silently skipped.
+In addition to opencode sessions, `session-tags` reads Goose sessions from `~/.local/share/goose/sessions/sessions.db` (override with `--goose-db`). If the database does not exist or is unreadable, it is silently skipped.
 
 - **Ledger cost and pricing**: Spend is read from `usage_ledger`. When cost is recorded in the ledger, that cost is used. When cost is null, it is calculated from model rates using cache-adjusted token counts (in goose, `input_tokens` includes cache read and write tokens; uncached input is `input - cache_read - cache_write`).
 - **Session IDs**: Goose sessions are identified by `goose:<id>`. Child sessions roll up to their root session via `parent_session_id`.
@@ -31,15 +31,15 @@ In addition to opencode sessions, `oc-tags` reads Goose sessions from `~/.local/
 - **Bulk tagging by directory**:
 
 ```bash
-oc-tags set alpha-runs --goose-dir /path/to/project
-oc-tags set alpha-runs --goose-dir /path/to/dir1 --goose-dir /path/to/dir2 --since 1788874200000
+session-tags set alpha-runs --goose-dir /path/to/project
+session-tags set alpha-runs --goose-dir /path/to/dir1 --goose-dir /path/to/dir2 --since 1788874200000
 ```
 
 `--goose-dir` performs a one-shot write to `tags.db` for all matching goose sessions whose working directory matches (path-normalised) and whose `created_at` timestamp is at or after `--since` (if provided). It is a one-shot operation that writes session tags, not a stored directory rule.
 
 ### Directory rules (removed)
 
-Directory rules (`dir_tag`, `oc-tags set --dir`) were removed; precedence is session tag > `auto:`. If `oc-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `oc-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:
+Directory rules (`dir_tag`, `session-tags set --dir`) were removed; precedence is session tag > `auto:`. If `session-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `session-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:
 
 ```bash
 python3 -c "import sqlite3,os; c=sqlite3.connect(os.path.expanduser('~/.local/share/oc-tags/tags.db')); c.execute('DELETE FROM dir_tag'); c.commit()"

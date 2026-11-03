@@ -27,7 +27,7 @@ opencode-launch --mcp slack ~/projects/pigeon "summarize the last hour of #incid
 2. Creates a new session via `POST /session`
 3. Sends the prompt via `POST /session/{id}/prompt_async`
 4. Prints the session ID and commands to attach or kill
-5. With `--tag`, tags the session for `oc-tags` cost reporting; without it,
+5. With `--tag`, tags the session for `session-tags` cost reporting; without it,
    inherits the launcher's explicit session tag, if any (best-effort, after the
    launch — see below)
 
@@ -310,8 +310,8 @@ Slugs must be unique per repo (a taken slug fails loudly). v1 requires repos wit
 
 ## Tagging the Session for Cost Reporting (`--tag`)
 
-`--tag <tag>` records what the session was launched to **do**, so `oc-tags`
-(`oc-tags top`, `oc-tags report`, the chart) can attribute its list-price
+`--tag <tag>` records what the session was launched to **do**, so `session-tags`
+(`session-tags top`, `session-tags report`, the chart) can attribute its list-price
 consumption to that work.
 
 ```bash
@@ -324,7 +324,7 @@ one already in its `INTERNAL.md` tag list, and if none clearly fits, **omit
 `--tag`** — the `auto:` fallback then marks the session as a to-do, whereas an
 invented tag hides it. The examples above are illustrative, not vocabulary.
 
-Three things about the oc-tags model make this worth using:
+Three things about the session-tags model make this worth using:
 
 - **It is an override, not a creation.** Every session *always* has exactly one
   tag; an untagged one falls back to a directory-derived `auto:` tag
@@ -344,16 +344,16 @@ Behaviour:
 - The tag is validated **before** anything is created: it must start with a
   letter or digit and use only `[A-Za-z0-9._:/-]`, 64 characters max. The
   leading-alphanumeric rule is what blocks argument injection (a tag starting
-  with `-` that oc-tags' argparse would read as a flag). `auto:` is rejected —
+  with `-` that session-tags' argparse would read as a flag). `auto:` is rejected —
   it is reserved for the fallback. ASCII means ASCII: the check runs under
   `LC_ALL=C`, because under the ambient `en_US.UTF-8` bash's `[A-Za-z0-9]`
   matches accented letters and `épic` would otherwise slip through here while
   pigeon's identical-looking check rejected it.
 - The tag is applied **after** the launch succeeds, by running
-  `oc-tags set <tag> <session-id>`. That costs nothing, because attribution is
+  `session-tags set <tag> <session-id>`. That costs nothing, because attribution is
   retroactive: `report`/`top` join costs against `tags.db` at read time, so a
   tag written a second later still covers every dollar the session spends.
-- Tagging is **strictly best-effort**. If `oc-tags` is missing or errors, the
+- Tagging is **strictly best-effort**. If `session-tags` is missing or errors, the
   launcher prints a `Note:` on stderr (including the by-hand command) and still
   reports a live, prompted session. Losing a launch to a bookkeeping write would
   be a strictly worse trade.
@@ -362,8 +362,8 @@ Behaviour:
   bound) by a locked `tags.db` before it prints its `Attach:`/`Kill:` lines. The
   happy path measures ~130ms. Spinning up a swarm runs `opencode-launch` N times
   serially, so a wedged tag DB costs up to 10s × N — annoying, never fatal.
-- The tag is stored lower-cased (`oc-tags`' `normalise_tag`), so `--tag
-  Late-Deliveries` charts as `late-deliveries`. The launcher prints oc-tags' own
+- The tag is stored lower-cased (`session-tags`' `normalise_tag`), so `--tag
+  Late-Deliveries` charts as `late-deliveries`. The launcher prints session-tags' own
   confirmation line rather than echoing your spelling back, so what you read is
   what the chart will show.
 
@@ -375,22 +375,22 @@ up from a tagged session therefore lands on the program's tag without passing
 `--tag` to every worker.
 
 - **Only an explicit session tag is inherited.** The launcher's tag must come
-  from `oc-tags set` (`oc-tags which` column 4 = `session`). An `auto:` fallback
+  from `session-tags set` (`session-tags which` column 4 = `session`). An `auto:` fallback
   was never chosen by anyone, so it is not passed on; the child keeps its own
   `auto:` fallback.
 - **`--tag <t>` always wins**, and no lookup is done.
 - **`--tag auto` opts out** (any case, exactly `auto`): no lookup, the child
   stays on its `auto:` fallback. Use it when the worker's job is unrelated to
   yours — a mislabel is worse than an untagged session.
-- **It is loud.** Success prints oc-tags' own line plus the source, e.g.
+- **It is loud.** Success prints session-tags' own line plus the source, e.g.
   `Tagged session 'ses_child' as 'billing' (inherited from ses_root)`. `ses_root`
   is the launcher's ROOT session (tags live on roots).
-- **It is a copy**, a plain `oc-tags set` on the child. Retagging the launcher
+- **It is a copy**, a plain `session-tags set` on the child. Retagging the launcher
   later does not follow; fix children one at a time.
 - **Best-effort, like `--tag`.** It runs after the prompt is sent, bounded by a
-  4s `timeout` on `oc-tags which` plus the usual 10s on `oc-tags set` (the
-  prompt is already sent, so this only holds up the launcher's own output). A missing `oc-tags`, a failure, a timeout,
-  an older 3-column `oc-tags`, or an inherited tag that fails the `--tag` rules
+  4s `timeout` on `session-tags which` plus the usual 10s on `session-tags set` (the
+  prompt is already sent, so this only holds up the launcher's own output). A missing `session-tags`, a failure, a timeout,
+  an older 3-column `session-tags`, or an inherited tag that fails the `--tag` rules
   each print a `Note:` on stderr; the launch itself is never affected.
 - The auto-attach TUI is spawned with `OPENCODE_SESSION_ID` scrubbed from its
   environment, so an attach that (re)starts the tmux server cannot plant the
@@ -403,7 +403,7 @@ inherits nothing). See
 repo.
 
 Forgot to pass it? Nothing is lost — tag afterwards with
-`oc-tags set <tag> <session-id>`.
+`session-tags set <tag> <session-id>`.
 
 ## Auto-Attach to nvim+tmux
 
