@@ -129,6 +129,8 @@
         home-manager = home-manager.packages.${system}.home-manager;
       };
       codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
+      # Server half of EM's sandboxed history shell; deployed by hosts/devbox/em-history-shell.nix.
+      em-history-shell = p.callPackage ./pkgs/em-history-shell { };
       # DevCycle CLI. Provides BOTH `dvc` (CLI, on PATH via home.base.nix) and
       # `dvc-mcp` (the local MCP server opencode-config.nix wires up), so the
       # two can never drift to different @devcycle/cli versions.
