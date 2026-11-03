@@ -260,6 +260,15 @@ export function summarizeFailedNote(reason: string): string {
   )
 }
 
+/**
+ * Hand-back note when a human interrupted the compaction (v6). Stored with
+ * noReply: the human stopped this, so it must not start a turn by itself.
+ */
+export const INTERRUPTED_NOTE =
+  "[self-compact] Compaction was interrupted, so this session was NOT compacted and its context " +
+  "is unchanged. Below is the resumption prompt you queued with self_compact_and_resume; it was " +
+  "stored without starting a turn. Do not compact again unless the user asks."
+
 // Bounded poll for the post-compaction idle. session.compacted is published from inside
 // the still-running compaction loop, so the runner needs a moment to finish and go idle
 // before prompt_async can start a fresh loop. 120 * 250ms = 30s is a generous ceiling;
@@ -362,6 +371,8 @@ export interface PendingResume {
    * instead of DEFERRED_RESUME_NOTE, so the agent knows it was NOT compacted.
    */
   failureNote?: string
+  /** Store the hand-back without starting a turn (v6: an interrupted compaction). */
+  noReply?: boolean
   createdAt: number
 }
 
@@ -475,6 +486,16 @@ export function createSelfCompactTool(deps: {
         lookupMs: Date.now() - now,
         replacedResuming: replaced?.phase === "resuming",
       })
+      if (replaced?.phase === "resuming" && replaced.failureNote) {
+        return (
+          "Compaction queued; will run when this turn ends. It REPLACES the resumption prompt of an " +
+          "earlier self_compact_and_resume whose compaction did NOT happen (this session has not " +
+          "been compacted); that prompt was waiting to be handed back to you and is now discarded. " +
+          "If anything in it is still needed, call this tool again with it merged into your new " +
+          "prompt. Its text was:\n\n" +
+          replaced.prompt
+        )
+      }
       if (replaced?.phase === "resuming") {
         return (
           "Compaction queued; will run when this turn ends. It REPLACES an earlier resumption " +
@@ -543,7 +564,7 @@ function isSessionIdle(event: PluginBusEvent): event is {
 
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>
   /**
    * Resolves true once the session's runner is idle, false on timeout.
    *
@@ -624,7 +645,7 @@ export function createOnCompacted(deps: {
 }
 
 async function deliverResume(
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>,
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>,
   sessionID: string,
   entry: PendingResume,
   stage: string,
@@ -638,7 +659,7 @@ async function deliverResume(
     deferred: !!entry.deferred,
   })
   try {
-    await callPromptAsync({ sessionID, text })
+    await callPromptAsync(entry.noReply ? { sessionID, text, noReply: true } : { sessionID, text })
     debug(`${stage} prompt_async OK`, { sessionID })
   } catch (err) {
     debug(`${stage} prompt_async FAILED`, { sessionID, error: errText(err) })
@@ -682,7 +703,7 @@ export function createOnStatus(deps: {
     modelID: string
   }) => Promise<void>
   /** Delivers a `resuming` entry (v5; see createOnCompacted). */
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>
   /**
    * Before delivering a DEFERRED entry: wait for the run to finish, then report
    * whether the session is still idle. Resolves false if a new turn has started.
@@ -709,6 +730,13 @@ export function createOnStatus(deps: {
   isIdle?: (input: { sessionID: string }) => Promise<boolean | undefined>
   /** Clock for the fast-failure test (v6). Injectable for tests. */
   now?: () => number
+  /**
+   * After a 200 with no compaction (v6): the error on the session's latest
+   * assistant message, if any. Tells an interrupt (MessageAbortedError) apart
+   * from a failed summary step. Optional; when absent, or when it resolves
+   * undefined, the failure is reported without a cause.
+   */
+  latestError?: (input: { sessionID: string }) => Promise<LatestError | undefined>
 }) {
   const sleep = deps.sleep ?? defaultSleep
   const isIdle = deps.isIdle ?? (async () => true)
@@ -822,7 +850,28 @@ export function createOnStatus(deps: {
         // publishing Compacted when the summary step errors).
         await sleep(NO_COMPACTION_GRACE_MS)
         if (!stillOurs()) return
-        await handBack(sessionID, entry, "summarize returned, but the session was not compacted (the summary step probably failed)", { settle: true })
+        // A cancelled run also answers 200 (runner onInterrupt). A human who
+        // interrupted the compaction must not get a turn started behind their back.
+        let latest: LatestError | undefined
+        try {
+          latest = await deps.latestError?.({ sessionID })
+        } catch (err) {
+          debug("onStatus latestError FAILED", { sessionID, error: errText(err) })
+        }
+        if (!stillOurs()) return
+        if (latest?.aborted) {
+          entry.phase = "resuming"
+          entry.deferred = true
+          entry.noReply = true
+          entry.failureNote = INTERRUPTED_NOTE
+          debug("onStatus compaction interrupted, storing prompt without a turn", { sessionID })
+          await deliverClaimed(sessionID, entry, { settle: true })
+          return
+        }
+        const cause = latest?.error ? `: ${latest.error}` : " (cause unknown)"
+        await handBack(sessionID, entry, `summarize returned, but the session was not compacted${cause}`, {
+          settle: true,
+        })
         return
       }
 
@@ -996,6 +1045,33 @@ export async function waitForSessionIdleHttp(
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+export interface LatestError {
+  aborted: boolean
+  error?: string
+}
+
+/**
+ * The error on the session's newest message, if it is an assistant message
+ * with one (v6). One bounded read (`limit=1` is the newest message); undefined
+ * when there is no such error or the read fails.
+ */
+export async function readLatestAssistantErrorHttp(
+  ctx: CallContext,
+  input: { sessionID: string; timeoutMs?: number },
+): Promise<LatestError | undefined> {
+  const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/message`, ctx.serverUrl)
+  url.searchParams.set("limit", "1")
+  const res = await getJson(ctx.fetch, url, input.timeoutMs ?? 5_000)
+  if (!res.ok || !Array.isArray(res.body)) return undefined
+  const info = asRecord(asRecord(res.body[res.body.length - 1])?.info)
+  if (info?.role !== "assistant") return undefined
+  const error = asRecord(info.error)
+  if (!error) return undefined
+  const name = typeof error.name === "string" ? error.name : "error"
+  const message = typeof asRecord(error.data)?.message === "string" ? (asRecord(error.data)!.message as string) : ""
+  return { aborted: name === "MessageAbortedError", error: message ? `${name}: ${message}` : name }
+}
+
 /**
  * One `GET /session/status` read (v6): true = idle (or absent: no runner),
  * false = busy/retry, undefined = the read failed or was malformed. Unlike
@@ -1045,7 +1121,7 @@ export async function settleThenCheckIdleHttp(
 
 export async function callPromptAsyncHttp(
   ctx: CallContext,
-  input: { sessionID: string; text: string },
+  input: { sessionID: string; text: string; noReply?: boolean },
 ): Promise<void> {
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/prompt_async`, ctx.serverUrl)
   debug("callPromptAsyncHttp request", {
@@ -1059,7 +1135,7 @@ export async function callPromptAsyncHttp(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         parts: [{ type: "text", text: input.text }],
-        noReply: false,
+        noReply: input.noReply ?? false,
       }),
       signal: AbortSignal.timeout(10_000),
     }),

@@ -18,6 +18,8 @@ import {
   FAST_FAILURE_MS,
   NO_COMPACTION_GRACE_MS,
   readSessionIdleHttp,
+  readLatestAssistantErrorHttp,
+  INTERRUPTED_NOTE,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
 
@@ -821,6 +823,65 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     expect(handedBack(t).text).toContain("not compacted")
   })
 
+  it("names the summary step's error when summarize returns 200 without compacting", async () => {
+    const t = setup()
+    const latestError = vi.fn().mockResolvedValue({ aborted: false, error: "APIError: overloaded" })
+    const handler = createOnStatus({ ...t, latestError })
+    await handler(idleEvent("s1"))
+    expect(latestError).toHaveBeenCalledWith({ sessionID: "s1" })
+    expect(handedBack(t).text).toContain("APIError: overloaded")
+  })
+
+  it("an INTERRUPTED compaction stores the prompt without starting a turn", async () => {
+    // A cancelled run also answers 200. The human stopped it; a hand-back that
+    // started a turn would override them.
+    const t = setup()
+    const latestError = vi.fn().mockResolvedValue({ aborted: true, error: "MessageAbortedError" })
+    const handler = createOnStatus({ ...t, latestError })
+    await handler(idleEvent("s1"))
+    const call = t.callPromptAsync.mock.calls[0][0]
+    expect(call.noReply).toBe(true)
+    expect(call.text.startsWith(INTERRUPTED_NOTE)).toBe(true)
+    expect(call.text.endsWith("resume me")).toBe(true)
+    expect(t.pending.has("s1")).toBe(false)
+  })
+
+  it("a replacement tool call over a pending hand-back says compaction did NOT happen", async () => {
+    const pending = new Map<string, PendingResume>([
+      ["s1", { ...awaiting("old prompt"), phase: "resuming", deferred: true, failureNote: "x" }],
+    ])
+    const tool = createSelfCompactTool({
+      pending,
+      lookupModel: async () => ({ ok: true, model: MODEL, source: "session" }),
+    })
+    const out = await tool.execute({ prompt: "new" }, { sessionID: "s1" })
+    expect(out).toContain("did NOT happen")
+    expect(out).not.toContain("right after that compaction")
+    expect(out.endsWith("old prompt")).toBe(true)
+  })
+
+  it("readLatestAssistantErrorHttp reads one newest message and reports its error", async () => {
+    const page = (info: unknown) => json([{ info, parts: [] }])
+    const fetchFn = vi.fn()
+    const ctx = { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") }
+    fetchFn.mockResolvedValueOnce(
+      page({ role: "assistant", error: { name: "MessageAbortedError", data: { message: "Aborted" } } }),
+    )
+    expect(await readLatestAssistantErrorHttp(ctx, { sessionID: "s1" })).toEqual({
+      aborted: true,
+      error: "MessageAbortedError: Aborted",
+    })
+    expect(new URL((fetchFn.mock.calls[0][0] as Request).url).search).toBe("?limit=1")
+    fetchFn.mockResolvedValueOnce(page({ role: "assistant", error: { name: "APIError" } }))
+    expect(await readLatestAssistantErrorHttp(ctx, { sessionID: "s1" })).toEqual({ aborted: false, error: "APIError" })
+    fetchFn.mockResolvedValueOnce(page({ role: "assistant" }))
+    expect(await readLatestAssistantErrorHttp(ctx, { sessionID: "s1" })).toBeUndefined()
+    fetchFn.mockResolvedValueOnce(page({ role: "user" }))
+    expect(await readLatestAssistantErrorHttp(ctx, { sessionID: "s1" })).toBeUndefined()
+    fetchFn.mockResolvedValueOnce(new Response("x", { status: 500 }))
+    expect(await readLatestAssistantErrorHttp(ctx, { sessionID: "s1" })).toBeUndefined()
+  })
+
   it("does not hand back after a 200 once session.compacted arrives within the grace period", async () => {
     const t = setup()
     t.sleep.mockImplementationOnce(t.compacts)
@@ -1444,7 +1505,11 @@ describe("self-compact plugin auth integration", () => {
     expect(mockFetch.mock.calls[1][1]).toEqual({ keepalive: false })
     // The mock serve never publishes session.compacted, so after the grace period
     // the prompt is handed back (v6) -- through the same auth'd fetch.
-    expect(paths.slice(2)).toEqual(["/session/status", "/session/s_auth_1/prompt_async"])
+    expect(paths.slice(2)).toEqual([
+      "/session/s_auth_1/message",
+      "/session/status",
+      "/session/s_auth_1/prompt_async",
+    ])
     const summarizeBody = await (mockFetch.mock.calls[1][0] as Request).clone().json()
     expect(summarizeBody).toEqual({ providerID: "anthropic", modelID: "claude-3-5", auto: false })
     for (const call of mockFetch.mock.calls) {

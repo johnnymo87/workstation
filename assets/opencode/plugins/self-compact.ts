@@ -10,6 +10,7 @@ import {
   createSelfCompactTool,
   getSharedPendingResumes,
   lookupActiveModel,
+  readLatestAssistantErrorHttp,
   readSessionIdleHttp,
   settleThenCheckIdleHttp,
   waitForSessionIdleHttp,
@@ -56,6 +57,8 @@ const plugin: Plugin = async (ctx) => {
     // Gates a summarize retry (v6): one status read, scoped like waitForIdle below.
     // Three-state: an unreadable status hands the prompt back rather than re-arming.
     isIdle: (input) => readSessionIdleHttp(callCtx, { ...input, directory: ctx.directory }),
+    // After a 200 with no compaction: was it interrupted, or did the summary fail?
+    latestError: (input) => readLatestAssistantErrorHttp(callCtx, input),
   })
 
   const onCompacted = createOnCompacted({
