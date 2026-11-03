@@ -46,7 +46,7 @@ compacted away why it was scheduled. See `scheduling-wakes`.
 | [beads](skills/beads/SKILL.md) | cross | Activate `bd` issue tracking when work spans multiple sessions or has complex dependencies. |
 | [migrating-beads-schema](skills/migrating-beads-schema/SKILL.md) | cross | Resolve a bd cross-clone schema-migration block (#4259): single-migrator discipline, DoltHub-vs-git split-remote trap, adopt-vs-migrate, embedded-clone graft fallback, 0037 stripped-UUID-default repair (Error 1105), fresh-clone verification. |
 | [reviewing-github-prs](skills/reviewing-github-prs/SKILL.md) | cross | Choosing the right response shape (threaded inline reply vs fresh review vs top-level issue comment) when posting on a PR, plus the `gh` CLI mechanics for each. |
-| [reviving-worktree-orphaned-sessions](skills/reviving-worktree-orphaned-sessions/SKILL.md) | cross | A session whose working directory was deleted goes silently dead — empty turns, HTTP 204, `realPath ENOENT` only in the serve log. Recreating the *same* path does not heal it; the fix is a new path plus a `session.directory` update. Also: check before pruning a worktree. |
+| [reviving-worktree-orphaned-sessions](skills/reviving-worktree-orphaned-sessions/SKILL.md) | cross | A session whose working directory was deleted is first half-alive (it still answers a human, but pigeon refuses swarm sends to it and lgtm-shepherd routes its PR alerts to the human as `worktree-gone`), then probably a zombie after the next serve restart (empty turns, `realPath ENOENT` in the serve log). Recreating the *same* path does not heal it; the fix is a new path plus a `session.directory` update, then waiting out pigeon's 5-minute directory cache. Also: check before pruning a worktree. |
 
 ### External Services
 
