@@ -56,6 +56,10 @@ let
 
   seccompPython = python3.withPackages (ps: [ ps.seccomp ]);
 
+  # The libseccomp the blob is built with: the Python binding is built from libseccomp's
+  # own source, so its version is the library's (and the closure carries that library).
+  libseccompVersion = python3.pkgs.seccomp.version;
+
   seccomp =
     runCommand "history-shell-seccomp" { nativeBuildInputs = [ seccompPython ]; }
       ''
@@ -91,13 +95,21 @@ stdenv.mkDerivation {
     install -m755 server.py $out/bin/em-history-shell-server
     patchShebangs $out/bin/em-history-shell-server
 
+    # One definition of the canonical policy hash: the server's own function.
+    policy_sha256=$(PYTHONPATH=. python3 -c \
+      'import sys, server; print(server.policy_sha256(open(sys.argv[1], encoding="utf-8").read()))' \
+      ${./seccomp_policy.py})
+
     jq -n \
       --arg server "$out" \
       --arg bwrap "${bubblewrap}/bin/bwrap" \
       --arg tools "${tools}" \
       --arg seccomp "${seccomp}/seccomp.bpf" \
+      --arg libseccomp_version "${libseccompVersion}" \
+      --arg policy_sha256 "$policy_sha256" \
       --rawfile closure "${closure}/store-paths" \
       '{server: $server, bwrap: $bwrap, tools: $tools, seccomp: $seccomp,
+        libseccomp_version: $libseccomp_version, policy_sha256: $policy_sha256,
         closure: ($closure | split("\n") | map(select(length > 0)))}' \
       > $out/share/em-history-shell/config.json
 

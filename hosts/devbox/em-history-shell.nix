@@ -131,17 +131,23 @@ let
     #    a broken sandbox, so nothing is assumed here.
   };
 
+  allowedUid = config.users.users.dev.uid;
+
   # sha256 of the settings that make up the sandbox's outer wall: the instance's
-  # serviceConfig without ExecStart, and the socket's socketConfig. Passed to the server
-  # as --unit-digest and put on every answer as "unit_digest", so a client that proved
-  # one unit can tell it from a changed one without reading systemd. ExecStart (the
-  # server path, --allowed-uid, --base) is left out: the server path is the answer's
-  # "server" already. The unit's [Unit] section, the user and the tmpfiles rules are not
-  # covered.
+  # serviceConfig without ExecStart, the socket's socketConfig, and the two ExecStart
+  # arguments that matter (--allowed-uid and --base). Passed to the server as
+  # --unit-digest and put on every answer as "unit_digest", so a client that proved one
+  # unit can tell it from a changed one without reading systemd. The rest of ExecStart
+  # is left out: it carries the digest itself, and the server path is the answer's
+  # "server" already. The unit's [Unit] section, the user and the tmpfiles rules are
+  # not covered.
   unitDigest = builtins.hashString "sha256" (
     builtins.toJSON {
       service = serviceConfigBase;
       socket = socketConfig;
+      args = {
+        inherit allowedUid base;
+      };
     }
   );
 in
@@ -176,7 +182,7 @@ in
     serviceConfig = {
       ExecStart = lib.concatStringsSep " " [
         "${server}/bin/em-history-shell-server"
-        "--allowed-uid ${toString config.users.users.dev.uid}"
+        "--allowed-uid ${toString allowedUid}"
         "--base ${base}"
         "--unit-digest ${unitDigest}"
       ];

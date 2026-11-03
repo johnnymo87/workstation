@@ -85,6 +85,7 @@ _STORE_FILE = re.compile(
 _NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 _ROOT_NAME = re.compile(r"agent-history(-[A-Za-z0-9_-]+)?")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_VERSION = re.compile(r"[0-9]+(\.[0-9]+){2}")
 
 RUN_KEYS = frozenset({"v", "op", "root", "view", "agent", "command"})
 PING_KEYS = frozenset({"v", "op"})
@@ -116,6 +117,10 @@ class Config:
     #: sha256 (hex) of the unit's settings, from the command line (see `unit_digest_arg`).
     #: Put on every answer, so the client can tell a changed unit from the proven one.
     unit_digest: str | None = None
+    #: The libseccomp the blob was built with, and `policy_sha256` of the policy source;
+    #: both from default.nix, reported by `ping`.
+    libseccomp_version: str = ""
+    policy_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,22 @@ def _store_file(value, name: str) -> str:
     return value
 
 
+def policy_sha256(text: str) -> str:
+    """sha256 (hex) of a seccomp policy source, canonicalised so comments and layout do
+    not move it. EXACTLY: split `text` on "\\n"; drop every line whose `.strip()` is empty
+    or starts with "#"; `.rstrip()` each remaining line (leading whitespace stays); join
+    with "\\n" (no trailing newline); sha256 the UTF-8 bytes. default.nix calls this at
+    build time (config.json `policy_sha256`); EM's suite computes the same over its own
+    nix/history_shell_seccomp.py. A trailing comment after code is code, and is kept."""
+    kept = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        kept.append(line.rstrip())
+    return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()
+
+
 def unit_digest_arg(value: str) -> str:
     """argparse type for `--unit-digest`: 64 lowercase hex digits (a sha256)."""
     if not _DIGEST.fullmatch(value):
@@ -186,7 +207,15 @@ def load_config(path: str) -> Config:
             raise ValueError(f"config closure holds a non-store path: {entry!r}")
     if tools not in closure:
         raise ValueError("config tools is not part of the closure")
+    version = raw.get("libseccomp_version")
+    if not isinstance(version, str) or not _VERSION.fullmatch(version):
+        raise ValueError(f"config libseccomp_version is not x.y.z: {version!r}")
+    policy = raw.get("policy_sha256")
+    if not isinstance(policy, str) or not _DIGEST.fullmatch(policy):
+        raise ValueError(f"config policy_sha256 is not a sha256: {policy!r}")
     return Config(
+        libseccomp_version=version,
+        policy_sha256=policy,
         server=server,
         bwrap=_store_file(raw.get("bwrap"), "bwrap"),
         tools=tools,
@@ -745,7 +774,13 @@ def handle_request(
         check_installed(config)
         return _answer(
             config,
-            {"ok": True, "uid": os.getuid(), "seccomp_sha256": seccomp_sha256(config)},
+            {
+                "ok": True,
+                "uid": os.getuid(),
+                "seccomp_sha256": seccomp_sha256(config),
+                "libseccomp_version": config.libseccomp_version,
+                "policy_sha256": config.policy_sha256,
+            },
         )
     if op != "run":
         raise Refused(f"Unknown operation {op!r}. Nothing was run.")

@@ -36,6 +36,8 @@ STORE_A = "/nix/store/" + "a" * 32 + "-tools"
 STORE_B = "/nix/store/" + "b" * 32 + "-dep"
 SERVER_PATH = "/nix/store/" + "c" * 32 + "-em-history-shell"
 UNIT_DIGEST = "e" * 64
+LIBSECCOMP = "2.6.0"
+POLICY_SHA = "f" * 64
 
 FAKE_BWRAP = """\
 #!{python}
@@ -85,6 +87,8 @@ class Base(unittest.TestCase):
             seccomp=self.seccomp,
             closure=(self.tools,),
             unit_digest=UNIT_DIGEST,
+            libseccomp_version=LIBSECCOMP,
+            policy_sha256=POLICY_SHA,
         )
 
     def make_root(self, name="agent-history", marker=True):
@@ -365,6 +369,8 @@ class TestConfig(unittest.TestCase):
             "tools": STORE_A,
             "seccomp": "/nix/store/" + "e" * 32 + "-seccomp/seccomp.bpf",
             "closure": [STORE_B, STORE_A],
+            "libseccomp_version": LIBSECCOMP,
+            "policy_sha256": POLICY_SHA,
         }
         raw.update(over)
         path = os.path.join(tmp, "config.json")
@@ -377,6 +383,8 @@ class TestConfig(unittest.TestCase):
             config = server.load_config(self.write(tmp))
         self.assertEqual(config.closure, (STORE_A, STORE_B))
         self.assertEqual(config.server, SERVER_PATH)
+        self.assertEqual(config.libseccomp_version, LIBSECCOMP)
+        self.assertEqual(config.policy_sha256, POLICY_SHA)
 
     def test_bad(self):
         cases = {
@@ -387,6 +395,12 @@ class TestConfig(unittest.TestCase):
             "empty closure": {"closure": []},
             "closure junk": {"closure": [STORE_A, "/etc"]},
             "server junk": {"server": "/tmp/x"},
+            "libseccomp missing": {"libseccomp_version": None},
+            "libseccomp junk": {"libseccomp_version": "2.6"},
+            "libseccomp newline": {"libseccomp_version": "2.6.0\n"},
+            "policy sha missing": {"policy_sha256": None},
+            "policy sha upper": {"policy_sha256": "F" * 64},
+            "policy sha short": {"policy_sha256": "f" * 63},
         }
         for label, over in cases.items():
             with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
@@ -559,6 +573,8 @@ class TestProtocol(Exchange):
                 "ok": True,
                 "uid": UID,
                 "seccomp_sha256": hashlib.sha256(b"BPF-fake-program").hexdigest(),
+                "libseccomp_version": LIBSECCOMP,
+                "policy_sha256": POLICY_SHA,
                 "server": SERVER_PATH,
                 "unit_digest": UNIT_DIGEST,
             },
@@ -814,7 +830,8 @@ class TestWholeProcess(unittest.TestCase):
         with open(cfg, "w") as handle:
             json.dump(
                 {"server": store, "bwrap": py, "tools": store, "seccomp": py,
-                 "closure": [store]},
+                 "closure": [store], "libseccomp_version": LIBSECCOMP,
+                 "policy_sha256": POLICY_SHA},
                 handle,
             )
         return store, cfg
@@ -860,6 +877,8 @@ class TestWholeProcess(unittest.TestCase):
             self.assertEqual(answer["server"], store)
             self.assertEqual(answer["uid"], UID)
             self.assertEqual(answer["unit_digest"], UNIT_DIGEST)
+            self.assertEqual(answer["libseccomp_version"], LIBSECCOMP)
+            self.assertEqual(answer["policy_sha256"], POLICY_SHA)
             with open(py, "rb") as handle:
                 self.assertEqual(
                     answer["seccomp_sha256"], hashlib.sha256(handle.read()).hexdigest()
@@ -938,6 +957,41 @@ class TestWholeProcess(unittest.TestCase):
                 stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
             )
             self.assertEqual(done.returncode, 2)
+
+
+class TestPolicyHash(unittest.TestCase):
+    """policy_sha256 is a protocol-visible definition: EM computes the same over its own
+    copy of the policy. Lines whose stripped form starts with # are dropped, so are blank
+    lines, trailing whitespace goes, and the rest is joined with \\n (no final newline)."""
+
+    def digest(self, text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def test_definition(self):
+        text = "# header\n\n  \nx = 1  \n   # indented comment\n\ty\t\r\n#: doc\nz\n\n"
+        self.assertEqual(server.policy_sha256(text), self.digest("x = 1\n\ty\nz"))
+
+    def test_code_comments_after_code_are_kept(self):
+        self.assertEqual(
+            server.policy_sha256("a = 1  # why\n"), self.digest("a = 1  # why")
+        )
+
+    def test_empty(self):
+        self.assertEqual(server.policy_sha256("# only\n\n"), self.digest(""))
+
+    def test_comment_and_blank_changes_do_not_move_it(self):
+        base = "a = 1\nb = 2\n"
+        noisy = "# new header\n\na = 1   \n\n# between\nb = 2\n\n\n"
+        self.assertEqual(server.policy_sha256(base), server.policy_sha256(noisy))
+        self.assertNotEqual(server.policy_sha256(base), server.policy_sha256("a = 1\nb = 3\n"))
+
+    def test_the_shipped_policy_ignores_the_ws_header(self):
+        with open(os.path.join(HERE, "seccomp_policy.py"), encoding="utf-8") as handle:
+            text = handle.read()
+        body = text.split("\n", 5)[5]  # EM's file: everything below the five-line header
+        self.assertTrue(body.startswith('"""Write the history shell'), body[:40])
+        self.assertEqual(server.policy_sha256(text), server.policy_sha256(body))
+        self.assertRegex(server.policy_sha256(text), r"[0-9a-f]{64}")
 
 
 class TestAgentVisibleText(Exchange):

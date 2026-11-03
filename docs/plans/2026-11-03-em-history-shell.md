@@ -27,14 +27,32 @@ client refuses an answer from any other. So a change to the tools, the policy or
 server changes the path and forces a re-proof, with no extra bookkeeping here.
 
 The unit's own settings are covered too. `hosts/devbox/em-history-shell.nix` hashes
-`{service: serviceConfig minus ExecStart, socket: socketConfig}` with
-`builtins.toJSON` and sha256, passes the hex on ExecStart as `--unit-digest`, and the
-server puts it on every answer (refusals and `ping` included) as **`unit_digest`**. A
-change to the caps, the sandbox props or the socket changes it. `ExecStart` is left out
-because it carries the digest, and the server path is `server` already. The user, the
-`[Unit]` section and the tmpfiles rules are not covered. If the server cannot start
-(bad config, fd 0 not a socket), it still tries to write one `unavailable` refusal to
-fd 0 before it exits 2, with `unit_digest` and, when the config was readable, `server`.
+`builtins.toJSON { service = <serviceConfig minus ExecStart>; socket = <socketConfig>;
+args = { allowedUid = <uid>; base = <base>; }; }` with sha256, passes the hex on
+ExecStart as `--unit-digest`, and the server puts it on every answer (refusals and
+`ping` included) as **`unit_digest`**. A change to the caps, the sandbox props, the
+socket, the allowed uid or the base directory changes it. The rest of `ExecStart` is
+left out because it carries the digest, and the server path is `server` already. The
+user, the `[Unit]` section and the tmpfiles rules are not covered. If the server cannot
+start (bad config, fd 0 not a socket), it still tries to write one `unavailable` refusal
+to fd 0 before it exits 2, with `unit_digest` and, when the config was readable,
+`server`.
+
+## Protocol additions to `ping` (still v1)
+
+`ping` answers also carry two fields. Older clients ignore unknown keys, and a client
+that wants them treats a missing one as "this server is older":
+
+- `libseccomp_version`: `"x.y.z"`, the libseccomp the seccomp blob was built with
+  (nixpkgs' `python3.pkgs.seccomp.version`, which is built from libseccomp's own source).
+- `policy_sha256`: sha256 (lowercase hex) of the seccomp policy source, canonicalised as
+  follows. Split the text on `"\n"`. Drop every line whose `.strip()` is empty or starts
+  with `"#"`. `.rstrip()` each remaining line (leading whitespace stays). Join with
+  `"\n"`, no trailing newline. sha256 the UTF-8 bytes. A comment after code on the same
+  line is code and stays. In Python: `server.policy_sha256(text)`. It is computed at
+  build time by that same function and stored in `config.json`. The WS copy (below its
+  five-line header) and EM's `nix/history_shell_seccomp.py` give the same value, which is
+  why the header comments do not move it. The `unit_digest` field is also on `ping`.
 
 ## The socket has no trigger limit
 
