@@ -5,14 +5,14 @@ description: Diagnoses and revives an opencode session whose working directory w
 
 # Reviving Worktree-Orphaned Sessions
 
-A session whose `directory` no longer exists breaks in one of two ways. The fix is the same for both: point `session.directory` at a path that exists and that the serve has never failed to resolve.
+A session whose `directory` no longer exists goes through two stages. The fix is the same for both: point `session.directory` at a path that exists.
 
-| Mode | What you see | Seen |
+| Stage | What you see | Seen |
 |---|---|---|
-| **Zombie** | Every turn finishes in under a second with zero parts. Human and swarm prompts alike get silence. Serve log: `prompt_async failed ... realPath ... ENOENT`. | cloudbox 2026-08-31 |
-| **Half-alive** | A human typing in Telegram or the TUI gets normal answers. Every *automated* route refuses it: pigeon's swarm arbiter will not send (`working directory missing`), and lgtm-shepherd sends the session's PR alerts (`ci_red`, `conflicted`, `needs_reply`) to the human instead (`human: worktree-gone`). | devbox 2026-11-02 |
+| **Half-alive** (the serve still has an instance loaded for the deleted path) | Human prompts via Telegram still get normal answers. Every *automated* route refuses the session: pigeon's swarm arbiter will not send (`working directory missing`), and lgtm-shepherd sends the session's PR alerts (`ci_red`, `conflicted`, `needs_reply`) to the human instead (`human: worktree-gone`). | devbox 2026-11-02 |
+| **Zombie** (the instance has to boot from the missing path, most likely after a serve restart) | Every turn finishes in under a second with zero parts. Human and swarm prompts alike get silence. Serve log: `prompt_async failed ... realPath ... ENOENT`. | cloudbox 2026-08-31 |
 
-Half-alive is the more dangerous one: the session answers when you ask it something, so it looks healthy, but it has stopped receiving swarm messages and shepherd wakes. "It replied to me" is not evidence the session is fine.
+That half-alive turns into a zombie at the next serve restart (nightly, ~03:00) is inferred from how the serve caches instances per directory; nobody has watched it happen. Fix a half-alive session now, not later. It looks healthy because it answers when you ask it something, but it has already stopped receiving swarm messages and shepherd wakes.
 
 ## Workflow
 
@@ -21,7 +21,7 @@ Half-alive is the more dangerous one: the session answers when you ask it someth
 - [ ] 2. Pick the new path (Choosing the path)
 - [ ] 3. Update session.directory
 - [ ] 4. Wait out pigeon's cache, then probe
-- [ ] 5. Find messages that failed during the outage and tell their senders
+- [ ] 5. Brief the session on messages and PR signals it missed during the outage
 ```
 
 ## Diagnosis
@@ -32,8 +32,10 @@ Half-alive is the more dangerous one: the session answers when you ask it someth
 S=ses_xxxxxxxx
 DB=~/.local/share/opencode/opencode.db
 
-# The directory the session has, and whether it exists
-D=$(curl -s http://127.0.0.1:4096/session/$S | jq -r .directory); echo "$D"; ls -ld "$D"
+# The directory the session has, and whether it exists. Read the DB, not the
+# serve API: an unauthenticated curl to a serve with auth on returns nothing,
+# and `ls ""` then looks exactly like a missing directory.
+D=$(nix run nixpkgs#sqlite -- "$DB" "select directory from session where id='$S';"); echo "$D"; [ -n "$D" ] && ls -ld "$D"
 
 # Automated routes refusing it (either is enough to act on)
 journalctl --namespace=pigeon --since -1d --no-pager | grep "$S" | grep -E "working directory missing|max attempts" | tail -5
@@ -55,27 +57,40 @@ nix run nixpkgs#sqlite -- "$DB" "select datetime(m.time_created/1000,'unixepoch'
 
 ## Choosing the path
 
-A path is safe if it exists and the serve has never failed to resolve it. **Recreating the deleted path is NOT safe**: the serve has memoized the failure, and the session keeps getting ENOENT for a directory that now exists (cloudbox 2026-08-31: restored at 22:46:52, ENOENT for that exact path at 22:47:19 and 22:48:42).
+**Do not recreate the deleted path.** On cloudbox 2026-08-31 the dir was restored at 22:46:52, and the session still got ENOENT for that exact path at 22:47:19 and 22:48:42. Newer opencode may have fixed this, but a different path works either way.
 
-Use the first that applies:
+**Which branch:** the branch of the PR the session still owes, not the one it was on when the tree vanished. A session often removes its tree right after that PR merges. Shepherd names the PRs it attributes to the session:
 
-1. **The session's branch is already checked out in another worktree** (`git worktree list | grep <branch>`). Use that path. You cannot `git worktree add` a branch that is checked out elsewhere anyway. First check that no other *main* session is sitting there (subagent children of this session are fine):
+```bash
+journalctl -u lgtm-shepherd.service --since -1d --no-pager | grep "candidate $S"
+```
+
+**Which path**, first that applies:
+
+1. **The branch is already checked out in another worktree** (`git worktree list | grep <branch>`). Use that path if no other recent session works there. Sessions often `cd` into a worktree without their `directory` naming it, so check both the session table and recent tool calls:
    ```bash
-   nix run nixpkgs#sqlite -- "$DB" "select id, title from session where directory = '<path>' and parent_id is null;"
+   nix run nixpkgs#sqlite -- "$DB" "select id, title from session
+     where directory = '<path>' and parent_id is null and id != '$S'
+       and time_updated > (strftime('%s','now')-86400)*1000;"
+   grep -ahs '<path>' ~/.local/share/opencode/log/opencode.log | grep -v "$S" | tail -3
    ```
+   If another session is working there, use rule 3.
 2. **The branch is not checked out anywhere:** `git worktree add .worktrees/<slug>-r2 <branch>`.
-3. **You already restored the old path:** `git worktree move .worktrees/<slug> .worktrees/<slug>-r2`.
+3. **The branch is checked out by someone else:** `git worktree add --detach .worktrees/<slug>-r2 <branch>`, and tell the revived session it is on a detached HEAD (it pushes with `git push origin HEAD:<branch>`).
+4. **You already restored the old path:** `git worktree move .worktrees/<slug> .worktrees/<slug>-r2`.
 
 ## Updating the directory
 
-Do this between turns (the session's last message is a finished assistant turn):
+Do this from another session, never from the orphaned one. The DB is in WAL mode with many concurrent writers; `.timeout` makes a busy DB wait instead of failing with "database is locked":
 
 ```bash
-nix run nixpkgs#sqlite -- "$DB" "update session set directory='<new-path>' where id='$S';"
-curl -s http://127.0.0.1:4096/session/$S | jq -r .directory   # serves read the change immediately
+nix run nixpkgs#sqlite -- -cmd '.timeout 5000' "$DB" "update session set directory='<new-path>' where id='$S';"
+nix run nixpkgs#sqlite -- "$DB" "select directory from session where id='$S';"
 ```
 
-**Pigeon caches each session's directory for up to 5 minutes** (`packages/daemon/src/swarm/registry.ts`, `ttlMs` in `routing/directory-resolver.ts`). Until the cached entry expires, swarm sends keep failing with the *old* path in the error. Wait 5 minutes before probing, or send the probe anyway; it is retried once a minute, 10 attempts in total.
+The serves and lgtm-shepherd read the new value straight away. The session's subagent children keep the old directory; leave them alone unless something is going to resume one.
+
+**Pigeon caches each session's directory for up to 5 minutes** (`ttlMs` in pigeon's `packages/daemon/src/routing/directory-resolver.ts`). Until the cached entry expires, swarm sends keep failing with the *old* path in the error. A send is retried after 1 s, 2 s, 5 s, 15 s, then every 60 s, 10 attempts in all (about 6.5 minutes). That only just outlasts the cache, so wait 5 minutes before probing, or resend if the probe shows up as `failed (max attempts)`.
 
 Probe with one swarm message asking for `pwd` and `git log --oneline -1` *without* a workdir override. The reply, arriving via the swarm, proves both that the path resolves and that automated delivery works again. The next shepherd sweep (every 10 min) should then log `dir_exists=yes would_route=yes` for its PRs.
 
@@ -83,17 +98,19 @@ Probe with one swarm message asking for `pwd` and `git log --oneline -1` *withou
 
 ## Messages lost during the outage
 
-Pigeon gives up after 10 attempts, and nothing redelivers the message after that. List what was dropped and tell each sender (the `from` of the original message) to resend:
+- **Ordinary swarm sends** fail permanently after 10 attempts. Pigeon tells the sender itself (a `delivery.failed` notice), so don't relay that. What the revived session lacks is the content; it was never delivered, and nothing will redeliver it.
+- **Scheduled wakes** (`swarm_schedule`) are retried every 30 s without counting attempts, until they expire. After the fix they may all arrive in a burst; any that expired first are lost without a `failed` line.
+- **Shepherd alerts** that went to the human (`human: worktree-gone`) are not re-sent to the session either.
 
 ```bash
-journalctl --namespace=pigeon --since -1d --no-pager | grep "failed (max attempts)" | grep "$S"
+journalctl --namespace=pigeon --since -1d --no-pager | grep "$S" | grep -E "failed \(max attempts\)|expired"
 ```
 
-Shepherd alerts that went to the human (`human: worktree-gone`) are not re-sent to the session either; brief the revived session on any PR signal it missed.
+Brief the revived session on anything there and on any PR signal it missed.
 
 ## Restarting the serve is the wrong first move
 
-It clears the memoized failure, but a pool serve carries many unrelated sessions and the restart kills their in-flight turns. The path swap costs no other session anything. Count the co-tenants first if you are still tempted:
+It reloads the session's instance, but a pool serve carries many unrelated sessions and the restart kills their in-flight turns. The path swap costs no other session anything. Count the co-tenants first if you are still tempted:
 
 ```bash
 nix run nixpkgs#sqlite -- "$DB" \
@@ -113,8 +130,8 @@ Identify the deleter rather than assuming; the same session has died twice from 
 
 | Deleter | How to check | Note |
 |---|---|---|
-| **The session itself** | `grep -ahs "worktree remove" ~/.local/share/opencode/log/opencode.log{.1,}` | The most common cause: it finished a PR and removed the tree it was sitting in (see the `finishing-a-development-branch` override in AGENTS.md). |
-| **`disk-cleanup.service`** | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly. Walks `<repo>/.worktrees/*/` in every repo under `~/projects` and removes merged worktrees, skipping any that a live session is sitting in. Never touches a primary checkout. |
+| **The session itself** | `grep -ahs "worktree remove" ~/.local/share/opencode/log/opencode.log{.1,}` | It finished a PR and removed the tree it was sitting in (see the `finishing-a-development-branch` override in AGENTS.md). |
+| **`disk-cleanup.service`** (cloudbox only) | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly. Walks `<repo>/.worktrees/*/` in every repo under `~/projects` and removes merged worktrees. It spares a worktree whose session was active in the last 7 days or still owns an open PR, so an older or quieter session is fair game. Never touches a primary checkout. |
 | **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged` on **one hardcoded work-repo root only** (`grep -n 'projects/' "$(readlink -f "$(command -v reset-workspace)")"`). If the dead worktree is in a different repo, it wasn't this. |
 
 ## Prevention
@@ -125,7 +142,7 @@ Before `git worktree remove`/`prune` or any cleanup of `.worktrees/`, check for 
 nix run nixpkgs#sqlite -- "$DB" "select id, title from session where directory like '%<slug>%';"
 ```
 
-A session that has finished one PR and is moving to another branch should move its own directory (the update above) rather than delete the tree it is sitting in.
+Never `git worktree remove` the tree you are sitting in, even after its PR merges; that is the AGENTS.md override for `finishing-a-development-branch`. A stale worktree costs some disk; a removed one costs a session.
 
 ## Related
 
