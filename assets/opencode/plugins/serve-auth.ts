@@ -101,7 +101,10 @@ export function wrapFetchWithAuth(
       req = new Request(input, { ...init, headers })
     }
 
-    const res = await baseFetch(req)
+    // Bun reads `keepalive` only from the fetch init, never from a Request, so
+    // re-wrapping would drop a caller's `keepalive: false` (self-compact relies
+    // on it). Forward just that; everything else is already in `req`.
+    const res = await baseFetch(req, init?.keepalive === false ? { keepalive: false } : undefined)
     if (res.status === 401) {
       invalidateServeAuthHeader()
     }

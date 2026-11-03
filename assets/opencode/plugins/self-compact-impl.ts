@@ -209,6 +209,66 @@ export const DEFERRED_RESUME_NOTE =
   "Another message started a turn right after compaction, so it is arriving late, after that " +
   "turn. Reconcile it with anything you have done since before acting on it."
 
+/**
+ * Delays before re-trying a failed POST /summarize (v6). Attempts total
+ * `length + 1`. The incident failure (a socket closed 21 ms into a request to a
+ * healthy serve) is gone within seconds, so the first retry is quick; the second
+ * gives a briefly overloaded serve time to recover. (A serve restart is not
+ * covered: the plugin runs inside the serve, so its pending map dies too.)
+ */
+export const SUMMARIZE_RETRY_DELAYS_MS: readonly number[] = [2_000, 30_000]
+
+/** A summarize failure slower than this is not retried (see createOnStatus). */
+export const FAST_FAILURE_MS = 5_000
+
+/** How long after a 200 from /summarize to wait for session.compacted (v6). */
+export const NO_COMPACTION_GRACE_MS = 2_000
+
+/** A non-2xx answer from POST /summarize. Anything else thrown is transport-level. */
+export class SummarizeHttpError extends Error {
+  constructor(
+    readonly status: number,
+    body: string,
+  ) {
+    super(`summarize failed: ${status} ${body}`)
+    this.name = "SummarizeHttpError"
+  }
+}
+
+/**
+ * Transport failures (no HTTP answer at all), 5xx and 429 may succeed on a
+ * retry. Any other 4xx (unknown model, session gone) will fail the same way.
+ */
+function isRetryableSummarizeError(err: unknown): boolean {
+  if (err instanceof SummarizeHttpError) return err.status >= 500 || err.status === 429
+  return true
+}
+
+/**
+ * Delivered into the session, ahead of the queued resumption prompt, when
+ * compaction could not be started (v6). The tool had already answered
+ * "Compaction queued", so this is the only way the agent -- and, through the
+ * session's Stop notification, the human -- learns that it did not happen.
+ */
+export function summarizeFailedNote(reason: string): string {
+  return (
+    `[self-compact] Compaction FAILED (${reason}), so this session was NOT compacted and its ` +
+    "context is unchanged. The resumption prompt you queued with self_compact_and_resume follows. " +
+    "Tell the user compaction failed and why. If the cause looks transient you may call " +
+    "self_compact_and_resume once more with this prompt; otherwise ask the user to run /compact. " +
+    "Do not retry it more than once."
+  )
+}
+
+/**
+ * Hand-back note when a human interrupted the compaction (v6). Stored with
+ * noReply: the human stopped this, so it must not start a turn by itself.
+ */
+export const INTERRUPTED_NOTE =
+  "[self-compact] Compaction was interrupted, so this session was NOT compacted and its context " +
+  "is unchanged. Below is the resumption prompt you queued with self_compact_and_resume; it was " +
+  "stored without starting a turn. Do not compact again unless the user asks."
+
 // Bounded poll for the post-compaction idle. session.compacted is published from inside
 // the still-running compaction loop, so the runner needs a moment to finish and go idle
 // before prompt_async can start a fresh loop. 120 * 250ms = 30s is a generous ceiling;
@@ -301,6 +361,18 @@ export interface PendingResume {
    * turn's idle, and is delivered with DEFERRED_RESUME_NOTE prepended.
    */
   deferred?: boolean
+  /**
+   * POST /summarize attempts made so far (v6). Carried across a re-arm to
+   * `awaitingTurnEnd`, so the retry bound covers the entry's whole life.
+   */
+  summarizeAttempts?: number
+  /**
+   * Set when compaction will not happen (v6): delivered ahead of the prompt
+   * instead of DEFERRED_RESUME_NOTE, so the agent knows it was NOT compacted.
+   */
+  failureNote?: string
+  /** Store the hand-back without starting a turn (v6: an interrupted compaction). */
+  noReply?: boolean
   createdAt: number
 }
 
@@ -344,7 +416,12 @@ export function createSelfCompactTool(deps: {
       // process lifetime. 30 minutes is generous; a real compaction takes
       // seconds to a few minutes.
       for (const [sid, entry] of deps.pending) {
-        const bound = entry.phase === "resuming" ? RESUMING_STALE_MS : STALE_MS
+        // Only an entry still waiting for the end of the turn that queued it gets
+        // the short bound. Every other phase waits on something that can
+        // legitimately take hours: a long compaction (`summarizing`), a turn that
+        // is not ours (`resuming`, or re-armed after a failed summarize).
+        const fresh = entry.phase === "awaitingTurnEnd" && !entry.summarizeAttempts
+        const bound = fresh ? STALE_MS : RESUMING_STALE_MS
         if (now - entry.createdAt > bound) deps.pending.delete(sid)
       }
 
@@ -409,6 +486,16 @@ export function createSelfCompactTool(deps: {
         lookupMs: Date.now() - now,
         replacedResuming: replaced?.phase === "resuming",
       })
+      if (replaced?.phase === "resuming" && replaced.failureNote) {
+        return (
+          "Compaction queued; will run when this turn ends. It REPLACES the resumption prompt of an " +
+          "earlier self_compact_and_resume whose compaction did NOT happen (this session has not " +
+          "been compacted); that prompt was waiting to be handed back to you and is now discarded. " +
+          "If anything in it is still needed, call this tool again with it merged into your new " +
+          "prompt. Its text was:\n\n" +
+          replaced.prompt
+        )
+      }
       if (replaced?.phase === "resuming") {
         return (
           "Compaction queued; will run when this turn ends. It REPLACES an earlier resumption " +
@@ -477,7 +564,7 @@ function isSessionIdle(event: PluginBusEvent): event is {
 
 export function createOnCompacted(deps: {
   pending: Map<string, PendingResume>
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>
   /**
    * Resolves true once the session's runner is idle, false on timeout.
    *
@@ -558,20 +645,21 @@ export function createOnCompacted(deps: {
 }
 
 async function deliverResume(
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>,
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>,
   sessionID: string,
   entry: PendingResume,
   stage: string,
   opts: { rethrow: boolean },
 ): Promise<void> {
-  const text = entry.deferred ? `${DEFERRED_RESUME_NOTE}\n\n${entry.prompt}` : entry.prompt
+  const note = entry.failureNote ?? (entry.deferred ? DEFERRED_RESUME_NOTE : undefined)
+  const text = note ? `${note}\n\n${entry.prompt}` : entry.prompt
   debug(`${stage} firing prompt_async`, {
     sessionID,
     promptChars: text.length,
     deferred: !!entry.deferred,
   })
   try {
-    await callPromptAsync({ sessionID, text })
+    await callPromptAsync(entry.noReply ? { sessionID, text, noReply: true } : { sessionID, text })
     debug(`${stage} prompt_async OK`, { sessionID })
   } catch (err) {
     debug(`${stage} prompt_async FAILED`, { sessionID, error: errText(err) })
@@ -594,8 +682,10 @@ async function deliverResume(
  *   2. Fires `POST /summarize` with the model the tool resolved at execute
  *      time (v4; no HTTP model lookup here any more).
  *
- * On summarize throw the entry is evicted (no retry; the user re-invokes the
- * skill). On success, the entry is left in `summarizing` phase for
+ * On summarize failure (v6) a transport error, 5xx or 429 is retried after
+ * SUMMARIZE_RETRY_DELAYS_MS while the session stays idle (re-armed for the next
+ * idle if it is busy); a final failure hands the prompt back to the session with
+ * summarizeFailedNote. On success, the entry is left in `summarizing` phase for
  * `createOnCompacted` to pop when the `session.compacted` bus event arrives.
  *
  * This is the deadlock-free path: by the time the runner's final idle
@@ -613,7 +703,7 @@ export function createOnStatus(deps: {
     modelID: string
   }) => Promise<void>
   /** Delivers a `resuming` entry (v5; see createOnCompacted). */
-  callPromptAsync: (input: { sessionID: string; text: string }) => Promise<void>
+  callPromptAsync: (input: { sessionID: string; text: string; noReply?: boolean }) => Promise<void>
   /**
    * Before delivering a DEFERRED entry: wait for the run to finish, then report
    * whether the session is still idle. Resolves false if a new turn has started.
@@ -629,36 +719,81 @@ export function createOnStatus(deps: {
    * always wires it.
    */
   settle?: (input: { sessionID: string }) => Promise<boolean>
+  /** Delay between summarize retries, and the no-compaction grace (v6). Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>
+  /**
+   * One status read before a summarize retry (v6): true = idle, false = busy,
+   * undefined = could not tell. Optional so tests that don't exercise retries
+   * need not supply it; when absent the retry is not gated. The plugin always
+   * wires it.
+   */
+  isIdle?: (input: { sessionID: string }) => Promise<boolean | undefined>
+  /** Clock for the fast-failure test (v6). Injectable for tests. */
+  now?: () => number
+  /**
+   * After a 200 with no compaction (v6): the error on the session's latest
+   * assistant message, if any. Tells an interrupt (MessageAbortedError) apart
+   * from a failed summary step. Optional; when absent, or when it resolves
+   * undefined, the failure is reported without a cause.
+   */
+  latestError?: (input: { sessionID: string }) => Promise<LatestError | undefined>
 }) {
+  const sleep = deps.sleep ?? defaultSleep
+  const isIdle = deps.isIdle ?? (async () => true)
+  const now = deps.now ?? Date.now
+
+  /**
+   * Deliver a `resuming` entry now. Claims it by deleting synchronously so the
+   * status poll (or a re-entrant idle) can't also deliver. With `settle`, a
+   * session that turns out to be busy gets the entry back for its next idle.
+   * An event hook must not throw, so failures are logged only.
+   */
+  async function deliverClaimed(sessionID: string, entry: PendingResume, opts: { settle: boolean }) {
+    deps.pending.delete(sessionID)
+    if (opts.settle && deps.settle) {
+      let idle = false
+      try {
+        idle = await deps.settle({ sessionID })
+      } catch (err) {
+        debug("onStatus settle FAILED", { sessionID, error: errText(err) })
+      }
+      if (!idle) {
+        // A new turn started (or the check failed): put the entry back for the
+        // next idle, unless a newer self_compact_and_resume took the slot.
+        if (!deps.pending.has(sessionID)) deps.pending.set(sessionID, entry)
+        debug("onStatus deferred resume re-armed (busy after settle)", {
+          sessionID,
+          rearmed: deps.pending.get(sessionID) === entry,
+        })
+        return
+      }
+    }
+    await deliverResume(deps.callPromptAsync, sessionID, entry, "onStatus", { rethrow: false })
+  }
+
+  /**
+   * Compaction will not happen: hand the prompt back behind summarizeFailedNote
+   * instead of dropping it. It goes through the same delivery as a deferred
+   * resume, so it is settled first and waits for the next idle if a turn has
+   * started. With `settle: false` (the status endpoint itself is failing, so a
+   * settle would only re-arm it forever) it is delivered at once.
+   */
+  async function handBack(sessionID: string, entry: PendingResume, reason: string, opts: { settle: boolean }) {
+    entry.phase = "resuming"
+    entry.deferred = true
+    entry.failureNote = summarizeFailedNote(truncate(reason, 300))
+    debug("onStatus summarize GAVE UP, handing prompt back", { sessionID, reason: truncate(reason, 300) })
+    await deliverClaimed(sessionID, entry, opts)
+  }
+
   return async ({ event }: { event: PluginBusEvent }) => {
     if (!isSessionIdle(event)) return
     const { sessionID } = event.properties
     const entry = deps.pending.get(sessionID)
     if (!entry) return
     if (entry.phase === "resuming") {
-      // Compaction is done and the session just went idle: deliver. Claim by
-      // deleting synchronously so the status poll (or a re-entrant idle) can't
-      // also deliver. An event hook must not throw, so failures are logged only.
-      deps.pending.delete(sessionID)
-      if (entry.deferred && deps.settle) {
-        let idle = false
-        try {
-          idle = await deps.settle({ sessionID })
-        } catch (err) {
-          debug("onStatus settle FAILED", { sessionID, error: errText(err) })
-        }
-        if (!idle) {
-          // A new turn started (or the check failed): put the entry back for the
-          // next idle, unless a newer self_compact_and_resume took the slot.
-          if (!deps.pending.has(sessionID)) deps.pending.set(sessionID, entry)
-          debug("onStatus deferred resume re-armed (busy after settle)", {
-            sessionID,
-            rearmed: deps.pending.get(sessionID) === entry,
-          })
-          return
-        }
-      }
-      await deliverResume(deps.callPromptAsync, sessionID, entry, "onStatus", { rethrow: false })
+      // Compaction is done (or failed, v6) and the session just went idle: deliver.
+      await deliverClaimed(sessionID, entry, { settle: !!entry.deferred })
       return
     }
     if (entry.phase !== "awaitingTurnEnd") {
@@ -679,31 +814,128 @@ export function createOnStatus(deps: {
       deps.pending.delete(sessionID)
       return
     }
-    debug("onStatus firing summarize", {
-      sessionID,
-      providerID: model.providerID,
-      modelID: model.modelID,
-    })
+    const maxAttempts = SUMMARIZE_RETRY_DELAYS_MS.length + 1
+    // Still ours to act on: not claimed by onCompacted, not replaced by a newer
+    // tool call, not evicted.
+    const stillOurs = () => deps.pending.get(sessionID) === entry && entry.phase === "summarizing"
 
-    try {
-      await deps.callSummarize({
+    for (;;) {
+      entry.summarizeAttempts = (entry.summarizeAttempts ?? 0) + 1
+      const attempt = entry.summarizeAttempts
+      debug("onStatus firing summarize", {
         sessionID,
         providerID: model.providerID,
         modelID: model.modelID,
+        attempt,
       })
-      debug("onStatus summarize OK", { sessionID })
-      // On success, leave the entry in 'summarizing' phase. The
-      // session.compacted handler will pop it when compaction completes.
-    } catch (err) {
-      // Summarize failed; evict so the next idle doesn't retry. User
-      // re-invokes the skill if they still want to compact.
-      debug("onStatus summarize FAILED evict", {
-        sessionID,
-        error: errText(err),
-      })
-      deps.pending.delete(sessionID)
+      const startedAt = now()
+      let failure: unknown
+      try {
+        await deps.callSummarize({
+          sessionID,
+          providerID: model.providerID,
+          modelID: model.modelID,
+        })
+      } catch (err) {
+        failure = err
+      }
+      const elapsedMs = now() - startedAt
+
+      if (failure === undefined) {
+        debug("onStatus summarize OK", { sessionID, elapsedMs })
+        // Normally session.compacted has already moved the entry on: it is
+        // published, and the plugin's listener runs, before /summarize returns.
+        // An entry still `summarizing` after a grace period means the server
+        // answered 200 without compacting (compaction.ts returns "stop" without
+        // publishing Compacted when the summary step errors).
+        await sleep(NO_COMPACTION_GRACE_MS)
+        if (!stillOurs()) return
+        // A cancelled run also answers 200 (runner onInterrupt). A human who
+        // interrupted the compaction must not get a turn started behind their back.
+        let latest: LatestError | undefined
+        try {
+          latest = await deps.latestError?.({ sessionID })
+        } catch (err) {
+          debug("onStatus latestError FAILED", { sessionID, error: errText(err) })
+        }
+        if (!stillOurs()) return
+        if (latest?.aborted) {
+          entry.phase = "resuming"
+          entry.deferred = true
+          entry.noReply = true
+          entry.failureNote = INTERRUPTED_NOTE
+          debug("onStatus compaction interrupted, storing prompt without a turn", { sessionID })
+          await deliverClaimed(sessionID, entry, { settle: true })
+          return
+        }
+        const cause = latest?.error ? `: ${latest.error}` : " (cause unknown)"
+        await handBack(sessionID, entry, `summarize returned, but the session was not compacted${cause}`, {
+          settle: true,
+        })
+        return
+      }
+
+      if (!stillOurs()) {
+        // A response that fails late can arrive after onCompacted has taken the
+        // entry. Evicting it here (what v2-v5 did) dropped a prompt from a
+        // compaction that worked.
+        debug("onStatus summarize FAILED (entry moved on, left alone)", {
+          sessionID,
+          error: errText(failure),
+          phase: deps.pending.get(sessionID) === entry ? entry.phase : "replaced-or-gone",
+        })
+        return
+      }
+      // Only a FAST failure is retried. A slow one means the server already did
+      // real work (loaded history, persisted a compaction marker, ran the model),
+      // so a retry would repeat a full-context compaction.
+      const retryable = isRetryableSummarizeError(failure) && elapsedMs < FAST_FAILURE_MS
+      debug("onStatus summarize FAILED", { sessionID, error: errText(failure), retryable, attempt, maxAttempts, elapsedMs })
+      if (!retryable || attempt >= maxAttempts) {
+        await handBack(sessionID, entry, errText(failure), { settle: true })
+        return
+      }
+
+      // A session that sits idle gets no further idle event, so waiting for the
+      // next one would strand the prompt (the 2026-11-03 incident). Retry here.
+      await sleep(SUMMARIZE_RETRY_DELAYS_MS[attempt - 1])
+      if (!stillOurs()) {
+        debug("onStatus summarize retry stand down (entry moved on)", { sessionID })
+        return
+      }
+      let idle: boolean | undefined
+      try {
+        idle = await isIdle({ sessionID })
+      } catch (err) {
+        debug("onStatus summarize retry status read FAILED", { sessionID, error: errText(err) })
+      }
+      if (!stillOurs()) {
+        debug("onStatus summarize retry stand down (entry moved on)", { sessionID })
+        return
+      }
+      if (idle === undefined) {
+        // Can't tell whether the session is idle. Re-arming would strand the
+        // prompt if it is (no idle event would come), so hand it back now.
+        await handBack(sessionID, entry, `${errText(failure)}; session status unreadable, not retried`, {
+          settle: false,
+        })
+        return
+      }
+      if (!idle) {
+        // Busy. Either the failed request did reach the server and compaction is
+        // running -- then onCompacted claims the entry from this phase as usual --
+        // or something else started a turn. Firing now could race that run, so
+        // wait for the next idle, which re-fires summarize.
+        entry.phase = "awaitingTurnEnd"
+        debug("onStatus summarize re-armed for next idle (session busy)", { sessionID, attempt })
+        return
+      }
     }
   }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
 
@@ -724,6 +956,11 @@ export async function callSummarizeHttp(
   // summarizations. Pigeon's daemon does the same — no timeout.
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/summarize`, ctx.serverUrl)
   debug("callSummarizeHttp request", { sessionID: input.sessionID, url: url.pathname })
+  // keepalive: false = a fresh connection. The 2026-11-03 failure was Bun reusing
+  // a pooled keep-alive socket that the server (node:http, 5 s keep-alive) had
+  // already closed: the model-lookup GETs ran 6 s earlier, and Bun retries a GET
+  // on a stale socket but not a POST. Bun ignores `keepalive` on a Request, so it
+  // must go in the fetch init (verified against opencode's bundled Bun 1.4.0).
   const res = await ctx.fetch(
     new Request(url.toString(), {
       method: "POST",
@@ -734,9 +971,10 @@ export async function callSummarizeHttp(
         auto: false,
       }),
     }),
+    { keepalive: false },
   )
   debug("callSummarizeHttp response", { sessionID: input.sessionID, status: res.status })
-  if (!res.ok) throw new Error(`summarize failed: ${res.status} ${await res.text()}`)
+  if (!res.ok) throw new SummarizeHttpError(res.status, await res.text())
 }
 
 /**
@@ -807,6 +1045,56 @@ export async function waitForSessionIdleHttp(
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
+export interface LatestError {
+  aborted: boolean
+  error?: string
+}
+
+/**
+ * The error on the session's newest message, if it is an assistant message
+ * with one (v6). One bounded read (`limit=1` is the newest message); undefined
+ * when there is no such error or the read fails.
+ */
+export async function readLatestAssistantErrorHttp(
+  ctx: CallContext,
+  input: { sessionID: string; timeoutMs?: number },
+): Promise<LatestError | undefined> {
+  const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/message`, ctx.serverUrl)
+  url.searchParams.set("limit", "1")
+  const res = await getJson(ctx.fetch, url, input.timeoutMs ?? 5_000)
+  if (!res.ok || !Array.isArray(res.body)) return undefined
+  const info = asRecord(asRecord(res.body[res.body.length - 1])?.info)
+  if (info?.role !== "assistant") return undefined
+  const error = asRecord(info.error)
+  if (!error) return undefined
+  const name = typeof error.name === "string" ? error.name : "error"
+  const message = typeof asRecord(error.data)?.message === "string" ? (asRecord(error.data)!.message as string) : ""
+  return { aborted: name === "MessageAbortedError", error: message ? `${name}: ${message}` : name }
+}
+
+/**
+ * One `GET /session/status` read (v6): true = idle (or absent: no runner),
+ * false = busy/retry, undefined = the read failed or was malformed. Unlike
+ * waitForSessionIdleHttp, "could not tell" is kept distinct from "busy".
+ */
+export async function readSessionIdleHttp(
+  ctx: CallContext,
+  input: { sessionID: string; directory?: string },
+): Promise<boolean | undefined> {
+  const url = new URL("/session/status", ctx.serverUrl)
+  if (input.directory) url.searchParams.set("directory", input.directory)
+  try {
+    const res = await ctx.fetch(new Request(url.toString(), { method: "GET" }))
+    if (!res.ok) return undefined
+    const parsed = await res.json()
+    if (!parsed || typeof parsed !== "object") return undefined
+    const status = (parsed as Record<string, { type?: string } | undefined>)[input.sessionID]
+    return !status || status.type === "idle"
+  } catch {
+    return undefined
+  }
+}
+
 // How long a deferred delivery waits after an idle event before re-checking. The
 // early idle from processor.halt precedes a cleanup that waits up to 250 ms per
 // in-flight tool call; 1.5 s covers several of those and is negligible next to a
@@ -833,7 +1121,7 @@ export async function settleThenCheckIdleHttp(
 
 export async function callPromptAsyncHttp(
   ctx: CallContext,
-  input: { sessionID: string; text: string },
+  input: { sessionID: string; text: string; noReply?: boolean },
 ): Promise<void> {
   const url = new URL(`/session/${encodeURIComponent(input.sessionID)}/prompt_async`, ctx.serverUrl)
   debug("callPromptAsyncHttp request", {
@@ -847,7 +1135,7 @@ export async function callPromptAsyncHttp(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         parts: [{ type: "text", text: input.text }],
-        noReply: false,
+        noReply: input.noReply ?? false,
       }),
       signal: AbortSignal.timeout(10_000),
     }),
