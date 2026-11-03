@@ -231,6 +231,20 @@ describe("wrapFetchWithAuth", () => {
     expect(passedReq.headers.get("Content-Type")).toBe("application/json")
   })
 
+  it("forwards a caller's keepalive: false through the re-wrap (Bun reads it only from the init)", async () => {
+    process.env.OPENCODE_SERVER_PASSWORD = "hunter2"
+    const mockBaseFetch = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }))
+    const fetchAuth = wrapFetchWithAuth(mockBaseFetch, {
+      passwordFilePath: path.join(tempDir, "nonexistent"),
+    })
+
+    await fetchAuth(new Request("http://localhost:58432/x", { method: "POST", body: "{}" }), { keepalive: false })
+    expect(mockBaseFetch.mock.calls[0][1]).toEqual({ keepalive: false })
+
+    await fetchAuth(new Request("http://localhost:58432/x", { method: "GET" }))
+    expect(mockBaseFetch.mock.calls[1][1]).toBeUndefined()
+  })
+
   it("invalidates cached auth header on 401 response", async () => {
     process.env.OPENCODE_SERVER_PASSWORD = "wrong_password"
 

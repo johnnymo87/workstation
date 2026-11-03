@@ -10,6 +10,7 @@ import {
   createSelfCompactTool,
   getSharedPendingResumes,
   lookupActiveModel,
+  readSessionIdleHttp,
   settleThenCheckIdleHttp,
   waitForSessionIdleHttp,
 } from "./self-compact-impl"
@@ -53,9 +54,8 @@ const plugin: Plugin = async (ctx) => {
     callPromptAsync: (input) => callPromptAsyncHttp(callCtx, input),
     settle: (input) => settleThenCheckIdleHttp(callCtx, { ...input, directory: ctx.directory }),
     // Gates a summarize retry (v6): one status read, scoped like waitForIdle below.
-    // A failed read counts as busy, so the entry is re-armed rather than fired blind.
-    isIdle: (input) =>
-      waitForSessionIdleHttp(callCtx, { ...input, directory: ctx.directory, attempts: 1 }),
+    // Three-state: an unreadable status hands the prompt back rather than re-arming.
+    isIdle: (input) => readSessionIdleHttp(callCtx, { ...input, directory: ctx.directory }),
   })
 
   const onCompacted = createOnCompacted({

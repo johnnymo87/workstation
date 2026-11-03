@@ -15,6 +15,9 @@ import {
   settleThenCheckIdleHttp,
   SummarizeHttpError,
   SUMMARIZE_RETRY_DELAYS_MS,
+  FAST_FAILURE_MS,
+  NO_COMPACTION_GRACE_MS,
+  readSessionIdleHttp,
 } from "../self-compact-impl"
 import type { PendingResume } from "../self-compact-impl"
 
@@ -640,8 +643,11 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
     const pending = new Map<string, PendingResume>([
       ["ses_x", { prompt: "p", phase: "awaitingTurnEnd", model: MODEL, createdAt: Date.now() }],
     ])
-    const callSummarize = vi.fn().mockResolvedValue(undefined)
-    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn() })
+    let phaseDuringSummarize: string | undefined
+    const callSummarize = vi.fn().mockImplementation(async () => {
+      phaseDuringSummarize = pending.get("ses_x")?.phase
+    })
+    const handler = createOnStatus({ pending, callSummarize, callPromptAsync: vi.fn(), sleep: async () => {} })
     await handler({
       event: {
         type: "session.status",
@@ -654,7 +660,7 @@ describe("createOnStatus (v4: idle-triggered summarize with the stashed model)",
       modelID: "claude",
     })
     // No HTTP model lookup at idle time any more: the model was resolved by the tool.
-    expect(pending.get("ses_x")?.phase).toBe("summarizing")
+    expect(phaseDuringSummarize).toBe("summarizing")
   })
 
   it("evicts a (legacy) entry that carries no model instead of guessing one", async () => {
@@ -725,21 +731,39 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
   const setup = () => {
     const pending = new Map<string, PendingResume>([["s1", awaiting()]])
     const sleep = vi.fn().mockResolvedValue(undefined)
-    const isIdle = vi.fn().mockResolvedValue(true)
+    const isIdle = vi.fn<(i: { sessionID: string }) => Promise<boolean | undefined>>().mockResolvedValue(true)
+    const settle = vi.fn().mockResolvedValue(true)
     const callPromptAsync = vi.fn().mockResolvedValue(undefined)
     const callSummarize = vi.fn().mockResolvedValue(undefined)
-    const deps = { pending, callSummarize, callPromptAsync, sleep, isIdle }
-    return { ...deps, handler: createOnStatus(deps) }
+    let clock = 0
+    const now = () => clock
+    const deps = { pending, callSummarize, callPromptAsync, sleep, isIdle, settle, now }
+    return {
+      ...deps,
+      handler: createOnStatus(deps),
+      advance: (ms: number) => {
+        clock += ms
+      },
+      // A successful /summarize as the plugin sees it: session.compacted has moved
+      // the entry to `resuming` before the response arrives.
+      compacts: async () => {
+        pending.get("s1")!.phase = "resuming"
+      },
+    }
+  }
+  const handedBack = (t: ReturnType<typeof setup>) => {
+    expect(t.callPromptAsync).toHaveBeenCalledOnce()
+    return t.callPromptAsync.mock.calls[0][0] as { sessionID: string; text: string }
   }
 
   it("retries a transport failure after a delay and keeps the entry for onCompacted", async () => {
     const t = setup()
-    t.callSummarize.mockRejectedValueOnce(socketClosed()).mockResolvedValueOnce(undefined)
+    t.callSummarize.mockRejectedValueOnce(socketClosed()).mockImplementationOnce(t.compacts)
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledTimes(2)
-    expect(t.sleep).toHaveBeenCalledOnce()
+    expect(t.sleep).toHaveBeenCalledWith(SUMMARIZE_RETRY_DELAYS_MS[0])
     expect(t.isIdle).toHaveBeenCalledWith({ sessionID: "s1" })
-    expect(t.pending.get("s1")?.phase).toBe("summarizing")
+    expect(t.pending.get("s1")?.phase).toBe("resuming")
     expect(t.callPromptAsync).not.toHaveBeenCalled()
   })
 
@@ -748,10 +772,10 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     t.callSummarize
       .mockRejectedValueOnce(new SummarizeHttpError(502, "bad gateway"))
       .mockRejectedValueOnce(new SummarizeHttpError(429, "slow down"))
-      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(t.compacts)
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledTimes(3)
-    expect(t.pending.get("s1")?.phase).toBe("summarizing")
+    expect(t.callPromptAsync).not.toHaveBeenCalled()
   })
 
   it("gives up after a bounded number of attempts and hands the prompt back to the session", async () => {
@@ -760,11 +784,11 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledTimes(SUMMARIZE_RETRY_DELAYS_MS.length + 1)
     expect(t.pending.has("s1")).toBe(false)
-    expect(t.callPromptAsync).toHaveBeenCalledOnce()
-    const { sessionID, text } = t.callPromptAsync.mock.calls[0][0]
+    const { sessionID, text } = handedBack(t)
     expect(sessionID).toBe("s1")
     expect(text).toContain("NOT compacted")
     expect(text).toContain("socket connection was closed")
+    expect(text).not.toContain(DEFERRED_RESUME_NOTE)
     expect(text.endsWith("resume me")).toBe(true)
   })
 
@@ -774,8 +798,53 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledOnce()
     expect(t.sleep).not.toHaveBeenCalled()
-    expect(t.pending.has("s1")).toBe(false)
-    expect(t.callPromptAsync.mock.calls[0][0].text).toContain("400")
+    expect(handedBack(t).text).toContain("400")
+  })
+
+  it("does not retry a SLOW failure (the server already did real work)", async () => {
+    const t = setup()
+    t.callSummarize.mockImplementation(async () => {
+      t.advance(FAST_FAILURE_MS)
+      throw new SummarizeHttpError(500, "provider overloaded")
+    })
+    await t.handler(idleEvent("s1"))
+    expect(t.callSummarize).toHaveBeenCalledOnce()
+    expect(handedBack(t).text).toContain("500")
+  })
+
+  it("hands the prompt back when summarize returns 200 but nothing compacted", async () => {
+    // compaction.ts returns "stop" without publishing Compacted when the summary
+    // step errors, and the route still answers 200.
+    const t = setup()
+    await t.handler(idleEvent("s1"))
+    expect(t.sleep).toHaveBeenCalledWith(NO_COMPACTION_GRACE_MS)
+    expect(handedBack(t).text).toContain("not compacted")
+  })
+
+  it("does not hand back after a 200 once session.compacted arrives within the grace period", async () => {
+    const t = setup()
+    t.sleep.mockImplementationOnce(t.compacts)
+    await t.handler(idleEvent("s1"))
+    expect(t.callPromptAsync).not.toHaveBeenCalled()
+    expect(t.pending.get("s1")?.phase).toBe("resuming")
+  })
+
+  it("the hand-back settles first and waits for the next idle if a turn has started", async () => {
+    const t = setup()
+    t.callSummarize.mockRejectedValue(new SummarizeHttpError(400, "unknown model"))
+    t.settle.mockResolvedValueOnce(false)
+    await t.handler(idleEvent("s1"))
+    expect(t.callPromptAsync).not.toHaveBeenCalled()
+    const entry = t.pending.get("s1")!
+    expect(entry.phase).toBe("resuming")
+    expect(entry.failureNote).toContain("NOT compacted")
+
+    // Next idle: delivered with the failure note (not the deferred-resume note),
+    // and summarize is NOT fired again.
+    await t.handler(idleEvent("s1"))
+    expect(t.callSummarize).toHaveBeenCalledOnce()
+    expect(handedBack(t).text).toContain("NOT compacted")
+    expect(handedBack(t).text).not.toContain(DEFERRED_RESUME_NOTE)
   })
 
   it("re-arms for the next idle when the session is busy at retry time (summarize may have got through)", async () => {
@@ -791,16 +860,20 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     t.callSummarize.mockRejectedValue(socketClosed())
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledTimes(SUMMARIZE_RETRY_DELAYS_MS.length + 1)
-    expect(t.callPromptAsync).toHaveBeenCalledOnce()
+    handedBack(t)
   })
 
-  it("treats a failed status read at retry time as busy (re-arm, never fire blind)", async () => {
+  it("hands back at once (no settle, no re-arm) when the session status is unreadable", async () => {
+    // Re-arming would strand the prompt in a session that is in fact idle: no
+    // further idle event would ever arrive.
     const t = setup()
     t.callSummarize.mockRejectedValueOnce(socketClosed())
-    t.isIdle.mockRejectedValueOnce(new Error("status read failed"))
+    t.isIdle.mockResolvedValueOnce(undefined)
     await t.handler(idleEvent("s1"))
     expect(t.callSummarize).toHaveBeenCalledOnce()
-    expect(t.pending.get("s1")?.phase).toBe("awaitingTurnEnd")
+    expect(t.settle).not.toHaveBeenCalled()
+    expect(handedBack(t).text).toContain("status unreadable")
+    expect(t.pending.has("s1")).toBe(false)
   })
 
   it("an armed entry still compacts if the dropped summarize did get through (onCompacted claims it)", async () => {
@@ -815,11 +888,9 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
   })
 
   it("leaves the entry alone when compaction already completed before summarize errored", async () => {
-    // session.compacted is published before /summarize returns. If the response
-    // then fails, the entry already belongs to onCompacted's delivery.
     const t = setup()
     t.callSummarize.mockImplementation(async () => {
-      t.pending.get("s1")!.phase = "resuming"
+      await t.compacts()
       throw new SummarizeHttpError(500, "late failure")
     })
     await t.handler(idleEvent("s1"))
@@ -850,6 +921,21 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     expect(t.pending.has("s1")).toBe(false)
   })
 
+  it("tool-time eviction gives a re-armed entry the long bound", async () => {
+    const old = Date.now() - 31 * 60 * 1000
+    const pending = new Map<string, PendingResume>([
+      ["s_rearmed", { ...awaiting(), createdAt: old, summarizeAttempts: 1 }],
+      ["s_fresh", { ...awaiting(), createdAt: old }],
+    ])
+    const tool = createSelfCompactTool({
+      pending,
+      lookupModel: async () => ({ ok: true, model: MODEL, source: "session" }),
+    })
+    await tool.execute({ prompt: "x" }, { sessionID: "s_other" })
+    expect(pending.has("s_rearmed")).toBe(true)
+    expect(pending.has("s_fresh")).toBe(false)
+  })
+
   it("callSummarizeHttp throws a SummarizeHttpError carrying the status", async () => {
     const fetchFn = vi.fn().mockResolvedValue(new Response("nope", { status: 503 }))
     const err = await callSummarizeHttp(
@@ -858,6 +944,30 @@ describe("summarize failure (v6: retry transient failures, surface final ones)",
     ).catch((e) => e)
     expect(err).toBeInstanceOf(SummarizeHttpError)
     expect(err.status).toBe(503)
+  })
+
+  it("callSummarizeHttp asks for a fresh connection (fetch init keepalive: false)", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(null, { status: 200 }))
+    await callSummarizeHttp(
+      { fetch: fetchFn, serverUrl: new URL("http://localhost:4096") },
+      { sessionID: "s1", providerID: "p", modelID: "m" },
+    )
+    expect(fetchFn.mock.calls[0][1]).toEqual({ keepalive: false })
+  })
+
+  it("readSessionIdleHttp distinguishes idle, busy and unknown", async () => {
+    const ctx = (res: Response | Error) => ({
+      fetch: vi.fn().mockImplementation(async () => {
+        if (res instanceof Error) throw res
+        return res
+      }),
+      serverUrl: new URL("http://localhost:4096"),
+    })
+    expect(await readSessionIdleHttp(ctx(json({})), { sessionID: "s1" })).toBe(true)
+    expect(await readSessionIdleHttp(ctx(json({ s1: { type: "idle" } })), { sessionID: "s1" })).toBe(true)
+    expect(await readSessionIdleHttp(ctx(json({ s1: { type: "busy" } })), { sessionID: "s1" })).toBe(false)
+    expect(await readSessionIdleHttp(ctx(new Response("x", { status: 500 })), { sessionID: "s1" })).toBeUndefined()
+    expect(await readSessionIdleHttp(ctx(new Error("reset")), { sessionID: "s1" })).toBeUndefined()
   })
 })
 
@@ -1329,7 +1439,12 @@ describe("self-compact plugin auth integration", () => {
     const paths = mockFetch.mock.calls.map((c) => new URL((c[0] as Request).url).pathname)
     // End-to-end: the tool resolved the model from session metadata (no
     // history download) and the idle handler fired summarize with it.
-    expect(paths).toEqual(["/session/s_auth_1", "/session/s_auth_1/summarize"])
+    expect(paths.slice(0, 2)).toEqual(["/session/s_auth_1", "/session/s_auth_1/summarize"])
+    // A fresh connection for summarize survives the auth re-wrap (v6).
+    expect(mockFetch.mock.calls[1][1]).toEqual({ keepalive: false })
+    // The mock serve never publishes session.compacted, so after the grace period
+    // the prompt is handed back (v6) -- through the same auth'd fetch.
+    expect(paths.slice(2)).toEqual(["/session/status", "/session/s_auth_1/prompt_async"])
     const summarizeBody = await (mockFetch.mock.calls[1][0] as Request).clone().json()
     expect(summarizeBody).toEqual({ providerID: "anthropic", modelID: "claude-3-5", auto: false })
     for (const call of mockFetch.mock.calls) {
