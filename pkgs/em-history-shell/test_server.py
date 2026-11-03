@@ -810,6 +810,7 @@ class TestWholeProcess(unittest.TestCase):
                     handle,
                 )
             srv, cli = socket.socketpair()
+            self.addCleanup(cli.close)
             proc = subprocess.Popen(
                 [sys.executable, os.path.join(HERE, "server.py"),
                  "--allowed-uid", str(UID), "--base", tmp, "--config", cfg],

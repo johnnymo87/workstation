@@ -1442,6 +1442,27 @@
           touch $out
         '';
 
+      # em-history-shell server (pkgs/em-history-shell/server.py): validation, the
+      # bwrap argv, root rules, framing, SO_PEERCRED over a socketpair, and the
+      # protocol with a FAKE bwrap. The real sandbox is EM's escape suite, run
+      # black-box against the deployed server, not here.
+      # The count is PINNED, following checks.ro-shell-tests: update it with the tests.
+      em-history-shell-unit = devboxPkgs.runCommand "em-history-shell-unit" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        export HOME=$TMPDIR
+        cd ${self}
+        python3 -W error::ResourceWarning pkgs/em-history-shell/test_server.py 2>&1 | tee "$TMPDIR/hs.txt"
+        grep -q '^OK$' "$TMPDIR/hs.txt" || { echo "GATE FAILURE: em-history-shell suite did not pass." >&2; exit 1; }
+        grep -q '^Ran 63 tests' "$TMPDIR/hs.txt" || {
+          echo "GATE FAILURE: expected 'Ran 63 tests'. If you added or removed tests" >&2
+          echo "deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q 'skipped' "$TMPDIR/hs.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
+        touch $out
+      '';
+
       goose-roles-tests = devboxPkgs.runCommand "goose-roles-tests" {
         nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.pyyaml ])) devboxPkgs.gnugrep ];
         GOOSE_ROLES_AGENTS_DIR = "${self}/assets/opencode/agents";
@@ -2716,6 +2737,7 @@
         ./hosts/devbox/em-ci-failover.nix
         ./hosts/devbox/nix-gc-floor.nix
         ./hosts/devbox/credo-diff-sweep.nix
+        ./hosts/devbox/em-history-shell.nix
       ];
     };
 

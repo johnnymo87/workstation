@@ -26,8 +26,9 @@
 #
 # --user runs the matrix in your user manager instead of as root (no DynamicUser, no
 # sudo). It is only INDICATIVE: the unit is then already inside a user namespace, so
-# bwrap's own userns is nested, which the real service does not have. Use it to check
-# the script, not to decide.
+# bwrap's own userns is nested, which the real service does not have, and two props
+# (CapabilityBoundingSet, ProtectHome) cannot be tested that way. Use it to check the
+# script, not to decide.
 #
 # Keep PROPS in step with serviceConfig in hosts/devbox/em-history-shell.nix.
 set -euo pipefail
@@ -57,10 +58,12 @@ TOOLS=$("$JQ" -r .tools "$CONFIG")
 SECCOMP=$("$JQ" -r .seccomp "$CONFIG")
 mapfile -t CLOSURE < <("$JQ" -r '.closure[]' "$CONFIG")
 
+STAND_BASE=/run
+[ "$USER_MODE" = 0 ] || STAND_BASE=${XDG_RUNTIME_DIR:-/tmp}
 if [ "$DRY" = 1 ]; then
-  STAND_IN=/run/em-hs-probe.DRYRUN
+  STAND_IN=$STAND_BASE/em-hs-probe.DRYRUN
 else
-  STAND_IN=$(mktemp -d /run/em-hs-probe.XXXXXX)
+  STAND_IN=$(mktemp -d "$STAND_BASE/em-hs-probe.XXXXXX")
   trap 'rm -rf "$STAND_IN"' EXIT
   mkdir -p "$STAND_IN/agent-history/jonathan/warrior" "$STAND_IN/agent-history/livia/son"
   : > "$STAND_IN/agent-history/.agent-history-root"
@@ -91,6 +94,16 @@ PROPS=(
   'CPUQuota=100%'
   'ReadOnlyPaths=-/var/lib/eternal-machinery'
 )
+if [ "$USER_MODE" = 1 ]; then
+  # A user manager cannot drop capabilities (exit 218), and ProtectHome=tmpfs hides
+  # /run/user, where the user-mode stand-in view lives: neither says anything about
+  # the service. Both stay in the root run.
+  kept=()
+  for prop in "${PROPS[@]}"; do
+    case "$prop" in CapabilityBoundingSet=|ProtectHome=*) ;; *) kept+=("$prop") ;; esac
+  done
+  PROPS=("${kept[@]}")
+fi
 # Left OFF in the unit. Each is run alone, to show what it does to bwrap's --proc.
 CANDIDATES=(
   'ProtectKernelTunables=yes'
