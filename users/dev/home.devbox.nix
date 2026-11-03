@@ -102,7 +102,20 @@ let
     // interrupt (observed live 2026-07-03: bare Debugger.enable -> pause
     // requests time out; with the handshake, pauses land).
     await send("Inspector.enable").catch(function () {});
-    await send("Debugger.enable");
+    // The wedge-watcher keeps the Debugger domain enabled on this serve, so a
+    // second enable is refused with "Debugger domain already enabled"
+    // (workstation-mise: every 2026-11-03 js-stacks file was just that error).
+    // The domain is shared, so sample anyway. Script URLs are only announced on
+    // the first enable, so frames show script ids in that case.
+    // HAZARD: when this client disconnects, Bun disables the shared Debugger
+    // domain, and the watcher's later pauses time out (verified 2026-11-03).
+    // The canary restarts the serve right after, so that is harmless there;
+    // after a MANUAL run against a watched serve, restart
+    // opencode-wedge-watcher@<port>.
+    await send("Debugger.enable").catch(function (e) {
+      if (String(e && e.message).indexOf("already enabled") < 0) throw e;
+      console.log("Debugger already enabled by another client (wedge-watcher); sampling anyway");
+    });
     await send("Debugger.setBreakpointsActive", { active: true }).catch(function () {});
     await send("Inspector.initialized").catch(function () {});
     for (let i = 0; i < N; i++) {
@@ -122,7 +135,9 @@ let
         });
         console.log("--- sample " + i + " " + new Date().toISOString());
         console.log(frames.slice(0, 30).join("\n") || "<no frames>");
-        await send("Debugger.resume");
+        // Refused ("Must be paused") when the wedge-watcher has already resumed
+        // the pause it saw broadcast; the sample above is still good.
+        await send("Debugger.resume").catch(function () {});
       } catch (e) {
         console.log("--- sample " + i + " FAILED: " + e.message);
         try { await send("Debugger.resume"); } catch (e2) {}
@@ -142,10 +157,12 @@ let
   # idles with the debugger pre-enabled. It polls /global/health client-side;
   # on 2 consecutive fails (or a manual force-file, for end-to-end testing:
   # `touch /tmp/opencode-wedge-watcher/<port>.force`) it pause/samples/resumes
-  # 10x and appends named frames to /tmp/opencode-wedge-watcher/. NOTE: while
-  # this holds the inspector WS, the canary's own js-stacks connect may fail —
-  # acceptable, the watcher's capture supersedes it. Same constraints as
-  # inspectorPauseStacks: no JS template literals (Nix '' escaping), node
+  # 10x and appends named frames to /tmp/opencode-wedge-watcher/. The serve
+  # canary also drops that force file early in a failure streak and just
+  # before its restart, and copies the resulting captures into its wedge dump
+  # (workstation-mise). It skips its own inspector client while this watcher
+  # is active.
+  # Same constraints as inspectorPauseStacks: no JS template literals (Nix '' escaping), node
   # runtime (nixpkgs bun 1.3.3's WS client is broken against bun's inspector).
   wedgeWatcher = pkgs.writeText "opencode-wedge-watcher.mjs" ''
     import fs from "node:fs";
@@ -1018,23 +1035,42 @@ ${serveIdCase}
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
+          # Marks the start of the current failure streak, so the dump can
+          # collect the wedge-watcher captures taken during it (workstation-mise).
+          SINCE="$STATE/$PORT.since"
 
           # Only police units that are supposed to be up. Intentional stops,
           # crash-loop backoff, etc. reset the counter.
           if [ "$(systemctl --user is-active "$UNIT")" != "active" ]; then
-            rm -f "$FAILFILE"
+            rm -f "$FAILFILE" "$SINCE"
             continue
           fi
 
           if curl -sf --max-time 3 --connect-timeout 3 \
                "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
-            rm -f "$FAILFILE"
+            rm -f "$FAILFILE" "$SINCE"
             continue
           fi
 
           FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$FAILS" > "$FAILFILE"
           echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          # Ask the wedge-watcher for JS stacks early in the streak and again
+          # just before the restart (workstation-mise). Its debugger is already
+          # enabled, which is what makes a capture land on a burning serve
+          # (Debugger.enable itself can take >60 s there). Its own trigger
+          # (2 consecutive 15 s health fails) never fired in the 2026-11-03
+          # storm: the serve answered often enough in between to reset it,
+          # while this probe failed 7 minutes running. Without this, those
+          # 42 wedges left no JS stacks at all. Not at fail 1: most streaks
+          # end there (173 of 410 since 10-27), and each capture is 10 pauses.
+          if [ "$FAILS" -eq 1 ]; then
+            touch "$SINCE"
+          fi
+          if [ "$FAILS" -eq 2 ] || [ "$FAILS" -eq $(( THRESHOLD - 1 )) ]; then
+            mkdir -p /tmp/opencode-wedge-watcher
+            touch "/tmp/opencode-wedge-watcher/$PORT.force" 2>/dev/null || true
+          fi
           [ "$FAILS" -lt "$THRESHOLD" ] && continue
 
           # Wedged. Capture cheap forensics BEFORE the kill destroys them
@@ -1097,12 +1133,26 @@ ${serveIdCase}
             # client deterministically gets NO responses from bun's inspector
             # (all commands time out), while node 22 and bun 1.3.14 both work —
             # verified live 2026-07-03 against serve-0.
-            timeout 250 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
-              "ws://127.0.0.1:1$PORT/debug" 3 500 > "$DUMP/js-stacks" 2>&1 || true
+            # Only when no wedge-watcher holds the debugger: the watcher's
+            # captures (requested above, copied below) cover that case, and
+            # this client's disconnect would disable the watcher's shared
+            # Debugger domain. It could also hold the restart for up to 250 s.
+            if systemctl --user is-active --quiet "opencode-wedge-watcher@$PORT.service"; then
+              echo "skipped: opencode-wedge-watcher@$PORT holds the debugger; see its $PORT-*.stacks captures in this dump" > "$DUMP/js-stacks"
+            else
+              timeout 250 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
+                "ws://127.0.0.1:1$PORT/debug" 3 500 > "$DUMP/js-stacks" 2>&1 || true
+            fi
           fi
+          # The wedge-watcher captures requested during this streak (above).
+          for f in /tmp/opencode-wedge-watcher/"$PORT"-*.stacks; do
+            [ -f "$f" ] && [ -e "$SINCE" ] && [ "$f" -nt "$SINCE" ] && cp "$f" "$DUMP/" 2>/dev/null || true
+          done
           echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
           systemctl --user restart "$UNIT"
-          rm -f "$FAILFILE"
+          # A force request the watcher never got to (a capture whose pauses do
+          # not land can run for minutes) must not fire on the fresh serve.
+          rm -f "$FAILFILE" "$SINCE" "/tmp/opencode-wedge-watcher/$PORT.force"
         done
       ''}";
     };
