@@ -1452,7 +1452,9 @@
       } ''
         export HOME=$TMPDIR
         cd ${self}
-        python3 -W error::ResourceWarning pkgs/em-history-shell/test_server.py 2>&1 | tee "$TMPDIR/hs.txt"
+        # PYTHONWARNINGS, not `python3 -W ...`: test-unwired-tests.sh only sees a runner
+        # directly followed by the path.
+        PYTHONWARNINGS=error::ResourceWarning python3 pkgs/em-history-shell/test_server.py 2>&1 | tee "$TMPDIR/hs.txt"
         grep -q '^OK$' "$TMPDIR/hs.txt" || { echo "GATE FAILURE: em-history-shell suite did not pass." >&2; exit 1; }
         grep -q '^Ran 63 tests' "$TMPDIR/hs.txt" || {
           echo "GATE FAILURE: expected 'Ran 63 tests'. If you added or removed tests" >&2
