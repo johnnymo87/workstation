@@ -158,10 +158,10 @@ let
   # on 2 consecutive fails (or a manual force-file, for end-to-end testing:
   # `touch /tmp/opencode-wedge-watcher/<port>.force`) it pause/samples/resumes
   # 10x and appends named frames to /tmp/opencode-wedge-watcher/. The serve
-  # canary also drops that force file at the start and near the end of a
-  # failure streak, and copies the resulting captures into its wedge dump
-  # (workstation-mise). While this holds the debugger, the canary's own
-  # Debugger.enable is refused as "already enabled"; it samples anyway.
+  # canary also drops that force file early in a failure streak and just
+  # before its restart, and copies the resulting captures into its wedge dump
+  # (workstation-mise). It skips its own inspector client while this watcher
+  # is active.
   # Same constraints as inspectorPauseStacks: no JS template literals (Nix '' escaping), node
   # runtime (nixpkgs bun 1.3.3's WS client is broken against bun's inspector).
   wedgeWatcher = pkgs.writeText "opencode-wedge-watcher.mjs" ''
@@ -1055,18 +1055,19 @@ ${serveIdCase}
           FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$FAILS" > "$FAILFILE"
           echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
-          # Ask the wedge-watcher for JS stacks NOW, at the start of the streak
-          # and again near its end (workstation-mise). Its debugger is already
+          # Ask the wedge-watcher for JS stacks early in the streak and again
+          # just before the restart (workstation-mise). Its debugger is already
           # enabled, which is what makes a capture land on a burning serve
           # (Debugger.enable itself can take >60 s there). Its own trigger
           # (2 consecutive 15 s health fails) never fired in the 2026-11-03
           # storm: the serve answered often enough in between to reset it,
           # while this probe failed 7 minutes running. Without this, those
-          # 42 wedges left no JS stacks at all.
+          # 42 wedges left no JS stacks at all. Not at fail 1: most streaks
+          # end there (173 of 410 since 10-27), and each capture is 10 pauses.
           if [ "$FAILS" -eq 1 ]; then
             touch "$SINCE"
           fi
-          if [ "$FAILS" -eq 1 ] || [ "$FAILS" -eq $(( THRESHOLD - 2 )) ]; then
+          if [ "$FAILS" -eq 2 ] || [ "$FAILS" -eq $(( THRESHOLD - 1 )) ]; then
             mkdir -p /tmp/opencode-wedge-watcher
             touch "/tmp/opencode-wedge-watcher/$PORT.force" 2>/dev/null || true
           fi
@@ -1132,8 +1133,16 @@ ${serveIdCase}
             # client deterministically gets NO responses from bun's inspector
             # (all commands time out), while node 22 and bun 1.3.14 both work —
             # verified live 2026-07-03 against serve-0.
-            timeout 250 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
-              "ws://127.0.0.1:1$PORT/debug" 3 500 > "$DUMP/js-stacks" 2>&1 || true
+            # Only when no wedge-watcher holds the debugger: the watcher's
+            # captures (requested above, copied below) cover that case, and
+            # this client's disconnect would disable the watcher's shared
+            # Debugger domain. It could also hold the restart for up to 250 s.
+            if systemctl --user is-active --quiet "opencode-wedge-watcher@$PORT.service"; then
+              echo "skipped: opencode-wedge-watcher@$PORT holds the debugger; see its $PORT-*.stacks captures in this dump" > "$DUMP/js-stacks"
+            else
+              timeout 250 ${pkgs.nodejs}/bin/node ${inspectorPauseStacks} \
+                "ws://127.0.0.1:1$PORT/debug" 3 500 > "$DUMP/js-stacks" 2>&1 || true
+            fi
           fi
           # The wedge-watcher captures requested during this streak (above).
           for f in /tmp/opencode-wedge-watcher/"$PORT"-*.stacks; do
@@ -1141,7 +1150,9 @@ ${serveIdCase}
           done
           echo "RESTARTING wedged $UNIT (pid=$PID); forensics in $DUMP"
           systemctl --user restart "$UNIT"
-          rm -f "$FAILFILE" "$SINCE"
+          # A force request the watcher never got to (a capture whose pauses do
+          # not land can run for minutes) must not fire on the fresh serve.
+          rm -f "$FAILFILE" "$SINCE" "/tmp/opencode-wedge-watcher/$PORT.force"
         done
       ''}";
     };
