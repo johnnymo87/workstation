@@ -99,6 +99,16 @@ check "healthy: all sources were read" 'grep -q "/v1/presence" "$S/fetch.log" &&
 at 600; run; at 1200; run
 check "healthy: still quiet after more passes (WARN lines, wanted close)" '[ "$(tgn)" -eq 0 ]'
 
+# 1b. A never-started session (deferred boot), as stack-health prints it since
+# EM #1173: INFO/WARN lines, no UNKNOWN. Hand-derived from the live capture
+# (the live checkout predates #1173), so the wording is the PR's, the layout is real.
+setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; run; at 600; run; at 1200; run
+check "deferred boot (INFO/WARN only): no alert over three passes" '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 0 ]'
+export EM_STACK_MONITOR_DRY_RUN=1; run; unset EM_STACK_MONITOR_DRY_RUN
+check "deferred boot: the raw key set is empty (no monitor:blind)" 'grep -qx "\[dry-run\] raw keys: (none)" "$S/out"'
+check "fixture: the deferred capture has INFO and WARN lines and no UNKNOWN" \
+  'grep -q "^  tape  *INFO" "$fx/stack-health-deferred.txt" && grep -q "^  routing_consumer WARN" "$fx/stack-health-deferred.txt" && ! grep -q UNKNOWN "$fx/stack-health-deferred.txt"'
+
 # 2. No stack: quiet, clears pending without "resolved", asks nothing of the API.
 setup; mkhealth "postgres FAIL refused"; run   # pass 1 of a debounced FAIL
 : >"$S/fetch.log"; touch "$S/nostack"; at 600; run
@@ -262,39 +272,107 @@ mkhealth "postgres FAIL refused" "tec-mcp DOWN gone"; at 1200; run; at 1800; run
 check "a new key re-announces as problem listing both" \
   '[ "$(tgn)" -eq 2 ] && head -n 1 <<<"$(tglast)" | grep -qx "EM stack: problem" && grep -q "tec-mcp" <<<"$(tglast)" && grep -q "postgres" <<<"$(tglast)"'
 
-# 13. Events: child_restart_failed posts once and hourly at most.
-crf() { # $1: boot_id, $2: cause
+# 13. Events: child_restart_failed posts once per recovery, and at most hourly per agent.
+A1=2026-11-04T19:00:00Z; A2=2026-11-04T19:20:00Z; A3=2026-11-04T19:50:00Z
+crf() { # $1: boot_id, $2: cause, $3: at (the newest recovery's time)
   serve_jq 4400_em_quiescence quiescence.json \
-    '.boot_id = $b | .agents.warrior_f.recoveries = [{at: "2026-11-04T19:00:00Z", cause: $c, detail: "boom: mcp child would not start"}]' \
-    --arg b "$1" --arg c "$2"
+    '.boot_id = $b | .agents.warrior_f.recoveries = [{at: $a, cause: $c, detail: "boom: mcp child would not start"}]' \
+    --arg b "$1" --arg c "$2" --arg a "${3:-$A1}"
 }
 setup; crf b1 child_restart_failed; run
 check "crf: posts an event once" '[ "$(tgn)" -eq 1 ] && head -n 1 <<<"$(tglast)" | grep -qx "EM stack: event" && grep -q "agent warrior_f: child_restart_failed" <<<"$(tglast)"'
 check "crf: the event carries the checkout and runbook" 'grep -q "@ $head_sha" <<<"$(tglast)"'
 check "event alone leaves the standing state ok" '[ "$(st .sig)" = ok ]'
+check "crf: the key names the recovery time" '[ "$(st ".events | keys[0]")" = "b1:warrior_f:crf:$A1" ]'
 at 600; run; at 1200; run
-check "crf: not again on later passes in the hour" '[ "$(tgn)" -eq 1 ]'
+check "crf: not again on later passes" '[ "$(tgn)" -eq 1 ]'
+at 3600; run; at 3900; run
+check "crf: the same recovery an hour later does not post again" '[ "$(tgn)" -eq 1 ]'
+crf b1 child_restart_failed "$A2"; at 1800; run
+check "crf: a newer recovery inside the rate window does not post" '[ "$(tgn)" -eq 1 ]'
+check "crf: and is not recorded" '[ "$(st ".events | length")" -eq 1 ]'
 at 3600; run
-check "crf: a stuck heal posts again the next hour" '[ "$(tgn)" -eq 2 ]'
-at 3600; run
-check "crf: and only once in that hour" '[ "$(tgn)" -eq 2 ]'
-at $((3600 * 4)); run
-check "seen events are pruned after 2 h" '[ "$(st ".events | keys | length")" -eq 1 ] && ! st ".events | keys[]" | grep -q ":crf:500000$"'
+check "crf: a newer recovery after the rate window posts" '[ "$(tgn)" -eq 2 ] && grep -q "$A2" <<<"$(tglast)"'
+at 3900; run
+check "crf: and only once" '[ "$(tgn)" -eq 2 ]'
+at 7000; run
+check "seen events are kept at least 2 h" '[ "$(st ".events | length")" -eq 2 ]'
+crf b1 child_restart_failed "$A3"; at 7300; run
+check "a new recovery after the window posts again" '[ "$(tgn)" -eq 3 ]'
+check "seen events older than 2 h are pruned" '! st ".events | keys[]" | grep -q "crf:$A1"'
 check "an event never made a resolved" '! grep -q resolved <<<"$(tgall)"'
 setup; crf b1 "run_limit+child_restart_failed"; run
 check "crf inside a joined cause counts" '[ "$(tgn)" -eq 1 ]'
 setup; serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.recoveries = [{at: "2026-11-04T19:00:00Z", cause: "run_limit", detail: "x"}]'; run
 check "a single recovery stays quiet" '[ "$(tgn)" -eq 0 ]'
-setup; serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.recoveries = [range(0;3) | {at: "2026-11-04T19:00:00Z", cause: "run_limit", detail: "x"}]'
-run
+flap() { # $1..: the `at` of each recovery
+  local a; local -a items=()
+  for a in "$@"; do items+=("{\"at\":\"$a\",\"cause\":\"run_limit\",\"detail\":\"x\"}"); done
+  local IFS=,
+  serve_jq 4400_em_quiescence quiescence.json ".agents.warrior_f.recoveries = [${items[*]}]"
+}
+setup; flap "$A1" "$A1" "$A1"; run
 check "3 recoveries post a flap event" '[ "$(tgn)" -eq 1 ] && grep -q "agent warrior_f: 3 recoveries in the last hour (run_limit)" <<<"$(tglast)"'
-at 600; run
-check "the flap posts once" '[ "$(tgn)" -eq 1 ]'
+at 600; run; at 3600; run
+check "the flap posts once for the same recoveries" '[ "$(tgn)" -eq 1 ]'
+flap "$A1" "$A1" "$A1" "$A2"; at 1200; run
+check "a flap with a newer recovery inside the rate window does not post" '[ "$(tgn)" -eq 1 ]'
+at 3600; run
+check "and posts after the rate window" '[ "$(tgn)" -eq 2 ]'
 setup; serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.recoveries = [{at: "x", cause: "run_limit", detail: "x"}, {at: "x", cause: "run_limit", detail: "x"}, {at: "x", cause: "child_restart_failed", detail: "x"}]'; run
 check "child_restart_failed ones do not count toward a flap" '[ "$(tgn)" -eq 1 ] && ! grep -q "recoveries in the last hour" <<<"$(tglast)"'
 setup; crf b1 child_restart_failed; run
 serve_jq 4400_em_quiescence quiescence.json '.boot_id = "b2"'; at 600; run
 check "a new boot_id (empty recoveries) replays nothing" '[ "$(tgn)" -eq 1 ]'
+
+# 13b. A source that fails for one pass neither drops a standing key nor resolves it.
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+check "GM halt announced" '[ "$(tgn)" -eq 1 ]'
+rm -f "$S/web/4002_v1_presence"; at 600; run
+check "presence timeout during a standing GM halt: no resolved, no new message" '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && [ "$(st ".keys | join(\",\")")" = gm_halt:jonathan ]'
+at 1200; run
+serve 4002_v1_presence 200 "$fx/presence.json"; at 1800; run
+check "presence back: still quiet (same set, no reminder yet)" '[ "$(tgn)" -eq 1 ]'
+rm -f "$S/web/4002_v1_sessions_jonathan_status"; at 2400; run
+check "status timeout during a standing GM halt: no resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | length")" -eq 1 ]'
+gm_status running x null; at 3000; run
+check "the halt really clearing resolves" '[ "$(tgn)" -eq 2 ] && [ "$(tglast)" = "EM stack: resolved, all checks OK again." ]'
+
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+: >"$S/health"; at 1200; run
+check "no SUMMARY while fail:postgres stands: not resolved, first blind pass quiet" '[ "$(tgn)" -eq 1 ] && [ "$(st .keys[0])" = fail:postgres ]'
+at 1800; run
+check "monitor:blind joins, and fail:postgres is carried with its text" \
+  '[ "$(tgn)" -eq 2 ] && m=$(tglast) && grep -q "^- postgres FAIL: refused" <<<"$m" && grep -q "printed no SUMMARY" <<<"$m" && ! grep -q resolved <<<"$m"'
+sethealth postgres OK fine; at 2400; run
+check "stack-health answering again resolves everything" '[ "$(tgn)" -eq 3 ] && [ "$(tglast)" = "EM stack: resolved, all checks OK again." ]'
+
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+sethealth postgres UNKNOWN "psql unresolvable"; at 1200; run
+check "a standing fail:<check> read UNKNOWN is carried, not resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st .keys[0])" = fail:postgres ]'
+
+setup; mkhealth "postgres FAIL refused"; run
+: >"$S/health"; at 600; run
+mkhealth "postgres FAIL refused"; at 1200; run
+check "a debounce count survives a pass whose source failed" '[ "$(tgn)" -eq 1 ] && grep -q "^- postgres FAIL" <<<"$(tglast)"'
+
+setup
+serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
+rm -f "$S/web/4400_em_quiescence"; at 1200; run; at 1800; run
+check "quiescence down while a quarantine stands: no resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st .keys[0])" = quarantine:warrior_f ]'
+serve 4400_em_quiescence 200 "$fx/quiescence.json"; at 2400; run
+check "quiescence back and the quarantine gone: resolved" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+
+setup
+serve_jq 4002_v1_presence presence.json '.presence.livia.last_close = {at: "2026-11-04T19:00:00Z", by: null, cause: "server", code: 1006, idle: false}'
+run; at 600; run
+serve 4002_v1_presence 503 "$fx/status-livia-503.json"; at 1200; run
+check "presence down while a presence key stands: no resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st .keys[0])" = presence:livia ]'
+
+# A source answering "all clear" does clear its keys (carry-forward is only for silence).
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+sethealth postgres OK fine; at 1200; run
+check "an answered check clears its key" '[ "$(tgn)" -eq 2 ] && [ "$(st ".keys | length")" -eq 0 ]'
 
 # 14. One Telegram message per pass: events ride with the standing problems.
 setup; mkhealth "postgres FAIL refused"; run
@@ -335,9 +413,13 @@ setup; touch "$S/nostack"; export EM_STACK_MONITOR_DRY_RUN=1; run
 check "dry run without a stack says so" 'grep -q "stack: none" "$S/out" && [ "$rc" -eq 0 ]'
 unset EM_STACK_MONITOR_DRY_RUN
 
-# 17. Corrupt state is treated as empty.
+# 17. Corrupt state, or valid JSON of the wrong shape, is normalized field by field.
 setup; echo 'not json' >"$STATE_DIRECTORY/state.json"; mkhealth "postgres FAIL refused"; run
 check "corrupt state does not abort" '[ "$rc" -eq 0 ] && [ "$(pend fail:postgres)" -eq 1 ]'
+for bad in '{"keys":"x"}' '{"pending":[1]}' '[1,2]' '{"sig":5,"sent_at":"soon","texts":[],"events":{"a":"b"},"keys":[1]}' '{"pending":{"fail:postgres":"many"}}'; do
+  setup; echo "$bad" >"$STATE_DIRECTORY/state.json"; mkhealth "postgres FAIL refused"; run; at 600; run
+  check "wrong-shape state $bad does not kill a pass" '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && [ "$(st .sig)" != "" ]'
+done
 
 # 18. Secrets and the dead-man's ping, through a fake curl.
 prun() { PATH="$S/bin:$PATH" run; }
@@ -353,7 +435,7 @@ setup; fake_curl; unset EM_STACK_TG_CMD
 echo "https://hc.example.invalid/ping/abc" >"$CREDENTIALS_DIRECTORY/hc_ping_url"
 mkhealth "postgres FAIL refused"; prun; at 600; prun
 check "default Telegram path: token and chat id reach curl on stdin only" \
-  'grep -q "bot" "$S/curl.in" && grep -q "api.telegram.org/botbot/sendMessage" "$S/curl.in" && ! grep -q "botbot" "$S/curl.args" && ! grep -q "api.telegram" "$S/curl.args"'
+  'grep -q "api.telegram.org/botbot/sendMessage" "$S/curl.in" && grep -q "chat_id=1" "$S/curl.in" && ! grep -q "botbot" "$S/curl.args" && ! grep -q "chat_id" "$S/curl.args" && ! grep -q "api.telegram" "$S/curl.args"'
 check "default Telegram path: the message text goes out as form data" 'grep -q "text=EM stack: problem" "$S/curl.args"'
 check "dead-man ping: success after a delivering pass, URL on stdin" 'grep -q "hc.example.invalid/ping/abc\"" "$S/curl.in" && ! grep -q "hc.example.invalid" "$S/curl.args"'
 setup; fake_curl; echo "https://hc.example.invalid/ping/abc" >"$CREDENTIALS_DIRECTORY/hc_ping_url"

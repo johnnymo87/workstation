@@ -43,6 +43,24 @@ WARN lines never alert. UNKNOWN lines alert only as `monitor:blind`. Stuck recov
 own: stack-health FAILs on `recovering_for_s >= 600`, which comes through as
 `fail:agentos`.
 
+Source failures. Every source is graded on its own, and the pass records which ones
+answered: stack-health (a line for the check that is not `UNKNOWN`), presence, each
+session's status (HTTP 200), quiescence. A key that was active last pass, is missing
+now, and whose source did not answer is carried forward with its stored text (the
+state keeps the text of each active key), so one failed fetch neither drops a
+standing key nor sends a false "resolved":
+
+- `fail:<check>`: carried while that check is absent or `UNKNOWN` this pass;
+- `monitor:blind`: never carried, it is derived from the stack-health output;
+- `presence:<sid>`: carried while presence did not answer;
+- `gm_halt:<sid>`: carried while presence did not answer, or while that session's
+  status did not;
+- `quarantine:<agent>`: carried while quiescence did not answer.
+
+There is no global "degraded" flag: quiescence never answers in sim modes. Debounce
+counts of such keys are carried too, unchanged, so a failed fetch does not restart a
+debounce.
+
 Debounce: a `fail:*`, `monitor:blind`, `presence:*` or `quarantine:*` key alerts only once it has been seen on
 2 passes in a row (one pass during a BEAM or AgentOS restart is normal). The pending set is
 kept in the state directory. Resolve after 1 clean pass.
@@ -53,13 +71,19 @@ From `/em/quiescence`, each agent's `recoveries` list (`{at, cause, detail}`, la
 in memory per AgentOS boot):
 
 - a recovery whose `cause` contains `child_restart_failed`. Key
-  `<boot_id>:<agent>:crf:<floor(now/3600)>`: a stuck heal retries every few minutes, so this
-  posts at most hourly per agent (stack-health turns a stuck one into `fail:agentos` anyway).
+  `<boot_id>:<agent>:crf:<at of the newest such recovery>`.
 - 3 or more recoveries for one agent in the list, not counting `child_restart_failed` ones
-  (flapping). Key `<boot_id>:<agent>:flap:<floor(now/3600)>`.
+  (flapping). Key `<boot_id>:<agent>:flap:<at of the newest non-crf recovery>`.
+
+A recovery stays in the list for an hour, so keying on its `at` makes the same recovery
+the same event. A stuck heal retries every few minutes and keeps adding recoveries, so
+each `<boot_id>:<agent>:<kind>` is also rate-limited: nothing is posted, or recorded,
+while a seen key with that prefix is under 3600 s old (stack-health turns a stuck heal
+into `fail:agentos` anyway).
 
 All of a pass's messages go out as one Telegram message, so a failed send retried next pass
-cannot duplicate part of it. Seen event keys are kept in the state directory (pruned after 2 h), so an AgentOS restart
+cannot duplicate part of it. Seen event keys are kept in the state directory (pruned after 2 h, so never inside the 1 h
+rate window), so an AgentOS restart
 (new `boot_id`) never replays old events. Single recoveries stay quiet: they are the system
 fixing itself.
 
@@ -69,7 +93,8 @@ fixing itself.
   `writeShellApplication` like em-ci-monitor.
 - A system service with `User=dev` (stack-health lives in `/home/dev`, uses per-user
   `pgrep` and `/run/user/1000`, and reads postgres through the dev-owned binary). Hardening:
-  `ProtectHome=read-only` (not tmpfs, the script must be readable), `ProtectSystem=strict`,
+  `ProtectHome=read-only` (not tmpfs, the script must be readable), `ProtectSystem=strict`
+  with `ReadWritePaths=/tmp` (stack-health's `mktemp`; without it every check reads UNKNOWN),
   `NoNewPrivileges`, `StateDirectory=em-stack-monitor`,
   `Environment=XDG_RUNTIME_DIR=/run/user/1000`. No `PrivateTmp` (stack-health scans
   `/tmp/devenv-*`) and no `PrivateNetwork` (it needs localhost and api.telegram.org). The unit
@@ -80,11 +105,15 @@ fixing itself.
 - Every source is graded on its own. A fetch that fails or a body that does not parse means
   "no data from that source" (for stack-health, `monitor:blind`), never an aborted pass.
 - `bin/stack-health` runs from `/home/dev/projects/eternal-machinery` (the main checkout),
-  `TimeoutStartSec=5min`. Its exit code is ignored. Each alert names the checkout's short
+  `TimeoutStartSec=8min` (stack-health's own 200 s timeout, four or more 10 s fetches,
+  Telegram's retries and a `/fail` ping add up to about 6.5 min). Its exit code is ignored. Each alert names the checkout's short
   `HEAD`, because nothing keeps that tree current. Lines are parsed with
   `^  (\S+)\s+(FAIL|DOWN|DEAD_MANAGER)\b`.
 - Timer: `OnBootSec=10min`, `OnUnitActiveSec=10min`, `RandomizedDelaySec=30s`.
-- Secrets by `LoadCredential`: `telegram_bot_token`, `telegram_chat_id` (pigeon's).
+- Secrets by `LoadCredential`: `telegram_bot_token`, `telegram_chat_id` (pigeon's). The bot
+  token and chat id reach curl only on stdin (`-K -`), never in argv.
+- State is normalized at load, field by field: corrupt JSON, or valid JSON of the wrong
+  shape, falls back to defaults and never kills a pass.
 - Dead-man ping: behind `hcEnabled = false` in the nix `let`. When true it adds sops secret
   `em_stack_hc_ping_url` (root 0400) and its `LoadCredential`. The script pings only when
   `$CREDENTIALS_DIRECTORY/hc_ping_url` exists, with em-ci-monitor's contract (success after a
@@ -104,22 +133,32 @@ fixing itself.
 live stack (real field types) and served by a fake fetch, which can also answer 503 or
 nothing. stack-health, the gate, the mode, Telegram and the clock are fakes too. Cases: no stack is
 quiet and clears pending without "resolved", but sends one "stopped" line for announced problems;
-a failing source (503, no answer, bad JSON) does not abort the pass; UNKNOWN reads as
+a failing source (503, no answer, bad JSON) does not abort the pass; stack-health output for a
+never-started session (deferred boot: INFO and WARN lines only, per EM #1173) raises no key; UNKNOWN reads as
 `monitor:blind`; `agentos DOWN` in a sim mode is quiet; a wanted close (`wants_out` object) is
 quiet; an `operator_halt` is quiet; a stuck `child_restart_failed` posts once an hour; a FAIL alerts only on its second pass; WARN and
 UNKNOWN never alert; STILL after 6 h; resolved after a clean pass; presence server close
 alerts, a wanted close does not; GM halt under 20 min quiet, over it alerts, a missing
 `halted_at` alerts on the 2nd pass; `child_restart_failed` posts once and not again on the
-next pass; 3 recoveries post a flap once; a new `boot_id` does not replay; a Telegram
-failure exits non-zero and records nothing.
+next pass or an hour later (same `at`), a newer one inside the rate window neither posts nor is
+recorded and one after it posts, seen events are kept 2 h; 3 recoveries post a flap once (same
+rules); a new `boot_id` does not replay; a failed source carries its keys (presence timeout
+during a standing GM halt, no `SUMMARY` while `fail:postgres` stands, a standing check read
+`UNKNOWN`, quiescence down during a quarantine, a debounce count surviving a failed pass) and an
+answered "clear" still resolves; wrong-shape state (`{"keys":"x"}`, `{"pending":[1]}`, ...) does
+not kill a pass; the Telegram token and chat id never appear in curl's argv; a Telegram failure
+exits non-zero and records nothing.
 
 ## Rollout
 
 1. Merge EM #1173 first, and pull the main checkout (`/home/dev/projects/eternal-machinery`),
    which is the stack-health the monitor runs.
 2. Merge this, then `sudo nixos-rebuild switch --flake .#devbox` (Jonathan, or on his word).
-3. `sudo systemctl start em-stack-monitor-dry-run` with the stack up, read the journal. On a
-   healthy stack the raw key set must be empty (in particular no `monitor:blind`).
+3. `sudo systemctl start em-stack-monitor-dry-run` with the stack up, read the journal. It must
+   print `mode: manual-live` (not `unknown`: an unknown mode means the BEAM's environment was
+   unreadable, and `agentos DOWN` is then not suppressed in sim modes), and on a healthy stack the
+   raw key set must be empty (in particular no `monitor:blind`). Run it both before the TEC
+   session is started (deferred boot) and after.
 4. The timer is on from the rebuild. If it is noisy, `sudo systemctl stop em-stack-monitor.timer`
    and tune.
 5. For the dead-man ping: create a healthchecks.io check, add its ping URL to devbox sops as

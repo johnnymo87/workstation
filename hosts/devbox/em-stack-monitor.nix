@@ -65,7 +65,10 @@ let
     serviceConfig = {
       Type = "oneshot";
       ExecStart = lib.getExe monitor;
-      TimeoutStartSec = "5min";
+      # Worst case: stack-health 200 s (its own timeout) + four 10 s fetches +
+      # Telegram (3 retries of 20 s plus backoff, ~90 s) + a /fail ping
+      # (~45 s) is about 6.5 min, so 8 min; the timeout inside the script stays.
+      TimeoutStartSec = "8min";
       User = "dev";
       Group = config.users.users.dev.group;
       # systemd creates /var/lib/em-stack-monitor and chowns it to User=.

@@ -9,9 +9,9 @@
 #   tg_chat_id      the forum group's chat id (no thread id -> General topic)
 #   hc_ping_url     healthchecks.io ping URL; optional, the dead-man's ping is
 #                   sent only when this file exists (hcEnabled in the .nix)
-# Secrets reach curl only through a config on stdin (`-K -`, written by the
-# printf builtin), never on a command line, where any host user could read
-# them from /proc.
+# Secrets (the bot token, the chat id, the ping URL) reach curl only through a
+# config on stdin (`-K -`, written by the printf builtin), never on a command
+# line, where any host user could read them from /proc.
 #
 # Configuration (environment, set by the unit): EM_STACK_REPO (the main EM
 # checkout, where bin/stack-health runs), EM_STACK_RUNBOOK, EM_STACK_REMIND_H,
@@ -33,14 +33,32 @@
 # that source" (for stack-health, the key monitor:blind), never an aborted
 # pass. So every command that may fail sits in an `if` or has `|| true`.
 #
+# Carry-forward. A source that fails for one pass must neither drop a standing
+# key nor produce a false "resolved". The pass records which sources answered
+# (stack-health: a line for the check that is not UNKNOWN; presence; the status
+# of each session; quiescence). A key that was active last pass, is missing now,
+# and whose source did not answer is carried forward with its stored text:
+#   fail:<check>   carried while that check is absent or UNKNOWN this pass
+#   monitor:blind  never carried (it is derived from the stack-health output)
+#   presence:<sid> carried while presence did not answer
+#   gm_halt:<sid>  carried while presence did not answer, or this sid's status
+#                  (HTTP 200) did not
+#   quarantine:*   carried while quiescence did not answer
+# There is no global degraded flag: quiescence never answers in sim modes.
+# Pending (debounce) counts of such keys are carried too, unchanged, so a
+# failed fetch does not restart a debounce either.
+#
 # State ($STATE_DIRECTORY/state.json), written only after a pass that delivered
-# everything it owed:
+# everything it owed. It is normalized at load, field by field, so valid JSON
+# of the wrong shape (or corrupt JSON) falls back to defaults, never kills a pass:
 #   sig      what was last announced: "" nothing, "ok", or a hash of the
 #            sorted active key set (numbers and times never reach a key)
-#   keys     the keys behind sig, so a "stopped" line can name them
+#   keys     the active keys behind sig, so a "stopped" line can name them
+#   texts    {key: text} of the active keys, for carry-forward
 #   sent_at  when the standing message last went out (for the 6 h reminder)
 #   pending  {key: consecutive passes seen} for the debounced keys
-#   events   {event key: time sent}, pruned after 2 h
+#   events   {event key: time sent}, pruned after 2 h (never under the 1 h
+#            rate window)
 #
 # Heartbeat contract (as em-ci-monitor). The healthchecks.io check measures the
 # MONITOR: a pass that observed everything and delivered every Telegram message
@@ -77,9 +95,9 @@ tg_send() { # $1: text. Returns non-zero when delivery failed.
     printf '%s' "$1" | "$EM_STACK_TG_CMD"
     return
   fi
-  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$(cred tg_bot_token)" |
+  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\ndata-urlencode = "chat_id=%s"\n' \
+    "$(cred tg_bot_token)" "$(cred tg_chat_id)" |
     curl -fsS -m 20 --retry 3 -o /dev/null \
-      --data-urlencode "chat_id=$(cred tg_chat_id)" \
       --data-urlencode "text=$1" \
       --data-urlencode "disable_web_page_preview=true" \
       -K -
@@ -130,20 +148,45 @@ declare -A text=() cls=()
 add() { text[$1]=$2; cls[$1]=$3; } # $1: stable key, $2: text, $3: deb|imm
 
 now=${EM_STACK_NOW:-$(date +%s)}
-hour=$(( now / 3600 ))
 state_file="${STATE_DIRECTORY:?}/state.json"
-state='{}'
-if [ -f "$state_file" ] && st=$(cat "$state_file") && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$st"; then
-  state=$st
+empty_state='{"sig":"","keys":[],"texts":{},"sent_at":0,"pending":{},"events":{}}'
+state=$empty_state
+if [ -f "$state_file" ] && st=$(cat "$state_file"); then
+  state=$(jq -c '
+    (if type == "object" then . else {} end) as $s
+    | def nums: if type == "object" then with_entries(select(.value | type == "number")) else {} end;
+      {sig: (if ($s.sig | type) == "string" then $s.sig else "" end),
+       keys: (if ($s.keys | type) == "array" then [$s.keys[] | select(type == "string")] else [] end),
+       texts: (if ($s.texts | type) == "object" then ($s.texts | with_entries(select(.value | type == "string"))) else {} end),
+       sent_at: (if ($s.sent_at | type) == "number" then ($s.sent_at | floor) else 0 end),
+       pending: ($s.pending | nums),
+       events: ($s.events | nums)}' <<<"$st" 2>/dev/null) || state=$empty_state
+  [ -n "$state" ] || state=$empty_state
 fi
-prev_sig=$(jq -r '.sig // ""' <<<"$state")
-prev_sent=$(jq -r '.sent_at // 0' <<<"$state")
+prev_sig=$(jq -r '.sig' <<<"$state")
+prev_sent=$(jq -r '.sent_at' <<<"$state")
 case "$prev_sent" in ''|*[!0-9]*) prev_sent=0 ;; esac
-prev_keys_txt=$(jq -r '(.keys // []) | join(", ")' <<<"$state")
+prev_keys_txt=$(jq -r '.keys | join(", ")' <<<"$state")
 
 # Seen events, pruned after 2 h.
 events_seen=$(jq -c --argjson now "$now" \
-  '(.events // {}) | with_entries(select(.value > ($now - 7200)))' <<<"$state")
+  '.events | with_entries(select(.value > ($now - 7200)))' <<<"$state")
+
+# Which sources answered this pass (for carry-forward).
+declare -A seen_checks=() sidset=() status_ok=()
+presence_ok=0; quies_ok=0
+source_failed() { # $1: key. 0 when the source behind that key did not answer this pass
+  local sid chk
+  case "$1" in
+    fail:*) chk=${1#fail:}; [ -z "${seen_checks[$chk]+x}" ] ;;
+    presence:*) [ "$presence_ok" = 0 ] ;;
+    gm_halt:*)
+      sid=${1#gm_halt:}
+      [ "$presence_ok" = 0 ] || { [ -n "${sidset[$sid]+x}" ] && [ -z "${status_ok[$sid]+x}" ]; } ;;
+    quarantine:*) [ "$quies_ok" = 0 ] ;;
+    *) return 1 ;;
+  esac
+}
 
 declare -a new_event_keys=() new_event_texts=()
 nostack=0
@@ -162,10 +205,14 @@ else
   health_out=$(stack_health) || true
   have_summary=0
   unknown_checks=()
+  re_any='^  ([^[:space:]]+)[[:space:]]+([A-Z_]+)([[:space:]]|$)'
   re_bad='^  ([^[:space:]]+)[[:space:]]+(FAIL|DOWN|DEAD_MANAGER)([[:space:]]|$)(.*)$'
   re_unk='^  ([^[:space:]]+)[[:space:]]+UNKNOWN([[:space:]]|$)'
   while IFS= read -r line; do
     case "$line" in SUMMARY:*) have_summary=1 ;; esac
+    if [[ $line =~ $re_any ]] && [ "${BASH_REMATCH[2]}" != UNKNOWN ]; then
+      seen_checks["${BASH_REMATCH[1]}"]=1
+    fi
     if [[ $line =~ $re_bad ]]; then
       chk=${BASH_REMATCH[1]}
       if [ "$chk" = agentos ] && [ "$live" = 0 ]; then continue; fi
@@ -184,9 +231,11 @@ else
 
   # --- Presence ---------------------------------------------------------------------
   sids=()
-  if get_json "http://127.0.0.1:4002/v1/presence" && [ "$GOT_CODE" = 200 ]; then
+  if get_json "http://127.0.0.1:4002/v1/presence" && [ "$GOT_CODE" = 200 ] &&
+     jq -e '.presence | type == "object"' >/dev/null 2>&1 <<<"$GOT_BODY"; then
+    presence_ok=1
     while IFS= read -r sid; do
-      [ -z "$sid" ] || sids+=("$sid")
+      [ -z "$sid" ] || { sids+=("$sid"); sidset["$sid"]=1; }
     done < <(jq -r '.presence | keys[] | select(test("^[A-Za-z0-9_-]+$"))' <<<"$GOT_BODY" 2>/dev/null || true)
     # last_close.cause "server" with wants_out null (it is an object {why, at}
     # when the close was wanted) means the server dropped us unasked.
@@ -204,7 +253,8 @@ else
 
   # --- GM halt, per session ---------------------------------------------------------
   for sid in "${sids[@]}"; do
-    if get_json "http://127.0.0.1:4002/v1/sessions/$sid/status"; then
+    if get_json "http://127.0.0.1:4002/v1/sessions/$sid/status" && [ "$GOT_CODE" = 200 ]; then
+      status_ok["$sid"]=1
       # halted_at is a microsecond ISO string; fromdateiso8601 wants none.
       while IFS=$'\t' read -r kind line; do
         [ -z "$kind" ] || add "gm_halt:$sid" "$line" "$kind"
@@ -223,6 +273,7 @@ else
 
   # --- AgentOS quiescence: quarantine and events --------------------------------------
   if get_json "http://127.0.0.1:4400/em/quiescence" && [ "$GOT_CODE" = 200 ]; then
+    quies_ok=1
     while IFS=$'\t' read -r key line; do
       [ -z "$key" ] || add "$key" "$line" deb
     done < <(jq -r '
@@ -232,12 +283,18 @@ else
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
 
     # Events: a child_restart_failed recovery, or 3+ other recoveries (flapping).
-    # Hourly keys, so a stuck heal posts at most once an hour per agent.
-    while IFS=$'\t' read -r key line; do
+    # A recovery stays in the list for an hour, so the key names the newest
+    # relevant recovery's `at` (the same recovery is the same event), and a
+    # stuck heal that keeps adding recoveries is rate-limited per
+    # <boot>:<agent>:<kind>: nothing is posted, or recorded, while a seen key
+    # with that prefix is under an hour old.
+    while IFS=$'\t' read -r key prefix line; do
       [ -n "$key" ] || continue
-      if jq -e --arg k "$key" 'has($k)' >/dev/null <<<"$events_seen"; then continue; fi
+      if jq -e --arg k "$key" --arg p "$prefix" --argjson now "$now" \
+           'has($k) or any(to_entries[]; (.key | startswith($p)) and .value > ($now - 3600))' \
+           >/dev/null <<<"$events_seen"; then continue; fi
       new_event_keys+=("$key"); new_event_texts+=("$line")
-    done < <(jq -r --argjson hour "$hour" '
+    done < <(jq -r '
       (.boot_id | tostring) as $b
       | (.agents // {}) | to_entries[]
       | .key as $a
@@ -245,15 +302,26 @@ else
       | ($r | map(select((.cause // "" | tostring) | contains("child_restart_failed")))) as $crf
       | ($r | map(select(((.cause // "" | tostring) | contains("child_restart_failed")) | not))) as $oth
       | (if ($crf | length) > 0 then
-           ["\($b):\($a):crf:\($hour)",
-            "agent \($a): child_restart_failed at \($crf[-1].at // "?") (\($crf | length) in the last hour): \(($crf[-1].detail // "") | tostring | gsub("\\s+"; " ") | .[0:200])"]
+           ($crf | max_by(.at // "")) as $c
+           | ["\($b):\($a):crf:\($c.at // "?")", "\($b):\($a):crf:",
+              "agent \($a): child_restart_failed at \($c.at // "?") (\($crf | length) in the last hour): \(($c.detail // "") | tostring | gsub("\\s+"; " ") | .[0:200])"]
          else empty end),
         (if ($oth | length) >= 3 then
-           ["\($b):\($a):flap:\($hour)",
-            "agent \($a): \($oth | length) recoveries in the last hour (\($oth | map(.cause | tostring) | unique | join(", ")))"]
+           ($oth | max_by(.at // "")) as $c
+           | ["\($b):\($a):flap:\($c.at // "?")", "\($b):\($a):flap:",
+              "agent \($a): \($oth | length) recoveries in the last hour (\($oth | map(.cause | tostring) | unique | join(", ")))"]
          else empty end)
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
   fi
+  # --- Carry forward keys whose source did not answer ---------------------------------
+  mapfile -t prev_active < <(jq -r '.keys[]' <<<"$state")
+  for k in "${prev_active[@]}"; do
+    [ -n "$k" ] || continue
+    [ -z "${text[$k]+x}" ] || continue
+    if source_failed "$k"; then
+      add "$k" "$(jq -r --arg k "$k" '.texts[$k] // $k' <<<"$state")" carry
+    fi
+  done
 fi
 
 # --- Decide what to say -------------------------------------------------------------
@@ -272,7 +340,7 @@ sig=""
 if [ "$nostack" = 0 ]; then
   prev_pending=$(jq -c '.pending // {}' <<<"$state")
   for k in "${all_keys[@]}"; do
-    if [ "${cls[$k]}" = imm ]; then
+    if [ "${cls[$k]}" = imm ] || [ "${cls[$k]}" = carry ]; then
       active+=("$k")
     else
       n=$(( $(jq -r --arg k "$k" '.[$k] // 0 | tonumber? // 0' <<<"$prev_pending") + 1 ))
@@ -280,6 +348,13 @@ if [ "$nostack" = 0 ]; then
       [ "$n" -lt 2 ] || active+=("$k")
     fi
   done
+  # A debounce count survives a pass in which its source did not answer.
+  while IFS=$'\t' read -r k n; do
+    [ -n "$k" ] || continue
+    if jq -e --arg k "$k" 'has($k) | not' >/dev/null <<<"$pending_json" && source_failed "$k"; then
+      pending_json=$(jq -c --arg k "$k" --argjson n "$n" '.[$k] = $n' <<<"$pending_json")
+    fi
+  done < <(jq -r '.pending | to_entries[] | [.key, (.value | tostring)] | @tsv' <<<"$state")
   if [ "${#active[@]}" -eq 0 ]; then
     sig=ok
   else
@@ -352,9 +427,13 @@ if ! dry; then
     events_new=$(jq -c --arg k "$k" --argjson now "$now" '.[$k] = $now' <<<"$events_new")
   done
   keys_json=$(printf '%s\n' "${active[@]}" | jq -R . | jq -sc 'map(select(. != ""))')
-  jq -n --arg sig "$sig" --argjson keys "$keys_json" --argjson sent "$sent_at" \
+  texts_json='{}'
+  for k in "${active[@]}"; do
+    texts_json=$(jq -c --arg k "$k" --arg t "${text[$k]}" '.[$k] = $t' <<<"$texts_json")
+  done
+  jq -n --arg sig "$sig" --argjson keys "$keys_json" --argjson texts "$texts_json" --argjson sent "$sent_at" \
     --argjson pending "$pending_json" --argjson events "$events_new" \
-    '{sig: $sig, keys: $keys, sent_at: $sent, pending: $pending, events: $events}' \
+    '{sig: $sig, keys: $keys, texts: $texts, sent_at: $sent, pending: $pending, events: $events}' \
     >"$state_file.tmp"
   mv "$state_file.tmp" "$state_file"
 fi
