@@ -51,8 +51,9 @@ Options:
               delete its branch. Never touches dirty or unmerged worktrees, the
               primary root, the current worktree, a worktree created within
               the grace period (WORK_PRUNE_GRACE_DAYS, default 3), or one that
-              an opencode session updated within WORK_PRUNE_SESSION_ACTIVE_DAYS
-              (default 7) has as its directory. Takes no <slug>.
+              an opencode or goose session updated within
+              WORK_PRUNE_SESSION_ACTIVE_DAYS (default 7) has as its directory.
+              Takes no <slug>.
   -h, --help  Show this help message.
 
 Notes:
