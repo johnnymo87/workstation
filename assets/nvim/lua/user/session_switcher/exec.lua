@@ -424,7 +424,7 @@ end
 --- Refusing upfront and visibly warning the user prevents the silent turn hang.
 ---
 --- THE OFFER (ASYNC, SILENT ON FAILURE):
---- When desc.sid is valid (^ses_[%w]+$), `oc-revive plan <sid>` runs in the background.
+--- When desc.sid is valid (revive.valid_sid), `oc-revive plan <sid>` runs in the background.
 --- Spawn failure, non-zero exit, timeout, unparseable JSON, or a plan that fails
 --- revive.offers validation are all silent, so the refusal stays the whole story
 --- whenever there is nothing safe to offer. An actionable plan gets a confirm
@@ -443,7 +443,8 @@ function M.refuse_dir_missing(desc)
   )
 
   local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
-  if sid and sid:match("^ses_[%w]+$") then
+  local revive = require("user.session_switcher.revive")
+  if sid and revive.valid_sid(sid) then
     if M.revive_inflight[sid] then
       -- No second plan while an apply holds the repo lock.
       vim.notify("a revive of " .. sid .. " is already running", vim.log.levels.INFO)

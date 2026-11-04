@@ -3210,6 +3210,33 @@ local BLOCKED_JSON = [==[{
 }]==]
 local BLOCKED_PATH = "/home/dev/projects/culinary-operations-server/.worktrees/cops-6757-step3-r1790876518"
 
+-- Verbatim `oc-revive plan goose:20261104_12` output captured from the real CLI.
+local REALGOOSE_JSON = [==[{
+  "revivable": true,
+  "harness": "goose",
+  "reason": null,
+  "sid": "goose:20261104_12",
+  "dead_dir": "/tmp/opencode/revive-probe/.worktrees/probe",
+  "repo": "/tmp/opencode/revive-probe",
+  "snapshot": null,
+  "candidates": [
+    {
+      "branch": "probe",
+      "source": "slug",
+      "tip": "b3d833c29943739e825e604f2fea15af91f3e690",
+      "tip_short": "b3d833c",
+      "subject": "probe-tip",
+      "tip_ct": "2026-11-04T16:20:59-05:00",
+      "merged": false,
+      "action": "recreate",
+      "path": "/tmp/opencode/revive-probe/.worktrees/probe"
+    }
+  ]
+}]==]
+local GOOSE_SID = "goose:20261104_12"
+local GOOSE_DEAD = "/tmp/opencode/revive-probe/.worktrees/probe"
+local GOOSE_TIP = "b3d833c29943739e825e604f2fea15af91f3e690"
+
 local function argv_eq(a, b)
   if #a ~= #b then return false end
   for i = 1, #a do if a[i] ~= b[i] then return false end end
@@ -3696,6 +3723,188 @@ do
   press_q()
   check(#floats() == 0, "q after exit closes it")
   check(not vim.api.nvim_buf_is_valid(buf), "q after exit deletes the buffer")
+end
+
+-- 86t. Goose revive: refuse_dir_missing runs oc-revive plan for valid goose sid, ignores invalid goose sid.
+do
+  local system_calls = {}
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    table.insert(system_calls, { cmd = cmd, opts = opts, on_exit = on_exit })
+    return { pid = 1 }
+  end
+  local orig_notify = vim.notify
+  vim.notify = function() end
+
+  exec.refuse_dir_missing({ directory = GOOSE_DEAD, sid = GOOSE_SID })
+  check(#system_calls == 1, "goose: one system call spawned")
+  local call = system_calls[1]
+  check(#call.cmd == 3, "goose: argv has 3 elements")
+  check(call.cmd[1] == "oc-revive", "goose: argv[1] is oc-revive")
+  check(call.cmd[2] == "plan", "goose: argv[2] is plan")
+  check(call.cmd[3] == GOOSE_SID, "goose: argv[3] is exactly sid")
+  check(call.opts.timeout == 5000, "goose: opts.timeout is 5000")
+  check(call.opts.text == true, "goose: opts.text is true")
+  check(call.opts.stdin == false, "goose: opts.stdin is false")
+
+  -- Invalid goose sid (e.g. non-numeric, trailing chars, etc.) -> no vim.system call.
+  system_calls = {}
+  local res = exec.refuse_dir_missing({ directory = GOOSE_DEAD, sid = "goose:abc" })
+  check(res == true, "refuse_dir_missing returns true for invalid goose sid")
+  check(#system_calls == 0, "no vim.system call for invalid goose sid 'goose:abc'")
+
+  system_calls = {}
+  exec.refuse_dir_missing({ directory = GOOSE_DEAD, sid = "goose:" })
+  check(#system_calls == 0, "no vim.system call for invalid goose sid 'goose:'")
+
+  -- revive.valid_sid predicate exports and checks
+  check(type(revive.valid_sid) == "function", "revive.valid_sid is exported")
+  check(revive.valid_sid("ses_123") == true, "valid_sid accepts ses_ sid")
+  check(revive.valid_sid(GOOSE_SID) == true, "valid_sid accepts goose sid")
+  check(revive.valid_sid("goose:abc") == false, "valid_sid rejects goose:abc")
+  check(revive.valid_sid("goose:") == false, "valid_sid rejects goose:")
+  check(revive.valid_sid("ses_") == false, "valid_sid rejects ses_")
+  check(revive.valid_sid(nil) == false, "valid_sid rejects nil")
+  check(revive.valid_sid("") == false, "valid_sid rejects empty string")
+
+  vim.system = orig_system
+  vim.notify = orig_notify
+end
+
+-- 86u. Goose revive: revive.offers on real payload and strict candidate validation.
+do
+  local r = revive.offers(vim.json.decode(REALGOOSE_JSON), GOOSE_SID, GOOSE_DEAD)
+  check(type(r) == "table" and r.kind == "revive", "goose: offers kind revive")
+  check(#r.offers == 1, "goose: one offer")
+  check(r.offers[1].branch == "probe", "goose: branch probe")
+  check(r.offers[1].path == GOOSE_DEAD, "goose: path matches dead_dir")
+  check(r.offers[1].tip_short == "b3d833c", "goose: tip_short")
+  check(r.offers[1].source == "slug", "goose: source slug")
+  check(r.offers[1].subject == "probe-tip", "goose: subject probe-tip")
+  check(r.offers[1].date == "2026-11-04", "goose: date parsed")
+  check(r.offers[1].merged == false, "goose: merged is false")
+  check(argv_eq(r.offers[1].argv, {
+    "oc-revive", "apply", GOOSE_SID,
+    "--branch", "probe",
+    "--path", GOOSE_DEAD,
+    "--action", "recreate",
+    "--expect-tip", GOOSE_TIP,
+    "--expect-old-dir", GOOSE_DEAD,
+  }), "goose: apply argv uses action recreate and dead_dir for path")
+
+  -- Rejections specific to goose offers
+  local function goose_plan() return vim.json.decode(REALGOOSE_JSON) end
+  local gcases = {
+    { "goose action add rejected", function(p) p.candidates[1].action = "add" end },
+    { "goose path ~= dead_dir rejected", function(p) p.candidates[1].path = "/tmp/opencode/revive-probe/.worktrees/other" end },
+    { "dead_dir not in .worktrees", function(p) p.dead_dir = "/tmp/opencode/revive-probe/probe"; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir leaf is .", function(p) p.dead_dir = "/tmp/opencode/revive-probe/.worktrees/."; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir leaf is ..", function(p) p.dead_dir = "/tmp/opencode/revive-probe/.worktrees/.."; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir leaf starts with dash", function(p) p.dead_dir = "/tmp/opencode/revive-probe/.worktrees/-probe"; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir nested under .worktrees", function(p) p.dead_dir = "/tmp/opencode/revive-probe/.worktrees/probe/extra"; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir in different repo", function(p) p.repo = "/tmp/other"; p.candidates[1].path = p.dead_dir end },
+    { "dead_dir relative", function(p) p.repo = "opencode/revive-probe"; p.dead_dir = "opencode/revive-probe/.worktrees/probe"; p.candidates[1].path = p.dead_dir end },
+    { "goose plan with resume object rejected", function(p) p.resume = { branch = "probe", path = GOOSE_DEAD, expect_tip = GOOSE_TIP, expect_old_dir = GOOSE_DEAD } end },
+    { "goose plan with blocked_by_worktree reason rejected", function(p) p.revivable = false; p.reason = "blocked_by_worktree: exists" end },
+    { "goose:abc sid rejected", function(p) p.sid = "goose:abc" end },
+    { "sid mismatch", function(p) p.sid = "goose:20261104_99" end },
+    { "dead_dir mismatch", function(p) p.dead_dir = "/tmp/opencode/revive-probe/.worktrees/other" end },
+  }
+  for _, c in ipairs(gcases) do
+    local p = goose_plan()
+    c[2](p)
+    local test_sid = (c[1] == "goose:abc sid rejected") and "goose:abc" or GOOSE_SID
+    local test_dead = (c[1]:find("dead_dir") and p.dead_dir) or GOOSE_DEAD
+    local ok, res = pcall(revive.offers, p, test_sid, test_dead)
+    check(ok and res == nil, "goose offers rejects: " .. c[1])
+  end
+
+  -- ses_ plan with action recreate rejected
+  local ses_plan = vim.json.decode(REALMERGED_JSON)
+  ses_plan.candidates[1].action = "recreate"
+  check(revive.offers(ses_plan, MERGED_SID, MERGED_DEAD) == nil, "ses_ plan with action recreate is rejected")
+end
+
+-- 86v. Goose revive: revive.blocked is always false for goose ids.
+do
+  check(revive.blocked(vim.json.decode(REALGOOSE_JSON), GOOSE_SID, GOOSE_DEAD) == false,
+    "blocked() is false for revivable goose plan")
+  local blocked_goose = vim.json.decode(REALGOOSE_JSON)
+  blocked_goose.revivable = false
+  blocked_goose.reason = "blocked_by_worktree: branch 'probe' is checked out"
+  check(revive.blocked(blocked_goose, GOOSE_SID, GOOSE_DEAD) == false,
+    "blocked() is false for goose id even with blocked_by_worktree reason")
+  check(revive.blocked(blocked_goose, "goose:abc", GOOSE_DEAD) == false,
+    "blocked() is false for malformed goose id")
+end
+
+-- 86w. Goose revive: prompt says 'recreate dir <rel>' (not 'new dir').
+do
+  local r = revive.offers(vim.json.decode(REALGOOSE_JSON), GOOSE_SID, GOOSE_DEAD)
+  local msg, choices, default = revive.prompt(r, "probe-session", GOOSE_SID)
+  check(choices == "&Revive\n&Cancel", "goose prompt: buttons are Revive and Cancel")
+  check(default == 2, "goose prompt: default is Cancel")
+  local lines = vim.split(msg, "\n", { plain = true })
+  check(lines[1] == 'Revive read-only session "probe-session"?', "goose prompt: first line names session")
+  check(msg:find("recreate dir .worktrees/probe", 1, true) ~= nil, "goose prompt: contains 'recreate dir .worktrees/probe'")
+  check(msg:find("new dir", 1, true) == nil, "goose prompt: does not say 'new dir'")
+  check(msg:find("Uncommitted files are NOT carried over.", 1, true) ~= nil, "goose prompt: warns uncommitted files not carried over")
+
+  -- Multiple candidate disagreement for goose
+  local r_disagree = vim.deepcopy(r)
+  local c2 = vim.deepcopy(r.offers[1])
+  c2.branch = "probe-alt"
+  c2.source = "bash-evidence"
+  table.insert(r_disagree.offers, c2)
+  local msg2, choices2, default2 = revive.prompt(r_disagree, "probe-session", GOOSE_SID)
+  check(choices2 == "&1 probe\n&2 probe-alt\n&Cancel", "goose disagree: numbered buttons")
+  check(default2 == 3, "goose disagree: default Cancel")
+  check(msg2:find("recreate dir .worktrees/probe", 1, true) ~= nil, "goose disagree: contains 'recreate dir .worktrees/probe'")
+  check(msg2:find("new dir", 1, true) == nil, "goose disagree: does not say 'new dir'")
+  check(msg2:find("Uncommitted files are NOT carried over.", 1, true) ~= nil, "goose disagree: warns uncommitted files not carried over")
+end
+
+-- 86x. Goose revive exec flow: apply and attach to goose session.
+do
+  local R = rig()
+  local goose_desc = { kind = "refuse_dir_missing", sid = GOOSE_SID, directory = GOOSE_DEAD, title = "probe", live_pane = false }
+  check(exec.refuse_dir_missing(goose_desc) == true, "goose refuse returns true")
+  check(#R.notes == 1 and R.notes[1].level == vim.log.levels.WARN
+    and R.notes[1].msg == string.format("session directory '%s' no longer exists on disk; session is read-only", GOOSE_DEAD),
+    "goose refusal warning")
+  R.sys[1].on_exit({ code = 0, stdout = REALGOOSE_JSON })
+  check(#R.confirms == 0, "no prompt from fast callback")
+  check(#R.sched == 1, "prompt scheduled")
+  R.answer = 1 -- Revive
+  R.drain()
+  check(#R.floats == 1, "goose revive opens floating terminal")
+  check(argv_eq(R.floats[1].argv, {
+    "oc-revive", "apply", GOOSE_SID,
+    "--branch", "probe",
+    "--path", GOOSE_DEAD,
+    "--action", "recreate",
+    "--expect-tip", GOOSE_TIP,
+    "--expect-old-dir", GOOSE_DEAD,
+  }), "goose terminal runs exact apply argv with recreate")
+  check(exec.revive_inflight[GOOSE_SID] == true, "goose in-flight flag set")
+  R.floats[1].done(0)
+  check(exec.revive_inflight[GOOSE_SID] == nil, "goose in-flight flag cleared")
+  check(#R.attaches == 1 and R.attaches[1].sid == GOOSE_SID, "exit 0 attaches to goose session")
+  R.restore()
+
+  -- Verify M.attach routes goose session to oc-auto-attach
+  local attach_sys = {}
+  local spawned = exec.attach({ sid = GOOSE_SID }, {
+    system = function(cmd, opts, on_exit)
+      table.insert(attach_sys, { cmd = cmd, opts = opts, on_exit = on_exit })
+      return { pid = 42 }
+    end,
+  })
+  check(spawned == true, "attach returns true for goose sid")
+  check(#attach_sys == 1, "attach spawned one command")
+  check(attach_sys[1].cmd[1] == "oc-auto-attach" and attach_sys[1].cmd[2] == GOOSE_SID, "attach runs oc-auto-attach with goose sid")
+  check(attach_sys[1].opts.text == true, "attach opts.text is true for goose")
+  check(type(attach_sys[1].on_exit) == "function", "attach on_exit handler provided for goose")
 end
 
 -- Leading newline: headless nvim writes notify messages to stderr WITHOUT a
