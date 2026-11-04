@@ -1,6 +1,6 @@
 # Devbox-specific home-manager configuration
 # Contains systemd services, sops secrets, and other devbox-only features
-{ config, pkgs, lib, localPkgs, projects, isDevbox, honkPkg, ... }:
+{ config, pkgs, lib, localPkgs, projects, isDevbox, assetsPath, honkPkg, ... }:
 
 let
   # mn9r M5: serve-pool descriptor (single source of truth in serve-pool.nix).
@@ -2003,6 +2003,60 @@ down and its silence means nothing. This host has no second leg.
   # cannot drift from that schema; an out-of-store link tracks its checkout without a rebuild.
   home.file.".local/bin/coordinator".source = config.lib.file.mkOutOfStoreSymlink
     "${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/coordinator.sh";
+
+  # ---- stall-watch dead-man watcher (same as cloudbox's) ---------------------
+  # devbox runs its own stall-watch for its own programs since 2026-11-04 (the
+  # stall-watch units themselves are installed imperatively from the private
+  # repo, as on cloudbox). This watcher is declarative ON PURPOSE: a watchdog
+  # co-located with its subject cannot report the subject's absence. Rationale
+  # and tuning: the lane-deadman-watch-stall-watch block in home.cloudbox.nix.
+  # The expect file is the "this host expects stall-watch" switch; delete the
+  # block to stop watching, not the file.
+  home.file.".local/bin/lane-deadman-watch" = {
+    source = "${assetsPath}/scripts/lane-deadman-watch";
+    executable = true;
+  };
+
+  home.file.".config/lanes/expect-stall-watch".text = ''
+    stall-watch is expected to be alive on this host.
+    Managed by home-manager (users/dev/home.devbox.nix).
+    Consumed by lane-deadman-watch. This is NOT the lane's arming flag.
+  '';
+
+  systemd.user.services.lane-deadman-watch-stall-watch = {
+    Unit.Description = "Alarm if stall-watch has quietly stopped running";
+    Service = {
+      Type = "oneshot";
+      # Interpreter explicit: a user unit's PATH cannot resolve `env bash`.
+      ExecStart = "${pkgs.bash}/bin/bash %h/.local/bin/lane-deadman-watch";
+      Nice = 19;
+      IOSchedulingClass = "idle";
+      # A hung oneshot would block every later check silently.
+      TimeoutStartSec = "2min";
+      Environment = [
+        "HOME=%h"
+        "LANE_DEADMAN_FILE=%h/.local/state/stall-watch/last-success"
+        "LANE_EXPECT_FILE=%h/.config/lanes/expect-stall-watch"
+        "LANE_ALERT_STATE=%h/.local/state/lane-deadman-watch-stall-watch.alert"
+        "LANE_ALERT_CMD=${driftAlert}"
+        "LANE_LABEL=stall-watch"
+        "LANE_STALE_SECONDS=7200"
+        "LANE_CADENCE_UNIT=stall-watch.timer"
+        "\"LANE_HINT=Check: systemctl --user status stall-watch.timer && journalctl --user -u stall-watch.service -n 100\""
+        "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.lane-deadman-watch-stall-watch = {
+    Unit.Description = "Timer for the stall-watch dead-man staleness check";
+    Timer = {
+      OnCalendar = "hourly";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+    Install.WantedBy = [ "timers.target" ];
+  };
 
   # BoldCo (boldco.mohrbacher.dev) was retired on 2026-10-26: its user unit
   # and the tunnel's port-3000 allowlist were removed, and its devbox clones
