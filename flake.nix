@@ -292,8 +292,10 @@
     #
     #   (nixos-cloudbox was previously absent because it pulls in
     #     `claude-failover-proxy` from a private repo; it is now built in CI by
-    #     pre-seeding the private FOD sources using CFP_READ_TOKEN before
-    #     `nix flake check` and scrubbing them before caching.)
+    #     save-before-private ordering: public checks are built and the Actions
+    #     store cache is saved BEFORE any private asset enters the store. Checks
+    #     with private closures are isolated via PRIVATE_CHECKS so private
+    #     binaries are never saved into the public repository's Actions cache.)
     checks.${devboxSystem} = {
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
