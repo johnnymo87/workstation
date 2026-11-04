@@ -17,7 +17,7 @@ function M.session_label(term_title, oc_session_id)
     if term_title == "OpenCode" then
       return "OpenCode"
     end
-    if type(oc_session_id) == "string" and oc_session_id:match("^goose:") and term_title ~= "" then
+    if type(oc_session_id) == "string" and oc_session_id:match("^goose:") and term_title ~= "" and not term_title:match("^term://") then
       return term_title
     end
   end
@@ -38,11 +38,14 @@ local function find_opencode_title(tabid)
   for _, win in ipairs(wins) do
     local buf = vim.api.nvim_win_get_buf(win)
     if vim.bo[buf].buftype == "terminal" then
-      local title = vim.b[buf].term_title or ""
-      last_term_title = title
-      local session_name = M.session_label(title, vim.b[buf].oc_session_id)
-      if session_name then
-        return session_name, title
+      local name = vim.api.nvim_buf_get_name(buf)
+      if not name:find("[FAILED] ", 1, true) then
+        local title = vim.b[buf].term_title or ""
+        last_term_title = title
+        local session_name = M.session_label(title, vim.b[buf].oc_session_id)
+        if session_name then
+          return session_name, title
+        end
       end
     end
   end

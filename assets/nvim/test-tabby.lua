@@ -23,6 +23,7 @@ check(tabby.session_label("OpenCode", "ses_123") == "OpenCode", "OpenCode with o
 -- 3. goose buffer with title -> term_title
 check(tabby.session_label("my-goose-title", "goose:12345") == "my-goose-title", "goose buffer with title")
 check(tabby.session_label("20261104_1", "goose:20261104_1") == "20261104_1", "goose buffer untitled (session id as title)")
+check(tabby.session_label("term:///d//1:/nix/store/x/bin/honk chat 1_1", "goose:1_1") == nil, "goose buffer with seeded term:// URI -> nil")
 
 -- 4. goose buffer with empty title -> nil
 check(tabby.session_label("", "goose:12345") == nil, "goose buffer with empty string title")
