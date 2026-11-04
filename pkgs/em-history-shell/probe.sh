@@ -19,7 +19,7 @@
 #   +<prop>   NONE plus that one prop: which props break bwrap by themselves
 #   -<prop>   ALL minus that one prop: which prop to drop when ALL fails
 # The "candidate" props are the ones the unit leaves OFF (ProtectKernelTunables,
-# ProtectProc, ProcSubset, ...): they are run only as +<prop>, to show why.
+# ProcSubset, ...): they are run only as +<prop>, to show why.
 #
 # The stand-in view is under /run, not /tmp: with PrivateTmp the unit gets its own
 # /tmp, so a view made there would be invisible and PrivateTmp would be blamed for it.
@@ -83,6 +83,12 @@ PROPS=(
   'ProtectSystem=strict'
   'ProtectHome=tmpfs'
   'NoNewPrivileges=yes'
+  'ProtectProc=invisible'
+  'ProtectControlGroups=yes'
+  'ProtectKernelModules=yes'
+  'LockPersonality=yes'
+  'MemoryDenyWriteExecute=yes'
+  'RestrictSUIDSGID=yes'
   'CapabilityBoundingSet='
   'RestrictNamespaces=user mnt pid net ipc uts cgroup'
   'SystemCallFilter=@system-service @mount sethostname'
@@ -107,20 +113,17 @@ fi
 # Left OFF in the unit. Each is run alone, to show what it does to bwrap's --proc.
 CANDIDATES=(
   'ProtectKernelTunables=yes'
-  'ProtectProc=invisible'
   'ProcSubset=pid'
-  'ProtectControlGroups=yes'
-  'ProtectKernelModules=yes'
   'RestrictAddressFamilies=AF_UNIX'
-  'LockPersonality=yes'
-  'MemoryDenyWriteExecute=yes'
-  'RestrictSUIDSGID=yes'
 )
 
 # The tool smoke test, run by bash inside the sandbox. It prints PROBE-OK last.
+# rg -P and grep -P are PCRE2, which JIT-compiles: they pin MemoryDenyWriteExecute.
 SMOKE='set -e
 python3 -c "import json,sys; print(sum(range(10)))" >/dev/null
 rg --version >/dev/null
+test "$(echo a1 | rg -P "\\d")" = a1
+echo a1 | grep -qP "\\d"
 test "$(echo "{\"a\":7}" | jq .a)" = 7
 x=$(echo forked | cat); test "$x" = forked
 ( : ) & wait

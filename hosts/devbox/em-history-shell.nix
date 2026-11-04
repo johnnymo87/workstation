@@ -35,9 +35,7 @@
 #   sudo "$P/bin/em-history-shell-probe"
 # It runs this unit's hardening props, one at a time and all together, around the real
 # bwrap argv and a tool smoke test, and says which props break the sandbox. If
-# it fails, change the props below (it names them) before switching. Also note its
-# "+ProtectProc=invisible" and "+ProcSubset=pid" lines: they are off in the unit, and
-# if they say OK, adopting ProtectProc=invisible is a follow-up.
+# it fails, change the props below (it names them) before switching.
 #
 # Design and the EM side: docs/plans/2026-11-03-em-history-shell.md.
 { config, lib, pkgs, ... }:
@@ -99,6 +97,17 @@ let
     PrivateDevices = true;
     PrivateNetwork = true;
     NoNewPrivileges = true;
+    # Other users' processes are hidden from the service, so a command that got out of
+    # bwrap still could not read their command lines or environments. The sudo probe
+    # passed it on 2026-11-03, alone and in ALL.
+    ProtectProc = "invisible";
+    # The rest of the probe's candidates that passed as root on 2026-11-03, alone and
+    # in ALL: none of them touches what bwrap or the tools inside it need.
+    ProtectControlGroups = true;
+    ProtectKernelModules = true;
+    LockPersonality = true;
+    MemoryDenyWriteExecute = true;
+    RestrictSUIDSGID = true;
     # bwrap runs in a user namespace it makes itself, where it has every capability
     # regardless of this set; the service needs none in the host namespace.
     CapabilityBoundingSet = "";
@@ -124,11 +133,8 @@ let
     #  - ProtectKernelTunables: bwrap mounts a fresh /proc inside its pid namespace, and
     #    the kernel refuses that while the unit's own /proc is overmounted
     #    ("Can't mount proc"). Measured by the probe.
-    #  - ProtectProc, ProcSubset: left off until the probe has run as root. A --user run
-    #    passes both, but that one is only indicative. If the sudo probe's
-    #    "+ProtectProc=invisible" line says OK, adopt ProtectProc=invisible in a
-    #    follow-up (it hides other users' processes from the service). It is not worth
-    #    a broken sandbox, so nothing is assumed here.
+    #  - ProcSubset=pid: bwrap reads /proc/sys/kernel/overflowuid to set up its user
+    #    namespace, and ProcSubset=pid hides /proc/sys. Measured by the sudo probe.
   };
 
   allowedUid = config.users.users.dev.uid;

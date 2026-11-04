@@ -86,12 +86,19 @@ carries it.
 1. `P=$(nix build --no-link --print-out-paths .#em-history-shell)`, then
    `sudo "$P/bin/em-history-shell-probe"`. It must end with "hardening as written
    works". If it names props, change them in `hosts/devbox/em-history-shell.nix`.
-   Also read its `+ProtectProc=invisible` and `+ProcSubset=pid` lines. The unit leaves
-   both off. If the sudo run says OK for `+ProtectProc=invisible`, adopt it in a
-   follow-up PR (it hides other users' processes from the service). A `--user` run
-   already passes both, but that run is only indicative.
+   The 2026-11-03 sudo run passed `+ProtectProc=invisible` and five more candidates
+   (ProtectControlGroups, ProtectKernelModules, LockPersonality,
+   MemoryDenyWriteExecute, RestrictSUIDSGID), so the unit now sets all six.
+   `+ProcSubset=pid` failed and stays off.
 2. `sudo nixos-rebuild switch --flake .#devbox` (creates the user, the directory and
    the ACL, and starts the socket).
 3. As dev, ping it:
    `python3 -c 'import socket as s; c=s.socket(s.AF_UNIX); c.connect("/run/em-history-shell/sock"); c.sendall(b"{\"v\":1,\"op\":\"ping\"}\n"); print(c.recv(4096).decode())'`
    answers `"ok":true` with the `server` path and the service user's uid (2100).
+
+Changing the unit once it runs (a prop, the server, the seccomp policy) changes the
+`server` path or the `unit_digest`. After the `nixos-rebuild switch`, every
+`shell_execute` answer says the service changed until AgentOS restarts. The restart
+runs the escape suite against the new unit, and that run is the verdict. If it fails,
+AgentOS will not start with the history shell on: boot it without
+`AGENTOS_HISTORY_SHELL=1`, then revert the change and rebuild.
