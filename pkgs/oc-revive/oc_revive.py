@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Iterable
 
 DEFAULT_DB_PATH = "~/.local/share/opencode/opencode.db"
 DEFAULT_GOOSE_DB_PATH = "~/.local/share/goose/sessions/sessions.db"
@@ -369,7 +369,7 @@ COMMIT_OUTPUT_RE = re.compile(
 )
 
 
-def last_commit_evidence(outputs: Any) -> tuple[str, str] | None:
+def last_commit_evidence(outputs: Iterable[str]) -> tuple[str, str] | None:
     """Extract the LAST (branch, sha) from tool outputs, ignoring detached HEAD."""
     last_evidence = None
     for output in outputs:
@@ -429,7 +429,7 @@ def goose_tool_outputs(conn: sqlite3.Connection, native_id: str) -> list[str]:
         (native_id,),
     )
     outputs: list[str] = []
-    for (content_json_raw,) in cur.fetchall():
+    for (content_json_raw,) in cur:
         if not content_json_raw:
             continue
         try:
@@ -480,45 +480,14 @@ def is_branch_merged(repo: str, tip_sha: str, trunk: str | None) -> bool:
     return res.returncode == 0
 
 
-def find_branch_candidates(
+def branch_candidates(
     repo: str,
-    *args: Any,
-    dead_dir: str | None = None,
-    evidence: tuple[str, str] | None = None,
-    choose_path: Any = None,
-    action: str = "add",
-    session_id: str | None = None,
-    db_conn: sqlite3.Connection | None = None,
+    dead_dir: str,
+    evidence: tuple[str, str] | None,
+    choose_path: Callable[[str], str],
+    action: str,
 ) -> list[dict[str, Any]]:
     """Find and validate branch candidates for reviving dead_dir."""
-    if len(args) == 3:
-        session_id = args[0]
-        dead_dir = args[1]
-        db_conn = args[2]
-        if evidence is None and db_conn is not None and session_id is not None:
-            evidence = extract_last_commit_evidence(db_conn, session_id)
-        if choose_path is None:
-            choose_path = lambda b: choose_revive_path(repo, dead_dir, db_conn)
-    elif len(args) >= 1:
-        dead_dir = args[0]
-        if len(args) >= 2:
-            evidence = args[1]
-        if len(args) >= 3:
-            choose_path = args[2]
-        if len(args) >= 4:
-            action = args[3]
-    else:
-        if evidence is None and db_conn is not None and session_id is not None:
-            evidence = extract_last_commit_evidence(db_conn, session_id)
-        if choose_path is None and db_conn is not None and dead_dir is not None:
-            choose_path = lambda b: choose_revive_path(repo, dead_dir, db_conn)
-
-    if dead_dir is None:
-        return []
-
-    if choose_path is None:
-        choose_path = lambda b: dead_dir
-
     slug = os.path.basename(dead_dir)
     slug_branch = sanitize_slug(slug)
 
@@ -610,7 +579,7 @@ def find_branch_candidates(
         ).stdout.strip()
 
         merged = is_branch_merged(repo, tip_sha, trunk)
-        revive_p = choose_path(branch) if callable(choose_path) else dead_dir
+        revive_p = choose_path(branch)
 
         candidates.append({
             "branch": branch,
@@ -625,6 +594,23 @@ def find_branch_candidates(
         })
 
     return candidates
+
+
+def find_branch_candidates(
+    repo: str,
+    session_id: str,
+    dead_dir: str,
+    db_conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Find and validate branch candidates for reviving dead_dir in opencode."""
+    evidence = extract_last_commit_evidence(db_conn, session_id)
+    return branch_candidates(
+        repo=repo,
+        dead_dir=dead_dir,
+        evidence=evidence,
+        choose_path=lambda branch: choose_revive_path(repo, dead_dir, db_conn),
+        action="add",
+    )
 
 
 DEFAULT_BUSY_THRESHOLD_SECONDS = 600
@@ -836,7 +822,25 @@ def plan_goose_revive(
     opencode_db_path: str | None = None,
 ) -> dict[str, Any]:
     """Plan revival of goose session sid (same-path recreation)."""
-    native_id = sid[len("goose:") :] if sid.startswith("goose:") else sid
+    def _refuse(reason: str, dead_dir: str | None = None, repo: str | None = None) -> dict[str, Any]:
+        return {
+            "revivable": False,
+            "harness": "goose",
+            "reason": reason,
+            "sid": sid,
+            "dead_dir": dead_dir,
+            "repo": repo,
+            "snapshot": None,
+            "candidates": [],
+        }
+
+    if not sid.startswith("goose:"):
+        return _refuse(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
+    native_id = sid[len("goose:") :]
+    if not re.match(r"^[0-9]+_[0-9]+$", native_id):
+        return _refuse(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
     conn = get_goose_db_connection(goose_db_path)
     try:
         cur = conn.cursor()
@@ -846,136 +850,64 @@ def plan_goose_revive(
         )
         row = cur.fetchone()
         if not row:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"session_not_found: session '{sid}' not found in database",
-                "sid": sid,
-                "dead_dir": None,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(f"session_not_found: session '{sid}' not found in database")
 
         _id, session_type, dead_dir, parent_session_id, archived_at = row
 
         if parent_session_id is not None:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"child_session: session '{sid}' is a child session (parent_session_id={parent_session_id})",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(
+                f"child_session: session '{sid}' is a child session (parent_session_id={parent_session_id})",
+                dead_dir=dead_dir,
+            )
 
         if session_type not in ("acp", "user"):
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"unsupported_session_type: session '{sid}' has unsupported type '{session_type}'",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(
+                f"unsupported_session_type: session '{sid}' has unsupported type '{session_type}'",
+                dead_dir=dead_dir,
+            )
 
         if archived_at is not None:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"archived_session: session '{sid}' is archived",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(f"archived_session: session '{sid}' is archived", dead_dir=dead_dir)
 
         if dead_dir and os.path.exists(dead_dir):
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"directory_exists: directory '{dead_dir}' still exists on disk",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(f"directory_exists: directory '{dead_dir}' still exists on disk", dead_dir=dead_dir)
 
         repo_dir, shape_err = validate_directory_shape(dead_dir)
         if shape_err:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": shape_err,
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(shape_err, dead_dir=dead_dir, repo=repo_dir)
 
         repo_err = validate_git_repo(repo_dir)
         if repo_err:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": repo_err,
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(repo_err, dead_dir=dead_dir, repo=repo_dir)
 
         sibling_sid, oc_err = check_opencode_sibling(opencode_db_path, dead_dir)
         if oc_err:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"opencode_db_unreadable: opencode database could not be read: {oc_err}",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(
+                f"opencode_db_unreadable: opencode database could not be read: {oc_err}",
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
         if sibling_sid:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": f"opencode_sibling: opencode session '{sibling_sid}' references directory '{dead_dir}'",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(
+                f"opencode_sibling: opencode session '{sibling_sid}' references directory '{dead_dir}'",
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
 
         evidence = last_commit_evidence(goose_tool_outputs(conn, native_id))
-        candidates = find_branch_candidates(
-            repo_dir,
+        candidates = branch_candidates(
+            repo=repo_dir,
             dead_dir=dead_dir,
             evidence=evidence,
             choose_path=lambda b: dead_dir,
             action="recreate",
         )
         if not candidates:
-            return {
-                "revivable": False,
-                "harness": "goose",
-                "reason": "no_candidates: zero branch candidates survive validation",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
+            return _refuse(
+                "no_candidates: zero branch candidates survive validation",
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
 
         return {
             "revivable": True,

@@ -2557,6 +2557,27 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(parsed["revivable"])
         self.assertEqual(parsed["sid"], sid)
 
+    def test_cli_plan_goose_db_flag(self):
+        goose_db_path = os.path.join(self.tmpdir.name, "custom_goose.db")
+        g_conn = init_goose_test_db(goose_db_path)
+        native_id = "20261104_55"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-goose-feat")
+        self._commit_branch("cli-goose-feat")
+        add_goose_session(g_conn, native_id, dead_dir)
+        g_conn.close()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main(["plan", sid, "--goose-db", goose_db_path])
+        self.assertEqual(rc, 0)
+        parsed = json.loads(stdout.getvalue())
+        self.assertTrue(parsed["revivable"])
+        self.assertEqual(parsed["harness"], "goose")
+        self.assertEqual(parsed["sid"], sid)
+        self.assertEqual(parsed["candidates"][0]["action"], "recreate")
+
     def test_cli_plan_unopenable_db_exits_2(self):
         stderr = io.StringIO()
         with mock.patch("sys.stderr", stderr):
@@ -2985,9 +3006,12 @@ class TestGoosePlan(unittest.TestCase):
         sid = "goose:abc"
         plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
         self.assertFalse(plan["revivable"])
-        self.assertTrue(
-            plan["reason"].startswith("session_not_found:") or plan["reason"].startswith("invalid_session_id:")
-        )
+        self.assertTrue(plan["reason"].startswith("invalid_session_id:"))
+
+        empty_sid = "goose:"
+        plan_empty = oc_revive.plan_revive(empty_sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan_empty["revivable"])
+        self.assertTrue(plan_empty["reason"].startswith("invalid_session_id:"))
 
     def test_plan_goose_refusal_child_session(self):
         native_id = "20261104_12"
@@ -3061,7 +3085,6 @@ class TestGoosePlan(unittest.TestCase):
         slug = "checked-out-feat"
         dead_dir = os.path.join(self.worktrees_dir, slug)
         self._commit_branch(slug)
-        # Check out branch in an active worktree
         live_wt = os.path.join(self.tmpdir.name, "live_wt")
         subprocess.run(["git", "worktree", "add", live_wt, slug], cwd=self.repo, check=True, capture_output=True)
         add_goose_session(self.goose_conn, native_id, dead_dir)
@@ -3086,7 +3109,6 @@ class TestGoosePlan(unittest.TestCase):
         self._commit_branch("sibling-feat")
         add_goose_session(self.goose_conn, native_id, dead_dir)
 
-        # Plant opencode session referencing dead_dir
         cur = self.oc_conn.cursor()
         cur.execute(
             "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
@@ -3106,7 +3128,6 @@ class TestGoosePlan(unittest.TestCase):
         self._commit_branch("sibling-sub-feat")
         add_goose_session(self.goose_conn, native_id, dead_dir)
 
-        # Plant opencode session referencing a subdirectory of dead_dir
         sub_dir = os.path.join(dead_dir, "nested", "child")
         cur = self.oc_conn.cursor()
         cur.execute(
@@ -3127,7 +3148,6 @@ class TestGoosePlan(unittest.TestCase):
         self._commit_branch("unreadable-feat")
         add_goose_session(self.goose_conn, native_id, dead_dir)
 
-        # Corrupt opencode db by writing non-sqlite garbage
         self.oc_conn.close()
         with open(self.oc_db_path, "wb") as f:
             f.write(b"NOT A SQLITE DATABASE FILE GARBAGE CONTENT")
@@ -3181,6 +3201,33 @@ class TestCommitEvidenceExtraction(unittest.TestCase):
     def test_last_commit_evidence_empty_or_none(self):
         self.assertIsNone(oc_revive.last_commit_evidence([]))
         self.assertIsNone(oc_revive.last_commit_evidence(["no commit pattern here"]))
+
+    def test_goose_tool_outputs_skips_malformed_items(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content_json TEXT NOT NULL
+            );
+        """)
+        sid = "20261104_12"
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, "NOT JSON {"))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps({"type": "toolResponse"})))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps(["string item", {"type": "notToolResponse"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": "not_dict"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": "not_dict"}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": "not_list"}}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": [{"type": "image"}, {"type": "text", "text": 123}]}}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": [{"type": "text", "text": "valid output"}]}}}])))
+        conn.commit()
+
+        outputs = oc_revive.goose_tool_outputs(conn, sid)
+        self.assertEqual(outputs, ["valid output"])
+        conn.close()
 
 
 if __name__ == "__main__":
