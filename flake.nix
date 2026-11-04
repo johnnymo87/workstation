@@ -1849,8 +1849,8 @@
           echo "GATE FAILURE: session_switcher lua suite did not reach its final pass line." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 10 ] || {
-          echo "GATE FAILURE: expected 10 'PASS  ' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/out.txt")" = 11 ] || {
+          echo "GATE FAILURE: expected 11 'PASS  ' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/out.txt")." >&2
           exit 1
         }
