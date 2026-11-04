@@ -38,12 +38,12 @@ needs a deploy.
   skill (`--mcp` at launch, `oc-mcp-enable` for a running session) and its discipline: prefer
   `slack-ro`, grant late and narrow. The rest of this skill does not apply to you.
 - **goose:** your tools are named `<extension>__<tool>`, for example `developer__shell`.
-  Read on. On **cloudbox**, goose sessions held by honkd have self-grant tools. Elsewhere
-  (devbox, macOS), tell the human the server cannot be turned on for this session.
+  Read on. On **cloudbox and devbox**, goose sessions held by honkd have self-grant tools. On
+  macOS, tell the human the server cannot be turned on for this session.
 
 ## goose: self-granting with swarm MCP tools
 
-On cloudbox, goose sessions held by honkd have tools `swarm__mcp_list`, `swarm__mcp_enable`,
+On cloudbox and devbox, goose sessions held by honkd have tools `swarm__mcp_list`, `swarm__mcp_enable`,
 and `swarm__mcp_disable`. Use them to turn on what the task needs, yourself, mid-turn: the new
 server's tools are usable from your next step (no need to end the turn).
 
@@ -94,7 +94,12 @@ Be unambiguous:
 - **No swarm tools at all:** ask the human for `/mcp enable swarm`.
 - **Sessions launched from Telegram:** the human has to attach with `honk chat <session>` to run
   these (Telegram's `/mcp` doesn't cover goose yet).
-- **Hosts without honkd (devbox, macOS):** the server can't be turned on for this session.
+- **Hosts without honkd (macOS):** the server can't be turned on for this session.
+- **A server missing from `mcp_list`:** each host offers only the servers in its own
+  `opencode.json`, so work-only servers (slack, atlassian, ...) are absent on devbox. That is
+  not an outage; tell the human the server isn't available on this host. On devbox every
+  listed server shows `!` (none is pre-confirmed there), so enabling any of them takes the
+  trailing `!` and a reason; the marker does not single one out as unusually dangerous.
 
 ## goose: `/mcp` in honk chat
 
