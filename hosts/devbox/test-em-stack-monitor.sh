@@ -39,7 +39,8 @@ setup() { # fresh sandbox per case; the healthy live stack
 #!$bash_bin
 name=\$(printf '%s' "\${1#http://127.0.0.1:}" | tr '/' '_')
 echo "\$1" >>"$S/fetch.log"
-[ -f "$S/web/\$name" ] || exit 7
+[ ! -e "$S/web/\$name.refused" ] || exit 7    # curl rc 7: connection refused (source gone)
+[ -f "$S/web/\$name" ] || exit 28             # curl rc 28: timeout (source failed)
 cat "$S/web/\$name"
 EOF
   printf '#!%s\n[ ! -e "%s/nostack" ]\n' "$bash_bin" "$S" >"$S/gate"
@@ -100,8 +101,8 @@ at 600; run; at 1200; run
 check "healthy: still quiet after more passes (WARN lines, wanted close)" '[ "$(tgn)" -eq 0 ]'
 
 # 1b. A never-started session (deferred boot), as stack-health prints it since
-# EM #1173: INFO/WARN lines, no UNKNOWN. Hand-derived from the live capture
-# (the live checkout predates #1173), so the wording is the PR's, the layout is real.
+# EM #1173: INFO/WARN lines, no UNKNOWN. The fixture is a real run of #1173's
+# stack-health as livia against the live stack (manual-live, the default mode here).
 setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; run; at 600; run; at 1200; run
 check "deferred boot (INFO/WARN only): no alert over three passes" '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 0 ]'
 export EM_STACK_MONITOR_DRY_RUN=1; run; unset EM_STACK_MONITOR_DRY_RUN
@@ -373,6 +374,91 @@ check "presence down while a presence key stands: no resolved" '[ "$(tgn)" -eq 1
 setup; mkhealth "postgres FAIL refused"; run; at 600; run
 sethealth postgres OK fine; at 1200; run
 check "an answered check clears its key" '[ "$(tgn)" -eq 2 ] && [ "$(st ".keys | length")" -eq 0 ]'
+
+# 13c. A source that is GONE (answered "not here") clears its keys; only a FAILED
+# source is carried, and carrying is capped at 3 passes.
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+serve 4002_v1_sessions_jonathan_status 503 "$fx/status-livia-503.json"; at 600; run
+check "A: session stopped (status 503 session_not_found) clears the GM halt" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)" && [ "$(st ".keys | length")" -eq 0 ]'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+rm -f "$S/web/4002_v1_sessions_jonathan_status"; touch "$S/web/4002_v1_sessions_jonathan_status.refused"; at 600; run
+check "status refused (gone) clears the GM halt" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+serve 4002_v1_sessions_jonathan_status 404 "$fx/status-livia-503.json"; at 600; run
+check "status 404 (gone) clears the GM halt" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+serve 4002_v1_sessions_jonathan_status 502 "$fx/status-livia-503.json"; at 600; run
+check "status 502 (failed, not session_not_found) is carried" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | length")" -eq 1 ]'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+serve 4002_v1_sessions_jonathan_status 200 <(echo '<html>'); at 600; run
+check "status 200 that does not parse is carried" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | length")" -eq 1 ]'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+rm -f "$S/web/4002_v1_presence"; touch "$S/web/4002_v1_presence.refused"; at 600; run
+check "presence refused (gone) drops the GM halt" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+
+setup
+serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
+rm -f "$S/web/4400_em_quiescence"; touch "$S/web/4400_em_quiescence.refused"; at 1200; run
+check "B: AgentOS stopped (:4400 refused) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+setup
+serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
+serve 4400_em_quiescence 404 "$fx/status-livia-503.json"; at 1200; run
+check "quiescence 404 (gone) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+
+setup; mkhealth "foo FAIL broke"; run; at 600; run
+check "C: fail:foo announced" '[ "$(tgn)" -eq 1 ]'
+sethealth postgres OK fine; at 1200; run
+check "C: a complete run (SUMMARY) with no foo line clears fail:foo" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+
+# The cap: a source timing out 4 passes in a row resolves on the 4th.
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+rm -f "$S/web/4002_v1_presence"
+at 600; run
+check "cap: carried on timeout 1" '[ "$(tgn)" -eq 1 ] && [ "$(st ".carried[\"gm_halt:jonathan\"]")" -eq 1 ]'
+at 1200; run; at 1800; run
+check "cap: carried on timeouts 2 and 3" '[ "$(tgn)" -eq 1 ] && [ "$(st ".carried[\"gm_halt:jonathan\"]")" -eq 3 ]'
+at 2400; run
+check "cap: resolved on timeout 4" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)" && [ "$(st ".carried | length")" -eq 0 ]'
+# ... and observing the key directly resets the count.
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+cp "$S/web/4002_v1_presence" "$S/presence.keep"; rm -f "$S/web/4002_v1_presence"
+at 600; run; at 1200; run; at 1800; run
+cp "$S/presence.keep" "$S/web/4002_v1_presence"; at 2400; run
+check "reset: observed directly, the carry count clears" '[ "$(st ".carried | length")" -eq 0 ] && [ "$(tgn)" -eq 1 ]'
+rm -f "$S/web/4002_v1_presence"; at 3000; run; at 3600; run; at 4200; run
+check "reset: three more timeouts are carried again" '[ "$(tgn)" -eq 1 ]'
+at 4800; run
+check "reset: and the 4th resolves" '[ "$(tgn)" -eq 2 ]'
+# Pending counts obey the same cap.
+setup; serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "x"'; run
+cp "$S/web/4400_em_quiescence" "$S/q.keep"; rm -f "$S/web/4400_em_quiescence"
+at 600; run; at 1200; run; at 1800; run
+cp "$S/q.keep" "$S/web/4400_em_quiescence"; at 2400; run
+check "debounce count carried through 3 failed passes: alerts when seen again" '[ "$(tgn)" -eq 1 ]'
+setup; serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "x"'; run
+cp "$S/web/4400_em_quiescence" "$S/q.keep"; rm -f "$S/web/4400_em_quiescence"
+at 600; run; at 1200; run; at 1800; run; at 2400; run
+cp "$S/q.keep" "$S/web/4400_em_quiescence"; at 3000; run
+check "debounce count past the cap is dropped: seen again counts as 1" '[ "$(tgn)" -eq 0 ]'
+
+# session_not_started: stack-health says the session it probed never started.
+for m in sim sim-reactive reactive-live autonomous-live; do
+  setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; echo "$m" >"$S/mode"; run
+  check "mode $m: first pass quiet" '[ "$(tgn)" -eq 0 ]'
+  at 600; run
+  check "mode $m: session never started alerts on the second pass, naming session and mode" \
+    '[ "$(tgn)" -eq 1 ] && grep -q "^- session livia was never started .* in mode $m," <<<"$(tglast)"'
+done
+setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; echo manual-live >"$S/mode"; run; at 600; run
+check "mode manual-live: a deferred session is normal, quiet" '[ "$(tgn)" -eq 0 ]'
+setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; : >"$S/mode"; run; at 600; run
+check "unknown mode: also alerts" '[ "$(tgn)" -eq 1 ] && grep -q "in mode unknown" <<<"$(tglast)"'
+setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; echo sim >"$S/mode"; run; at 600; run
+cat "$fx/stack-health.txt" >"$S/health"; at 1200; run
+check "session_not_started clears when the session is up" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; echo sim >"$S/mode"; run; at 600; run
+: >"$S/health"; at 1200; run
+check "session_not_started is carried when stack-health printed no SUMMARY" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | index(\"session_not_started\") != null")" = true ]'
 
 # 14. One Telegram message per pass: events ride with the standing problems.
 setup; mkhealth "postgres FAIL refused"; run

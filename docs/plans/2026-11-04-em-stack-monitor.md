@@ -32,6 +32,7 @@ Each has a stable key. Detail text (numbers, times) never goes into a key.
 | Key | Source | Condition |
 |---|---|---|
 | `fail:<check>` | `bin/stack-health` | a line whose verdict is `FAIL`, `DOWN` or `DEAD_MANAGER` (except `agentos` outside a live mode) |
+| `session_not_started` | `bin/stack-health` | the line `api WARN session <s> not started (HTTP 503 session_not_found ...` (EM #1173) in any mode but `manual-live`, which starts the session lazily. Every other mode, `sim`, `sim-reactive`, `reactive-live`, `autonomous-live`, starts it eagerly, so a session that never came up is a problem. An unknown mode alerts too (errs noisy, as the `agentos` rule does). The text names the session stack-health probed and the mode. |
 | `monitor:blind` | `bin/stack-health` | no `SUMMARY:` line, or any `UNKNOWN` line while `:4002` answered: the monitor cannot see, so say so |
 | `presence:<sid>` | `GET :4002/v1/presence` | `link == "offline"`, `last_close.cause == "server"`, and `wants_out == null` (it is an object `{why, at}` when the close was wanted). The text names `last_close.at`, `code`, and says when `idle` is true (TEC logs out an idle character). |
 | `quarantine:<agent>` | `GET :4400/em/quiescence` | `agents[k].quarantined != null` (it is a reason string) |
@@ -43,25 +44,33 @@ WARN lines never alert. UNKNOWN lines alert only as `monitor:blind`. Stuck recov
 own: stack-health FAILs on `recovering_for_s >= 600`, which comes through as
 `fail:agentos`.
 
-Source failures. Every source is graded on its own, and the pass records which ones
-answered: stack-health (a line for the check that is not `UNKNOWN`), presence, each
-session's status (HTTP 200), quiescence. A key that was active last pass, is missing
-now, and whose source did not answer is carried forward with its stored text (the
-state keeps the text of each active key), so one failed fetch neither drops a
-standing key nor sends a false "resolved":
+Source failures. Every source is graded on its own, and each pass records, per source,
+one of three outcomes. *Answered*: it said something, including "nothing wrong" and
+"not here" such as a 503 `session_not_found` on a session's status. *Gone*: connection
+refused (curl rc 7) or HTTP 404, and for stack-health a complete run (it printed
+`SUMMARY:`) that has no line for a check. *Failed*: a timeout, a reset, a 5xx other than
+`session_not_found`, a 200 that does not parse, or a stack-health run without `SUMMARY:`.
+Only a *failed* source is carried: a key that was active last pass, is missing now, and
+whose source failed is carried forward with its stored text (the state keeps the text of
+each active key), so one failed fetch neither drops a standing key nor sends a false
+"resolved". A gone source clears its keys like any absent key (a stopped session, a
+stopped AgentOS, a check that no longer exists).
 
-- `fail:<check>`: carried while that check is absent or `UNKNOWN` this pass;
+- `fail:<check>`, `session_not_started`: carried when stack-health printed no `SUMMARY:` line,
+  or that check (`api` for `session_not_started`) reads `UNKNOWN`;
 - `monitor:blind`: never carried, it is derived from the stack-health output;
-- `presence:<sid>`: carried while presence did not answer;
-- `gm_halt:<sid>`: carried while presence did not answer, or while that session's
-  status did not;
-- `quarantine:<agent>`: carried while quiescence did not answer.
+- `presence:<sid>`: carried while the presence fetch failed;
+- `gm_halt:<sid>`: carried while the presence fetch failed, or while that session's status
+  fetch failed;
+- `quarantine:<agent>`: carried while the quiescence fetch failed.
 
-There is no global "degraded" flag: quiescence never answers in sim modes. Debounce
-counts of such keys are carried too, unchanged, so a failed fetch does not restart a
-debounce.
+There is no global "degraded" flag: quiescence never answers in sim modes. Carrying is
+capped: at most 3 consecutive passes per key (state `carried: {key: n}`, reset whenever the
+key is observed directly), so a source that fails 4 passes in a row resolves on the 4th like
+any absent key. Debounce counts of such keys are carried too, unchanged, under the same cap
+(past it the count is dropped).
 
-Debounce: a `fail:*`, `monitor:blind`, `presence:*` or `quarantine:*` key alerts only once it has been seen on
+Debounce: a `fail:*`, `session_not_started`, `monitor:blind`, `presence:*` or `quarantine:*` key alerts only once it has been seen on
 2 passes in a row (one pass during a BEAM or AgentOS restart is normal). The pending set is
 kept in the state directory. Resolve after 1 clean pass.
 
@@ -134,7 +143,9 @@ live stack (real field types) and served by a fake fetch, which can also answer 
 nothing. stack-health, the gate, the mode, Telegram and the clock are fakes too. Cases: no stack is
 quiet and clears pending without "resolved", but sends one "stopped" line for announced problems;
 a failing source (503, no answer, bad JSON) does not abort the pass; stack-health output for a
-never-started session (deferred boot: INFO and WARN lines only, per EM #1173) raises no key; UNKNOWN reads as
+never-started session (deferred boot: INFO and WARN lines only, per EM #1173; a real capture)
+raises no key in `manual-live` and `session_not_started` in sim, sim-reactive, reactive-live,
+autonomous-live and an unknown mode (clearing when the session is up, carried without a `SUMMARY`); UNKNOWN reads as
 `monitor:blind`; `agentos DOWN` in a sim mode is quiet; a wanted close (`wants_out` object) is
 quiet; an `operator_halt` is quiet; a stuck `child_restart_failed` posts once an hour; a FAIL alerts only on its second pass; WARN and
 UNKNOWN never alert; STILL after 6 h; resolved after a clean pass; presence server close
@@ -143,9 +154,12 @@ alerts, a wanted close does not; GM halt under 20 min quiet, over it alerts, a m
 next pass or an hour later (same `at`), a newer one inside the rate window neither posts nor is
 recorded and one after it posts, seen events are kept 2 h; 3 recoveries post a flap once (same
 rules); a new `boot_id` does not replay; a failed source carries its keys (presence timeout
-during a standing GM halt, no `SUMMARY` while `fail:postgres` stands, a standing check read
-`UNKNOWN`, quiescence down during a quarantine, a debounce count surviving a failed pass) and an
-answered "clear" still resolves; wrong-shape state (`{"keys":"x"}`, `{"pending":[1]}`, ...) does
+during a standing GM halt, a status 502 or an unparsable 200, no `SUMMARY` while `fail:postgres`
+stands, a standing check read `UNKNOWN`, quiescence down during a quarantine, a debounce count
+surviving a failed pass) while a gone source clears them (status 503 `session_not_found`, 404 or
+refused; `:4400` refused or 404; presence refused; a complete stack-health run with no line for a
+check), the cap resolves on the 4th failed pass and resets when the key is observed, a debounce
+count past the cap is dropped, and an answered "clear" still resolves; wrong-shape state (`{"keys":"x"}`, `{"pending":[1]}`, ...) does
 not kill a pass; the Telegram token and chat id never appear in curl's argv; a Telegram failure
 exits non-zero and records nothing.
 

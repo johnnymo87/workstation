@@ -1,8 +1,8 @@
-stack-health — 2026-11-04 15:39:29-0500 — /home/dev/projects/eternal-machinery
-  disk         OK       163G free (floor 5G, warn 15G)
+stack-health — 2026-11-04 16:33:48-0500 — /home/dev/projects/.worktrees/shd
+  disk         OK       157G free (floor 5G, warn 15G)
   manager      OK       devenv process manager alive, 7 stack process(es)
   postgres     OK       accepting connections on 5434
-  api          WARN     session livia not started (HTTP 503 session_not_found) — expected under deferred boot; start the session before a window
+  api          WARN     session livia not started (HTTP 503 session_not_found; expected under deferred boot; start it before a window)
   tape         INFO     session livia not started (deferred boot): tape writer not checked yet
   session_guard OK       every session the guard watches is up: jonathan=up(failures 0, restores/h 0, restarts/h 0)
   presence     OK       no server close: jonathan=offline/unknown livia=offline/unknown
@@ -15,7 +15,7 @@ stack-health — 2026-11-04 15:39:29-0500 — /home/dev/projects/eternal-machine
   recipe       INFO     AgentOS recipe_source='panel'
   landmarks    OK       17 landmark annotation(s), 13 placement(s) on live vertices, 1 safe retreat target(s) in cartography_dev (candidates, not proven reachable)
   radar_bound  OK       no stored radar view has a cell beyond 120 px (largest coordinate 120)
-  routing_consumer WARN     the BEAM answered 503 session_not_found without a routing field, so the routing consumer was not checked
+  routing_consumer WARN     session livia not started, and this BEAM's 503 carries no routing object (restart it to check the consumer before the session starts)
   routing_journal OK       about 1015 journal row(s), 1031 unacked, table 328 kB. OK means every trigger is present and ALWAYS; their wiring and bodies are Cartography.Routing.Integrity's job. With the consumer on (routing_consumer) it acks and trims the journal; with it off the journal only grows
   growth       OK       all databases=9G (warn >20G), 97 cartography_test* partitions (>12; see runbook for the drop recipe)
 

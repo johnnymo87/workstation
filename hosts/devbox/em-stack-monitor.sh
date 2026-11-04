@@ -21,7 +21,8 @@
 # Test hooks (everything outside this script is injectable; each is the path of
 # an executable, or unset for the real thing):
 #   EM_STACK_FETCH_CMD   $1 = URL; prints the HTTP code on line 1, the body
-#                        after it; non-zero when nothing answered.
+#                        after it; non-zero (curl's exit code: 7 = refused,
+#                        28 = timeout) when nothing answered.
 #   EM_STACK_GATE_CMD    exit 0 when a stack (a BEAM on 127.0.0.1:4002) is up.
 #   EM_STACK_MODE_CMD    prints the BEAM's EM_MODE (empty when unknown).
 #   EM_STACK_HEALTH_CMD  prints bin/stack-health's output (exit code ignored).
@@ -33,20 +34,25 @@
 # that source" (for stack-health, the key monitor:blind), never an aborted
 # pass. So every command that may fail sits in an `if` or has `|| true`.
 #
-# Carry-forward. A source that fails for one pass must neither drop a standing
-# key nor produce a false "resolved". The pass records which sources answered
-# (stack-health: a line for the check that is not UNKNOWN; presence; the status
-# of each session; quiescence). A key that was active last pass, is missing now,
-# and whose source did not answer is carried forward with its stored text:
-#   fail:<check>   carried while that check is absent or UNKNOWN this pass
+# Carry-forward. A source that FAILS to answer for a pass (timeout, reset, a 5xx
+# other than session_not_found, a 200 that does not parse) must neither drop a
+# standing key nor produce a false "resolved". A source that answers "not here"
+# (connection refused, 404, session_not_found, a complete stack-health run with
+# no line for the check) is GONE: its keys clear like any absent key. A key that
+# was active last pass, is missing now, and whose source failed is carried
+# forward with its stored text:
+#   fail:<check>, session_not_started
+#                  carried when stack-health printed no SUMMARY line, or that
+#                  check (api, for session_not_started) reads UNKNOWN
 #   monitor:blind  never carried (it is derived from the stack-health output)
-#   presence:<sid> carried while presence did not answer
-#   gm_halt:<sid>  carried while presence did not answer, or this sid's status
-#                  (HTTP 200) did not
-#   quarantine:*   carried while quiescence did not answer
+#   presence:<sid> carried while the presence fetch failed
+#   gm_halt:<sid>  carried while the presence fetch failed, or this session's
+#                  status fetch failed (a 503 session_not_found is an answer)
+#   quarantine:*   carried while the quiescence fetch failed
 # There is no global degraded flag: quiescence never answers in sim modes.
-# Pending (debounce) counts of such keys are carried too, unchanged, so a
-# failed fetch does not restart a debounce either.
+# Carrying is capped at 3 consecutive passes per key (state `carried`), reset
+# whenever the key is observed directly; the 4th failed pass lets it resolve.
+# Pending (debounce) counts of such keys are carried under the same cap.
 #
 # State ($STATE_DIRECTORY/state.json), written only after a pass that delivered
 # everything it owed. It is normalized at load, field by field, so valid JSON
@@ -57,6 +63,7 @@
 #   texts    {key: text} of the active keys, for carry-forward
 #   sent_at  when the standing message last went out (for the 6 h reminder)
 #   pending  {key: consecutive passes seen} for the debounced keys
+#   carried  {key: consecutive passes carried forward}
 #   events   {event key: time sent}, pruned after 2 h (never under the 1 h
 #            rate window)
 #
@@ -107,7 +114,7 @@ tg_send() { # $1: text. Returns non-zero when delivery failed.
 fetch() { # $1: URL. HTTP code on line 1, body after it. Non-zero: no answer.
   if [ -n "${EM_STACK_FETCH_CMD:-}" ]; then "$EM_STACK_FETCH_CMD" "$1"; return; fi
   local raw
-  raw=$(curl -sS -m 10 -w '\n%{http_code}' "$1") || return 1
+  raw=$(curl -sS -m 10 -w '\n%{http_code}' "$1") || return $?
   printf '%s\n%s\n' "${raw##*$'\n'}" "${raw%$'\n'*}"
 }
 
@@ -129,16 +136,25 @@ stack_health() { # prints bin/stack-health output; exit code is ignored by the c
   cd "$EM_STACK_REPO" && timeout 200 ./bin/stack-health 2>&1
 }
 
-# get_json URL: leaves the HTTP code in GOT_CODE and the body in GOT_BODY.
-# Returns non-zero (no data) when nothing answered or the body is not JSON.
-GOT_CODE=""; GOT_BODY=""
+# get_json URL: leaves the HTTP code in GOT_CODE, the body in GOT_BODY and the
+# kind of outcome in GOT_KIND: "answered" (valid JSON, any code; the caller
+# judges the code), "gone" (curl rc 7, connection refused, or HTTP 404: the
+# source says "not here") or "failed" (any other fetch failure, or a body that
+# is not JSON). Returns non-zero unless "answered".
+GOT_CODE=""; GOT_BODY=""; GOT_KIND=failed
 get_json() {
-  local raw
-  GOT_CODE=""; GOT_BODY=""
-  raw=$(fetch "$1") || return 1
+  local raw rc=0
+  GOT_CODE=""; GOT_BODY=""; GOT_KIND=failed
+  raw=$(fetch "$1") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -ne 7 ] || GOT_KIND=gone
+    return 1
+  fi
   GOT_CODE=${raw%%$'\n'*}
   case "$raw" in *$'\n'*) GOT_BODY=${raw#*$'\n'} ;; *) GOT_BODY="" ;; esac
-  jq -e . >/dev/null 2>&1 <<<"$GOT_BODY"
+  if [ "$GOT_CODE" = 404 ]; then GOT_KIND=gone; return 1; fi
+  jq -e . >/dev/null 2>&1 <<<"$GOT_BODY" || return 1
+  GOT_KIND=answered
 }
 
 # --- Collect ------------------------------------------------------------------------
@@ -149,7 +165,7 @@ add() { text[$1]=$2; cls[$1]=$3; } # $1: stable key, $2: text, $3: deb|imm
 
 now=${EM_STACK_NOW:-$(date +%s)}
 state_file="${STATE_DIRECTORY:?}/state.json"
-empty_state='{"sig":"","keys":[],"texts":{},"sent_at":0,"pending":{},"events":{}}'
+empty_state='{"sig":"","keys":[],"texts":{},"sent_at":0,"pending":{},"events":{},"carried":{}}'
 state=$empty_state
 if [ -f "$state_file" ] && st=$(cat "$state_file"); then
   state=$(jq -c '
@@ -160,7 +176,8 @@ if [ -f "$state_file" ] && st=$(cat "$state_file"); then
        texts: (if ($s.texts | type) == "object" then ($s.texts | with_entries(select(.value | type == "string"))) else {} end),
        sent_at: (if ($s.sent_at | type) == "number" then ($s.sent_at | floor) else 0 end),
        pending: ($s.pending | nums),
-       events: ($s.events | nums)}' <<<"$st" 2>/dev/null) || state=$empty_state
+       events: ($s.events | nums),
+       carried: ($s.carried | nums)}' <<<"$st" 2>/dev/null) || state=$empty_state
   [ -n "$state" ] || state=$empty_state
 fi
 prev_sig=$(jq -r '.sig' <<<"$state")
@@ -172,21 +189,34 @@ prev_keys_txt=$(jq -r '.keys | join(", ")' <<<"$state")
 events_seen=$(jq -c --argjson now "$now" \
   '.events | with_entries(select(.value > ($now - 7200)))' <<<"$state")
 
-# Which sources answered this pass (for carry-forward).
-declare -A seen_checks=() sidset=() status_ok=()
-presence_ok=0; quies_ok=0
-source_failed() { # $1: key. 0 when the source behind that key did not answer this pass
+# Which sources failed this pass (for carry-forward); see the header.
+declare -A unknown_set=() sidset=() status_state=() prev_carried=() carried_n=()
+have_summary=0
+presence_state=failed; quies_state=failed
+source_failed() { # $1: key. 0 when the source behind that key FAILED this pass
   local sid chk
   case "$1" in
-    fail:*) chk=${1#fail:}; [ -z "${seen_checks[$chk]+x}" ] ;;
-    presence:*) [ "$presence_ok" = 0 ] ;;
+    fail:*|session_not_started)
+      chk=${1#fail:}; [ "$1" != session_not_started ] || chk=api
+      [ "$have_summary" = 0 ] || [ -n "${unknown_set[$chk]+x}" ] ;;
+    presence:*) [ "$presence_state" = failed ] ;;
     gm_halt:*)
       sid=${1#gm_halt:}
-      [ "$presence_ok" = 0 ] || { [ -n "${sidset[$sid]+x}" ] && [ -z "${status_ok[$sid]+x}" ]; } ;;
-    quarantine:*) [ "$quies_ok" = 0 ] ;;
+      [ "$presence_state" = failed ] || { [ -n "${sidset[$sid]+x}" ] && [ "${status_state[$sid]:-}" = failed ]; } ;;
+    quarantine:*) [ "$quies_state" = failed ] ;;
     *) return 1 ;;
   esac
 }
+carry_step() { # $1: key. 0 if it may be carried one more pass (and counts it)
+  local n
+  [ -z "${carried_n[$1]+x}" ] || return 0   # already counted this pass
+  n=$(( ${prev_carried[$1]:-0} + 1 ))
+  [ "$n" -le 3 ] || return 1
+  carried_n[$1]=$n
+}
+while IFS=$'\t' read -r k n; do
+  [ -z "$k" ] || prev_carried["$k"]=$n
+done < <(jq -r '.carried | to_entries[] | [.key, (.value | tostring)] | @tsv' <<<"$state")
 
 declare -a new_event_keys=() new_event_texts=()
 nostack=0
@@ -203,16 +233,16 @@ else
 
   # --- bin/stack-health -------------------------------------------------------------
   health_out=$(stack_health) || true
-  have_summary=0
   unknown_checks=()
-  re_any='^  ([^[:space:]]+)[[:space:]]+([A-Z_]+)([[:space:]]|$)'
+  session_probe=""
+  # `api WARN session X not started (HTTP 503 session_not_found ...`: the session
+  # stack-health probed has not started (deferred boot, EM #1173).
+  re_api='^  api[[:space:]]+WARN[[:space:]]+session[[:space:]]+([^[:space:]]+)[[:space:]]+not started \(HTTP 503 session_not_found'
   re_bad='^  ([^[:space:]]+)[[:space:]]+(FAIL|DOWN|DEAD_MANAGER)([[:space:]]|$)(.*)$'
   re_unk='^  ([^[:space:]]+)[[:space:]]+UNKNOWN([[:space:]]|$)'
   while IFS= read -r line; do
     case "$line" in SUMMARY:*) have_summary=1 ;; esac
-    if [[ $line =~ $re_any ]] && [ "${BASH_REMATCH[2]}" != UNKNOWN ]; then
-      seen_checks["${BASH_REMATCH[1]}"]=1
-    fi
+    if [[ $line =~ $re_api ]]; then session_probe=${BASH_REMATCH[1]}; fi
     if [[ $line =~ $re_bad ]]; then
       chk=${BASH_REMATCH[1]}
       if [ "$chk" = agentos ] && [ "$live" = 0 ]; then continue; fi
@@ -221,8 +251,14 @@ else
       add "fail:$chk" "$chk ${BASH_REMATCH[2]}: ${detail:0:300}" deb
     elif [[ $line =~ $re_unk ]]; then
       unknown_checks+=("${BASH_REMATCH[1]}")
+      unknown_set["${BASH_REMATCH[1]}"]=1
     fi
   done <<<"$health_out"
+  # manual-live starts the session lazily, so this is normal there; every other
+  # known mode starts it eagerly. An unknown mode errs noisy (as agentos does).
+  if [ -n "$session_probe" ] && [ "$mode" != manual-live ]; then
+    add "session_not_started" "session $session_probe was never started (stack-health: HTTP 503 session_not_found) in mode ${mode:-unknown}, which starts it eagerly" deb
+  fi
   if [ "$have_summary" = 0 ]; then
     add "monitor:blind" "bin/stack-health printed no SUMMARY line (it timed out or crashed): the monitor cannot see the stack" deb
   elif [ "${#unknown_checks[@]}" -gt 0 ]; then
@@ -233,7 +269,7 @@ else
   sids=()
   if get_json "http://127.0.0.1:4002/v1/presence" && [ "$GOT_CODE" = 200 ] &&
      jq -e '.presence | type == "object"' >/dev/null 2>&1 <<<"$GOT_BODY"; then
-    presence_ok=1
+    presence_state=answered
     while IFS= read -r sid; do
       [ -z "$sid" ] || { sids+=("$sid"); sidset["$sid"]=1; }
     done < <(jq -r '.presence | keys[] | select(test("^[A-Za-z0-9_-]+$"))' <<<"$GOT_BODY" 2>/dev/null || true)
@@ -251,10 +287,14 @@ else
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
   fi
 
+  # Only a refusal or a 404 says the endpoint is gone; anything else failed.
+  [ "$presence_state" = answered ] || [ "$GOT_KIND" != gone ] || presence_state=gone
+
   # --- GM halt, per session ---------------------------------------------------------
   for sid in "${sids[@]}"; do
+    status_state["$sid"]=failed
     if get_json "http://127.0.0.1:4002/v1/sessions/$sid/status" && [ "$GOT_CODE" = 200 ]; then
-      status_ok["$sid"]=1
+      status_state["$sid"]=answered
       # halted_at is a microsecond ISO string; fromdateiso8601 wants none.
       while IFS=$'\t' read -r kind line; do
         [ -z "$kind" ] || add "gm_halt:$sid" "$line" "$kind"
@@ -268,12 +308,17 @@ else
           elif ($now - $t) >= ($min * 60) then ["imm", "\($what), halted \((($now - $t) / 60) | floor) min ago"]
           else empty end
         | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
+    elif [ "$GOT_KIND" = gone ]; then
+      status_state["$sid"]=gone
+    elif [ "$GOT_KIND" = answered ] && [ "$GOT_CODE" = 503 ] &&
+         jq -e '.error == "session_not_found"' >/dev/null 2>&1 <<<"$GOT_BODY"; then
+      status_state["$sid"]=answered   # the session is not running: no halt to report
     fi
   done
 
   # --- AgentOS quiescence: quarantine and events --------------------------------------
   if get_json "http://127.0.0.1:4400/em/quiescence" && [ "$GOT_CODE" = 200 ]; then
-    quies_ok=1
+    quies_state=answered
     while IFS=$'\t' read -r key line; do
       [ -z "$key" ] || add "$key" "$line" deb
     done < <(jq -r '
@@ -312,13 +357,16 @@ else
               "agent \($a): \($oth | length) recoveries in the last hour (\($oth | map(.cause | tostring) | unique | join(", ")))"]
          else empty end)
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
+  elif [ "$GOT_KIND" = gone ]; then
+    quies_state=gone
   fi
+
   # --- Carry forward keys whose source did not answer ---------------------------------
   mapfile -t prev_active < <(jq -r '.keys[]' <<<"$state")
   for k in "${prev_active[@]}"; do
     [ -n "$k" ] || continue
     [ -z "${text[$k]+x}" ] || continue
-    if source_failed "$k"; then
+    if source_failed "$k" && carry_step "$k"; then
       add "$k" "$(jq -r --arg k "$k" '.texts[$k] // $k' <<<"$state")" carry
     fi
   done
@@ -351,7 +399,7 @@ if [ "$nostack" = 0 ]; then
   # A debounce count survives a pass in which its source did not answer.
   while IFS=$'\t' read -r k n; do
     [ -n "$k" ] || continue
-    if jq -e --arg k "$k" 'has($k) | not' >/dev/null <<<"$pending_json" && source_failed "$k"; then
+    if jq -e --arg k "$k" 'has($k) | not' >/dev/null <<<"$pending_json" && source_failed "$k" && carry_step "$k"; then
       pending_json=$(jq -c --arg k "$k" --argjson n "$n" '.[$k] = $n' <<<"$pending_json")
     fi
   done < <(jq -r '.pending | to_entries[] | [.key, (.value | tostring)] | @tsv' <<<"$state")
@@ -431,9 +479,13 @@ if ! dry; then
   for k in "${active[@]}"; do
     texts_json=$(jq -c --arg k "$k" --arg t "${text[$k]}" '.[$k] = $t' <<<"$texts_json")
   done
+  carried_json='{}'
+  for k in "${!carried_n[@]}"; do
+    carried_json=$(jq -c --arg k "$k" --argjson n "${carried_n[$k]}" '.[$k] = $n' <<<"$carried_json")
+  done
   jq -n --arg sig "$sig" --argjson keys "$keys_json" --argjson texts "$texts_json" --argjson sent "$sent_at" \
-    --argjson pending "$pending_json" --argjson events "$events_new" \
-    '{sig: $sig, keys: $keys, texts: $texts, sent_at: $sent, pending: $pending, events: $events}' \
+    --argjson pending "$pending_json" --argjson events "$events_new" --argjson carried "$carried_json" \
+    '{sig: $sig, keys: $keys, texts: $texts, sent_at: $sent, pending: $pending, events: $events, carried: $carried}' \
     >"$state_file.tmp"
   mv "$state_file.tmp" "$state_file"
 fi
