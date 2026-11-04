@@ -18,6 +18,7 @@
     ./opencode-config.nix
     ./opencode-skills.nix
     ./goose-roles.nix
+    ./goose-config.nix
     ./tmux.devbox.nix
     ./tmux.cloudbox.nix
     ./tmux.darwin.nix
