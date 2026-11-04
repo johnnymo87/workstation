@@ -1,0 +1,100 @@
+{
+  "status": "disconnected",
+  "cursor": 8447,
+  "tape": {
+    "path": "log/tape-20261103-235540.jsonl",
+    "writer": "running",
+    "configured": true
+  },
+  "travel": {
+    "last_walk": null
+  },
+  "stream_cursor": 14844,
+  "interlock": {
+    "state": "running"
+  },
+  "nav": {
+    "description": "We'll be kick starting the first Season of the Conqueror at the Silver",
+    "moved": false,
+    "room_name": null,
+    "exits": [],
+    "vertex_id": 2,
+    "exits_explored": {},
+    "rooms": [
+      {
+        "size": 20,
+        "x": -10,
+        "y": -10,
+        "color": {
+          "hex": "#ff0000",
+          "role": "player"
+        },
+        "light": 51.06
+      }
+    ],
+    "observation_signature": "4241c690349fcedc",
+    "look_sig": "dd9d9b10035fac45"
+  },
+  "presence": {
+    "last_close": {
+      "at": "2026-11-04T19:26:45Z",
+      "by": null,
+      "cause": "server",
+      "code": 1000,
+      "idle": false
+    },
+    "link": "offline",
+    "place": "unknown",
+    "since": "2026-11-04T19:26:45Z",
+    "via": "start",
+    "wants_out": {
+      "at": "2026-11-04T18:25:04Z",
+      "why": "sleep"
+    }
+  },
+  "evidence_recorders": {
+    "running": true,
+    "missing": [],
+    "expected": true,
+    "builders": [
+      "jonathan"
+    ],
+    "recorders": [
+      "jonathan"
+    ]
+  },
+  "map_builder": {
+    "running": true,
+    "holds_map": true
+  },
+  "map_lock": {
+    "holder": null,
+    "held_ms": null,
+    "waiters": 0,
+    "oldest_wait_ms": null,
+    "stuck": false
+  },
+  "radar_bound": {
+    "bound": 120,
+    "dropped_frames": 0,
+    "largest_coordinate": null,
+    "last_dropped_at": null,
+    "last_vertex_id": null
+  },
+  "session_guard": {
+    "enabled": true,
+    "sessions": {
+      "jonathan": {
+        "state": "up",
+        "failures": 0,
+        "last_loss_age_s": null,
+        "next_attempt_in_s": null,
+        "player_notice": null,
+        "restarts_last_hour": 0,
+        "restores_last_hour": 0
+      }
+    }
+  },
+  "last_reconnect_at": null,
+  "bridge_generation": 0
+}

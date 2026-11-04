@@ -1,0 +1,22 @@
+stack-health — 2026-11-04 15:39:29-0500 — /home/dev/projects/eternal-machinery
+  disk         OK       163G free (floor 5G, warn 15G)
+  manager      OK       devenv process manager alive, 7 stack process(es)
+  postgres     OK       accepting connections on 5434
+  api          WARN     HTTP 200 but session jonathan status='disconnected' — TEC not connected (expected under deferred boot; connect before a window)
+  tape         OK       session jonathan tape writer running (log/tape-20261103-235540.jsonl)
+  session_guard OK       every session the guard watches is up: jonathan=up(failures 0, restores/h 0, restarts/h 0)
+  presence     OK       no server close: jonathan=offline/unknown livia=offline/unknown
+  map_fence    OK       held in cartography_dev by application_name 'eternal_map_fence' (Postgres backend 4002134, client 127.0.0.1/32) — the stack owns the map (this check cannot tell which stack: do not run two on one database)
+  map_builder  OK       session jonathan has a map builder
+  evidence     OK       1 recorder(s), one per builder
+  map_lock     OK       the map is free
+  tec-mcp      OK       serving on :4006 (HTTP 406)
+  agentos      OK       profile=warrior_f mcp_role=prod boot_id=550d247048d8 admission=open
+  recipe       INFO     AgentOS recipe_source='panel'
+  landmarks    OK       17 landmark annotation(s), 13 placement(s) on live vertices, 1 safe retreat target(s) in cartography_dev (candidates, not proven reachable)
+  radar_bound  OK       no stored radar view has a cell beyond 120 px (largest coordinate 120)
+  routing_consumer WARN     the BEAM predates the routing field (restart it to check the routing consumer)
+  routing_journal OK       about 1015 journal row(s), 1031 unacked, table 328 kB. OK means every trigger is present and ALWAYS; their wiring and bodies are Cartography.Routing.Integrity's job. With the consumer on (routing_consumer) it acks and trims the journal; with it off the journal only grows
+  growth       OK       all databases=9G (warn >20G), 97 cartography_test* partitions (>12; see runbook for the drop recipe)
+
+SUMMARY: WARN — usable, but see the WARN lines above

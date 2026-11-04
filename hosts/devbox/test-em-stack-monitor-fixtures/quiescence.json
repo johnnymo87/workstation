@@ -1,0 +1,62 @@
+{
+  "boot_id": "550d247048d8",
+  "admission": "open",
+  "maintenance": null,
+  "idle": true,
+  "agents": {
+    "coordinator": {
+      "agent_key": "coordinator",
+      "admission": "open",
+      "quarantined": null,
+      "running": null,
+      "running_tickets": [],
+      "queued": [],
+      "direct_runs": {
+        "waiting": 0,
+        "running": 0
+      },
+      "idle": true,
+      "failures": 0,
+      "recoveries": [],
+      "recovering": null,
+      "recovering_for_s": null,
+      "backoff_s": 0
+    },
+    "warrior_f": {
+      "agent_key": "warrior_f",
+      "admission": "open",
+      "quarantined": null,
+      "running": null,
+      "running_tickets": [],
+      "queued": [],
+      "direct_runs": {
+        "waiting": 0,
+        "running": 0
+      },
+      "idle": true,
+      "failures": 0,
+      "recoveries": [],
+      "recovering": null,
+      "recovering_for_s": null,
+      "backoff_s": 0
+    },
+    "jonathan": {
+      "agent_key": "jonathan",
+      "admission": "open",
+      "quarantined": null,
+      "running": null,
+      "running_tickets": [],
+      "queued": [],
+      "direct_runs": {
+        "waiting": 0,
+        "running": 0
+      },
+      "idle": true,
+      "failures": 0,
+      "recoveries": [],
+      "recovering": null,
+      "recovering_for_s": null,
+      "backoff_s": 0
+    }
+  }
+}

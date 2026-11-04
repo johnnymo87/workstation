@@ -1,0 +1,29 @@
+{
+  "presence": {
+    "jonathan": {
+      "last_close": {
+        "at": "2026-11-04T19:26:45Z",
+        "by": null,
+        "cause": "server",
+        "code": 1000,
+        "idle": false
+      },
+      "link": "offline",
+      "place": "unknown",
+      "since": "2026-11-04T19:26:45Z",
+      "via": "start",
+      "wants_out": {
+        "at": "2026-11-04T18:25:04Z",
+        "why": "sleep"
+      }
+    },
+    "livia": {
+      "last_close": null,
+      "link": "offline",
+      "place": "unknown",
+      "since": null,
+      "via": null,
+      "wants_out": null
+    }
+  }
+}
