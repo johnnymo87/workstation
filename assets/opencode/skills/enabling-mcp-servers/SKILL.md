@@ -97,7 +97,9 @@ Be unambiguous:
 - **Hosts without honkd (macOS):** the server can't be turned on for this session.
 - **A server missing from `mcp_list`:** each host offers only the servers in its own
   `opencode.json`, so work-only servers (slack, atlassian, ...) are absent on devbox. That is
-  not an outage; tell the human the server isn't available on this host.
+  not an outage; tell the human the server isn't available on this host. On devbox every
+  listed server shows `!` (none is pre-confirmed there), so enabling any of them takes the
+  trailing `!` and a reason; the marker does not single one out as unusually dangerous.
 
 ## goose: `/mcp` in honk chat
 
