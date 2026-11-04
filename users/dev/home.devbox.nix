@@ -991,8 +991,10 @@ ${serveIdCase}
   # Restart=always never fires (no OOM — see the MemoryMax-only rationale on
   # the serve unit above). Nothing watched for that state; the 2026-07-03
   # wedge sat invisible for >=93s until the nightly reset SIGKILLed it.
-  # This timer probes each pool member's /global/health (3s timeout) once a
-  # minute; after 3 consecutive failures it dumps cheap owner-readable
+  # This timer probes each pool member's /global/health (3s timeout) and, if
+  # that answers, a one-row session list (10s; catches a serve whose session-DB
+  # routes hang while health answers) once a minute; after THRESHOLD
+  # consecutive failures it dumps cheap owner-readable
   # forensics (/proc status/wchan/syscall + cgroup memory.*) to
   # /tmp/opencode-serve-canary/ and restarts that one instance. Design notes
   # in .agents/skills/monitoring-serve-pool/SKILL.md; full post-mortem in
@@ -1032,6 +1034,55 @@ ${serveIdCase}
           exec 9<&-
         fi
 
+        # Half-wedge probe (2026-11-03, pigeon-0d7). /global/health can keep
+        # answering while every route that reads the session DB hangs: :4096
+        # sat like that for 2.5h after a memory-pressure event (health, /config
+        # and /session/status in ms; GET /session and /session/<id> never
+        # returned), seven turns froze and every launch timed out at create.
+        # So each serve that answers health also gets a one-row session list on
+        # its default instance (~5 ms healthy; 10 s cap). Only NO response
+        # counts. Two guards keep this from becoming a restart storm:
+        #  - A serve younger than DB_PROBE_GRACE_S is not DB-probed: the probe
+        #    may be the request that creates its default instance, and instance
+        #    creation is what re-triggers the post-boot burn (g3iy).
+        #  - If EVERY DB-probed serve is stuck (and there are at least two),
+        #    the cause is shared (the one opencode.db), a restart cannot fix it,
+        #    and restarting the whole pool every few minutes is worse than the
+        #    stall. Alert instead, and count nothing.
+        # Done as a pre-pass so the second guard can see the whole pool before
+        # any restart decision.
+        DB_PROBE_GRACE_S=600
+        declare -A DB_STUCK_OF=()
+        DB_OK=0
+        DB_BAD=0
+        UP_S=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
+        for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+          UNIT="opencode-serve@$PORT.service"
+          [ "$(systemctl --user is-active "$UNIT")" = "active" ] || continue
+          MONO_US=$(systemctl --user show "$UNIT" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+          if [ -n "$MONO_US" ] && [ "$MONO_US" -gt 0 ] 2>/dev/null && \
+             [ $(( UP_S - MONO_US / 1000000 )) -lt "$DB_PROBE_GRACE_S" ]; then
+            continue
+          fi
+          curl -sf --max-time 3 --connect-timeout 3 \
+               "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1 || continue
+          DB_CODE=$(curl -s --max-time 10 --connect-timeout 3 -o /dev/null -w "%{http_code}" \
+                      "http://127.0.0.1:$PORT/session?limit=1" 2>/dev/null)
+          case "$DB_CODE" in
+            ""|000) DB_STUCK_OF[$PORT]=1; DB_BAD=$((DB_BAD + 1)) ;;
+            *) DB_OK=$((DB_OK + 1)) ;;
+          esac
+        done
+        if [ "$DB_BAD" -ge 2 ] && [ "$DB_OK" -eq 0 ]; then
+          echo "WARNING: every DB-probed serve ($DB_BAD) hangs on /session?limit=1 while answering /global/health; shared cause, NOT restarting"
+          ${driftAlert} "$STATE/db-poolwide-alerted" "db-poolwide" "Every opencode serve on devbox answers /global/health but hangs on a one-row session list (GET /session?limit=1). The cause is shared (the one opencode.db: a lock, a stuck writer, the disk), so the serve canary is NOT restarting them. Check: journalctl --user -u opencode-serve-canary; lsof ~/.local/share/opencode/opencode.db*; cat /proc/locks" 900 14400
+          DB_STUCK_OF=()
+        elif [ "$DB_OK" -gt 0 ]; then
+          # A serve answered the DB probe: genuinely resolved. (Not on a pass
+          # that probed nothing, which would re-arm the alert for no reason.)
+          rm -f "$STATE/db-poolwide-alerted"
+        fi
+
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
@@ -1046,15 +1097,22 @@ ${serveIdCase}
             continue
           fi
 
+          PROBE=/global/health
           if curl -sf --max-time 3 --connect-timeout 3 \
                "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
-            rm -f "$FAILFILE" "$SINCE"
-            continue
+            # Health answered. Still a failure if the pre-pass found this
+            # serve's session-DB routes hung (the half-wedge, above).
+            if [ -n "''${DB_STUCK_OF[$PORT]:-}" ]; then
+              PROBE="/session?limit=1 (health OK)"
+            else
+              rm -f "$FAILFILE" "$SINCE"
+              continue
+            fi
           fi
 
           FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$FAILS" > "$FAILFILE"
-          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          echo "WARNING: $UNIT failed $PROBE ($FAILS/$THRESHOLD consecutive)"
           # Ask the wedge-watcher for JS stacks early in the streak and again
           # just before the restart (workstation-mise). Its debugger is already
           # enabled, which is what makes a capture land on a burning serve
@@ -1078,6 +1136,13 @@ ${serveIdCase}
           TS=$(date +%Y%m%dT%H%M%S)
           DUMP="$STATE/wedge-$TS-$PORT"
           mkdir -p "$DUMP"
+          echo "$PROBE" > "$DUMP/probe"
+          # A half-wedge has a FREE event loop, so the busy-loop forensics
+          # below will look idle. Record the DB's lock and file state too.
+          if [ "$PROBE" != "/global/health" ]; then
+            cat /proc/locks > "$DUMP/proc-locks" 2>/dev/null || true
+            ls -l "$HOME"/.local/share/opencode/opencode.db* > "$DUMP/db-files" 2>/dev/null || true
+          fi
           PID=$(systemctl --user show "$UNIT" -p MainPID --value)
           CG=$(systemctl --user show "$UNIT" -p ControlGroup --value)
           if [ -n "$PID" ] && [ "$PID" != "0" ]; then
