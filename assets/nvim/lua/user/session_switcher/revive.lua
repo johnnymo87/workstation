@@ -90,6 +90,9 @@ function M.valid_sid(sid)
   return is_opencode_sid(sid) or is_goose_sid(sid)
 end
 
+M.is_opencode_sid = is_opencode_sid
+M.is_goose_sid = is_goose_sid
+
 --- Validate a decoded plan and build the offers.
 ---
 --- @param plan any decoded `oc-revive plan` JSON
@@ -218,6 +221,19 @@ function M.blocked(plan, sid, dead_dir)
     and plan.reason:find("blocked_by_worktree:", 1, true) == 1
 end
 
+--- True when a goose plan was refused because an opencode session also references
+--- the dead directory (opencode_sibling: prefix). The caller shows a one-line WARN.
+function M.sibling_refused(plan, sid, dead_dir)
+  return type(plan) == "table"
+    and is_goose_sid(sid)
+    and plan.sid == sid
+    and is_str(dead_dir)
+    and plan.dead_dir == dead_dir
+    and plan.revivable ~= true
+    and type(plan.reason) == "string"
+    and plan.reason:find("opencode_sibling:", 1, true) == 1
+end
+
 local function rel(path, repo)
   local prefix = repo:gsub("/+$", "") .. "/"
   if path:sub(1, #prefix) == prefix then
@@ -299,6 +315,9 @@ function M.prompt(result, title, sid)
 
   if result.kind ~= "resume" then
     table.insert(lines, "  Uncommitted files are NOT carried over.")
+  end
+  if is_goose then
+    table.insert(lines, "  The agent is not told: tell it the worktree was recreated and uncommitted work is gone.")
   end
   table.insert(choices, "&Cancel")
   return table.concat(lines, "\n"), table.concat(choices, "\n"), #choices

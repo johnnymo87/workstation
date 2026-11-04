@@ -408,6 +408,16 @@ function M.offer_revive(desc, result)
       )
       return
     end
+    if revive.is_goose_sid(sid) then
+      local msg = string.format(
+        "revived %s: worktree recreated at %s on %s @ %s. Tell the agent uncommitted work is gone.",
+        sid,
+        offer.path,
+        offer.branch,
+        offer.tip_short
+      )
+      vim.notify(msg, vim.log.levels.INFO)
+    end
     M.attach({ sid = sid })
   end)
   if not started then
@@ -467,6 +477,14 @@ function M.refuse_dir_missing(desc)
           if revive.blocked(plan, sid, desc.directory) then
             local msg = string.format(
               "revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details",
+              sid
+            )
+            vim.schedule(function()
+              pcall(vim.notify, msg, vim.log.levels.WARN)
+            end)
+          elseif revive.sibling_refused(plan, sid, desc.directory) then
+            local msg = string.format(
+              "revive refused: an opencode session also lives in this directory; run `oc-revive %s` for the options",
               sid
             )
             vim.schedule(function()

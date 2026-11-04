@@ -3825,7 +3825,7 @@ do
   check(revive.offers(ses_plan, MERGED_SID, MERGED_DEAD) == nil, "ses_ plan with action recreate is rejected")
 end
 
--- 86v. Goose revive: revive.blocked is always false for goose ids.
+-- 86v. Goose revive: revive.blocked is always false for goose ids; sibling_refused detects opencode_sibling.
 do
   check(revive.blocked(vim.json.decode(REALGOOSE_JSON), GOOSE_SID, GOOSE_DEAD) == false,
     "blocked() is false for revivable goose plan")
@@ -3836,6 +3836,27 @@ do
     "blocked() is false for goose id even with blocked_by_worktree reason")
   check(revive.blocked(blocked_goose, "goose:abc", GOOSE_DEAD) == false,
     "blocked() is false for malformed goose id")
+
+  -- sibling_refused predicate tests
+  local sib_plan = vim.json.decode(REALGOOSE_JSON)
+  sib_plan.revivable = false
+  sib_plan.reason = "opencode_sibling: opencode session 'ses_123' also has this directory..."
+  check(revive.sibling_refused(sib_plan, GOOSE_SID, GOOSE_DEAD) == true,
+    "sibling_refused is true for goose id with opencode_sibling reason")
+  check(revive.sibling_refused(sib_plan, "ses_123", GOOSE_DEAD) == false,
+    "sibling_refused is false for opencode sid")
+  check(revive.sibling_refused(sib_plan, "goose:abc", GOOSE_DEAD) == false,
+    "sibling_refused is false for malformed goose sid")
+  check(revive.sibling_refused(sib_plan, GOOSE_SID, "/other/dead") == false,
+    "sibling_refused is false when dead_dir mismatches")
+  local rev_plan = vim.json.decode(REALGOOSE_JSON)
+  rev_plan.reason = "opencode_sibling: ..."
+  check(revive.sibling_refused(rev_plan, GOOSE_SID, GOOSE_DEAD) == false,
+    "sibling_refused is false when revivable is true")
+  local other_reason = vim.deepcopy(sib_plan)
+  other_reason.reason = "session_not_found: ..."
+  check(revive.sibling_refused(other_reason, GOOSE_SID, GOOSE_DEAD) == false,
+    "sibling_refused is false for other reasons")
 end
 
 -- 86w. Goose revive: prompt says 'recreate dir <rel>' (not 'new dir').
@@ -3849,6 +3870,7 @@ do
   check(msg:find("recreate dir .worktrees/probe", 1, true) ~= nil, "goose prompt: contains 'recreate dir .worktrees/probe'")
   check(msg:find("new dir", 1, true) == nil, "goose prompt: does not say 'new dir'")
   check(msg:find("Uncommitted files are NOT carried over.", 1, true) ~= nil, "goose prompt: warns uncommitted files not carried over")
+  check(msg:find("The agent is not told: tell it the worktree was recreated and uncommitted work is gone.", 1, true) ~= nil, "goose prompt: contains agent not told warning")
 
   -- Multiple candidate disagreement for goose
   local r_disagree = vim.deepcopy(r)
@@ -3862,6 +3884,7 @@ do
   check(msg2:find("recreate dir .worktrees/probe", 1, true) ~= nil, "goose disagree: contains 'recreate dir .worktrees/probe'")
   check(msg2:find("new dir", 1, true) == nil, "goose disagree: does not say 'new dir'")
   check(msg2:find("Uncommitted files are NOT carried over.", 1, true) ~= nil, "goose disagree: warns uncommitted files not carried over")
+  check(msg2:find("The agent is not told: tell it the worktree was recreated and uncommitted work is gone.", 1, true) ~= nil, "goose disagree: contains agent not told warning")
 end
 
 -- 86x. Goose revive exec flow: apply and attach to goose session.
@@ -3889,6 +3912,10 @@ do
   check(exec.revive_inflight[GOOSE_SID] == true, "goose in-flight flag set")
   R.floats[1].done(0)
   check(exec.revive_inflight[GOOSE_SID] == nil, "goose in-flight flag cleared")
+  check(#R.notes == 2, "two notices: initial refusal warn + exit 0 info")
+  check(R.notes[2].level == vim.log.levels.INFO
+    and R.notes[2].msg == string.format("revived %s: worktree recreated at %s on probe @ b3d833c. Tell the agent uncommitted work is gone.", GOOSE_SID, GOOSE_DEAD),
+    "goose exit 0 emits info notification with recreated details")
   check(#R.attaches == 1 and R.attaches[1].sid == GOOSE_SID, "exit 0 attaches to goose session")
   R.restore()
 
@@ -3905,6 +3932,24 @@ do
   check(attach_sys[1].cmd[1] == "oc-auto-attach" and attach_sys[1].cmd[2] == GOOSE_SID, "attach runs oc-auto-attach with goose sid")
   check(attach_sys[1].opts.text == true, "attach opts.text is true for goose")
   check(type(attach_sys[1].on_exit) == "function", "attach on_exit handler provided for goose")
+end
+
+-- 86y. Goose revive exec flow: sibling refusal shows WARN line.
+do
+  local R = rig()
+  local goose_desc = { kind = "refuse_dir_missing", sid = GOOSE_SID, directory = GOOSE_DEAD, title = "probe", live_pane = false }
+  check(exec.refuse_dir_missing(goose_desc) == true, "goose refuse returns true")
+  check(#R.notes == 1 and R.notes[1].level == vim.log.levels.WARN, "initial refusal warning")
+  local sib_plan = vim.json.decode(REALGOOSE_JSON)
+  sib_plan.revivable = false
+  sib_plan.reason = "opencode_sibling: opencode session 'ses_123' also has this directory..."
+  R.sys[1].on_exit({ code = 0, stdout = vim.json.encode(sib_plan) })
+  check(#R.sched == 1, "sibling refusal scheduled warning")
+  R.drain()
+  check(#R.notes == 2 and R.notes[2].level == vim.log.levels.WARN
+    and R.notes[2].msg == string.format("revive refused: an opencode session also lives in this directory; run `oc-revive %s` for the options", GOOSE_SID),
+    "sibling refusal surfaces expected warning text")
+  R.restore()
 end
 
 -- Leading newline: headless nvim writes notify messages to stderr WITHOUT a
