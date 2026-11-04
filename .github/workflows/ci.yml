@@ -124,6 +124,55 @@ jobs:
       - name: Disk space before
         run: df -h /
 
+      # Pre-seed private FOD sources for nixos-cloudbox.
+      #
+      # nixosConfigurations.cloudbox includes claude-failover-proxy (and in the
+      # future devbox may include cfp-shaper), which fetches release assets
+      # from the private repo johnnymo87/claude-failover-proxy. In CI, we use the
+      # CFP_READ_TOKEN secret to download the assets via the GitHub API and add
+      # them to the Nix store as fixed-output derivations. Once added, Nix sees
+      # the FODs as already realised and does not attempt an unauthenticated fetch.
+      #
+      # Fork PRs do not have access to repository secrets; fail loudly with a
+      # clear message rather than a confusing 404.
+      - name: Pre-seed private release assets
+        env:
+          GH_TOKEN: ${{ secrets.CFP_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CFP_READ_TOKEN secret is empty or unset."
+            echo "Fork PRs do not receive repository secrets and cannot pre-seed private assets for nixos-cloudbox."
+            exit 1
+          fi
+
+          sources=$(nix eval --json '.#claude-failover-proxy.passthru.privateSources')
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          while IFS= read -r src; do
+            [ -z "$src" ] && continue
+            name=$(echo "$src" | jq -r '.name')
+            url=$(echo "$src" | jq -r '.url')
+            expected_path=$(echo "$src" | jq -r '.storePath')
+
+            echo "Fetching private FOD source $name from $url..."
+            gh api -H 'Accept: application/octet-stream' "$url" > "$tmpdir/$name"
+
+            actual_path=$(nix-store --add-fixed sha256 "$tmpdir/$name")
+            rm -f "$tmpdir/$name"
+
+            echo "  Expected: $expected_path"
+            echo "  Actual:   $actual_path"
+
+            if [ "$actual_path" != "$expected_path" ]; then
+              echo "::error::Pre-seeded store path mismatch for $name: expected $expected_path, got $actual_path"
+              exit 1
+            fi
+            echo "Successfully pre-seeded $name -> $actual_path"
+          done < <(echo "$sources" | jq -c '.[]')
+
       # --print-build-logs is not cosmetic. Without it a failing derivation
       # prints only "For full logs, run: nix log /nix/store/...drv", and that
       # store path dies with the runner -- leaving a red check with no way to
@@ -215,6 +264,12 @@ jobs:
       # are already built by the check above, so this costs seconds and only pins
       # them. gc-max-store-size stays as a best-effort ceiling: GC will now simply
       # fail to reach it rather than evict what we are trying to keep.
+      #
+      # NOTE ON nixos-cloudbox: nixos-cloudbox is DELIBERATELY NOT pinned here.
+      # nixos-cloudbox depends on claude-failover-proxy, whose binary comes from
+      # a private repository. Pinning nixos-cloudbox would prevent the scrub
+      # step below from deleting the private binary and its referrers closure,
+      # which would cause the private binary to leak into the saved Nix store cache.
       - name: Pin the checked configurations so the pre-save GC cannot drop them
         run: |
           mkdir -p /tmp/ci-gcroots
@@ -222,6 +277,78 @@ jobs:
           nix build -o /tmp/ci-gcroots/home-cloudbox '.#checks.aarch64-linux.home-cloudbox'
           nix build -o /tmp/ci-gcroots/nixos-devbox   '.#checks.aarch64-linux.nixos-devbox'
           ls -l /tmp/ci-gcroots/
+
+      # CRITICAL LEAK VECTOR:
+      # This repository is public and cache-nix-action saves the Nix store on
+      # main. Fork PRs can restore main's Actions caches. Private binaries (and
+      # anything referencing them, such as the nixos-cloudbox system closure) must
+      # NOT be present in the saved cache.
+      #
+      # This step runs with `if: always()` after everything that uses the store
+      # and before cache-nix-action's post-save action (post-steps execute after
+      # all main job steps). It removes any GC root that might pin the private
+      # assets, queries the full referrers closure of the private FOD paths,
+      # deletes them with --ignore-liveness, and asserts none remain.
+      - name: Scrub private binaries from Nix store before cache save
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # Get expected private FOD paths from the package definition
+          sources=$(nix eval --json '.#claude-failover-proxy.passthru.privateSources' 2>/dev/null || echo "[]")
+          fod_paths=$(echo "$sources" | jq -r '.[].storePath // empty')
+
+          if [ -z "$fod_paths" ]; then
+            echo "No private FOD paths found to scrub."
+            exit 0
+          fi
+
+          echo "Private FOD paths to scrub:"
+          echo "$fod_paths"
+
+          # Remove any gcroot in /tmp/ci-gcroots just in case
+          rm -f /tmp/ci-gcroots/nixos-cloudbox
+
+          # Query all existing FOD paths in the store
+          existing_fods=()
+          for p in $fod_paths; do
+            if [ -e "$p" ]; then
+              existing_fods+=("$p")
+            fi
+          done
+
+          if [ ${#existing_fods[@]} -eq 0 ]; then
+            echo "None of the private FOD paths are present in the store."
+            exit 0
+          fi
+
+          # Find full referrers closure of all existing private FOD paths
+          mapfile -t to_delete < <(nix-store --query --referrers-closure "${existing_fods[@]}")
+
+          if [ ${#to_delete[@]} -gt 0 ]; then
+            echo "Deleting private FODs and referrers closure:"
+            printf '%s\n' "${to_delete[@]}"
+
+            # Pass all paths to delete. Multiple passes handle any dependency ordering.
+            for _ in 1 2 3 4 5; do
+              nix-store --delete --ignore-liveness "${to_delete[@]}" >/dev/null 2>&1 || true
+            done
+
+            # Assert that NONE remain
+            leaked=0
+            for p in "${to_delete[@]}"; do
+              if [ -e "$p" ]; then
+                echo "::error::Failed to scrub private path from store: $p still exists!"
+                leaked=1
+              fi
+            done
+
+            if [ "$leaked" -ne 0 ]; then
+              echo "::error::Private paths leaked into the Nix store closure!"
+              exit 1
+            fi
+            echo "Successfully scrubbed all private FODs and referrers from the store."
+          fi
 
       - name: Disk space after
         if: always()
