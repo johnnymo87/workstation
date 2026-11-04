@@ -122,6 +122,7 @@ session_clean_wt="$repo/.worktrees/session-clean-merged"
 idle_session_wt="$repo/.worktrees/idle-session-merged"
 goose_session_wt="$repo/.worktrees/goose-session-merged"
 goose_idle_wt="$repo/.worktrees/goose-idle-merged"
+goose_sub_wt="$repo/.worktrees/goose-sub-merged"
 # Idle sessions (30 days) that OPENED A PR. The 7-day session window alone
 # reaps all four; ownership of a still-open PR must keep the first two.
 openpr_wt="$repo/.worktrees/openpr-merged"
@@ -146,6 +147,7 @@ git -C "$repo" worktree add -b session-clean-merged "$session_clean_wt" origin/m
 git -C "$repo" worktree add -b idle-session-merged "$idle_session_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b goose-session-merged "$goose_session_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b goose-idle-merged "$goose_idle_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b goose-sub-merged "$goose_sub_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b openpr-merged "$openpr_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b subagent-openpr-merged "$subagent_openpr_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b mergedpr-merged "$mergedpr_wt" origin/main >/dev/null
@@ -240,6 +242,7 @@ find "$session_clean_wt" -exec touch -d '20 days ago' {} +
 find "$idle_session_wt" -exec touch -d '20 days ago' {} +
 find "$goose_session_wt" -exec touch -d '20 days ago' {} +
 find "$goose_idle_wt" -exec touch -d '20 days ago' {} +
+find "$goose_sub_wt" -exec touch -d '20 days ago' {} +
 for wt in "$openpr_wt" "$subagent_openpr_wt" "$mergedpr_wt" "$ghfail_wt" "$nopr_wt" "$norepo_wt" "$manypr_wt"; do
   find "$wt" -exec touch -d '20 days ago' {} +
 done
@@ -284,14 +287,15 @@ con.executemany(
 con.commit()
 SESSION_DB_PY
 
-# Goose sessions DB: a live session in goose_session_wt, and an idle one in
-# goose_idle_wt. Timestamp format is UTC '%Y-%m-%d %H:%M:%S'.
+# Goose sessions DB: a live session in goose_session_wt, one live in a
+# directory UNDER goose_sub_wt, and an idle one in goose_idle_wt. Timestamp format is UTC '%Y-%m-%d %H:%M:%S'.
 goose_db="$home/.local/share/goose/sessions/sessions.db"
 mkdir -p "$(dirname "$goose_db")"
-python3 - "$goose_db" "$(cd "$goose_session_wt" && pwd -P)" "$(cd "$goose_idle_wt" && pwd -P)" <<'GOOSE_DB_PY'
+python3 - "$goose_db" "$(cd "$goose_session_wt" && pwd -P)" "$(cd "$goose_idle_wt" && pwd -P)" \
+  "$(cd "$goose_sub_wt" && pwd -P)" <<'GOOSE_DB_PY'
 import sqlite3, sys, time
 
-db, live_dir, idle_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+db, live_dir, idle_dir, sub_dir = sys.argv[1:5]
 now = time.time()
 fmt = "%Y-%m-%d %H:%M:%S"
 live_time = time.strftime(fmt, time.gmtime(now - 3 * 86400))
@@ -307,6 +311,7 @@ con.executemany(
     [
         ("20261104_1", live_dir, live_time),
         ("20261001_9", idle_dir, idle_time),
+        ("20261104_2", sub_dir + "/crates/x", live_time),
     ],
 )
 con.commit()
@@ -426,6 +431,8 @@ assert_remove_not_logged "$goose_session_wt" \
   "aged clean worktree owned by a live goose session is not selected for removal"
 assert_remove_logged "$goose_idle_wt" \
   "aged clean worktree whose goose session went idle weeks ago is still selected for removal"
+assert_remove_not_logged "$goose_sub_wt" \
+  "aged clean worktree with a live goose session in a SUBDIRECTORY is not selected for removal"
 
 # An idle session that opened a still-OPEN PR still owes that PR its review
 # replies. Removed on 2026-09-27: internal-frontends/cops-6764-fe-plan, whose
