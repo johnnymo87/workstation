@@ -991,8 +991,10 @@ ${serveIdCase}
   # Restart=always never fires (no OOM — see the MemoryMax-only rationale on
   # the serve unit above). Nothing watched for that state; the 2026-07-03
   # wedge sat invisible for >=93s until the nightly reset SIGKILLed it.
-  # This timer probes each pool member's /global/health (3s timeout) once a
-  # minute; after 3 consecutive failures it dumps cheap owner-readable
+  # This timer probes each pool member's /global/health (3s timeout) and, if
+  # that answers, a one-row session list (10s; catches a serve whose session-DB
+  # routes hang while health answers) once a minute; after THRESHOLD
+  # consecutive failures it dumps cheap owner-readable
   # forensics (/proc status/wchan/syscall + cgroup memory.*) to
   # /tmp/opencode-serve-canary/ and restarts that one instance. Design notes
   # in .agents/skills/monitoring-serve-pool/SKILL.md; full post-mortem in
@@ -1046,15 +1048,33 @@ ${serveIdCase}
             continue
           fi
 
+          PROBE=/global/health
           if curl -sf --max-time 3 --connect-timeout 3 \
                "http://127.0.0.1:$PORT/global/health" >/dev/null 2>&1; then
-            rm -f "$FAILFILE" "$SINCE"
-            continue
+            # Half-wedge probe (2026-11-03, pigeon-0d7): /global/health can keep
+            # answering while every route that reads the session DB hangs.
+            # :4096 sat like that for 2.5h after a memory-pressure event: health,
+            # /config and /session/status in ms, but GET /session and
+            # /session/<id> never returned, so seven turns froze and every
+            # launch timed out at create. A one-row session list on the default
+            # instance costs ~5 ms on a healthy serve. Only NO response counts
+            # (any HTTP status means the route ran); 10 s is generous for a
+            # LIMIT 1 query, and the same THRESHOLD of consecutive minutes
+            # applies, so a merely slow minute never restarts anything.
+            DB_CODE=$(curl -s --max-time 10 --connect-timeout 3 -o /dev/null -w "%{http_code}" \
+                        "http://127.0.0.1:$PORT/session?limit=1" 2>/dev/null)
+            case "$DB_CODE" in
+              ""|000) PROBE="/session?limit=1 (health OK)" ;;
+              *)
+                rm -f "$FAILFILE" "$SINCE"
+                continue
+                ;;
+            esac
           fi
 
           FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$FAILS" > "$FAILFILE"
-          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          echo "WARNING: $UNIT failed $PROBE ($FAILS/$THRESHOLD consecutive)"
           # Ask the wedge-watcher for JS stacks early in the streak and again
           # just before the restart (workstation-mise). Its debugger is already
           # enabled, which is what makes a capture land on a burning serve

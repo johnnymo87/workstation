@@ -2430,8 +2430,29 @@ ${serveIdCase}
               ;;
           esac
 
+          # Half-wedge probe (2026-11-03, pigeon-0d7): /global/health can keep
+          # answering while every route that reads the session DB hangs. devbox
+          # :4096 sat like that for 2.5h: health, /config and /session/status in
+          # ms, GET /session and /session/<id> never returned, turns froze and
+          # launches timed out at create. A one-row session list on the default
+          # instance costs ~5 ms on a healthy serve. Only after a 200 (a 401
+          # serve cannot be probed further, and is already reported), and only
+          # NO response counts as stuck; the same THRESHOLD of consecutive
+          # minutes applies. The serve still counts as answering for the auth and
+          # drift bookkeeping below, because its HTTP server did answer.
+          DB_STUCK=0
+          if [ "$SERVE_ALIVE" -eq 1 ] && [ "$HEALTH_CODE" = "200" ]; then
+            DB_CODE=$(curl -s --max-time 10 --connect-timeout 3 \
+                           -o /dev/null -w "%{http_code}" \
+                           ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+                           "http://127.0.0.1:$PORT/session?limit=1" 2>/dev/null)
+            case "$DB_CODE" in
+              ""|000) DB_STUCK=1 ;;
+            esac
+          fi
+
           if [ "$SERVE_ALIVE" -eq 1 ]; then
-            rm -f "$FAILFILE"
+            [ "$DB_STUCK" -eq 0 ] && rm -f "$FAILFILE"
             PROBED_COUNT=$((PROBED_COUNT + 1))
             ALIVE_PORTS="''${ALIVE_PORTS:+$ALIVE_PORTS }$PORT"
 
@@ -2498,12 +2519,14 @@ ${serveIdCase}
               fi
             fi
 
-            continue
+            [ "$DB_STUCK" -eq 0 ] && continue
           fi
 
+          PROBE=/global/health
+          [ "$DB_STUCK" -eq 1 ] && PROBE="/session?limit=1 (health OK)"
           FAILS=$(( $(cat "$FAILFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$FAILS" > "$FAILFILE"
-          echo "WARNING: $UNIT failed /global/health ($FAILS/$THRESHOLD consecutive)"
+          echo "WARNING: $UNIT failed $PROBE ($FAILS/$THRESHOLD consecutive)"
           [ "$FAILS" -lt "$THRESHOLD" ] && continue
 
           # Wedged. Capture cheap forensics BEFORE the kill destroys them
