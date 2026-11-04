@@ -146,6 +146,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Scrubbing Company References](.agents/skills/scrubbing-company-references/SKILL.md) | Policy for keeping org metadata out of public source |
 | [Atlassian Multi-Instance](.agents/skills/atlassian-multi-instance/SKILL.md) | Adding, removing, debugging Atlassian instance profiles |
 | [Setting Up Notion MCP](.agents/skills/setting-up-notion-mcp/SKILL.md) | First-time OAuth + headless devbox SSH-L dance for Notion's hosted MCP |
+| [Setting Up Wiz MCP](.agents/skills/setting-up-wiz-mcp/SKILL.md) | OAuth for Wiz's hosted MCP; why the granted scope includes a write scope despite config, and the tool-list check that stands in for "read-only" |
 | [Setting Up DevCycle MCP](.agents/skills/setting-up-devcycle-mcp/SKILL.md) | Local dvc-mcp + client-credentials (sops/Keychain) for DevCycle's feature-flag MCP; hosted remote is unusable (no dynamic client registration) |
 | [Resetting Workspace](.agents/skills/resetting-workspace/SKILL.md) | Manual + nightly cloudbox reset (kill nvims, clear sessions, restart serve) |
 | [Monitoring Serve Pool](.agents/skills/monitoring-serve-pool/SKILL.md) | Wedged-serve detection/recovery (canary timer), "alive but frozen" failure mode, serve memory-limit rationale |

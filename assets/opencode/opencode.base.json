@@ -10,7 +10,8 @@
   },
   "tools": {
     "slack_*": false,
-    "slack-ro_*": false
+    "slack-ro_*": false,
+    "wiz_*": false
   },
   "agent": {
     "build": {
@@ -161,6 +162,11 @@
     "notion": {
       "type": "remote",
       "url": "https://mcp.notion.com/mcp",
+      "enabled": false
+    },
+    "wiz": {
+      "type": "remote",
+      "url": "https://mcp.app.wiz.io/",
       "enabled": false
     }
   }
