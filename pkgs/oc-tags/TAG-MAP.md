@@ -1,4 +1,4 @@
-# oc-tags: naming and maintaining tags
+# session-tags: naming and maintaining tags
 
 The tagging policy now lives in the `tagging-sessions` skill,
 `assets/opencode/skills/tagging-sessions/SKILL.md`, where agents load it

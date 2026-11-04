@@ -1,13 +1,13 @@
 ---
 name: finding-program-coordinators
-description: Looks up the coordinator session of a program of work (an oc-tags tag) and the id to swarm_send to. Use when asked to report, hand off, or escalate something to another program's coordinator, when work you found belongs to a different program's tag or epic, when you are about to conclude a program has no coordinator, or when you see a gse_ session id or a "📋 <tag>" label and need to know what it is.
+description: Looks up the coordinator session of a program of work (a session-tags tag) and the id to swarm_send to. Use when asked to report, hand off, or escalate something to another program's coordinator, when work you found belongs to a different program's tag or epic, when you are about to conclude a program has no coordinator, or when you see a gse_ session id or a "📋 <tag>" label and need to know what it is.
 ---
 
 # Finding a Program's Coordinator
 
 On cloudbox, almost every active program of work has a **coordinator**. It is a
 long-lived goose session run by `stall-watch`, one per program, and it is keyed
-by the program's oc-tags tag. You reach it with `swarm_send` to a **`gse_`** id.
+by the program's session-tags tag. You reach it with `swarm_send` to a **`gse_`** id.
 The lookup is one read-only query.
 
 This is not the coordinator role that `swarm-messaging` bans. That ban covers
@@ -28,7 +28,7 @@ concluded that no coordinator existed, which was wrong. Here is what it tried:
 | The program epic's bead notes ("there is no coordinator") | The notes described one swarm's own topology. Nobody updates a program's beads when stall-watch binds or rebinds its coordinator, so the notes are not a registry. |
 | grep of `opencode.db` titles | The wrong database. Coordinators live in goose's `sessions.db`, and their titles are not the tag. |
 | `swarm_send` to the `ses_` that launched the program's swarm | A launcher is not a coordinator. Its worktree was gone, and pigeon returned `delivery.failed`. |
-| (not tried) `oc-tags` | Would not have helped. Coordinator sessions are **not** tagged with their program's tag. They report as `stall-watcher-runs` or `auto:goose/stallwatch-<tag>-<ms>`. |
+| (not tried) `session-tags` | Would not have helped. Coordinator sessions are **not** tagged with their program's tag. They report as `stall-watcher-runs` or `auto:goose/stallwatch-<tag>-<ms>`. |
 
 The tag was enough. It is the key to the registry, and the session never
 queried the registry.
@@ -76,7 +76,7 @@ mailbox. Every coordinator is registered there under the label
 **Which tag?** Use the tag of the program that owns the problem, not your own.
 If you only know the epic, the mapping from tag to `beads_epic` is in
 `~/projects/eng-agent-platform/stallwatch/programs.toml` (a private repo).
-`oc-tags which <ses_>` on any of that program's worker sessions also gives you
+`session-tags which <ses_>` on any of that program's worker sessions also gives you
 the tag.
 
 ## Before you send

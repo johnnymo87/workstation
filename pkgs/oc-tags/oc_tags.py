@@ -1600,7 +1600,9 @@ def _add_db_options(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     desc = __doc__.splitlines()[0] if __doc__ else ""
-    p = argparse.ArgumentParser(prog="oc-tags", description=desc)
+    p = argparse.ArgumentParser(
+        prog=os.path.basename(sys.argv[0]) or "session-tags", description=desc
+    )
     # The parent owns the real defaults; every subparser SUPPRESSes its own.
     p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
@@ -1673,6 +1675,15 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _unattributable_id_hint(sid: str) -> str | None:
+    raw = sid[len("goose:"):] if sid.startswith("goose:") else sid
+    if raw.startswith("gse_"):
+        return f"'{sid}' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)"
+    if re.match(r"^\d{8}_\d+$", sid):
+        return f"'{sid}' looks like a goose session id; did you mean goose:{sid}?"
+    return None
+
+
 def cmd_set(args: argparse.Namespace) -> int:
     tag = args.target
     if not tag:
@@ -1722,6 +1733,11 @@ def cmd_set(args: argparse.Namespace) -> int:
     target_sid = args.session_id or os.environ.get("OPENCODE_SESSION_ID")
     if not target_sid:
         sys.stderr.write("Error: no session ID provided and OPENCODE_SESSION_ID is not set\n")
+        return 1
+
+    hint = _unattributable_id_hint(target_sid)
+    if hint is not None:
+        sys.stderr.write(f"Error: {hint}\n")
         return 1
 
     root_sid = target_sid
@@ -1949,7 +1965,11 @@ def cmd_rm(args: argparse.Namespace) -> int:
         if deleted:
             print(f"Removed session tag for '{args.target}'")
             return 0
-        sys.stderr.write(f"Error: no session tag found for '{args.target}'\n")
+        msg = f"Error: no session tag found for '{args.target}'"
+        hint = _unattributable_id_hint(args.target)
+        if hint is not None:
+            msg += f"\n{hint}"
+        sys.stderr.write(f"{msg}\n")
         return 1
 
     sys.stderr.write("Error: specify session-id\n")

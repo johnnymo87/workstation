@@ -1023,6 +1023,66 @@ class TestCli(unittest.TestCase):
             rc = oc_tags.main(["top", "--days", "7", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
 
+    def test_set_refusing_gse_id_writes_nothing(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["set", "billing", "gse_x", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        self.assertIn("Error: 'gse_x' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)\n", err.getvalue())
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_set_refusing_goose_prefixed_gse_id_writes_nothing(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["set", "billing", "goose:gse_x", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        self.assertIn("Error: 'goose:gse_x' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)\n", err.getvalue())
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_set_refusing_bare_goose_id(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["set", "billing", "20261102_2", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        self.assertIn("Error: '20261102_2' looks like a goose session id; did you mean goose:20261102_2?\n", err.getvalue())
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_set_accepting_prefixed_goose_id(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["set", "billing", "goose:20261102_2", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {"goose:20261102_2": "billing"})
+
+    def test_rm_stored_gse_id_still_removes_it(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "gse_x", "billing")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["rm", "gse_x", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_rm_missing_bare_goose_id_prints_hint(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["rm", "20261102_2", "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        expected = "Error: no session tag found for '20261102_2'\n'20261102_2' looks like a goose session id; did you mean goose:20261102_2?\n"
+        self.assertEqual(err.getvalue(), expected)
+
+    def test_which_gse_id_keeps_exit_zero_and_today_output(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["which", "gse_x", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), "auto:no-dir\tauto\tgse_x\tauto\n")
+
 
 class TestSessionsSubcommand(unittest.TestCase):
     """`oc-tags sessions <tag>` (workstation-p8ch): newline-separated ids."""
