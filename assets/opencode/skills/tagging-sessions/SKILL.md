@@ -20,6 +20,7 @@ policy still applies; there is just no org tag list to pick from.
 ```bash
 session-tags which                  # this session's effective tag ($OPENCODE_SESSION_ID)
 session-tags set <tag>              # tag this session
+session-tags set <tag> goose:$AGENT_SESSION_ID  # tag this goose session (OPENCODE_SESSION_ID is unset there)
 session-tags set <tag> <session>    # tag another root session
 session-tags set <tag> --goose-dir <dir> # tag goose sessions by working directory
 session-tags ls --counts            # every tag in use, with session counts

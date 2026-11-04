@@ -1028,7 +1028,16 @@ class TestCli(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             rc = oc_tags.main(["set", "billing", "gse_x", "--db", self.db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 1)
-        self.assertIn("Error: 'gse_x' is a pigeon id; tag the goose session as goose:<native id> (pigeon sessions.backend_session_id)\n", err.getvalue())
+        self.assertIn("Error: 'gse_x' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)\n", err.getvalue())
+        with oc_tags.open_store(self.tags_db) as st:
+            self.assertEqual(oc_tags.session_tags(st), {})
+
+    def test_set_refusing_goose_prefixed_gse_id_writes_nothing(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["set", "billing", "goose:gse_x", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 1)
+        self.assertIn("Error: 'goose:gse_x' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)\n", err.getvalue())
         with oc_tags.open_store(self.tags_db) as st:
             self.assertEqual(oc_tags.session_tags(st), {})
 

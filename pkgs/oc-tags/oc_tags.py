@@ -1676,8 +1676,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _unattributable_id_hint(sid: str) -> str | None:
-    if sid.startswith("gse_"):
-        return f"'{sid}' is a pigeon id; tag the goose session as goose:<native id> (pigeon sessions.backend_session_id)"
+    raw = sid[len("goose:"):] if sid.startswith("goose:") else sid
+    if raw.startswith("gse_"):
+        return f"'{sid}' is a pigeon id; tag the goose session as goose:<native id> (in a goose session: goose:$AGENT_SESSION_ID; else pigeon sessions.backend_session_id)"
     if re.match(r"^\d{8}_\d+$", sid):
         return f"'{sid}' looks like a goose session id; did you mean goose:{sid}?"
     return None
