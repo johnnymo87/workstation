@@ -290,12 +290,12 @@
     #     realises when it runs on the Mac. (Single attributes still evaluate
     #     fine on this leg -- see bazelrc-disk-cache-tests.)
     #
-    #   (nixos-cloudbox was previously absent because it pulls in
-    #     `claude-failover-proxy` from a private repo; it is now built in CI by
-    #     save-before-private ordering: public checks are built and the Actions
-    #     store cache is saved BEFORE any private asset enters the store. Checks
-    #     with private closures are isolated via PRIVATE_CHECKS so private
-    #     binaries are never saved into the public repository's Actions cache.)
+    #   (nixos-cloudbox and nixos-devbox pull in `claude-failover-proxy` / `cfp-shaper`
+    #     from a private repo; they are built in CI by save-before-private ordering:
+    #     public checks are built and the Actions store cache is saved BEFORE any
+    #     private asset enters the store. Checks with private closures are isolated
+    #     via PRIVATE_CHECKS so private binaries are never saved into the public
+    #     repository's Actions cache.)
     checks.${devboxSystem} = {
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;

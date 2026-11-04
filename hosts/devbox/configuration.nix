@@ -15,6 +15,13 @@ let
   servePool = (import ../../users/dev/serve-pool.nix).forHost.devbox;
   routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
 
+  # NAME COLLISION, and it is a silent one: `pkgs.goose` in nixpkgs is the
+  # pressly/goose DATABASE MIGRATION TOOL, not this. Bind it to goose-cli
+  # matching hosts/cloudbox/configuration.nix.
+  goose-cli = pkgs.callPackage ../../pkgs/goose { };
+  agent-secret-env-sh = pkgs.callPackage ../../pkgs/agent-secret-env-sh { };
+  cfp-shaper = (pkgs.callPackage ../../pkgs/claude-failover-proxy { }).shaper;
+
   # lgtm author-side shepherd for the repos devbox owns (lgtm-5ksr.5). See
   # systemd.services.lgtm-shepherd below. Flip to false to stop it; nothing
   # else reads its state.
@@ -187,11 +194,22 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Shared secret between goose-serve and the pigeon daemon's goose runner:
+      # goose's GOOSE_SERVER__SECRET_KEY on one side, pigeon's
+      # PIGEON_GOOSE_ACP_TOKEN on the other.
+      #
+      # DELIBERATELY NO restartUnits (parity with cloudbox): goose-serve sets
+      # restartIfChanged = false so it does not bounce mid-turn. Listing both
+      # units here would restart pigeon-daemon only, creating a split-brain.
+      #
+      # ROTATING THIS SECRET is therefore a manual, three-unit operation:
+      #   sudo systemctl restart goose-serve
+      #   systemctl --user restart honkd
+      #   sudo systemctl restart pigeon-daemon
       pigeon_goose_acp_token = {
         owner = "dev";
         group = "dev";
         mode = "0400";
-        restartUnits = [ "goose-serve.service" "pigeon-daemon.service" ];
       };
       # Cloudflare Queue ID (used by my-podcasts-consumer)
       cloudflare_queue_id = {
@@ -378,8 +396,10 @@ in
         "PIGEON_SERVE_ENDPOINTS=${servePool.endpointsCsv}"
         "PIGEON_SERVE_LIVENESS=self"
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
-        # Goose ACP server endpoint for pigeon goose runner
-        "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4080/acp"
+        # Goose ACP server endpoint for pigeon goose runner (points at honkd proxy)
+        "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
+        # Who may leave a message for a pull-mode session (owner's Telegram user id)
+        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256"
         # workstation-debug: widen the heartbeat-staleness window before a serve
         # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
         # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat
@@ -425,7 +445,20 @@ in
         fi
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
-        [ -f /run/secrets/pigeon_goose_acp_token ] && export PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
+        # Must match goose-serve's GOOSE_SERVER__SECRET_KEY. Degrade gracefully
+        # if missing/empty (disables goose backend rather than killing pigeon-daemon).
+        if [ -r /run/secrets/pigeon_goose_acp_token ]; then
+          PIGEON_GOOSE_ACP_TOKEN="$(cat /run/secrets/pigeon_goose_acp_token)"
+          if [ -n "$PIGEON_GOOSE_ACP_TOKEN" ]; then
+            export PIGEON_GOOSE_ACP_TOKEN
+          else
+            echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token is EMPTY; disabling the goose backend" >&2
+            unset PIGEON_GOOSE_ACP_TOKEN PIGEON_GOOSE_ACP_URL
+          fi
+        else
+          echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token missing or unreadable; disabling the goose backend" >&2
+          unset PIGEON_GOOSE_ACP_URL
+        fi
         # Arms the daemon's bearer auth. Without this the daemon answers EVERY
         # route unauthenticated (auth.ts:6 short-circuits on a falsy token), and
         # on 2026-09-12 it was doing so to the public internet through this
@@ -524,15 +557,50 @@ in
     };
   };
 
-  systemd.services.goose-serve = {
-    description = "Goose ACP server";
+  # cfp-shaper: request shaper frontend for TeamClaude (Anthropic Max pool).
+  # TeamClaude rotates personal Max accounts and injects OAuth bearer tokens,
+  # but does not shape requests. Anthropic refuses unshaped Claude Max subscription
+  # traffic (requires Claude Code headers/beta tags); cfp-shaper adapts standard
+  # Anthropic requests into Claude-Code-shaped requests before forwarding them to
+  # TeamClaude on 127.0.0.1:3456. Binds loopback only (127.0.0.1:3457) and runs
+  # keyless (TeamClaude exempts localhost from API keys).
+  #
+  # Defined as a NixOS system service (not home-manager) to keep cfp-shaper
+  # out of the home-dev closure, keeping home-dev public and cached in CI.
+  systemd.services.cfp-shaper = {
+    description = "Claude failover proxy traffic shaper for TeamClaude";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
     after = [ "network-online.target" ];
 
-    unitConfig = {
-      ConditionPathExists = "/home/dev/.local/bin/goose";
+    serviceConfig = {
+      Type = "simple";
+      User = "dev";
+      Group = "dev";
+      Environment = [
+        "CFP_SHAPER_HOST=127.0.0.1"
+        "CFP_SHAPER_PORT=3457"
+        "CFP_TEAMCLAUDE_URL=http://127.0.0.1:3456"
+      ];
+      ExecStart = "${cfp-shaper}/bin/cfp-shaper";
+      Restart = "always";
+      RestartSec = 5;
     };
+  };
+
+  systemd.services.goose-serve = {
+    description = "Goose ACP server (backend for pigeon /launch --backend goose)";
+    wantedBy = [ "multi-user.target" ];
+    wants = [ "network-online.target" "cfp-shaper.service" ];
+    after = [ "network-online.target" "cfp-shaper.service" ];
+
+    # Bouncing kills in-flight turns, so do NOT restart on unrelated rebuilds.
+    # See hosts/cloudbox/configuration.nix for full rationale.
+    restartIfChanged = false;
+
+    # Full path so tools spawned by goose's developer extension have access
+    # to all standard CLI tools, matching cloudbox / opencode-serve.
+    path = [ "/run/wrappers" config.system.path "/home/dev/.nix-profile" "/home/dev/.local" ];
 
     serviceConfig = {
       Type = "simple";
@@ -543,15 +611,66 @@ in
         "HOME=/home/dev"
         "GOOSE_MODE=auto"
         "GOOSE_DISABLE_KEYRING=true"
-        "PATH=/home/dev/.local/bin:/home/dev/.nix-profile/bin:/run/wrappers/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+        # Default provider/model for NEW sessions. Note: GOOSE_PROVIDER/GOOSE_MODEL
+        # are only defaults; goose 1.54 switches provider/model per session via
+        # ACP set_config_option.
+        "GOOSE_PROVIDER=anthropic"
+        "GOOSE_MODEL=claude-opus-5-5"
+        # Route Anthropic requests through cfp-shaper -> TeamClaude.
+        "ANTHROPIC_HOST=http://127.0.0.1:3457"
+        # Goose requires a non-empty key; cfp-shaper discards it and TeamClaude
+        # injects the OAuth token from the active personal Max account.
+        "ANTHROPIC_API_KEY=teamclaude-managed"
+
+        # Tool-shell environment (non-interactive git defaults), matching cloudbox.
+        "GIT_EDITOR=:"
+        "GIT_SEQUENCE_EDITOR=:"
+        "EDITOR=:"
+        "GIT_PAGER=cat"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
-        export GOOSE_SERVER__SECRET_KEY="$(cat /run/secrets/pigeon_goose_acp_token)"
-        export OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
-        exec /home/dev/.local/bin/goose serve --port 4080
+
+        read_secret() {
+          local path="$1" val
+          if [ ! -r "$path" ]; then
+            echo "goose-serve: $path missing or unreadable (sops not decrypted?)" >&2
+            exit 1
+          fi
+          val="$(cat "$path")"
+          if [ -z "$val" ]; then
+            echo "goose-serve: $path is empty" >&2
+            exit 1
+          fi
+          printf '%s' "$val"
+        }
+
+        GOOSE_SERVER__SECRET_KEY="$(read_secret /run/secrets/pigeon_goose_acp_token)"
+        export GOOSE_SERVER__SECRET_KEY
+
+        # Export OPENAI_API_KEY so sessions can still be switched to OpenAI models.
+        if [ -r /run/secrets/openai_api_key ]; then
+          OPENAI_API_KEY="$(cat /run/secrets/openai_api_key)"
+          if [ -n "$OPENAI_API_KEY" ]; then
+            export OPENAI_API_KEY
+          fi
+        fi
+
+        # Source CLI/tool credentials for goose's tool shells (matching cloudbox).
+        source ${agent-secret-env-sh}
+        AGENT_SECRET_ENV_SKIP="CLAUDE_CODE_OAUTH_TOKEN GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY" \
+          agent_secret_env_export
+
+        # Preflight config.yaml
+        cfg="$HOME/.config/goose/config.yaml"
+        if [ ! -r "$cfg" ]; then
+          echo "goose-serve: $cfg missing or unreadable; goose cannot resolve its extensions" >&2
+          exit 1
+        fi
+
+        exec ${goose-cli}/bin/goose serve --port 4080
       ''}";
-      Restart = "on-failure";
+      Restart = "always";
       RestartSec = 5;
     };
   };
@@ -1126,6 +1245,28 @@ Check:
   # sessions (mosh, tmux, opencode) always get CPU/IO priority.
   nix.daemonCPUSchedPolicy = "batch";
   nix.daemonIOSchedClass = "idle";
+
+  # A FOD's impureEnvVars are read from the environment of WHATEVER PROCESS
+  # performs the build (see the NIX_REMOTE=daemon block just below for why that
+  # matters). We REUSE the existing github_api_token secret (verified: it reads
+  # the private cfp release asset, HTTP 200) rather than minting a second PAT; a
+  # sops template wraps its raw value in the KEY=VALUE form EnvironmentFile
+  # requires. The '-' prefix makes the file optional so the daemon still starts
+  # if sops hasn't rendered it yet (early boot); restartUnits bounces the daemon
+  # once it's (re)rendered.
+  sops.templates."nix-daemon-github-token" = {
+    content = "GITHUB_TOKEN=${config.sops.placeholder.github_api_token}";
+    restartUnits = [ "nix-daemon.service" ];
+  };
+  systemd.services.nix-daemon.serviceConfig.EnvironmentFile =
+    [ "-${config.sops.templates."nix-daemon-github-token".path}" ];
+
+  # Route root's nix builds through the daemon as well (see cloudbox for rationale)
+  # so `sudo nixos-rebuild` self-serves private-asset FOD fetches.
+  environment.etc."nix-remote-daemon.env".text = "NIX_REMOTE=daemon\n";
+  security.sudo.extraConfig = ''
+    Defaults env_file = /etc/nix-remote-daemon.env
+  '';
 
   # Garbage collection.
   #

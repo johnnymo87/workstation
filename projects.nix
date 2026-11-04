@@ -25,6 +25,10 @@
     url = "git@github.com:johnnymo87/eternal-machinery.git";
     platforms = [ "devbox" ];
   };
+  eng-agent-platform = {
+    url = "git@github.com:johnnymo87/eng-agent-platform.git";
+    platforms = [ "devbox" ];
+  };
   my-podcasts = {
     url = "git@github.com:johnnymo87/my-podcasts.git";
     platforms = [ "devbox" ];

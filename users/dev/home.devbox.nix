@@ -1,6 +1,6 @@
 # Devbox-specific home-manager configuration
 # Contains systemd services, sops secrets, and other devbox-only features
-{ config, pkgs, lib, localPkgs, projects, isDevbox, ... }:
+{ config, pkgs, lib, localPkgs, projects, isDevbox, honkPkg, ... }:
 
 let
   # mn9r M5: serve-pool descriptor (single source of truth in serve-pool.nix).
@@ -340,6 +340,9 @@ lib.mkIf isDevbox {
   # Constrain vitest worker count — default uses all cores, which starves
   # opencode sessions and devenv services when tests run in watch mode.
   home.sessionVariables.VITEST_MAX_WORKERS = "4";  # 16-core box, keep 75% free
+
+  home.sessionVariables.HONK_PIGEON_URL = "http://127.0.0.1:4731";
+  home.sessionVariables.HONK_PIGEON_TOKEN_FILE = "/run/secrets/pigeon_daemon_auth_token";
 
   # Guard: abort activation if running on the wrong machine.
   # Devbox and cloudbox share arch, user, and home dir -- applying the wrong
@@ -1853,7 +1856,7 @@ down and its silence means nothing. This host has no second leg.
   # reseed — re-run it as part of any from-scratch seed (alongside `login`).
   # Nix-packaged (pkgs/teamclaude) — pulled + installed by home-manager, no checkout.
   # hcloud: Hetzner CLI, authenticated by HCLOUD_TOKEN (sops hcloud_token).
-  home.packages = [ localPkgs.teamclaude pkgs.hcloud ];
+  home.packages = [ localPkgs.teamclaude pkgs.hcloud honkPkg ];
 
   # TeamClaude: multi-account Claude Max rotator. A local Anthropic-API proxy on
   # 127.0.0.1:3456 that rotates across personal Max accounts and injects the
@@ -1961,6 +1964,45 @@ down and its silence means nothing. This host has no second leg.
       WantedBy = [ "default.target" ];
     };
   };
+
+  systemd.user.services.honkd = {
+    Unit = {
+      Description = "honkd - durable ACP proxy for goose";
+      After = [ "network.target" ];
+      X-SwitchMethod = "keep-old";
+      StartLimitIntervalSec = 0;
+    };
+    Service = {
+      Type = "simple";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-self-grant --swarm-default --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      Restart = "always";
+      RestartSec = 5;
+      RestartSteps = 10;
+      RestartMaxDelaySec = 300;
+      MemoryMax = "1G";
+      MemorySwapMax = "0";
+    };
+    Install = {
+      WantedBy = [ "default.target" ];
+    };
+  };
+
+  # Stable token pre-seed: ensure ~/.local/state/honk exists (0700) and
+  # ~/.local/state/honk/secret is a symlink to /run/secrets/pigeon_goose_acp_token.
+  # L+ atomically replaces any regular file or broken symlink natively at
+  # configuration time. This must exist before honkd's first start, because
+  # otherwise honkd mints a random downstream secret and pigeon's token stops matching.
+  systemd.user.tmpfiles.rules = [
+    "d %h/.local/state/honk 0700 - - -"
+    "L+ %h/.local/state/honk/secret - - - - /run/secrets/pigeon_goose_acp_token"
+  ];
+
+  # `coordinator <tag>` / `coordinator --all`: print the swarm_send id of a program's stall-watch
+  # coordinator, for any session (opencode, goose, human). The finding-program-coordinators skill
+  # calls it. The script is owned by the private repo that owns stall-watch's state, so the lookup
+  # cannot drift from that schema; an out-of-store link tracks its checkout without a rebuild.
+  home.file.".local/bin/coordinator".source = config.lib.file.mkOutOfStoreSymlink
+    "${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/coordinator.sh";
 
   # BoldCo (boldco.mohrbacher.dev) was retired on 2026-10-26: its user unit
   # and the tunnel's port-3000 allowlist were removed, and its devbox clones

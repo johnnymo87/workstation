@@ -35,7 +35,7 @@ jobs:
       # saved BEFORE any private asset enters the store. Private checks are only
       # built afterward, guaranteeing that private binaries are never stored in
       # GitHub Actions caches on this public repository.
-      PRIVATE_CHECKS: "nixos-cloudbox"
+      PRIVATE_CHECKS: "nixos-cloudbox nixos-devbox"
     # Kept generous deliberately. Two layers now cut the cost -- the devenv
     # substituter and the Nix-store cache below -- but a cache MISS (first run on
     # a new key with no prefix match, or after a purge) still pays the full cold
@@ -105,7 +105,7 @@ jobs:
       # Every check in .#checks.<system> except those listed in $PRIVATE_CHECKS is
       # built here with an indirect gcroot under /tmp/ci-gcroots/<name>. This
       # realizes all public check closures and pins them so the pre-save cache GC
-      # preserves them. Checks with private dependencies (nixos-cloudbox) are
+      # preserves them. Checks with private dependencies (nixos-cloudbox, nixos-devbox) are
       # skipped here and built only after the cache has been saved.
       - name: Build public checks
         run: |
@@ -190,7 +190,7 @@ jobs:
           purge-created: 604800
           purge-primary-key: never
 
-      # Pre-seed private FOD sources for nixos-cloudbox.
+      # Pre-seed private FOD sources for nixos-cloudbox and nixos-devbox.
       #
       # Now that the store cache has been saved, we can safely introduce private
       # release assets. In CI, we use the CFP_READ_TOKEN secret to download the
@@ -208,7 +208,7 @@ jobs:
 
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::CFP_READ_TOKEN secret is empty or unset."
-            echo "Fork PRs do not receive repository secrets and cannot pre-seed private assets for nixos-cloudbox."
+            echo "Fork PRs do not receive repository secrets and cannot pre-seed private assets for private checks (nixos-cloudbox, nixos-devbox)."
             exit 1
           fi
 
