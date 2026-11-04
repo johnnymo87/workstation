@@ -3631,6 +3631,88 @@ class TestGooseApply(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.isdir(dead_dir))
 
+    def test_apply_goose_toctou_path_appeared(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-toctou"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        original_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 5 and cmd[:4] == ["git", "-C", self.repo, "worktree"] and cmd[4] == "add":
+                os.makedirs(dead_dir, exist_ok=True)
+                with open(os.path.join(dead_dir, "foreign.txt"), "w") as f:
+                    f.write("foreign worktree content")
+            return original_run(cmd, *args, **kwargs)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(oc_revive.ReviveError) as ctx:
+                oc_revive.apply_goose_revive(
+                    sid=sid,
+                    branch=branch,
+                    path=dead_dir,
+                    action="recreate",
+                    expect_tip=tip,
+                    expect_old_dir=dead_dir,
+                    goose_db_path=self.goose_db_path,
+                    opencode_db_path=self.oc_db_path,
+                )
+        self.assertTrue(str(ctx.exception).startswith("plan-changed:"))
+        self.assertIn("appeared while reviving", str(ctx.exception))
+        self.assertTrue(os.path.exists(os.path.join(dead_dir, "foreign.txt")))
+
+    def test_cli_apply_goose_db_unreadable_exits_1(self):
+        bad_db_dir = os.path.join(self.tmpdir.name, "is_a_dir")
+        os.makedirs(bad_db_dir, exist_ok=True)
+        branch = "feat-bad-db"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "apply", "goose:20261104_12",
+                "--branch", branch,
+                "--path", dead_dir,
+                "--action", "recreate",
+                "--expect-tip", tip,
+                "--expect-old-dir", dead_dir,
+                "--goose-db", bad_db_dir,
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("error opening database", stderr.getvalue().lower())
+
+    def test_apply_goose_opencode_sibling_at_subdir_refusal(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-sub-sibling"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        sub_dir = os.path.join(dead_dir, "nested", "child")
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            ("ses_oc_sub_sibling", sub_dir, 1000, 1000),
+        )
+        self.oc_conn.commit()
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("opencode_sibling"))
+        self.assertIn("ses_oc_sub_sibling", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

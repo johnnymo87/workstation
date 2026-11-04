@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -211,6 +212,32 @@ def get_git_common_dir(repo: str) -> str:
     if not os.path.isabs(git_common):
         git_common = os.path.normpath(os.path.join(repo, git_common))
     return git_common
+
+
+@contextlib.contextmanager
+def repo_lock(repo: str) -> Any:
+    """Acquire flock on <git-common-dir>/oc-revive.lock with timeout."""
+    git_common = get_git_common_dir(repo)
+    lock_path = os.path.join(git_common, "oc-revive.lock")
+
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    lock_timeout = get_lock_timeout_seconds()
+    start_lock = time.time()
+    locked = False
+    try:
+        while not locked:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except (BlockingIOError, OSError):
+                if time.time() - start_lock > lock_timeout:
+                    raise ReviveError(f"Timed out waiting for lock on {lock_path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def parse_ledger_line(line: str) -> tuple[str, float | None, str | None] | None:
@@ -869,7 +896,7 @@ def plan_goose_revive(
         if archived_at is not None:
             return _refuse(f"archived_session: session '{sid}' is archived", dead_dir=dead_dir)
 
-        if dead_dir and os.path.exists(dead_dir):
+        if dead_dir and os.path.lexists(dead_dir):
             return _refuse(f"directory_exists: directory '{dead_dir}' still exists on disk", dead_dir=dead_dir)
 
         repo_dir, shape_err = validate_directory_shape(dead_dir)
@@ -1303,23 +1330,7 @@ def apply_goose_revive(
         raise ReviveError(repo_err)
     repo = repo_dir
 
-    git_common = get_git_common_dir(repo)
-    lock_path = os.path.join(git_common, "oc-revive.lock")
-
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-    lock_timeout = get_lock_timeout_seconds()
-    start_lock = time.time()
-    locked = False
-    try:
-        while not locked:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-            except (BlockingIOError, OSError):
-                if time.time() - start_lock > lock_timeout:
-                    raise ReviveError(f"Timed out waiting for lock on {lock_path}")
-                time.sleep(0.05)
-
+    with repo_lock(repo):
         fresh_conn = get_goose_db_connection(goose_db_path)
         try:
             cur = fresh_conn.cursor()
@@ -1358,18 +1369,15 @@ def apply_goose_revive(
                 f"directory-mismatch: session '{sid}' working_dir is '{working_dir}', expected '{expect_old_dir}'"
             )
 
-        # 1. Path is absent on disk
-        if os.path.exists(target_p):
+        if os.path.lexists(target_p):
             raise ReviveError(f"plan-changed: path '{target_p}' already exists on disk")
 
-        # 2. OpenCode sibling check
         sibling_sid, oc_err = check_opencode_sibling(opencode_db_path, target_p)
         if oc_err:
             raise ReviveError(f"opencode_db_unreadable: opencode database could not be read: {oc_err}")
         if sibling_sid:
             raise ReviveError(f"opencode_sibling: opencode session '{sibling_sid}' references directory '{target_p}'")
 
-        # 3. Branch tip == expect_tip
         tip_res = subprocess.run(
             ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
             capture_output=True,
@@ -1383,17 +1391,15 @@ def apply_goose_revive(
                 f"plan-changed: branch '{branch}' tip moved from {expect_tip} to {current_tip}"
             )
 
-        # 4. Prune stale entries
+        # The prune runs before the active-worktree check so the dead path's stale entry is not mistaken for a live checkout.
         subprocess.run(["git", "-C", repo, "worktree", "prune"], check=True, capture_output=True)
 
-        # 5. Refuse if branch checked out in another live worktree
         active_wt_map = get_branch_to_active_worktree(repo)
         if branch in active_wt_map:
             raise ReviveError(
                 f"branch-checked-out: branch '{branch}' is already checked out at '{active_wt_map[branch]}'"
             )
 
-        # 6. Add worktree
         add_res = subprocess.run(
             ["git", "-C", repo, "worktree", "add", target_p, branch],
             capture_output=True,
@@ -1401,12 +1407,16 @@ def apply_goose_revive(
             errors="replace",
         )
         if add_res.returncode != 0:
+            add_output = (add_res.stderr or "") + (add_res.stdout or "")
+            if "already exists" in add_output.lower():
+                raise ReviveError(
+                    f"plan-changed: path '{target_p}' appeared while reviving; nothing was created or removed"
+                )
             verify_worktree_after_failed_add(
                 repo, sid, target_p, branch, expect_tip, add_res.returncode,
                 add_res.stderr or add_res.stdout or "",
             )
 
-        # 7. Assert path is a dir on branch
         if not os.path.isdir(target_p):
             raise ReviveError(f"worktree-creation-failed: directory '{target_p}' was not created")
 
@@ -1419,11 +1429,6 @@ def apply_goose_revive(
             raise ReviveError(
                 f"worktree-creation-failed: worktree at '{target_p}' is not on expected branch '{branch}'"
             )
-
-    finally:
-        if locked:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
 
     return {
         "ok": True,
@@ -1479,22 +1484,7 @@ def apply_revive(
             raise ReviveError(f"Repo directory '{repo}' not found")
 
         git_common = get_git_common_dir(repo)
-        lock_path = os.path.join(git_common, "oc-revive.lock")
-
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-        lock_timeout = get_lock_timeout_seconds()
-        start_lock = time.time()
-        locked = False
-        try:
-            while not locked:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    locked = True
-                except (BlockingIOError, OSError):
-                    if time.time() - start_lock > lock_timeout:
-                        raise ReviveError(f"Timed out waiting for lock on {lock_path}")
-                    time.sleep(0.05)
-
+        with repo_lock(repo):
             # Step 1: Idempotent retry check on fresh connection
             fresh_conn = get_db_connection(db_path)
             try:
@@ -1912,11 +1902,6 @@ def apply_revive(
                             os.kill(os.getpid(), signal.SIGINT)
                     else:
                         os.kill(os.getpid(), received_signal)
-
-        finally:
-            if locked:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
     finally:
         conn.close()
 
@@ -2081,6 +2066,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Successfully revived session '{extra_args.sid}' at {res['path']}")
             return 0
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 1
         except ReviveError as e:
             print(f"Revival failed: {e}", file=sys.stderr)
             return 1
@@ -2138,6 +2126,9 @@ def main(argv: list[str] | None = None) -> int:
                     f"uncommitted work from before the deletion is gone; verify HEAD before continuing."
                 )
                 return 0
+            except (sqlite3.Error, OSError) as e:
+                print(f"Error opening database: {e}", file=sys.stderr)
+                return 1
             except ReviveError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
@@ -2174,6 +2165,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Successfully revived session '{args.sid}' at {res['path']}")
             return 0
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 1
         except ReviveError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
