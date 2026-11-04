@@ -2368,6 +2368,58 @@ ${serveIdCase}
         # rather than an optimisation — see the deadline argument down there.
         ALIVE_PORTS=""
 
+        # Half-wedge probe (2026-11-03, pigeon-0d7). /global/health can keep
+        # answering while every route that reads the session DB hangs: devbox
+        # :4096 sat like that for 2.5h after a memory-pressure event (health,
+        # /config and /session/status in ms; GET /session and /session/<id>
+        # never returned), turns froze and every launch timed out at create.
+        # So each serve that answers health with 200 also gets a one-row
+        # session list on its default instance (~3 ms healthy; 10 s cap). Only
+        # NO response counts, on the same FAILFILE/THRESHOLD as health. Guards:
+        #  - A serve younger than DB_PROBE_GRACE_S is not DB-probed: the probe
+        #    may be the request that creates its default instance, and instance
+        #    creation is what re-triggers the post-boot burn (g3iy).
+        #  - If EVERY DB-probed serve is stuck (and there are at least two),
+        #    the cause is shared (the one opencode.db), a restart cannot fix it,
+        #    and restarting the whole pool every few minutes is worse than the
+        #    stall. Alert instead, and count nothing.
+        # A pre-pass, so that second guard sees the whole pool before any
+        # restart decision.
+        DB_PROBE_GRACE_S=600
+        declare -A DB_STUCK_OF=()
+        DB_OK=0
+        DB_BAD=0
+        UP_S=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
+        for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
+          UNIT="opencode-serve@$PORT.service"
+          [ "$(systemctl is-active "$UNIT")" = "active" ] || continue
+          MONO_US=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+          if [ -n "$MONO_US" ] && [ "$MONO_US" -gt 0 ] 2>/dev/null && \
+             [ $(( UP_S - MONO_US / 1000000 )) -lt "$DB_PROBE_GRACE_S" ]; then
+            continue
+          fi
+          H=$(curl -s --max-time 3 --connect-timeout 3 -o /dev/null -w "%{http_code}" \
+                ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+                "http://127.0.0.1:$PORT/global/health" 2>/dev/null)
+          [ "$H" = "200" ] || continue
+          DB_CODE=$(curl -s --max-time 10 --connect-timeout 3 -o /dev/null -w "%{http_code}" \
+                      ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
+                      "http://127.0.0.1:$PORT/session?limit=1" 2>/dev/null)
+          case "$DB_CODE" in
+            ""|000) DB_STUCK_OF[$PORT]=1; DB_BAD=$((DB_BAD + 1)) ;;
+            *) DB_OK=$((DB_OK + 1)) ;;
+          esac
+        done
+        if [ "$DB_BAD" -ge 2 ] && [ "$DB_OK" -eq 0 ]; then
+          echo "WARNING: every DB-probed serve ($DB_BAD) hangs on /session?limit=1 while answering /global/health; shared cause, NOT restarting"
+          ${driftAlert} "$STATE/db-poolwide-alerted" "db-poolwide" "Every opencode serve on cloudbox answers /global/health but hangs on a one-row session list (GET /session?limit=1). The cause is shared (the one opencode.db: a lock, a stuck writer, the disk), so the serve canary is NOT restarting them. Check: journalctl -u opencode-serve-canary; lsof /home/dev/.local/share/opencode/opencode.db*; cat /proc/locks" 900 14400
+          DB_STUCK_OF=()
+        elif [ "$DB_OK" -gt 0 ]; then
+          # A serve answered the DB probe: genuinely resolved. (Not on a pass
+          # that probed nothing, which would re-arm the alert for no reason.)
+          rm -f "$STATE/db-poolwide-alerted"
+        fi
+
         for PORT in ${lib.concatMapStringsSep " " toString servePool.ports}; do
           UNIT="opencode-serve@$PORT.service"
           FAILFILE="$STATE/$PORT.fails"
@@ -2430,29 +2482,19 @@ ${serveIdCase}
               ;;
           esac
 
-          # Half-wedge probe (2026-11-03, pigeon-0d7): /global/health can keep
-          # answering while every route that reads the session DB hangs. devbox
-          # :4096 sat like that for 2.5h: health, /config and /session/status in
-          # ms, GET /session and /session/<id> never returned, turns froze and
-          # launches timed out at create. A one-row session list on the default
-          # instance costs ~5 ms on a healthy serve. Only after a 200 (a 401
-          # serve cannot be probed further, and is already reported), and only
-          # NO response counts as stuck; the same THRESHOLD of consecutive
-          # minutes applies. The serve still counts as answering for the auth and
-          # drift bookkeeping below, because its HTTP server did answer.
+          # Half-wedge (pigeon-0d7): health answered, but the pre-pass found
+          # this serve's session-DB routes hung. It still counts as having
+          # answered for the credential bookkeeping (its HTTP server did), but
+          # it is kept out of ALIVE_PORTS and the binary-drift check: it may be
+          # restarted below, and both would then describe a process that is gone.
           DB_STUCK=0
-          if [ "$SERVE_ALIVE" -eq 1 ] && [ "$HEALTH_CODE" = "200" ]; then
-            DB_CODE=$(curl -s --max-time 10 --connect-timeout 3 \
-                           -o /dev/null -w "%{http_code}" \
-                           ''${SERVE_AUTH_CURL_ARGS[@]+"''${SERVE_AUTH_CURL_ARGS[@]}"} \
-                           "http://127.0.0.1:$PORT/session?limit=1" 2>/dev/null)
-            case "$DB_CODE" in
-              ""|000) DB_STUCK=1 ;;
-            esac
+          if [ "$SERVE_ALIVE" -eq 1 ] && [ "$HEALTH_CODE" = "200" ] && [ -n "''${DB_STUCK_OF[$PORT]:-}" ]; then
+            DB_STUCK=1
+            PROBED_COUNT=$((PROBED_COUNT + 1))
           fi
 
-          if [ "$SERVE_ALIVE" -eq 1 ]; then
-            [ "$DB_STUCK" -eq 0 ] && rm -f "$FAILFILE"
+          if [ "$SERVE_ALIVE" -eq 1 ] && [ "$DB_STUCK" -eq 0 ]; then
+            rm -f "$FAILFILE"
             PROBED_COUNT=$((PROBED_COUNT + 1))
             ALIVE_PORTS="''${ALIVE_PORTS:+$ALIVE_PORTS }$PORT"
 
@@ -2519,7 +2561,7 @@ ${serveIdCase}
               fi
             fi
 
-            [ "$DB_STUCK" -eq 0 ] && continue
+            continue
           fi
 
           PROBE=/global/health
@@ -2534,6 +2576,13 @@ ${serveIdCase}
           TS=$(date +%Y%m%dT%H%M%S)
           DUMP="$STATE/wedge-$TS-$PORT"
           mkdir -p "$DUMP"
+          echo "$PROBE" > "$DUMP/probe"
+          # A half-wedge has a FREE event loop, so the busy-loop forensics
+          # below will look idle. Record the DB's lock and file state too.
+          if [ "$DB_STUCK" -eq 1 ]; then
+            cat /proc/locks > "$DUMP/proc-locks" 2>/dev/null || true
+            ls -l /home/dev/.local/share/opencode/opencode.db* > "$DUMP/db-files" 2>/dev/null || true
+          fi
 
           # Bound persistent forensics: keep only the 10 newest wedge dumps.
           # lbe2: this needs `xargs`, which is why findutils is on the PATH above

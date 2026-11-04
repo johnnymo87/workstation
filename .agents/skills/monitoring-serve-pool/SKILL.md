@@ -40,7 +40,15 @@ every route that reads the session DB (`/session`, `/session/<id>`, a new
 directory's instance) hung, so turns froze phantom-busy and launches timed out
 at create. Only *no response* to the DB probe counts as a failure, and it feeds
 the same consecutive-failure counter (journal line `failed /session?limit=1
-(health OK)`). Both canaries (devbox user unit, cloudbox system unit) do this.
+(health OK)`). Both canaries (devbox user unit, cloudbox system unit) do this,
+in a pre-pass with two guards: a serve younger than 10 min is not DB-probed
+(the probe could be what creates its default instance and re-triggers the
+post-boot burn), and when **every** DB-probed serve (at least two) is stuck the
+cause is taken to be shared — the one `opencode.db` — so nothing is restarted
+and a pigeon alert (`db-poolwide`) is sent instead. A DB-stuck restart's dump
+also has `probe`, `proc-locks` and `db-files`, because a half-wedged serve's
+event loop is free and the busy-loop forensics look idle. The probe only reads:
+a serve holding a leaked write transaction would still pass it.
 
 - **7 consecutive failures** (≈7-8 min wedged, which outlasts the post-boot catalog/credential burn to prevent thrashing) → dump forensics, then
   `systemctl --user restart opencode-serve@<port>.service` (that one
