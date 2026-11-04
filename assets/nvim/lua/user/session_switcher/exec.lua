@@ -462,7 +462,6 @@ function M.refuse_dir_missing(desc)
         if not ok then
           return
         end
-        local revive = require("user.session_switcher.revive")
         local offers = revive.offers(plan, sid, desc.directory)
         if not offers then
           if revive.blocked(plan, sid, desc.directory) then

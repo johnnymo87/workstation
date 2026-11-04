@@ -51,6 +51,17 @@ local function valid_full_sha(s)
   return type(s) == "string" and (#s == 40 or #s == 64) and s:match("^%x+$") ~= nil
 end
 
+local SID_OPENCODE_PAT = "^ses_[%w]+$"
+local SID_GOOSE_PAT = "^goose:%d+_%d+$"
+
+local function is_opencode_sid(sid)
+  return type(sid) == "string" and sid:match(SID_OPENCODE_PAT) ~= nil
+end
+
+local function is_goose_sid(sid)
+  return type(sid) == "string" and sid:match(SID_GOOSE_PAT) ~= nil
+end
+
 local function valid_worktree_shape(path, repo)
   if not is_str(path) or not is_str(repo) or path:find("%c") then
     return false
@@ -76,14 +87,7 @@ function M.valid_path(path, repo, dead_dir)
 end
 
 function M.valid_sid(sid)
-  if type(sid) ~= "string" then
-    return false
-  end
-  return sid:match("^ses_[%w]+$") ~= nil or sid:match("^goose:%d+_%d+$") ~= nil
-end
-
-local function is_goose_sid(sid)
-  return type(sid) == "string" and sid:match("^goose:%d+_%d+$") ~= nil
+  return is_opencode_sid(sid) or is_goose_sid(sid)
 end
 
 --- Validate a decoded plan and build the offers.
@@ -112,6 +116,9 @@ function M.offers(plan, sid, dead_dir)
     if type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
       return nil
     end
+    if not valid_worktree_shape(dead_dir, repo) then
+      return nil
+    end
   end
 
   if plan.revivable == true then
@@ -129,7 +136,7 @@ function M.offers(plan, sid, dead_dir)
         return nil
       end
       if is_goose then
-        if c.action ~= "recreate" or c.path ~= dead_dir or not valid_worktree_shape(dead_dir, repo) then
+        if c.action ~= "recreate" or c.path ~= dead_dir then
           return nil
         end
       else
@@ -202,8 +209,7 @@ end
 --- shows #620's one-line WARN for this case rather than nothing.
 function M.blocked(plan, sid, dead_dir)
   return type(plan) == "table"
-    and type(sid) == "string"
-    and sid:match("^ses_[%w]+$") ~= nil
+    and is_opencode_sid(sid)
     and plan.sid == sid
     and is_str(dead_dir)
     and plan.dead_dir == dead_dir
