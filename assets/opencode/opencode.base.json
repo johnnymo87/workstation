@@ -10,7 +10,8 @@
   },
   "tools": {
     "slack_*": false,
-    "slack-ro_*": false
+    "slack-ro_*": false,
+    "wiz_*": false
   },
   "agent": {
     "build": {
