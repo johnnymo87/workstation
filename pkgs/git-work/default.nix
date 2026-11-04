@@ -51,8 +51,9 @@ Options:
               delete its branch. Never touches dirty or unmerged worktrees, the
               primary root, the current worktree, a worktree created within
               the grace period (WORK_PRUNE_GRACE_DAYS, default 3), or one that
-              an opencode session updated within WORK_PRUNE_SESSION_ACTIVE_DAYS
-              (default 7) has as its directory. Takes no <slug>.
+              an opencode or goose session updated within
+              WORK_PRUNE_SESSION_ACTIVE_DAYS (default 7) has as its directory.
+              Takes no <slug>.
   -h, --help  Show this help message.
 
 Notes:
@@ -140,15 +141,18 @@ EOF
     # sessions skill). Two guards close that:
     #
     #   GRACE PERIOD: nothing created within PRUNE_GRACE_DAYS is eligible.
-    #   LIVE SESSION: nothing that a session updated within
+    #   LIVE SESSION: nothing that an opencode or goose session updated within
     #     PRUNE_SESSION_ACTIVE_DAYS has as its directory is eligible
-    #     (mirrors disk-cleanup's GUARD 1b).
+    #     (mirrors disk-cleanup's GUARD 1b). Goose workers started with
+    #     `honk launch` have their worktree as `working_dir`, and goose rows
+    #     are in a separate DB.
     #
     # Both fail safe: a probe that cannot answer keeps the worktree. A stale
     # worktree costs disk until tomorrow's sweep; a deleted one costs a session.
     PRUNE_GRACE_DAYS="''${WORK_PRUNE_GRACE_DAYS:-3}"
     PRUNE_SESSION_ACTIVE_DAYS="''${WORK_PRUNE_SESSION_ACTIVE_DAYS:-7}"
     PRUNE_SESSION_DB="''${WORK_PRUNE_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
+    PRUNE_GOOSE_DB="''${WORK_PRUNE_GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
 
     # Seconds since the worktree was CREATED. Measured from the ctime of the
     # `gitdir` file in its admin dir (<common>/worktrees/<name>/gitdir), which
@@ -193,6 +197,31 @@ EOF
       return 0
     }
 
+    # Is <wt> (or a directory under it) the working_dir of a goose session
+    # updated within PRUNE_SESSION_ACTIVE_DAYS? Goose rows are in sessions.db
+    # with updated_at in UTC text. 0 = yes (prints the session id), 1 = no,
+    # 2 = probe failed (prints the error). A MISSING db means no goose here:
+    # answers no.
+    goose_session_owner() {
+      local wt="$1" sql_path out
+      [ -f "$PRUNE_GOOSE_DB" ] || return 1
+      sql_path="''${wt//\'/\'\'}"
+      # Read-only: a live goose-serve or honkd is writing this database.
+      # .timeout: WAL reader can briefly see SQLITE_BUSY during a checkpoint.
+      if ! out="$(sqlite3 -readonly -cmd '.timeout 5000' "$PRUNE_GOOSE_DB" \
+        "select id from sessions
+           where (working_dir = '$sql_path'
+                  or substr(working_dir, 1, length('$sql_path') + 1) = '$sql_path' || '/')
+             and updated_at >= datetime('now', '-$PRUNE_SESSION_ACTIVE_DAYS days')
+           order by updated_at desc limit 1;" 2>&1)"; then
+        printf '%s\n' "$out" | head -1
+        return 2
+      fi
+      [ -n "$out" ] || return 1
+      printf '%s\n' "$out"
+      return 0
+    }
+
     # --prune-merged: remove every worktree under <root>/.worktrees/ whose branch
     # is fully merged into origin/<trunk> and whose working tree is clean, then
     # delete that branch. This is the pruning OWNER named in the Phase 3.5 design
@@ -202,9 +231,9 @@ EOF
     #   - a worktree with uncommitted/untracked changes (status --porcelain)
     #   - a branch with commits not yet in origin/<trunk> (not an ancestor)
     #   - a worktree created within PRUNE_GRACE_DAYS, or one a recent opencode
-    #     session has as its directory (see the guards above). Unmerged-or-dirty
-    #     alone did NOT protect active sessions: a fresh branch with no commits
-    #     reads as merged.
+    #     or goose session has as its directory (see the guards above).
+    #     Unmerged-or-dirty alone did NOT protect active sessions: a fresh
+    #     branch with no commits reads as merged.
     prune_merged() {
       local no_fetch="''${1:-0}" trunk_override="''${2:-}"
       local v
@@ -288,13 +317,19 @@ EOF
         log "prune-merged: keep $wt_path (created $((age / 3600))h ago, within ''${PRUNE_GRACE_DAYS}d grace period)"
         return 1
       fi
-      # Never remove a worktree a recent opencode session has as its directory.
+      # Never remove a worktree a recent opencode or goose session has as its directory.
       local owner="" owner_rc=0
       owner="$(session_owner "$real_wt")" || owner_rc=$?
       case "$owner_rc" in
         0) log "prune-merged: keep $wt_path (opencode session $owner lives here)"; return 1 ;;
         1) : ;;
         *) log "prune-merged: keep $wt_path (session probe failed: $owner)"; return 1 ;;
+      esac
+      owner_rc=0; owner="$(goose_session_owner "$real_wt")" || owner_rc=$?
+      case "$owner_rc" in
+        0) log "prune-merged: keep $wt_path (goose session $owner lives here)"; return 1 ;;
+        1) : ;;
+        *) log "prune-merged: keep $wt_path (goose session probe failed: $owner)"; return 1 ;;
       esac
       # Never remove a dirty worktree.
       if [ -n "$(git -C "$real_wt" status --porcelain 2>/dev/null)" ]; then

@@ -790,8 +790,8 @@
         }
         # Pinned, following checks.oc-auto-attach: a suite that stops
         # adjudicating must not be able to present as green.
-        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 27 ] || {
-          echo "GATE FAILURE: expected 27 'PASS ' lines, got" \
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 34 ] || {
+          echo "GATE FAILURE: expected 34 'PASS ' lines, got" \
                "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
           exit 1
         }

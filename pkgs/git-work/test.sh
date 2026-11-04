@@ -35,6 +35,9 @@ fi
 # WHICH binary passed.
 echo "Testing: $work_script"
 
+# Isolate test runs from the real goose session DB
+export WORK_PRUNE_GOOSE_DB="${WORK_PRUNE_GOOSE_DB_TEST:-/nonexistent/goose-sessions.db}"
+
 # Source the real production script to load helper functions without executing main()
 source "$work_script"
 
@@ -435,6 +438,41 @@ if [[ "$prune_out" == *"session probe failed"* ]]; then
   echo "PASS: session: probe failure logged"
 else
   echo "FAIL: session: probe failure not logged. Got: [$prune_out]"; fail=1
+fi
+
+# Test 9f: GOOSE SESSION guard. A goose session updated recently whose working_dir
+# is the worktree (or under it) keeps it; a stale one does not; an unreadable DB
+# keeps everything (fail safe).
+cd "$fresh_clone"
+goose_db="$tmpdir/goose.db"
+"$work_script" --no-fetch goose_live >/dev/null 2>&1
+"$work_script" --no-fetch goose-sub >/dev/null 2>&1
+"$work_script" --no-fetch goose-stale >/dev/null 2>&1
+wt_goose_live="$(realpath "$fresh_clone/.worktrees/goose_live")"
+wt_goose_sub="$(realpath "$fresh_clone/.worktrees/goose-sub")"
+wt_goose_stale="$(realpath "$fresh_clone/.worktrees/goose-stale")"
+sqlite3 "$goose_db" "create table sessions (id text primary key, working_dir text not null, updated_at timestamp);
+  insert into sessions values ('20261104_1', '$wt_goose_live', datetime('now'));
+  insert into sessions values ('20261104_2', '$wt_goose_sub/crates/x', datetime('now'));
+  insert into sessions values ('20261001_9', '$wt_goose_stale', datetime('now', '-30 days'));"
+prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db WORK_PRUNE_GOOSE_DB="$goose_db" "$work_script" --prune-merged 2>&1)"
+check "goose session: recent session's worktree KEPT" "1" "$([ -d "$wt_goose_live" ] && echo 1 || echo 0)"
+check "goose session: session in a SUBDIR keeps the worktree" "1" "$([ -d "$wt_goose_sub" ] && echo 1 || echo 0)"
+check "goose session: stale session does not pin the worktree" "0" "$([ -d "$wt_goose_stale" ] && echo 1 || echo 0)"
+if [[ "$prune_out" == *"goose_live (goose session 20261104_1 lives here)"* ]]; then
+  echo "PASS: goose session: keep reason names the session"
+else
+  echo "FAIL: goose session: keep reason missing. Got: [$prune_out]"; fail=1
+fi
+echo "not a database" > "$tmpdir/goose-broken.db"
+"$work_script" --no-fetch goose-broken >/dev/null 2>&1
+wt_goose_broken="$(realpath "$fresh_clone/.worktrees/goose-broken")"
+prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db WORK_PRUNE_GOOSE_DB="$tmpdir/goose-broken.db" "$work_script" --prune-merged 2>&1)"
+check "goose session: unreadable DB keeps the worktree (fail safe)" "1" "$([ -d "$wt_goose_broken" ] && echo 1 || echo 0)"
+if [[ "$prune_out" == *"goose session probe failed"* ]]; then
+  echo "PASS: goose session: probe failure logged"
+else
+  echo "FAIL: goose session: probe failure not logged. Got: [$prune_out]"; fail=1
 fi
 
 # Test 10: slug path-traversal guard (the worktree dir name must stay under
