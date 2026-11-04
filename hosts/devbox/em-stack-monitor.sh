@@ -37,7 +37,7 @@
 # Carry-forward. A source that FAILS to answer for a pass (timeout, reset, a 5xx
 # other than session_not_found, a 200 that does not parse) must neither drop a
 # standing key nor produce a false "resolved". A source that answers "not here"
-# (connection refused, 404, session_not_found, a complete stack-health run with
+# (connection refused, 404 and, outside a live mode, a refused :4400; session_not_found, a complete stack-health run with
 # no line for the check) is GONE: its keys clear like any absent key. A key that
 # was active last pass, is missing now, and whose source failed is carried
 # forward with its stored text:
@@ -48,7 +48,9 @@
 #   presence:<sid> carried while the presence fetch failed
 #   gm_halt:<sid>  carried while the presence fetch failed, or this session's
 #                  status fetch failed (a 503 session_not_found is an answer)
-#   quarantine:*   carried while the quiescence fetch failed
+#   quarantine:*   carried while the quiescence fetch failed (in a live mode, or
+#                  an unknown one, a refused :4400 counts as failed: AgentOS is
+#                  meant to be up, and fail:agentos takes over)
 # There is no global degraded flag: quiescence never answers in sim modes.
 # Carrying is capped at 3 consecutive passes per key (state `carried`), reset
 # whenever the key is observed directly; the 4th failed pass lets it resolve.
@@ -170,7 +172,7 @@ state=$empty_state
 if [ -f "$state_file" ] && st=$(cat "$state_file"); then
   state=$(jq -c '
     (if type == "object" then . else {} end) as $s
-    | def nums: if type == "object" then with_entries(select(.value | type == "number")) else {} end;
+    | def nums: if type == "object" then with_entries(select((.value | type == "number") and .value >= 0) | .value |= floor) else {} end;
       {sig: (if ($s.sig | type) == "string" then $s.sig else "" end),
        keys: (if ($s.keys | type) == "array" then [$s.keys[] | select(type == "string")] else [] end),
        texts: (if ($s.texts | type) == "object" then ($s.texts | with_entries(select(.value | type == "string"))) else {} end),
@@ -358,7 +360,9 @@ else
          else empty end)
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
   elif [ "$GOT_KIND" = gone ]; then
-    quies_state=gone
+    # In a live mode AgentOS is supposed to be up, so a refusal is a failure to
+    # carry (the 3-pass cap) until fail:agentos takes over; elsewhere it is gone.
+    if [ "$live" = 1 ]; then quies_state=failed; else quies_state=gone; fi
   fi
 
   # --- Carry forward keys whose source did not answer ---------------------------------
@@ -408,6 +412,11 @@ if [ "$nostack" = 0 ]; then
   else
     sig=$(printf '%s\n' "${active[@]}" | sort -u | sha256sum | cut -c1-16)
   fi
+fi
+
+if [ "$nostack" = 0 ] && [ -z "$sig" ]; then
+  echo "em-stack-monitor: internal error: no signature for the active key set" >&2
+  exit 1
 fi
 
 short_head=$(git -C "$EM_STACK_REPO" rev-parse --short HEAD 2>/dev/null) || short_head=unknown

@@ -397,18 +397,32 @@ rm -f "$S/web/4002_v1_presence"; touch "$S/web/4002_v1_presence.refused"; at 600
 check "presence refused (gone) drops the GM halt" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
 
 setup
+echo sim >"$S/mode"
 serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
 rm -f "$S/web/4400_em_quiescence"; touch "$S/web/4400_em_quiescence.refused"; at 1200; run
-check "B: AgentOS stopped (:4400 refused) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
-setup
+check "B: AgentOS stopped (:4400 refused, sim mode) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+setup; echo sim >"$S/mode"
 serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
 serve 4400_em_quiescence 404 "$fx/status-livia-503.json"; at 1200; run
-check "quiescence 404 (gone) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+check "quiescence 404 (gone, sim mode) clears the quarantine" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
 
 setup; mkhealth "foo FAIL broke"; run; at 600; run
 check "C: fail:foo announced" '[ "$(tgn)" -eq 1 ]'
 sethealth postgres OK fine; at 1200; run
 check "C: a complete run (SUMMARY) with no foo line clears fail:foo" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+
+# In a live mode a refused :4400 is a failure (AgentOS should be up): the quarantine is
+# carried, not resolved, until the cap lets it go (fail:agentos takes over before that).
+for m in manual-live ""; do
+  setup; echo "$m" >"$S/mode"
+  serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable"'; run; at 600; run
+  rm -f "$S/web/4400_em_quiescence"; touch "$S/web/4400_em_quiescence.refused"; at 1200; run
+  check "mode '${m:-unknown}': AgentOS refusing sends no resolved on that pass" '[ "$(tgn)" -eq 1 ] && [ "$(st .keys[0])" = quarantine:warrior_f ]'
+  at 1800; run; at 2400; run
+  check "mode '${m:-unknown}': still carried on the 3rd refused pass" '[ "$(tgn)" -eq 1 ]'
+  at 3000; run
+  check "mode '${m:-unknown}': the cap resolves it on the 4th" '[ "$(tgn)" -eq 2 ] && grep -q resolved <<<"$(tglast)"'
+done
 
 # The cap: a source timing out 4 passes in a row resolves on the 4th.
 setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
@@ -502,6 +516,20 @@ unset EM_STACK_MONITOR_DRY_RUN
 # 17. Corrupt state, or valid JSON of the wrong shape, is normalized field by field.
 setup; echo 'not json' >"$STATE_DIRECTORY/state.json"; mkhealth "postgres FAIL refused"; run
 check "corrupt state does not abort" '[ "$rc" -eq 0 ] && [ "$(pend fail:postgres)" -eq 1 ]'
+# Counts are non-negative integers: 1.5 reads as 1, -3 as nothing, and the pass still signs.
+setup; echo '{"pending":{"fail:postgres":1.5}}' >"$STATE_DIRECTORY/state.json"; mkhealth "postgres FAIL refused"; run
+check "pending 1.5 reads as 1: the second sighting alerts, with a real sig" \
+  '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && head -n 1 <<<"$(tglast)" | grep -qx "EM stack: problem" && grep -q "^- postgres FAIL" <<<"$(tglast)" && [ "$(st .sig)" != "" ] && [ "$(pend fail:postgres)" -eq 2 ]'
+setup; gm_status gm_halted gm_contact "$(iso $((T0 - 25 * 60)))"; run
+printf '%s' "$(jq -c '.carried = {"gm_halt:jonathan": -3} | .pending = {"x": -1}' "$STATE_DIRECTORY/state.json")" >"$STATE_DIRECTORY/state.json"
+rm -f "$S/web/4002_v1_presence"; at 600; run
+check "carried -3 reads as no count: carried once, no STILL, state sane" \
+  '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && [ "$(st ".carried[\"gm_halt:jonathan\"]")" -eq 1 ] && [ "$(st ".pending | length")" -eq 0 ]'
+# An empty signature with a stack up is an internal error: exit 1, send nothing.
+setup; printf '#!%s\ncat >/dev/null\n' "$bash_bin" >"$S/bin/sha256sum"; chmod +x "$S/bin/sha256sum"
+mkhealth "postgres FAIL refused"; run; PATH="$S/bin:$PATH" run; at 600; PATH="$S/bin:$PATH" run
+check "empty sig with the stack up: exit 1 and nothing sent" '[ "$rc" -eq 1 ] && [ "$(tgn)" -eq 0 ] && grep -q "internal error" "$S/err"'
+
 for bad in '{"keys":"x"}' '{"pending":[1]}' '[1,2]' '{"sig":5,"sent_at":"soon","texts":[],"events":{"a":"b"},"keys":[1]}' '{"pending":{"fail:postgres":"many"}}'; do
   setup; echo "$bad" >"$STATE_DIRECTORY/state.json"; mkhealth "postgres FAIL refused"; run; at 600; run
   check "wrong-shape state $bad does not kill a pass" '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && [ "$(st .sig)" != "" ]'

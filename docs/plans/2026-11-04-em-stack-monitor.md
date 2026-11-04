@@ -62,7 +62,7 @@ stopped AgentOS, a check that no longer exists).
 - `presence:<sid>`: carried while the presence fetch failed;
 - `gm_halt:<sid>`: carried while the presence fetch failed, or while that session's status
   fetch failed;
-- `quarantine:<agent>`: carried while the quiescence fetch failed.
+- `quarantine:<agent>`: carried while the quiescence fetch failed. In a live mode (or an unknown one) a refused `:4400` counts as failed, not gone: AgentOS is meant to be up, so the 3-pass cap carries the quarantine until `fail:agentos` takes over. Outside a live mode it is gone.
 
 There is no global "degraded" flag: quiescence never answers in sim modes. Carrying is
 capped: at most 3 consecutive passes per key (state `carried: {key: n}`, reset whenever the
@@ -159,7 +159,7 @@ stands, a standing check read `UNKNOWN`, quiescence down during a quarantine, a 
 surviving a failed pass) while a gone source clears them (status 503 `session_not_found`, 404 or
 refused; `:4400` refused or 404; presence refused; a complete stack-health run with no line for a
 check), the cap resolves on the 4th failed pass and resets when the key is observed, a debounce
-count past the cap is dropped, and an answered "clear" still resolves; wrong-shape state (`{"keys":"x"}`, `{"pending":[1]}`, ...) does
+count past the cap is dropped, and an answered "clear" still resolves; a refused `:4400` in manual-live (or unknown mode) is carried, not resolved; counts in state are non-negative integers (1.5 reads as 1, -3 as none); an empty signature with the stack up exits 1 and sends nothing; wrong-shape state (`{"keys":"x"}`, `{"pending":[1]}`, ...) does
 not kill a pass; the Telegram token and chat id never appear in curl's argv; a Telegram failure
 exits non-zero and records nothing.
 
