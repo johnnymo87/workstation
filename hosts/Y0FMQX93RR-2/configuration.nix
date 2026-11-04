@@ -59,6 +59,30 @@ in
     interval = [ { Weekday = 0; Hour = 4; Minute = 15; } ];
   };
 
+  # Never idle-sleep on AC power.
+  #
+  # This Mac runs always-on agent infrastructure (opencode serves, pigeon,
+  # teamclaude, cfp). On the macOS default (`sleep 15`) it idle-slept within
+  # 15 minutes of the last keypress even when plugged in, and every session
+  # that was mid-turn then thrashed: each ~45 s DarkWake found its upstream
+  # stream dead with no network ("SSE read timed out", getaddrinfo ENOTFOUND),
+  # scheduled a retry, and went back to sleep.
+  #
+  # AC profile only (`pmset -c`); battery keeps its default so a forgotten,
+  # open laptop does not drain flat. Displays still sleep. Lid-closed
+  # (clamshell) sleep without an external display is NOT prevented; that needs
+  # `pmset disablesleep 1`, deliberately not set.
+  #
+  # Not `power.sleep.computer`: nix-darwin implements it with
+  # `systemsetup -setComputerSleep`, which applies to every power source and
+  # discards its output, so a failure would be silent.
+  system.activationScripts.power.text = lib.mkAfter ''
+    echo "setting AC idle system sleep to never..." >&2
+    if ! /usr/bin/pmset -c sleep 0; then
+      echo "warning: pmset -c sleep 0 failed; the Mac will still idle-sleep on AC" >&2
+    fi
+  '';
+
   # Allow unfree
   nixpkgs.config.allowUnfree = true;
 
