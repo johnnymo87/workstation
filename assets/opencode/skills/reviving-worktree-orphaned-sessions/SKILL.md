@@ -148,9 +148,10 @@ Never `git worktree remove` the tree you are sitting in, even after its PR merge
 
 A goose session (`goose:<id>` in the picker, `gse_…` in pigeon) whose worktree was deleted is revived differently, and the rest of this skill does not apply to it.
 
-- **What you see:** the session keeps taking turns, but every shell call fails with `Failed to spawn shell command: No such file or directory`. Its swarm tools still work.
+- **What you see:** shell calls fail with ENOENT while the directory is absent. Its swarm tools still work. The session may also be dropped by honkd after a goose-serve restart (it cannot load a missing cwd), so opening it fails.
 - **Fix:** press Enter on its row in the session picker, or run `oc-revive goose:<id>`. This recreates the worktree **at the same path**, on the branch it had. No directory update and no new path are needed: goose-serve and honkd cache nothing per path, so the next turn just works (measured 2026-11-04).
-- **It refuses** (`opencode_sibling:`) when an opencode session also has that directory: recreating it would turn that opencode session into a zombie. Revive the opencode session first with the path workflow above.
+- **It refuses** (`opencode_sibling:`) when an opencode session also has that directory: recreating it would turn that opencode session into a zombie. If that session is finished, archive it and re-run. If you still need it, revive it instead (`oc-revive <sid>`); that moves its branch to a new worktree, and this goose session can then no longer be revived.
+- **Plain directory recreated by agent:** a dead goose session can recreate `.worktrees/<slug>` itself as a plain directory, because its write tool creates parent dirs. `oc-revive` then reports `directory_exists`. Check: no `.git` file in it (`ls -a`). Move the plain dir aside (to `/tmp`, not delete) and re-run.
 - **No notice is sent** to the agent. Tell it that the worktree was recreated and that uncommitted work is gone.
 
 ## Related
