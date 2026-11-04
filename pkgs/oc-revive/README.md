@@ -40,6 +40,7 @@ another session).
 Goose sessions (`goose:<id>`) are revived by recreating the worktree **at the session's original path**:
 - Neither goose nor honkd caches failed path lookups (opencode's `LayerMap` memo does not exist here; measured 2026-11-04). Recreating the worktree in place makes the next turn succeed immediately.
 - Refuses if any opencode session references the dead directory or any subdirectory (`opencode_sibling`), which would turn that opencode session into a zombie.
+- Recreation also revives every other goose session whose directory is that path, and none of those agents is told.
 - No notice is sent to the agent (goose has no `noReply` prompt, so tell the agent yourself; `apply` prints a paste-able summary line).
 - No busy check (recreating the directory under a running turn is safe) and no resume subcommand (if `apply` created the directory, the session works).
 

@@ -195,6 +195,21 @@ def get_session_referencing_path(conn: sqlite3.Connection, path: str) -> str | N
     return None
 
 
+def get_unarchived_opencode_sibling(conn: sqlite3.Connection, path: str) -> str | None:
+    """Return the ID of any unarchived opencode session referencing path or any subdirectory of it, or None."""
+    cur = conn.cursor()
+    paths_to_check = {path, os.path.realpath(path)}
+    for p in paths_to_check:
+        cur.execute(
+            "SELECT id FROM session WHERE (directory = ? OR directory LIKE ? || '/%') AND time_archived IS NULL LIMIT 1",
+            (p, p),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+    return None
+
+
 def is_path_referenced_in_db(conn: sqlite3.Connection, path: str) -> bool:
     """Check if path or any subdirectory of it is referenced by any session row."""
     return get_session_referencing_path(conn, path) is not None
@@ -825,7 +840,7 @@ def check_opencode_sibling(
     opencode_db_path: str | None,
     dead_dir: str,
 ) -> tuple[str | None, str | None]:
-    """Check if any opencode session references dead_dir or a subdirectory.
+    """Check if any unarchived opencode session references dead_dir or a subdirectory.
     Returns (sibling_sid, unreadable_error).
     """
     path = opencode_db_path or os.environ.get("OPENCODE_DB", DEFAULT_DB_PATH)
@@ -835,12 +850,23 @@ def check_opencode_sibling(
     try:
         conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
         try:
-            sibling = get_session_referencing_path(conn, dead_dir)
+            sibling = get_unarchived_opencode_sibling(conn, dead_dir)
             return sibling, None
         finally:
             conn.close()
     except Exception as e:
         return None, str(e)
+
+
+def format_opencode_sibling_refusal(sibling_sid: str) -> str:
+    """Format refusal message when an unarchived opencode session references the directory."""
+    return (
+        f"opencode_sibling: opencode session '{sibling_sid}' also has this directory. "
+        f"Recreating it would leave that session a zombie. "
+        f"If '{sibling_sid}' is finished, archive it and re-run. "
+        f"If you still need it, revive it instead (oc-revive {sibling_sid}); "
+        f"that moves its branch to a new worktree, and this goose session can then no longer be revived."
+    )
 
 
 def plan_goose_revive(
@@ -916,7 +942,7 @@ def plan_goose_revive(
             )
         if sibling_sid:
             return _refuse(
-                f"opencode_sibling: opencode session '{sibling_sid}' references directory '{dead_dir}'",
+                format_opencode_sibling_refusal(sibling_sid),
                 dead_dir=dead_dir,
                 repo=repo_dir,
             )
@@ -1376,7 +1402,7 @@ def apply_goose_revive(
         if oc_err:
             raise ReviveError(f"opencode_db_unreadable: opencode database could not be read: {oc_err}")
         if sibling_sid:
-            raise ReviveError(f"opencode_sibling: opencode session '{sibling_sid}' references directory '{target_p}'")
+            raise ReviveError(format_opencode_sibling_refusal(sibling_sid))
 
         tip_res = subprocess.run(
             ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
@@ -1407,15 +1433,41 @@ def apply_goose_revive(
             errors="replace",
         )
         if add_res.returncode != 0:
-            add_output = (add_res.stderr or "") + (add_res.stdout or "")
-            if "already exists" in add_output.lower():
-                raise ReviveError(
-                    f"plan-changed: path '{target_p}' appeared while reviving; nothing was created or removed"
+            target_real = os.path.realpath(target_p)
+            entry = None
+            try:
+                for e in get_worktree_entries(repo):
+                    e_p = e.get("path")
+                    if e_p and (e_p == target_p or os.path.realpath(e_p) == target_real):
+                        entry = e
+                        break
+            except subprocess.CalledProcessError:
+                entry = None
+
+            raw_output = (add_res.stderr or "") + (add_res.stdout or "")
+            tail = _tail(raw_output)
+
+            if (
+                add_res.returncode > 0
+                and entry is not None
+                and not entry.get("prunable")
+                and not entry.get("locked")
+                and entry.get("branch") == branch
+                and entry.get("head") == expect_tip
+                and os.path.isdir(target_p)
+            ):
+                print(
+                    f"WARNING: git worktree add exited {add_res.returncode}, most likely a failing post-checkout hook, "
+                    f"but the worktree at '{target_p}' is on '{branch}' at {expect_tip[:9]}; continuing.\n"
+                    + (f"  Hook output (tail):\n    " + tail.replace("\n", "\n    ") + "\n" if tail else "")
+                    + "  Any setup that hook does was skipped; run it inside the repo's dev shell if you need it.",
+                    file=sys.stderr,
+                    flush=True,
                 )
-            verify_worktree_after_failed_add(
-                repo, sid, target_p, branch, expect_tip, add_res.returncode,
-                add_res.stderr or add_res.stdout or "",
-            )
+            else:
+                raise ReviveError(
+                    f"plan-changed: git worktree add failed (exit {add_res.returncode}): {tail}; nothing was removed. Inspect {target_p} by hand."
+                )
 
         if not os.path.isdir(target_p):
             raise ReviveError(f"worktree-creation-failed: directory '{target_p}' was not created")

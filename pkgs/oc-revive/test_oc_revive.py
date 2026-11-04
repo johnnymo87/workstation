@@ -32,6 +32,7 @@ def init_test_db(db_path: str) -> sqlite3.Connection:
             title TEXT,
             time_created INTEGER,
             time_updated INTEGER,
+            time_archived INTEGER,
             agent TEXT,
             model TEXT
         );
@@ -3118,8 +3119,51 @@ class TestGoosePlan(unittest.TestCase):
 
         plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
         self.assertFalse(plan["revivable"])
+        expected_reason = (
+            "opencode_sibling: opencode session 'ses_sibling_exact' also has this directory. "
+            "Recreating it would leave that session a zombie. "
+            "If 'ses_sibling_exact' is finished, archive it and re-run. "
+            "If you still need it, revive it instead (oc-revive ses_sibling_exact); "
+            "that moves its branch to a new worktree, and this goose session can then no longer be revived."
+        )
+        self.assertEqual(plan["reason"], expected_reason)
+
+    def test_plan_goose_opencode_sibling_archived_is_allowed(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-archived-feat")
+        self._commit_branch("sibling-archived-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?)",
+            ("ses_sibling_archived", dead_dir, 1000, 1000, 2000),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+        self.assertEqual(len(plan["candidates"]), 1)
+
+    def test_plan_goose_opencode_sibling_child_session_non_archived_refused(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-child-feat")
+        self._commit_branch("sibling-child-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, parent_id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?)",
+            ("ses_sibling_child", "ses_parent_id", dead_dir, 1000, 1000, None),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
         self.assertTrue(plan["reason"].startswith("opencode_sibling:"))
-        self.assertIn("ses_sibling_exact", plan["reason"])
+        self.assertIn("ses_sibling_child", plan["reason"])
 
     def test_plan_goose_refusal_opencode_sibling_at_subdir(self):
         native_id = "20261104_12"
@@ -3436,7 +3480,42 @@ class TestGooseApply(unittest.TestCase):
                 goose_db_path=self.goose_db_path,
                 opencode_db_path=self.oc_db_path,
             )
-        self.assertTrue(str(ctx.exception).startswith("opencode_sibling"))
+        expected_err = (
+            f"opencode_sibling: opencode session 'ses_oc_sibling' also has this directory. "
+            f"Recreating it would leave that session a zombie. "
+            f"If 'ses_oc_sibling' is finished, archive it and re-run. "
+            f"If you still need it, revive it instead (oc-revive ses_oc_sibling); "
+            f"that moves its branch to a new worktree, and this goose session can then no longer be revived."
+        )
+        self.assertEqual(str(ctx.exception), expected_err)
+
+    def test_apply_goose_opencode_sibling_archived_is_allowed(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-sibling-archived"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?)",
+            ("ses_oc_sibling_archived", dead_dir, 1000, 1000, 2000),
+        )
+        self.oc_conn.commit()
+
+        res = oc_revive.apply_goose_revive(
+            sid=sid,
+            branch=branch,
+            path=dead_dir,
+            action="recreate",
+            expect_tip=tip,
+            expect_old_dir=dead_dir,
+            goose_db_path=self.goose_db_path,
+            opencode_db_path=self.oc_db_path,
+        )
+        self.assertTrue(res.get("ok"))
+        self.assertTrue(os.path.isdir(dead_dir))
 
     def test_apply_goose_opencode_db_unreadable_refusal(self):
         native_id = "20261104_12"
@@ -3659,9 +3738,52 @@ class TestGooseApply(unittest.TestCase):
                     goose_db_path=self.goose_db_path,
                     opencode_db_path=self.oc_db_path,
                 )
-        self.assertTrue(str(ctx.exception).startswith("plan-changed:"))
-        self.assertIn("appeared while reviving", str(ctx.exception))
+        self.assertTrue(str(ctx.exception).startswith("plan-changed: git worktree add failed (exit 128):"))
+        self.assertIn("nothing was removed. Inspect", str(ctx.exception))
+        self.assertIn(dead_dir, str(ctx.exception))
         self.assertTrue(os.path.exists(os.path.join(dead_dir, "foreign.txt")))
+
+    def test_apply_goose_failed_add_foreign_worktree_survives(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-target"
+        other_branch = "feat-foreign"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        other_tip = self._commit_branch(other_branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        # A concurrent work command registered a worktree at dead_dir on another branch
+        original_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 5 and cmd[:4] == ["git", "-C", self.repo, "worktree"] and cmd[4] == "add":
+                # Create foreign worktree on other_branch
+                original_run(["git", "-C", self.repo, "worktree", "add", dead_dir, other_branch], check=True, capture_output=True)
+                with open(os.path.join(dead_dir, "sentinel.txt"), "w") as f:
+                    f.write("sentinel data")
+            return original_run(cmd, *args, **kwargs)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(oc_revive.ReviveError) as ctx:
+                oc_revive.apply_goose_revive(
+                    sid=sid,
+                    branch=branch,
+                    path=dead_dir,
+                    action="recreate",
+                    expect_tip=tip,
+                    expect_old_dir=dead_dir,
+                    goose_db_path=self.goose_db_path,
+                    opencode_db_path=self.oc_db_path,
+                )
+        err = str(ctx.exception)
+        self.assertTrue(err.startswith("plan-changed: git worktree add failed (exit "), f"unexpected err: {err}")
+        self.assertIn(f"; nothing was removed. Inspect {dead_dir} by hand.", err)
+        # Foreign worktree and its contents survived untouched
+        self.assertTrue(os.path.exists(os.path.join(dead_dir, "sentinel.txt")))
+        entries = oc_revive.get_worktree_entries(self.repo)
+        foreign_entries = [e for e in entries if e.get("path") == dead_dir]
+        self.assertEqual(len(foreign_entries), 1)
+        self.assertEqual(foreign_entries[0].get("branch"), other_branch)
 
     def test_cli_apply_goose_db_unreadable_exits_1(self):
         bad_db_dir = os.path.join(self.tmpdir.name, "is_a_dir")
