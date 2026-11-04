@@ -623,6 +623,22 @@
         touch $out
       '';
 
+      # EM stack monitor (devbox em-stack-monitor, bead eternal-machinery-qpmfc.103.1).
+      # Pinned assertion count; see hosts/devbox/test-em-stack-monitor.sh.
+      em-stack-monitor-tests = devboxPkgs.runCommand "em-stack-monitor-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+                              devboxPkgs.gnused devboxPkgs.jq devboxPkgs.git ];
+      } ''
+        cd ${self}
+        bash hosts/devbox/test-em-stack-monitor.sh 2>&1 | tee "$TMPDIR/s.txt"
+        grep -q '^ALL PASS (96 assertions)' "$TMPDIR/s.txt" || {
+          echo "GATE FAILURE: em-stack-monitor suite did not reach ALL PASS (96 assertions)." >&2
+          echo "If you added assertions, bump the pinned count here deliberately." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
       # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
       credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {
@@ -2733,6 +2749,7 @@
         ./hosts/devbox/em-ci.nix
         ./hosts/devbox/em-ci-monitor.nix
         ./hosts/devbox/em-ci-failover.nix
+        ./hosts/devbox/em-stack-monitor.nix
         ./hosts/devbox/nix-gc-floor.nix
         ./hosts/devbox/credo-diff-sweep.nix
         ./hosts/devbox/em-history-shell.nix
