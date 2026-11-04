@@ -77,13 +77,13 @@
 }:
 
 let
-  version = "0.12.0";
+  version = "0.13.0";
 
   sources = {
     "aarch64-linux" = fetchurl {
       name = "claude-failover-proxy-${version}-linux-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/706447034";
-      hash = "sha256-VJj6BkfL7ex+4l5EIn1sHo4Ra44zOcYdriRIxv8Xlv8=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350382";
+      hash = "sha256-9+zrxp5GxtD+yv3egxifhajUf6nbcrO4KUwpnl6jtdI=";
       # Stream the raw asset bytes rather than the JSON metadata.
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       # Forward $GITHUB_TOKEN from the (nix-daemon) environment into the sandbox
@@ -96,8 +96,21 @@ let
 
     "aarch64-darwin" = fetchurl {
       name = "claude-failover-proxy-${version}-darwin-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/706447033";
-      hash = "sha256-p9Xliy0ynFPQ6IoAkITrperpMps9KrFuP7c1rJmZLTg=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350399";
+      hash = "sha256-ZT6eS/8Vx6n9GTI7qEq65bjV0nsBZqOAFe++OUK3cZE=";
+      curlOptsList = [ "-H" "Accept: application/octet-stream" ];
+      netrcImpureEnvVars = [ "GITHUB_TOKEN" ];
+      netrcPhase = ''
+        echo "machine api.github.com login x-access-token password $GITHUB_TOKEN" > netrc
+      '';
+    };
+  };
+
+  shaperSources = {
+    "aarch64-linux" = fetchurl {
+      name = "cfp-shaper-${version}-linux-arm64";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350381";
+      hash = "sha256-j9IuQ7Q1rcQ5ciw8ZwCQJk1KAYmNAxWnhukMNWvruc8=";
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       netrcImpureEnvVars = [ "GITHUB_TOKEN" ];
       netrcPhase = ''
@@ -117,6 +130,70 @@ let
   # and links against the system libSystem.
   libPath = lib.makeLibraryPath [ glibc stdenv.cc.cc.lib ];
   interpreter = "${glibc}/lib/ld-linux-aarch64.so.1";
+
+  privateSources = lib.filter (s: s != null) [
+    (if sources ? ${stdenv.hostPlatform.system} then {
+      name = sources.${stdenv.hostPlatform.system}.name;
+      url = sources.${stdenv.hostPlatform.system}.url;
+      outputHash = sources.${stdenv.hostPlatform.system}.outputHash;
+      storePath = "${sources.${stdenv.hostPlatform.system}}";
+    } else null)
+    (if shaperSources ? ${stdenv.hostPlatform.system} then {
+      name = shaperSources.${stdenv.hostPlatform.system}.name;
+      url = shaperSources.${stdenv.hostPlatform.system}.url;
+      outputHash = shaperSources.${stdenv.hostPlatform.system}.outputHash;
+      storePath = "${shaperSources.${stdenv.hostPlatform.system}}";
+    } else null)
+  ];
+
+  shaper = stdenv.mkDerivation {
+    pname = "cfp-shaper";
+    inherit version;
+
+    src = shaperSources.${stdenv.hostPlatform.system}
+      or (throw "cfp-shaper: unsupported system ${stdenv.hostPlatform.system} (released targets: aarch64-linux)");
+
+    dontUnpack = true;
+    dontFixup = true;
+
+    installPhase =
+      if stdenv.isLinux then ''
+        runHook preInstall
+
+        magic="$(od -An -tx1 -N4 "$src" | tr -d ' \n')"
+        if [ "$magic" != "7f454c46" ]; then
+          echo "cfp-shaper: expected an ELF binary for ${stdenv.hostPlatform.system}, got magic $magic" >&2
+          echo "  The aarch64-linux shaperSources entry is probably pointing at another target's asset." >&2
+          exit 1
+        fi
+
+        install -Dm755 "$src" "$out/libexec/cfp-shaper"
+        mkdir -p "$out/bin"
+        printf '#!%s\nexec %s --library-path %s "%s/libexec/cfp-shaper" "$@"\n' \
+          "${stdenv.shell}" "${interpreter}" "${libPath}" "$out" \
+          > "$out/bin/cfp-shaper"
+        chmod +x "$out/bin/cfp-shaper"
+        runHook postInstall
+      '' else ''
+        echo "cfp-shaper: unsupported system ${stdenv.hostPlatform.system}" >&2
+        exit 1
+      '';
+
+    doCheck = false;
+
+    meta = with lib; {
+      description = "Personal request shaper / proxy frontend for Claude-on-Vertex and TeamClaude backends";
+      homepage = "https://github.com/johnnymo87/claude-failover-proxy";
+      license = licenses.mit;
+      sourceProvenance = with sourceTypes; [ binaryNativeCode ];
+      mainProgram = "cfp-shaper";
+      platforms = [ "aarch64-linux" ];
+    };
+
+    passthru = {
+      inherit privateSources;
+    };
+  };
 
 in
 
@@ -184,6 +261,10 @@ stdenv.mkDerivation {
     '';
 
   doCheck = false;
+
+  passthru = {
+    inherit shaper sources shaperSources privateSources;
+  };
 
   meta = with lib; {
     description = "Personal budget-gated failover proxy: routes opencode Claude-on-Vertex traffic to Claude Max (TeamClaude) when the daily Vertex budget is exceeded";

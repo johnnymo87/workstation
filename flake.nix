@@ -97,6 +97,7 @@
       p = pkgsFor system;
       goose = p.callPackage ./pkgs/goose { };
       ro-shell = p.callPackage ./pkgs/ro-shell { };
+      cfp = p.callPackage ./pkgs/claude-failover-proxy { };
     in {
       ask-question = p.callPackage ./pkgs/ask-question { };
       # Named `bazel-scope` rather than `bazel`: the DERIVATION provides bin/bazel
@@ -106,7 +107,8 @@
       bb = p.callPackage ./pkgs/bb { };
       pressure-sampler = p.callPackage ./pkgs/pressure-sampler { };
       beads = p.callPackage ./pkgs/beads { };
-      claude-failover-proxy = p.callPackage ./pkgs/claude-failover-proxy { };
+      claude-failover-proxy = cfp;
+      cfp-shaper = cfp.shaper;
       # Seeds the PRIVATE cfp release asset into the store on macOS, where no
       # GITHUB_TOKEN reaches the builder. Exposed as its own output so it can be
       # run BEFORE a rebuild -- the whole point is that the rebuild it unblocks
@@ -278,33 +280,27 @@
     #
     # Deliberately absent:
     #
-    #   nixos-cloudbox -- that host pulls in `claude-failover-proxy`, whose
-    #     binary lives in a PRIVATE repo and is fetched through the GitHub API
-    #     with a token supplied via `netrcImpureEnvVars`. A CI runner has no
-    #     such credential, so the fetch 404s and the toplevel cannot be built
-    #     there at all. This is a credential wall, not a defect: it was proven
-    #     empirically in the first run of this gate (#218), where the other
-    #     three checks built clean and only this one failed. Note the recurring
-    #     hazard is unaffected -- `writeShellApplication` (the shellcheck-fatal
-    #     builder) appears zero times in either host configuration and only in
-    #     the home configs, which ARE built below. Cloudbox also keeps the
-    #     eval-level checking `nix flake check` already did. Restoring a real
-    #     build needs a CI credential; tracked separately.
-    #
     #   The Mac's configurations (darwinConfigurations.<host>.system and
     #     homeConfigurations.<host>) -- BUILDING them needs a macOS builder,
-    #     and the home one also contains claude-failover-proxy (the same
-    #     credential wall as cloudbox). Even forcing their full derivation
-    #     graph here is out: devenv's aarch64-darwin package is
-    #     import-from-derivation of a darwin-only drv, so plain EVALUATION of
-    #     the home closure needs a darwin builder too. They are built by
-    #     checks.${darwinSystem} further down, which `nix flake check` realises
-    #     when it runs on the Mac. (Single attributes still evaluate fine on
-    #     this leg -- see bazelrc-disk-cache-tests.)
+    #     and the home one also contains claude-failover-proxy. Even forcing
+    #     their full derivation graph here is out: devenv's aarch64-darwin
+    #     package is import-from-derivation of a darwin-only drv, so plain
+    #     EVALUATION of the home closure needs a darwin builder too. They are
+    #     built by checks.${darwinSystem} further down, which `nix flake check`
+    #     realises when it runs on the Mac. (Single attributes still evaluate
+    #     fine on this leg -- see bazelrc-disk-cache-tests.)
+    #
+    #   (nixos-cloudbox was previously absent because it pulls in
+    #     `claude-failover-proxy` from a private repo; it is now built in CI by
+    #     save-before-private ordering: public checks are built and the Actions
+    #     store cache is saved BEFORE any private asset enters the store. Checks
+    #     with private closures are isolated via PRIVATE_CHECKS so private
+    #     binaries are never saved into the public repository's Actions cache.)
     checks.${devboxSystem} = {
       home-dev = self.homeConfigurations.dev.activationPackage;
       home-cloudbox = self.homeConfigurations.cloudbox.activationPackage;
       nixos-devbox = self.nixosConfigurations.devbox.config.system.build.toplevel;
+      nixos-cloudbox = self.nixosConfigurations.cloudbox.config.system.build.toplevel;
 
       # ---- pkgs/opencode-frontdoor vitest suite (bead workstation-5m47) ----
       #
@@ -1320,8 +1316,8 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 6 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 6 tests'. If you added or removed" >&2
+        grep -q '^Ran 7 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 7 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

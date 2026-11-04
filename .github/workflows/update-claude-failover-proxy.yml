@@ -65,9 +65,9 @@ jobs:
             echo "Update available: $current -> $latest"
           fi
 
-      # Resolve BOTH released targets. cfp ships one asset per host that runs it
-      # (linux-arm64 = cloudbox, darwin-arm64 = the Mac) and default.nix has a
-      # `sources` entry per target, each with its OWN asset id and hash.
+      # Resolve all released assets: claude-failover-proxy (linux-arm64, darwin-arm64)
+      # and cfp-shaper (linux-arm64). default.nix has an entry per asset, each
+      # with its OWN asset id and hash.
       - name: Resolve asset ids + hashes
         if: steps.check.outputs.up_to_date == 'false'
         id: asset
@@ -106,7 +106,28 @@ jobs:
             echo "${target}: asset_id=$asset_id sri=$sri"
           done
 
-      # Rewrite each `sources` entry IN ITS OWN BLOCK.
+          # Resolve cfp-shaper-linux-arm64
+          shaper_name="cfp-shaper-linux-arm64"
+          shaper_asset_id=$(gh api "repos/johnnymo87/claude-failover-proxy/releases/tags/${tag}" \
+            --jq ".assets[] | select(.name==\"${shaper_name}\") | .id")
+          if [ -z "$shaper_asset_id" ]; then
+            echo "asset ${shaper_name} not found on ${tag}" >&2
+            exit 1
+          fi
+
+          gh release download "$tag" \
+            --repo johnnymo87/claude-failover-proxy \
+            --pattern "$shaper_name" \
+            --output asset.bin --clobber
+          h=$(nix-prefetch-url "file://$PWD/asset.bin" 2>/dev/null)
+          shaper_sri=$(nix hash convert --hash-algo sha256 --to sri "$h")
+          rm -f asset.bin
+
+          echo "shaper_asset_id=$shaper_asset_id" >> "$GITHUB_OUTPUT"
+          echo "shaper_sri=$shaper_sri" >> "$GITHUB_OUTPUT"
+          echo "shaper: asset_id=$shaper_asset_id sri=$shaper_sri"
+
+      # Rewrite each source entry IN ITS OWN BLOCK.
       #
       # This used to be three unanchored `sed -i` calls over the whole file,
       # which was correct only while exactly one target existed. With two, the
@@ -126,7 +147,9 @@ jobs:
             --linux-asset-id "${{ steps.asset.outputs.linux_arm64_asset_id }}" \
             --linux-hash "${{ steps.asset.outputs.linux_arm64_sri }}" \
             --darwin-asset-id "${{ steps.asset.outputs.darwin_arm64_asset_id }}" \
-            --darwin-hash "${{ steps.asset.outputs.darwin_arm64_sri }}"
+            --darwin-hash "${{ steps.asset.outputs.darwin_arm64_sri }}" \
+            --shaper-asset-id "${{ steps.asset.outputs.shaper_asset_id }}" \
+            --shaper-hash "${{ steps.asset.outputs.shaper_sri }}"
 
           git diff pkgs/claude-failover-proxy/default.nix
 
@@ -152,9 +175,10 @@ jobs:
           else
             pr_url=$(gh pr create \
               --title "chore(deps): update claude-failover-proxy to ${version}" \
-              --body "Automated update of \`claude-failover-proxy\` to \`${version}\` (private release asset; bumps version, asset id, and hash)." \
+              --body "Automated update of \`claude-failover-proxy\` to \`${version}\` (private release assets; bumps version, asset ids, and hashes)." \
               --label "dependencies,automated" \
               --head "$branch")
+            echo "Created PR: $pr_url"
             pr_number=$(gh pr view "$branch" --json number -q '.number')
             gh pr merge "$pr_number" --auto --squash
           fi

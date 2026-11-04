@@ -26,6 +26,16 @@ jobs:
         include:
           - runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    env:
+      # Flake checks whose transitive closure contains private binaries
+      # (claude-failover-proxy, cfp-shaper). Space-separated.
+      #
+      # RULE: Any check whose closure includes private release assets must be
+      # listed here. Public checks are built and the Actions Nix-store cache is
+      # saved BEFORE any private asset enters the store. Private checks are only
+      # built afterward, guaranteeing that private binaries are never stored in
+      # GitHub Actions caches on this public repository.
+      PRIVATE_CHECKS: "nixos-cloudbox"
     # Kept generous deliberately. Two layers now cut the cost -- the devenv
     # substituter and the Nix-store cache below -- but a cache MISS (first run on
     # a new key with no prefix match, or after a purge) still pays the full cold
@@ -74,55 +84,159 @@ jobs:
       #
 
       # This uses the GitHub Actions cache as a Nix store cache, which needs NO
-
       # external account and NO secret, unlike Cachix. A self-hosted runner would be
-
       # faster still but GitHub advises against them on PUBLIC repositories, since a
-
       # fork PR can execute arbitrary code on the runner.
-
       #
-
-      # The store is GC'd to ~7GB before saving because the Actions cache quota is
-
-      # 10GB per repo and an ungarbage-collected store exceeds it. Old entries are
-
-      # purged so a stale cache cannot silently squat the quota and starve new saves.
-
-      - name: Restore and save the Nix store
-
-        uses: nix-community/cache-nix-action@v7.0.2
-
+      # RESTORE STEP: Restores cached store paths. The corresponding SAVE step runs
+      # explicitly later in the workflow, strictly BEFORE any private release asset
+      # enters the store.
+      - name: Restore the Nix store cache
+        uses: nix-community/cache-nix-action/restore@v7.0.2
         with:
-
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
-
           restore-prefixes-first-match: nix-${{ runner.os }}-
-
-          gc-max-store-size-linux: 7000000000
-
-          purge: true
-
-          purge-prefixes: nix-${{ runner.os }}-
-
-          purge-created: 604800
-
-          purge-primary-key: never
-
-          # Restore everywhere, save only on main.
-          #
-          # A .nix-touching PR rotates the primary key, so its run misses and would
-          # save a multi-GB entry scoped to refs/pull/N/merge. The daily bot PRs
-          # (update-bb, update-gws, update-opencode-patched, update-packages) all
-          # touch .nix files, so several such entries can be in flight at once.
-          # Against a 10GB repo limit that means GitHub silently LRU-evicts entries
-          # we still want, and a main run cannot clean them up because purge is
-          # scoped to the current ref. Saving only from main keeps one lineage.
-          save: ${{ github.ref == 'refs/heads/main' }}
-
 
       - name: Disk space before
         run: df -h /
+
+      # Build all public checks before saving the cache.
+      #
+      # Every check in .#checks.<system> except those listed in $PRIVATE_CHECKS is
+      # built here with an indirect gcroot under /tmp/ci-gcroots/<name>. This
+      # realizes all public check closures and pins them so the pre-save cache GC
+      # preserves them. Checks with private dependencies (nixos-cloudbox) are
+      # skipped here and built only after the cache has been saved.
+      - name: Build public checks
+        run: |
+          set -euo pipefail
+
+          arch=$(uname -m)
+          case "$arch" in
+            x86_64) system="x86_64-linux" ;;
+            aarch64|arm64) system="aarch64-linux" ;;
+            *) system="$arch-linux" ;;
+          esac
+
+          checks=$(nix eval --json ".#checks.${system}" --apply 'builtins.attrNames' 2>/dev/null || echo "[]")
+
+          mkdir -p /tmp/ci-gcroots
+
+          failed=0
+          for name in $(echo "$checks" | jq -r '.[]'); do
+            is_private=false
+            for priv in $PRIVATE_CHECKS; do
+              if [ "$name" = "$priv" ]; then
+                is_private=true
+                break
+              fi
+            done
+
+            if [ "$is_private" = "true" ]; then
+              echo "Skipping private check: $name (will build after cache save)"
+              continue
+            fi
+
+            echo "Building public check: .#checks.${system}.${name}..."
+            if ! nix build --print-build-logs --keep-going -o "/tmp/ci-gcroots/$name" ".#checks.${system}.${name}"; then
+              echo "::error::Build failed for public check: $name"
+              failed=1
+            fi
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more public checks failed to build."
+            exit 1
+          fi
+
+          ls -l /tmp/ci-gcroots/
+
+      # Pre-save tripwire:
+      # Assert that no private binaries exist in /nix/store before saving the
+      # cache. If a public check silently grew a private dependency, this fails
+      # closed and aborts the job before the save step runs.
+      - name: Verify no private binaries in store before cache save
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          matches=(/nix/store/*-claude-failover-proxy-* /nix/store/*-cfp-shaper-*)
+          shopt -u nullglob
+
+          if [ ${#matches[@]} -gt 0 ]; then
+            echo "::error::Tripwire fired: private binaries found in Nix store before cache save!"
+            printf '%s\n' "${matches[@]}"
+            exit 1
+          fi
+          echo "Store is clean: no private binaries found."
+
+      # Save the Nix store cache on main.
+      #
+      # Crucially, this runs BEFORE any private release asset is pre-seeded or built.
+      # The store at this point contains only public check outputs and their
+      # dependencies.
+      #
+      # The store is GC'd to ~7GB before saving because the Actions cache quota is
+      # 10GB per repo and an ungarbage-collected store exceeds it. Old entries are
+      # purged so a stale cache cannot silently squat the quota and starve new saves.
+      - name: Save the Nix store cache
+        if: github.ref == 'refs/heads/main'
+        uses: nix-community/cache-nix-action/save@v7.0.2
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', '**/*.nix') }}
+          gc-max-store-size-linux: 7000000000
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 604800
+          purge-primary-key: never
+
+      # Pre-seed private FOD sources for nixos-cloudbox.
+      #
+      # Now that the store cache has been saved, we can safely introduce private
+      # release assets. In CI, we use the CFP_READ_TOKEN secret to download the
+      # assets via the GitHub API and add them to the Nix store as fixed-output
+      # derivations. Once added, Nix sees the FODs as already realised and does
+      # not attempt an unauthenticated fetch.
+      #
+      # Fork PRs do not have access to repository secrets; fail loudly with a
+      # clear message rather than a confusing 404.
+      - name: Pre-seed private release assets
+        env:
+          GH_TOKEN: ${{ secrets.CFP_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::CFP_READ_TOKEN secret is empty or unset."
+            echo "Fork PRs do not receive repository secrets and cannot pre-seed private assets for nixos-cloudbox."
+            exit 1
+          fi
+
+          sources=$(nix eval --json '.#claude-failover-proxy.passthru.privateSources')
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          while IFS= read -r src; do
+            [ -z "$src" ] && continue
+            name=$(echo "$src" | jq -r '.name')
+            url=$(echo "$src" | jq -r '.url')
+            expected_path=$(echo "$src" | jq -r '.storePath')
+
+            echo "Fetching private FOD source $name from $url..."
+            gh api -H 'Accept: application/octet-stream' "$url" > "$tmpdir/$name"
+
+            actual_path=$(nix-store --add-fixed sha256 "$tmpdir/$name")
+            rm -f "$tmpdir/$name"
+
+            echo "  Expected: $expected_path"
+            echo "  Actual:   $actual_path"
+
+            if [ "$actual_path" != "$expected_path" ]; then
+              echo "::error::Pre-seeded store path mismatch for $name: expected $expected_path, got $actual_path"
+              exit 1
+            fi
+            echo "Successfully pre-seeded $name -> $actual_path"
+          done < <(echo "$sources" | jq -c '.[]')
 
       # --print-build-logs is not cosmetic. Without it a failing derivation
       # prints only "For full logs, run: nix log /nix/store/...drv", and that
@@ -198,30 +312,6 @@ jobs:
         run: |
           bash pkgs/session-state-plugin/test.sh
           bash pkgs/self-compact-plugin/test.sh
-
-      # Root the checked configurations before the cache step runs.
-      #
-      # Without this the cache is real but useless, which is worse than no cache
-      # because it looks healthy. Measured on run 30600536667: "Cache hit ...
-      # Cache restored successfully", 1474 MB -- and wrangler-4.62.0.drv plus
-      # wrangler-pnpm-deps.drv built anyway, so the job stayed at ~12 min.
-      #
-      # Cause: `nix flake check` realises its checks but leaves no gcroot behind, so
-      # the garbage collection that cache-nix-action runs to fit gc-max-store-size
-      # is free to delete every one of them before the save. What got cached was the
-      # cheap residue, not the expensive closures.
-      #
-      # `nix build -o` creates an indirect gcroot, which the GC cannot remove. These
-      # are already built by the check above, so this costs seconds and only pins
-      # them. gc-max-store-size stays as a best-effort ceiling: GC will now simply
-      # fail to reach it rather than evict what we are trying to keep.
-      - name: Pin the checked configurations so the pre-save GC cannot drop them
-        run: |
-          mkdir -p /tmp/ci-gcroots
-          nix build --print-build-logs -o /tmp/ci-gcroots/home-dev '.#checks.aarch64-linux.home-dev'
-          nix build -o /tmp/ci-gcroots/home-cloudbox '.#checks.aarch64-linux.home-cloudbox'
-          nix build -o /tmp/ci-gcroots/nixos-devbox   '.#checks.aarch64-linux.nixos-devbox'
-          ls -l /tmp/ci-gcroots/
 
       - name: Disk space after
         if: always()

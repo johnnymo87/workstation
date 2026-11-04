@@ -47,6 +47,15 @@ let
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
     };
   };
+
+  shaperSources = {
+    "aarch64-linux" = fetchurl {
+      name = "cfp-shaper-${version}-linux-arm64";
+      url = "https://api.github.com/repos/o/r/releases/assets/555";
+      hash = "sha256-SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSQ=";
+      curlOptsList = [ "-H" "Accept: application/octet-stream" ];
+    };
+  };
 in
 { }
 '''
@@ -54,6 +63,7 @@ in
 NEW = {
     "aarch64-linux": ("333", "sha256-NEWLINUXNEWLINUXNEWLINUXNEWLINUXNEWLINUXXQ="),
     "aarch64-darwin": ("444", "sha256-NEWDARWINNEWDARWINNEWDARWINNEWDARWINNEWDQ="),
+    "cfp-shaper-linux": ("777", "sha256-NEWSHAPERNEWSHAPERNEWSHAPERNEWSHAPERNEWSQ="),
 }
 
 
@@ -61,17 +71,42 @@ class RewriteTest(unittest.TestCase):
     def test_each_block_keeps_its_own_id_and_hash(self) -> None:
         out = mod.rewrite(FIXTURE, "0.9.4", "0.9.5", NEW)
 
-        linux_block = out.split('"aarch64-darwin"')[0]
-        darwin_block = out.split('"aarch64-darwin"')[1]
+        sources_part, shaper_part = out.split("shaperSources")
+        linux_block, darwin_block = sources_part.split('"aarch64-darwin"')
 
         self.assertIn("releases/assets/333", linux_block)
         self.assertIn(NEW["aarch64-linux"][1], linux_block)
         self.assertIn("releases/assets/444", darwin_block)
         self.assertIn(NEW["aarch64-darwin"][1], darwin_block)
+        self.assertIn("releases/assets/777", shaper_part)
+        self.assertIn(NEW["cfp-shaper-linux"][1], shaper_part)
 
-        # The precise historical corruption: darwin carrying linux's values.
+        # None of the blocks bleed into each other
         self.assertNotIn("releases/assets/333", darwin_block)
+        self.assertNotIn("releases/assets/333", shaper_part)
+        self.assertNotIn("releases/assets/444", linux_block)
+        self.assertNotIn("releases/assets/444", shaper_part)
+        self.assertNotIn("releases/assets/777", linux_block)
+        self.assertNotIn("releases/assets/777", darwin_block)
+
+    def test_three_blocks_rewritten_independently(self) -> None:
+        """Explicit test that linux, darwin, and shaper blocks update independently."""
+        out = mod.rewrite(FIXTURE, "0.9.4", "0.9.5", NEW)
+
+        # Linux block has its values and neither of the other two
+        self.assertIn("releases/assets/333", out)
+        self.assertIn("releases/assets/444", out)
+        self.assertIn("releases/assets/777", out)
+
+        sources_part, shaper_part = out.split("shaperSources")
+        linux_block, darwin_block = sources_part.split('"aarch64-darwin"')
+
         self.assertNotIn(NEW["aarch64-linux"][1], darwin_block)
+        self.assertNotIn(NEW["aarch64-linux"][1], shaper_part)
+        self.assertNotIn(NEW["aarch64-darwin"][1], linux_block)
+        self.assertNotIn(NEW["aarch64-darwin"][1], shaper_part)
+        self.assertNotIn(NEW["cfp-shaper-linux"][1], linux_block)
+        self.assertNotIn(NEW["cfp-shaper-linux"][1], darwin_block)
 
     def test_version_bumped_once(self) -> None:
         out = mod.rewrite(FIXTURE, "0.9.4", "0.9.5", NEW)
@@ -86,7 +121,11 @@ class RewriteTest(unittest.TestCase):
                 FIXTURE,
                 "0.9.4",
                 "0.9.5",
-                {"aarch64-linux": ("333", same), "aarch64-darwin": ("444", same)},
+                {
+                    "aarch64-linux": ("333", same),
+                    "aarch64-darwin": ("444", "sha256-diff1="),
+                    "cfp-shaper-linux": ("777", same),
+                },
             )
 
     def test_missing_block_is_fatal(self) -> None:
@@ -105,6 +144,7 @@ class RewriteTest(unittest.TestCase):
         self.assertIn('version = "9.9.9"', out)
         self.assertIn("releases/assets/333", out)
         self.assertIn("releases/assets/444", out)
+        self.assertIn("releases/assets/777", out)
 
 
 if __name__ == "__main__":
