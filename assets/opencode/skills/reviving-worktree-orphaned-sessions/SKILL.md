@@ -144,6 +144,15 @@ nix run nixpkgs#sqlite -- "$DB" "select id, title from session where directory l
 
 Never `git worktree remove` the tree you are sitting in, even after its PR merges; that is the AGENTS.md override for `finishing-a-development-branch`. A stale worktree costs some disk; a removed one costs a session.
 
+## Goose sessions
+
+A goose session (`goose:<id>` in the picker, `gse_…` in pigeon) whose worktree was deleted is revived differently, and the rest of this skill does not apply to it.
+
+- **What you see:** the session keeps taking turns, but every shell call fails with `Failed to spawn shell command: No such file or directory`. Its swarm tools still work.
+- **Fix:** press Enter on its row in the session picker, or run `oc-revive goose:<id>`. This recreates the worktree **at the same path**, on the branch it had. No directory update and no new path are needed: goose-serve and honkd cache nothing per path, so the next turn just works (measured 2026-11-04).
+- **It refuses** (`opencode_sibling:`) when an opencode session also has that directory: recreating it would turn that opencode session into a zombie. Revive the opencode session first with the path workflow above.
+- **No notice is sent** to the agent. Tell it that the worktree was recreated and that uncommitted work is gone.
+
 ## Related
 
 - `monitoring-serve-pool` (workstation repo-local): wedged vs. frozen serves. An orphaned session is neither; the serve is healthy and only this session is affected.
