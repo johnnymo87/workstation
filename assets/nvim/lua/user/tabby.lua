@@ -1,5 +1,5 @@
--- OpenCode session titles as tab labels via tabby.nvim
--- Reads b:term_title set by OpenCode's TUI, displays session name directly.
+-- OpenCode and honk session titles as tab labels via tabby.nvim
+-- Reads b:term_title set by OpenCode's TUI or honk, displays session name directly.
 
 local M = {}
 
@@ -7,6 +7,22 @@ local M = {}
 -- Preserves last-known title when OpenCode temporarily clears b:term_title
 -- (e.g. during compaction or state transitions).
 local cache = {}
+
+function M.session_label(term_title, oc_session_id)
+  if type(term_title) == "string" then
+    local session_name = term_title:match("^OC | (.+)$")
+    if session_name then
+      return session_name
+    end
+    if term_title == "OpenCode" then
+      return "OpenCode"
+    end
+    if type(oc_session_id) == "string" and oc_session_id:match("^goose:") and term_title ~= "" then
+      return term_title
+    end
+  end
+  return nil
+end
 
 -- Scan a tab's windows for a terminal buffer with an OpenCode title.
 -- Returns:
@@ -24,12 +40,9 @@ local function find_opencode_title(tabid)
     if vim.bo[buf].buftype == "terminal" then
       local title = vim.b[buf].term_title or ""
       last_term_title = title
-      local session_name = title:match("^OC | (.+)$")
+      local session_name = M.session_label(title, vim.b[buf].oc_session_id)
       if session_name then
         return session_name, title
-      end
-      if title == "OpenCode" then
-        return "OpenCode", title
       end
     end
   end
