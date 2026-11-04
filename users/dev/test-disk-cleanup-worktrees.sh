@@ -120,6 +120,8 @@ fresh_clean_wt="$repo/.worktrees/fresh-clean-merged"
 live_clean_wt="$repo/.worktrees/live-clean-merged"
 session_clean_wt="$repo/.worktrees/session-clean-merged"
 idle_session_wt="$repo/.worktrees/idle-session-merged"
+goose_session_wt="$repo/.worktrees/goose-session-merged"
+goose_idle_wt="$repo/.worktrees/goose-idle-merged"
 # Idle sessions (30 days) that OPENED A PR. The 7-day session window alone
 # reaps all four; ownership of a still-open PR must keep the first two.
 openpr_wt="$repo/.worktrees/openpr-merged"
@@ -142,6 +144,8 @@ git -C "$repo" worktree add -b fresh-clean-merged "$fresh_clean_wt" origin/main 
 git -C "$repo" worktree add -b live-clean-merged "$live_clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b session-clean-merged "$session_clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b idle-session-merged "$idle_session_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b goose-session-merged "$goose_session_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b goose-idle-merged "$goose_idle_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b openpr-merged "$openpr_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b subagent-openpr-merged "$subagent_openpr_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b mergedpr-merged "$mergedpr_wt" origin/main >/dev/null
@@ -234,6 +238,8 @@ done
 # this script destroyed on 2026-09-01.
 find "$session_clean_wt" -exec touch -d '20 days ago' {} +
 find "$idle_session_wt" -exec touch -d '20 days ago' {} +
+find "$goose_session_wt" -exec touch -d '20 days ago' {} +
+find "$goose_idle_wt" -exec touch -d '20 days ago' {} +
 for wt in "$openpr_wt" "$subagent_openpr_wt" "$mergedpr_wt" "$ghfail_wt" "$nopr_wt" "$norepo_wt" "$manypr_wt"; do
   find "$wt" -exec touch -d '20 days ago' {} +
 done
@@ -277,6 +283,34 @@ con.executemany(
 )
 con.commit()
 SESSION_DB_PY
+
+# Goose sessions DB: a live session in goose_session_wt, and an idle one in
+# goose_idle_wt. Timestamp format is UTC '%Y-%m-%d %H:%M:%S'.
+goose_db="$home/.local/share/goose/sessions/sessions.db"
+mkdir -p "$(dirname "$goose_db")"
+python3 - "$goose_db" "$(cd "$goose_session_wt" && pwd -P)" "$(cd "$goose_idle_wt" && pwd -P)" <<'GOOSE_DB_PY'
+import sqlite3, sys, time
+
+db, live_dir, idle_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+now = time.time()
+fmt = "%Y-%m-%d %H:%M:%S"
+live_time = time.strftime(fmt, time.gmtime(now - 3 * 86400))
+idle_time = time.strftime(fmt, time.gmtime(now - 30 * 86400))
+
+con = sqlite3.connect(db)
+con.execute(
+    "create table sessions (id text primary key, working_dir text not null, "
+    "updated_at timestamp)"
+)
+con.executemany(
+    "insert into sessions (id, working_dir, updated_at) values (?, ?, ?)",
+    [
+        ("20261104_1", live_dir, live_time),
+        ("20261001_9", idle_dir, idle_time),
+    ],
+)
+con.commit()
+GOOSE_DB_PY
 
 # lgtm's shepherd attribution cache: PR -> the session that ran `gh pr create`.
 # rootSessionId is the session lgtm-shepherd wakes, so it is the one that must
@@ -388,6 +422,10 @@ assert_remove_not_logged "$session_clean_wt" \
   "aged clean worktree owned by a live opencode session is not selected for removal"
 assert_remove_logged "$idle_session_wt" \
   "aged clean worktree whose session went idle weeks ago is still selected for removal"
+assert_remove_not_logged "$goose_session_wt" \
+  "aged clean worktree owned by a live goose session is not selected for removal"
+assert_remove_logged "$goose_idle_wt" \
+  "aged clean worktree whose goose session went idle weeks ago is still selected for removal"
 
 # An idle session that opened a still-OPEN PR still owes that PR its review
 # replies. Removed on 2026-09-27: internal-frontends/cops-6764-fe-plan, whose
@@ -447,6 +485,41 @@ if cat "$tmpdir/harness-v3.out" "$tmpdir/harness-v3.err" | grep -q "unrecognised
 else
   fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v3.err")"
 fi
+
+# Fail-closed goose DB: an unreadable goose DB must keep every tree (fail-closed).
+cp "$goose_db" "$goose_db.bak"
+printf 'not a database' > "$goose_db"
+: > "$remove_log"
+set +e
+HOME="$home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" \
+  DISK_CLEANUP_GH_TIMEOUT=1 "$harness" > "$tmpdir/harness-goose-broken.out" 2> "$tmpdir/harness-goose-broken.err"
+harness_broken_rc=$?
+set -e
+[ "$harness_broken_rc" -eq 0 ] || fail "cleanup_worktrees harness (broken goose db) exited $harness_broken_rc" \
+  "stdout: $(tr '\n' ' ' < "$tmpdir/harness-goose-broken.out")"
+assert_remove_not_logged "$goose_session_wt" \
+  "an unreadable goose DB keeps the goose session worktree (fail-closed)"
+assert_remove_not_logged "$clean_wt" \
+  "an unreadable goose DB keeps every worktree probed (fail-closed)"
+cp "$goose_db.bak" "$goose_db"
+rm -f "$goose_db.bak"
+
+# No opencode DB: a host with goose only (or missing opencode DB) still consults goose.
+# Without this, [ -f "$SESSION_DB" ] || return 1 short-circuits before goose is asked.
+mv "$session_db" "$session_db.bak"
+: > "$remove_log"
+set +e
+HOME="$home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" \
+  DISK_CLEANUP_GH_TIMEOUT=1 "$harness" > "$tmpdir/harness-no-opencode.out" 2> "$tmpdir/harness-no-opencode.err"
+harness_no_oc_rc=$?
+set -e
+[ "$harness_no_oc_rc" -eq 0 ] || fail "cleanup_worktrees harness (no opencode db) exited $harness_no_oc_rc" \
+  "stdout: $(tr '\n' ' ' < "$tmpdir/harness-no-opencode.out")"
+assert_remove_not_logged "$goose_session_wt" \
+  "a host without opencode DB still keeps worktrees of live goose sessions"
+assert_remove_logged "$goose_idle_wt" \
+  "a host without opencode DB still selects idle goose worktrees for removal"
+mv "$session_db.bak" "$session_db"
 
 # --- PR worktrees: lgtm-pr-<N> (lgtm) and pr-<N> (maven-renovate lane) ---
 lgtm_home="$tmpdir/lgtm_home"

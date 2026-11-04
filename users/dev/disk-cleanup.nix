@@ -1508,7 +1508,14 @@ lib.mkMerge [
       # host has accumulated. A session idle for a week is treated as gone;
       # keeping a tree for every session that ever named one would re-create
       # the disk-full incident this script exists to prevent.
+      #
+      # Both opencode and goose sessions are consulted. Goose workers started
+      # with `honk launch` record their worktree as `working_dir` in a second
+      # database (~/.local/share/goose/sessions/sessions.db). Neither is deleted
+      # while updated within SESSION_ACTIVE_DAYS. Missing DBs answer no; an
+      # unreadable or locked DB keeps the tree.
       SESSION_DB="$HOME/.local/share/opencode/opencode.db"
+      GOOSE_SESSION_DB="$HOME/.local/share/goose/sessions/sessions.db"
       SESSION_ACTIVE_DAYS=7
 
       # GUARD 1c: a session that still owes an OPEN PR is not gone, however
@@ -1545,9 +1552,9 @@ lib.mkMerge [
       session_owns_worktree() {
         local path="$1" verdict=""
 
-        [ -f "$SESSION_DB" ] || return 1
+        [ -f "$SESSION_DB" ] || [ -f "$GOOSE_SESSION_DB" ] || return 1
 
-        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" "$LGTM_ATTRIBUTION_CACHE" <<'PYEOF' 2>/dev/null
+        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" "$LGTM_ATTRIBUTION_CACHE" "$GOOSE_SESSION_DB" <<'PYEOF' 2>/dev/null
       import json
       import os
       import sqlite3
@@ -1557,6 +1564,7 @@ lib.mkMerge [
 
       db_path, wt_path, active_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
       cache_path = sys.argv[4]
+      goose_db_path = sys.argv[5] if len(sys.argv) > 5 else None
       cutoff_ms = int((time.time() - active_days * 86400) * 1000)
 
       candidates = {wt_path.rstrip("/") or "/"}
@@ -1565,30 +1573,62 @@ lib.mkMerge [
       except OSError:
           pass
 
-      try:
-          # Read-only URI: a concurrent serve is writing this database and must
-          # never be disturbed by a cleanup probe.
-          con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
-          placeholders = ",".join("?" for _ in candidates)
-          # Every session in the tree, not only recent ones: an idle one is
-          # still an owner if it opened a PR that is open (GUARD 1c).
-          rows = con.execute(
-              "select id, time_updated from session where directory in (%s)"
-              % placeholders,
-              tuple(sorted(candidates)),
-          ).fetchall()
-      except Exception as exc:
-          print("PROBE-FAILED: %s" % exc)
-          sys.exit(0)
+      rows = []
+      if os.path.isfile(db_path):
+          try:
+              # Read-only URI: a concurrent serve is writing this database and must
+              # never be disturbed by a cleanup probe.
+              con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
+              placeholders = ",".join("?" for _ in candidates)
+              # Every session in the tree, not only recent ones: an idle one is
+              # still an owner if it opened a PR that is open (GUARD 1c).
+              rows = con.execute(
+                  "select id, time_updated from session where directory in (%s)"
+                  % placeholders,
+                  tuple(sorted(candidates)),
+              ).fetchall()
+              con.close()
+          except Exception as exc:
+              print("PROBE-FAILED: %s" % exc)
+              sys.exit(0)
 
       recent = [sid for sid, updated in rows if updated >= cutoff_ms]
       if recent:
           print("SESSION %s" % recent[0])
           sys.exit(0)
+
+      if goose_db_path and os.path.isfile(goose_db_path):
+          try:
+              con_goose = sqlite3.connect("file:%s?mode=ro" % goose_db_path, uri=True, timeout=10)
+              cand_list = sorted(candidates)
+              in_placeholders = ",".join("?" for _ in cand_list)
+              prefix_conds = " or ".join(
+                  "substr(working_dir, 1, length(?) + 1) = ? || '/'" for _ in cand_list
+              )
+              sql = (
+                  "select id from sessions "
+                  "where (working_dir in (%s) or %s) "
+                  "and updated_at >= datetime('now', ?) "
+                  "order by updated_at desc limit 1"
+              ) % (in_placeholders, prefix_conds)
+              params = list(cand_list)
+              for c in cand_list:
+                  params.extend([c, c])
+              params.append("-%d days" % active_days)
+              goose_row = con_goose.execute(sql, tuple(params)).fetchone()
+              con_goose.close()
+              if goose_row:
+                  print("SESSION goose:%s" % goose_row[0])
+                  sys.exit(0)
+          except Exception as exc:
+              print("PROBE-FAILED: goose: %s" % exc)
+              sys.exit(0)
+
       if not rows or not os.path.exists(cache_path):
           print("FREE")
           sys.exit(0)
 
+      # Goose sessions do not take part in GUARD 1c: lgtm's attribution cache maps PRs to opencode sessions only.
       ids = {sid for sid, _ in rows}
       try:
           with open(cache_path) as fh:
