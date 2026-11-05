@@ -131,7 +131,7 @@ Identify the deleter rather than assuming; the same session has died twice from 
 | Deleter | How to check | Note |
 |---|---|---|
 | **The session itself** | `grep -ahs "worktree remove" ~/.local/share/opencode/log/opencode.log{.1,}` | It finished a PR and removed the tree it was sitting in (see the `finishing-a-development-branch` override in AGENTS.md). |
-| **`disk-cleanup.service`** (cloudbox only) | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly. Walks `<repo>/.worktrees/*/` in every repo under `~/projects` and removes merged worktrees. It spares a worktree whose session was active in the last 7 days or still owns an open PR, so an older or quieter session is fair game. Never touches a primary checkout. |
+| **`disk-cleanup.service`** (cloudbox only) | `journalctl --user -u disk-cleanup \| grep -i worktree` | Nightly. Walks `<repo>/.worktrees/*/` in every repo under `~/projects` and removes merged worktrees. It spares a worktree that a live process is in, that an opencode or goose session used in the last 7 days, or that was touched in the last 2 days. An older or quieter session is fair game: revive it with `oc-revive`. Never touches a primary checkout. |
 | **`reset-workspace`** (nightly) | its log lines name the repo | `work --prune-merged` on **one hardcoded work-repo root only** (`grep -n 'projects/' "$(readlink -f "$(command -v reset-workspace)")"`). If the dead worktree is in a different repo, it wasn't this. |
 
 ## Prevention
