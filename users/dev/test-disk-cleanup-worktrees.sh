@@ -128,6 +128,8 @@ stale_dirty_wt="$repo/.worktrees/stale-dirty-merged"
 stale_mixed_wt="$repo/.worktrees/stale-mixed-merged"
 dirty_abandoned_wt="$repo/.worktrees/dirty-abandoned"
 live_abandoned_wt="$repo/.worktrees/live-abandoned"
+fresh_abandoned_wt="$repo/.worktrees/fresh-abandoned"
+aged_abandoned_wt="$repo/.worktrees/aged-abandoned"
 git -C "$repo" worktree add -b clean-merged "$clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b fresh-clean-merged "$fresh_clean_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b live-clean-merged "$live_clean_wt" origin/main >/dev/null
@@ -141,6 +143,8 @@ git -C "$repo" worktree add -b stale-dirty-merged "$stale_dirty_wt" origin/main 
 git -C "$repo" worktree add -b stale-mixed-merged "$stale_mixed_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b dirty-abandoned "$dirty_abandoned_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b live-abandoned "$live_abandoned_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b fresh-abandoned "$fresh_abandoned_wt" origin/main >/dev/null
+git -C "$repo" worktree add -b aged-abandoned "$aged_abandoned_wt" origin/main >/dev/null
 # Merged and spotless, and nothing in it touched for weeks: the sweep's actual
 # job. Ageing it is what makes it eligible at all now -- before the minimum-age
 # guard this case was created fresh and still reaped, which is exactly how a
@@ -166,6 +170,21 @@ git -C "$dirty_abandoned_wt" add abandoned.md
 GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
   git -C "$dirty_abandoned_wt" commit -m 'old abandoned commit' >/dev/null
 printf 'uncommitted abandoned work\n' >> "$dirty_abandoned_wt/abandoned.md"
+find "$dirty_abandoned_wt" -exec touch -d '20 days ago' {} +
+
+# Abandoned-shape tree (ancient commit, no remote branch), freshly checked out.
+# Minimum-age floor on the abandoned path must keep it.
+printf 'old abandoned branch\n' > "$fresh_abandoned_wt/abandoned.md"
+git -C "$fresh_abandoned_wt" add abandoned.md
+GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+  git -C "$fresh_abandoned_wt" commit -m 'old abandoned commit' >/dev/null
+
+# Same abandoned shape, aged past the floor: must be reaped.
+printf 'old abandoned branch\n' > "$aged_abandoned_wt/abandoned.md"
+git -C "$aged_abandoned_wt" add abandoned.md
+GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+  git -C "$aged_abandoned_wt" commit -m 'old abandoned commit' >/dev/null
+find "$aged_abandoned_wt" -exec touch -d '20 days ago' {} +
 
 # Same shape as dirty_abandoned (ancient commit, no remote branch) but with a
 # live process sitting in it. "Last commit is old" says nothing about whether
@@ -196,9 +215,10 @@ trap 'stop_occupants; rm -rf "$tmpdir"' EXIT
 
 start_occupant "$live_clean_wt"
 start_occupant "$live_abandoned_wt"
-# The occupants' nested/ dirs are fresh, so re-age live_clean_wt: without this
-# it would be kept by the minimum-age guard and prove nothing about liveness.
+# The occupants' nested/ dirs are fresh, so re-age live_clean_wt and live_abandoned_wt:
+# without this they would be kept by the minimum-age guard and prove nothing about liveness.
 find "$live_clean_wt" -exec touch -d '20 days ago' {} +
+find "$live_abandoned_wt" -exec touch -d '20 days ago' {} +
 # Wait for both cwds to actually appear in /proc before probing anything.
 for _ in $(seq 1 50); do
   ready=0
@@ -349,6 +369,15 @@ assert_remove_not_logged "$dirty_wt" "dirty merged worktree with fresh dirt is n
 assert_remove_logged "$stale_dirty_wt" "dirty merged worktree with stale dirt is selected for removal"
 assert_remove_not_logged "$stale_mixed_wt" "stale tree with fresh space-named dirt is not selected for removal"
 assert_remove_logged "$dirty_abandoned_wt" "dirty abandoned worktree is selected for removal"
+assert_remove_not_logged "$fresh_abandoned_wt" \
+  "freshly created abandoned worktree is not selected for removal (minimum age floor)"
+if grep -q "keeping abandoned worktree (tree touched within [0-9]*d): example/fresh-abandoned" "$tmpdir/harness.err"; then
+  pass "freshly created abandoned worktree logs why it was kept"
+else
+  fail "freshly created abandoned worktree must log why it was kept" "stderr: $(cat "$tmpdir/harness.err")"
+fi
+assert_remove_logged "$aged_abandoned_wt" \
+  "aged abandoned worktree is selected for removal"
 
 # The two defects that destroyed a running session's working directory.
 assert_remove_not_logged "$fresh_clean_wt" \

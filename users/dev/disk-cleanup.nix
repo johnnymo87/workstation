@@ -1822,6 +1822,21 @@ lib.mkMerge [
                 if worktree_removal_blocked "$wt_dir" "abandoned worktree" "$repo_name/$wt_name"; then
                   continue
                 fi
+
+                # Minimum-age floor: a revived worktree has fresh mtimes but an old
+                # last commit, and the revived session's DB timestamp may be stale.
+                # The floor keeps it from being reaped the following night.
+                touched_rc=0
+                tree_touched_since "$wt_dir" "$WORKTREE_MIN_AGE_DAYS" || touched_rc=$?
+                if [ "$touched_rc" = 0 ]; then
+                  log "WARN: keeping abandoned worktree (tree touched within ''${WORKTREE_MIN_AGE_DAYS}d): $repo_name/$wt_name"
+                  continue
+                fi
+                if [ "$touched_rc" != 1 ]; then
+                  log "WARN: keeping abandoned worktree, freshness scan failed: $repo_name/$wt_name"
+                  continue
+                fi
+
                 log "Removing abandoned worktree ($age_days days old): $repo_name/$wt_name"
                 git -C "$repo_dir" worktree remove "$wt_dir" --force 2>&1 || true
               fi
