@@ -367,9 +367,20 @@ class EvaluateRollout(unittest.TestCase):
         code, msg, _ = evaluate(OURS, [pod_simple("a", OURS, OLDER)])
         self.assertEqual(mr.EXIT_ALL_MET, code)
 
+    def test_old_pod_on_our_own_merge_counts_once_a_batch_head_is_rolling(self):
+        # The verdict is about OUR merge, not the batch head: a Ready pod on
+        # our own commit is already serving it, so a later head rolling over
+        # it does not hold the merge open. (Before descendant-pod acceptance
+        # this case read "pods updating".)
+        code, _, _ = evaluate(LATER, [
+            pod_simple("new", LATER, LATER),
+            pod_simple("old", OURS, OURS),
+        ])
+        self.assertEqual(mr.EXIT_DEPLOYED_AS_ANCESTOR, code)
+
     def test_still_rolling_while_an_old_revision_pod_survives(self):
-        # The terminating old-revision pod keeps the rollout open, which is
-        # the behaviour the fix must NOT loosen.
+        # A surviving old-revision pod that does NOT contain our merge keeps
+        # the rollout open, which is the behaviour the fix must NOT loosen.
         code, msg, _ = evaluate(LATER, [
             pod_simple("new", LATER, LATER),
             pod_simple("old", OLDER, OLDER),
