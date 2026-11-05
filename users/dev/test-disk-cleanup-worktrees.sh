@@ -123,18 +123,6 @@ idle_session_wt="$repo/.worktrees/idle-session-merged"
 goose_session_wt="$repo/.worktrees/goose-session-merged"
 goose_idle_wt="$repo/.worktrees/goose-idle-merged"
 goose_sub_wt="$repo/.worktrees/goose-sub-merged"
-# Idle sessions (30 days) that OPENED A PR. The 7-day session window alone
-# reaps all four; ownership of a still-open PR must keep the first two.
-openpr_wt="$repo/.worktrees/openpr-merged"
-subagent_openpr_wt="$repo/.worktrees/subagent-openpr-merged"
-mergedpr_wt="$repo/.worktrees/mergedpr-merged"
-ghfail_wt="$repo/.worktrees/ghfail-merged"
-nopr_wt="$repo/.worktrees/nopr-merged"
-norepo_wt="$repo/.worktrees/norepo-merged"
-# THE INCIDENT'S OWN SHAPE: one session, several PRs, only one still open.
-# The real session owned 8 and the open one sorted last. With one PR per
-# session everywhere else, "stop at the first non-open answer" passed.
-manypr_wt="$repo/.worktrees/manypr-merged"
 dirty_wt="$repo/.worktrees/dirty-merged"
 stale_dirty_wt="$repo/.worktrees/stale-dirty-merged"
 stale_mixed_wt="$repo/.worktrees/stale-mixed-merged"
@@ -148,13 +136,6 @@ git -C "$repo" worktree add -b idle-session-merged "$idle_session_wt" origin/mai
 git -C "$repo" worktree add -b goose-session-merged "$goose_session_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b goose-idle-merged "$goose_idle_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b goose-sub-merged "$goose_sub_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b openpr-merged "$openpr_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b subagent-openpr-merged "$subagent_openpr_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b mergedpr-merged "$mergedpr_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b ghfail-merged "$ghfail_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b nopr-merged "$nopr_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b norepo-merged "$norepo_wt" origin/main >/dev/null
-git -C "$repo" worktree add -b manypr-merged "$manypr_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b dirty-merged "$dirty_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b stale-dirty-merged "$stale_dirty_wt" origin/main >/dev/null
 git -C "$repo" worktree add -b stale-mixed-merged "$stale_mixed_wt" origin/main >/dev/null
@@ -243,22 +224,13 @@ find "$idle_session_wt" -exec touch -d '20 days ago' {} +
 find "$goose_session_wt" -exec touch -d '20 days ago' {} +
 find "$goose_idle_wt" -exec touch -d '20 days ago' {} +
 find "$goose_sub_wt" -exec touch -d '20 days ago' {} +
-for wt in "$openpr_wt" "$subagent_openpr_wt" "$mergedpr_wt" "$ghfail_wt" "$nopr_wt" "$norepo_wt" "$manypr_wt"; do
-  find "$wt" -exec touch -d '20 days ago' {} +
-done
 
 session_db="$home/.local/share/opencode/opencode.db"
 mkdir -p "$(dirname "$session_db")"
-python3 - "$session_db" "$(cd "$session_clean_wt" && pwd -P)" "$(cd "$idle_session_wt" && pwd -P)" \
-  "$(cd "$openpr_wt" && pwd -P)" "$(cd "$subagent_openpr_wt" && pwd -P)" \
-  "$(cd "$mergedpr_wt" && pwd -P)" "$(cd "$ghfail_wt" && pwd -P)" \
-  "$(cd "$nopr_wt" && pwd -P)" "$(cd "$norepo_wt" && pwd -P)" \
-  "$(cd "$manypr_wt" && pwd -P)" <<'SESSION_DB_PY'
+python3 - "$session_db" "$(cd "$session_clean_wt" && pwd -P)" "$(cd "$idle_session_wt" && pwd -P)" <<'SESSION_DB_PY'
 import sqlite3, sys, time
 
 db, live_dir, idle_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-openpr_dir, sub_dir, merged_dir, ghfail_dir, nopr_dir, norepo_dir, manypr_dir = sys.argv[4:11]
-month_ms = 30 * 86400 * 1000
 now_ms = int(time.time() * 1000)
 con = sqlite3.connect(db)
 con.execute(
@@ -273,15 +245,6 @@ con.executemany(
         # Long gone. Must NOT protect: the real host carries 4456 stale rows,
         # and honouring them all would pin every worktree they ever named.
         ("ses_idle", idle_dir, now_ms - 30 * 86400 * 1000),
-        # Idle for a month -- past the session window -- but each opened a PR.
-        # Whether the tree is kept must depend on whether that PR is OPEN.
-        ("ses_openpr", openpr_dir, now_ms - month_ms),
-        ("ses_subagent", sub_dir, now_ms - month_ms),
-        ("ses_mergedpr", merged_dir, now_ms - month_ms),
-        ("ses_ghfail", ghfail_dir, now_ms - month_ms),
-        ("ses_nopr", nopr_dir, now_ms - month_ms),
-        ("ses_norepo", norepo_dir, now_ms - month_ms),
-        ("ses_manypr", manypr_dir, now_ms - month_ms),
     ],
 )
 con.commit()
@@ -317,25 +280,6 @@ con.executemany(
 con.commit()
 GOOSE_DB_PY
 
-# lgtm's shepherd attribution cache: PR -> the session that ran `gh pr create`.
-# rootSessionId is the session lgtm-shepherd wakes, so it is the one that must
-# count. originSessionId (a subagent, for some PRs) is honoured too, as
-# belt-and-braces; the subagent case below pins that it still works.
-attribution_cache="$home/.local/state/lgtm/shepherd/attribution-cache.json"
-mkdir -p "$(dirname "$attribution_cache")"
-cat > "$attribution_cache" <<'CACHE_JSON'
-{"version": 1, "scannedThrough": 0, "entries": {
-  "example/repo#101": {"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr", "parentage": "main", "createdAt": 0},
-  "example/repo#104": {"repo": "example/repo", "prNumber": 104, "rootSessionId": "ses_someroot", "originSessionId": "ses_subagent", "parentage": "subagent", "createdAt": 0},
-  "example/repo#102": {"repo": "example/repo", "prNumber": 102, "rootSessionId": "ses_mergedpr", "originSessionId": "ses_mergedpr", "parentage": "main", "createdAt": 0},
-  "example/repo#103": {"repo": "example/repo", "prNumber": 103, "rootSessionId": "ses_ghfail", "originSessionId": "ses_ghfail", "parentage": "main", "createdAt": 0},
-  "example/repo#105": {"repo": "example/repo", "prNumber": 105, "rootSessionId": "ses_nopr", "originSessionId": "ses_nopr", "parentage": "main", "createdAt": 0},
-  "example/gone#1": {"repo": "example/gone", "prNumber": 1, "rootSessionId": "ses_norepo", "originSessionId": "ses_norepo", "parentage": "main", "createdAt": 0},
-  "example/repo#111": {"repo": "example/repo", "prNumber": 111, "rootSessionId": "ses_manypr", "originSessionId": "ses_manypr", "parentage": "main", "createdAt": 0},
-  "example/repo#112": {"repo": "example/repo", "prNumber": 112, "rootSessionId": "ses_manypr", "originSessionId": "ses_manypr", "parentage": "main", "createdAt": 0},
-  "example/repo#113": {"repo": "example/repo", "prNumber": 113, "rootSessionId": "ses_manypr", "originSessionId": "ses_manypr", "parentage": "main", "createdAt": 0}
-}}
-CACHE_JSON
 fakebin="$tmpdir/fakebin"
 remove_log="$tmpdir/remove.log"
 mkdir -p "$fakebin"
@@ -360,20 +304,13 @@ exec "$REAL_GIT" "$@"
 SH
 chmod +x "$fakebin/git"
 
-# GitHub stand-in: 101 and 104 are open, 102 merged, 103 unanswerable,
-# 105 a PR number that does not exist, example/gone a repo GitHub will not
-# resolve (deleted -- or invisible to this token, which looks the same).
+# GitHub stand-in for lgtm-pr-N tests. Emits OPEN for 202, MERGED for 201/203/204.
 # When called with -q, emits raw state (python caller); when called with
 # --json state (bash caller), emits JSON.
 printf '#!%s\n' "$(command -v bash)" > "$fakebin/gh"
 cat >> "$fakebin/gh" <<'SH'
 set -euo pipefail
 [ "$1" = "pr" ] && [ "$2" = "view" ] || { echo "fake gh: unexpected $*" >&2; exit 2; }
-for arg in "$@"; do
-  if [ "$arg" = "example/gone" ]; then
-    echo "GraphQL: Could not resolve to a Repository with the name 'example/gone'. (repository)" >&2; exit 1
-  fi
-done
 has_q=false
 for arg in "$@"; do
   if [ "$arg" = "-q" ]; then
@@ -389,11 +326,8 @@ emit_state() {
   fi
 }
 case "$3" in
-  101|104|111|202) emit_state OPEN ;;
-  112|113|102|201|203|204) emit_state MERGED ;;
-  # Hangs past the harness's DISK_CLEANUP_GH_TIMEOUT: the exception path.
-  106)     sleep 10; emit_state OPEN ;;
-  105)     echo "GraphQL: Could not resolve to a PullRequest with the number of 105. (repository.pullRequest)" >&2; exit 1 ;;
+  202) emit_state OPEN ;;
+  201|203|204) emit_state MERGED ;;
   *)       echo "fake gh: HTTP 502" >&2; exit 1 ;;
 esac
 SH
@@ -434,64 +368,22 @@ assert_remove_logged "$goose_idle_wt" \
 assert_remove_not_logged "$goose_sub_wt" \
   "aged clean worktree with a live goose session in a SUBDIRECTORY is not selected for removal"
 
-# An idle session that opened a still-OPEN PR still owes that PR its review
-# replies. Removed on 2026-09-27: internal-frontends/cops-6764-fe-plan, whose
-# PR #1573 then got CHANGES_REQUESTED and could not be routed to its author.
-assert_remove_not_logged "$openpr_wt" \
-  "aged worktree whose idle session opened a still-OPEN PR is not selected for removal"
-assert_remove_not_logged "$subagent_openpr_wt" \
-  "same, when the only session in the tree is the originating SUBAGENT"
-assert_remove_logged "$mergedpr_wt" \
-  "aged worktree whose idle session's PR is MERGED is still selected for removal"
-assert_remove_not_logged "$ghfail_wt" \
-  "PR state unknowable (gh failed) keeps the tree, never reads as not-open"
-assert_remove_logged "$nopr_wt" \
-  "a PR number GitHub says does not exist is not open, so it does not pin the tree"
-assert_remove_not_logged "$norepo_wt" \
-  "an unresolvable REPOSITORY keeps the tree: no-access looks identical to deleted"
-assert_remove_not_logged "$manypr_wt" \
-  "a session with several PRs is kept when only its OLDEST is open (the 2026-09-27 shape)"
-
-# Re-run the harness with the attribution cache replaced, for the failure
-# modes a single cache cannot express. Only the open-PR tree is asserted on:
-# the rest of the fixture was already judged above.
-run_with_cache() {
-  local body="$1" tag="$2"
-  printf '%s' "$body" > "$attribution_cache"
-  : > "$remove_log"
-  set +e
-  HOME="$home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" \
-    DISK_CLEANUP_GH_TIMEOUT=1 "$harness" > "$tmpdir/harness-$tag.out" 2> "$tmpdir/harness-$tag.err"
-  local rc=$?
-  set -e
-  [ "$rc" -eq 0 ] || fail "cleanup_worktrees harness ($tag) exited $rc" \
-    "stdout: $(tr '\n' ' ' < "$tmpdir/harness-$tag.out")"
-}
-
-run_with_cache '{"version": 1, "entries": {' corrupt
-assert_remove_not_logged "$openpr_wt" \
-  "an attribution cache that will not parse keeps the tree (fail-closed)"
-
-run_with_cache '{"version": 1, "scannedThrough": 0, "entries": {"example/repo#106": {"repo": "example/repo", "prNumber": 106, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}}}' ghhang
-assert_remove_not_logged "$openpr_wt" \
-  "a gh call that times out keeps the tree (fail-closed, not skipped)"
-
-# lgtm cache v2 (lgtm-zsf1): every PR maps to a LIST of candidate parts. The
-# open PR's session is the SECOND candidate, so only a reader that walks the
-# whole list pins the tree.
-run_with_cache '{"version": 2, "scannedThrough": 0, "candidates": {"example/repo#101": [{"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_elsewhere", "originSessionId": "ses_elsewhere"}, {"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}]}}' v2
-assert_remove_not_logged "$openpr_wt" \
-  "a v2 cache pins the tree when ANY candidate session of an open PR sits in it"
-
-run_with_cache '{"version": 3, "candidates": {"example/repo#101": [{"repo": "example/repo", "prNumber": 101, "rootSessionId": "ses_openpr", "originSessionId": "ses_openpr"}]}}' v3
-assert_remove_logged "$openpr_wt" \
-  "an UNRECOGNISED cache format falls back to pre-guard behaviour instead of pinning every idle tree"
-# The harness's log() writes to stderr (the real script's writes to stdout).
-if cat "$tmpdir/harness-v3.out" "$tmpdir/harness-v3.err" | grep -q "unrecognised format"; then
-  pass "an unrecognised cache format is announced, so the guard cannot go quietly inert"
-else
-  fail "an unrecognised cache format must log a WARN" "stderr: $(tr '\n' ' ' < "$tmpdir/harness-v3.err")"
-fi
+# Regression for GUARD 1c retirement: an idle (30-day) opencode session's
+# merged, aged, clean tree is reaped even when an attribution cache naming its
+# session with an OPEN PR exists.
+attribution_cache="$home/.local/state/lgtm/shepherd/attribution-cache.json"
+mkdir -p "$(dirname "$attribution_cache")"
+cat > "$attribution_cache" <<'CACHE_JSON'
+{"version": 1, "scannedThrough": 0, "entries": {
+  "example/repo#202": {"repo": "example/repo", "prNumber": 202, "rootSessionId": "ses_idle", "originSessionId": "ses_idle", "parentage": "main", "createdAt": 0}
+}}
+CACHE_JSON
+: > "$remove_log"
+HOME="$home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" "$harness" \
+  > "$tmpdir/harness-regression-1c.out" 2> "$tmpdir/harness-regression-1c.err"
+assert_remove_logged "$idle_session_wt" \
+  "idle session worktree is reaped even when an attribution cache names an open PR"
+rm -f "$attribution_cache"
 
 # Fail-closed goose DB: an unreadable goose DB must keep every tree (fail-closed).
 cp "$goose_db" "$goose_db.bak"
