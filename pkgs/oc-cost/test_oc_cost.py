@@ -14,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oc_cost  # noqa: E402
 
+# main() defaults to the real goose DB; no test may read it.
+oc_cost._DEFAULT_GOOSE_DB = "/nonexistent/path/to/goose.db"
+
 
 class TestParseArgs(unittest.TestCase):
     def test_defaults(self):

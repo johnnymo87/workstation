@@ -474,15 +474,15 @@ def query_message_rows(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> 
 def query_goose_rows(
     goose_db_path: str, start_ms: int, end_ms: int
 ) -> tuple[list[dict], dict[str, str]]:
-    """Query goose usage_ledger and sessions in [start_ms, end_ms) ms.
+    """Query goose usage_ledger and sessions in [start_ms, end_ms] ms, inclusive like _BASE_WHERE.
 
     Returns (rows, kind_map) where kind_map maps 'goose:'+sid -> 'subagent' | 'primary'.
     """
     uri = f"file:{goose_db_path}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("BEGIN")
     try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN")
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
             """
