@@ -1510,11 +1510,14 @@
         nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.pyyaml ])) devboxPkgs.gnugrep ];
         GOOSE_ROLES_AGENTS_DIR = "${self}/assets/opencode/agents";
         ROLES_OUT = (localPkgsFor devboxSystem).goose-roles;   # forces the build + validate
+        # The trees home-manager deploys per host (provider differs; users/dev/goose-roles.nix).
+        DEPLOYED_ROLES_DEVBOX = self.homeConfigurations.dev.config.home.file.".config/goose/subagent-roles".source;
+        DEPLOYED_ROLES_CLOUDBOX = self.homeConfigurations.cloudbox.config.home.file.".config/goose/subagent-roles".source;
       } ''
         cd ${self}
         python3 pkgs/goose-roles/test_gen_goose_roles.py 2>&1 | tee "$TMPDIR/gr.txt"
         grep -q '^OK' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: goose-roles suite did not pass." >&2; exit 1; }
-        grep -q '^Ran 9 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 9 tests." >&2; exit 1; }
+        grep -q '^Ran 11 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 11 tests." >&2; exit 1; }
         grep -q 'skipped' "$TMPDIR/gr.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
         touch $out
       '';

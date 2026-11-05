@@ -150,7 +150,9 @@ def main():
     p.add_argument("--agents-dir", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--ro-shell-cmd", required=True)
-    p.add_argument("--provider", default="gcp_vertex_ai")
+    # Only providers some host here can actually reach: a typo would otherwise
+    # ship roles every delegate fails on (the recipe provider has no fallback).
+    p.add_argument("--provider", default="gcp_vertex_ai", choices=["gcp_vertex_ai", "anthropic"])
     p.add_argument("--opus-model", required=True)
     p.add_argument("--sonnet-model", required=True)
     a = p.parse_args()
