@@ -103,6 +103,32 @@ class GenTest(unittest.TestCase):
             self.assertEqual(ro, role != "implementer", role)
         self.assertTrue(os.path.isfile(os.path.join(out, "unscoped.yaml")))
 
+    def test_unreachable_provider_rejected(self):
+        # The recipe provider outranks every fallback, so a typo must fail the build.
+        argv = sys.argv
+        sys.argv = ["gen", "--agents-dir", "x", "--out", "y", "--ro-shell-cmd", "z",
+                    "--provider", "gcp_vertex", "--opus-model", "m", "--sonnet-model", "m"]
+        try:
+            with self.assertRaises(SystemExit):
+                g.main()
+        finally:
+            sys.argv = argv
+
+    def test_deployed_roles_provider_per_host(self):
+        # What home-manager actually deploys on each host (flake check wiring):
+        # devbox has no Vertex, so its roles must not name gcp_vertex_ai.
+        want = {"DEPLOYED_ROLES_DEVBOX": "anthropic", "DEPLOYED_ROLES_CLOUDBOX": "gcp_vertex_ai"}
+        missing = [k for k in want if not os.environ.get(k)]
+        if missing:
+            self.skipTest(f"set {', '.join(missing)}")
+        for var, provider in want.items():
+            roles_dir = os.path.join(os.environ[var], "roles")
+            for role in g.ROLES:
+                with self.subTest(host=var, role=role):
+                    with open(os.path.join(roles_dir, f"{role}.yaml")) as fh:
+                        r = yaml.safe_load(fh)
+                    self.assertEqual(r["settings"]["goose_provider"], provider)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

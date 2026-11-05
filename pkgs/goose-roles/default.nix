@@ -6,7 +6,17 @@
 # sonnetModel: claude-sonnet-5-5 404s on Vertex here (1002 failed requests via cfp,
 # 2026-10-09) and cfp is Claude-only, so goose cannot use opencode's Gemini
 # rewrite. Sonnet-tier roles run on Opus until a Vertex Sonnet works.
+#
+# provider: written into every role as settings.goose_provider, which OUTRANKS
+# GOOSE_SUBAGENT_PROVIDER and the delegate call's own provider argument
+# (summon.rs resolve_provider), with no fallback if that provider is unusable.
+# So it must be a provider the HOST can actually reach. cloudbox: gcp_vertex_ai
+# (the default). devbox has no GCP project, ADC or Vertex proxy and runs goose on
+# anthropic via cfp-shaper -> TeamClaude, so users/dev/goose-roles.nix overrides
+# this to "anthropic" there. The model ids are the same bare claude-* names on
+# both providers.
 { lib, runCommand, python3, ro-shell, goose, agentsDir,
+  provider ? "gcp_vertex_ai",
   opusModel ? "claude-opus-5-5", sonnetModel ? "claude-opus-5-5" }:
 
 runCommand "goose-roles" {
@@ -16,7 +26,7 @@ runCommand "goose-roles" {
   };
 } ''
   python3 ${./gen_goose_roles.py} --agents-dir ${agentsDir} --out $out \
-    --ro-shell-cmd ${ro-shell}/bin/ro-shell \
+    --ro-shell-cmd ${ro-shell}/bin/ro-shell --provider ${provider} \
     --opus-model ${opusModel} --sonnet-model ${sonnetModel}
   export HOME=$TMPDIR GOOSE_DISABLE_KEYRING=true
   for f in $out/roles/*.yaml $out/unscoped.yaml; do
