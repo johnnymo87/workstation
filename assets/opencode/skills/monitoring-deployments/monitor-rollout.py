@@ -551,6 +551,7 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
         # it becomes the batch head's only after containment is proven.
         effective_sha = short_sha
         spec_ok = bool(spec_tag) and spec_tag.lower().startswith(short_sha)
+        is_batched = False
 
         if not spec_ok and spec_tag and merge_sha:
             cls = classify_deployed_tag(repo, merge_sha, spec_tag,
@@ -558,6 +559,7 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
             if cls["kind"] == "contained":
                 effective_sha = cls["sha"][:SHORT_SHA_LEN]
                 spec_ok = True
+                is_batched = True
                 batched.append(
                     f"[{label}] {dep}: deployed as {cls['sha'][:SHORT_SHA_LEN]}, "
                     f"which contains {short_sha} (compare status "
@@ -611,18 +613,58 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
             waiting.append(f"[{label}] {dep}: no pods yet")
             continue
 
-        # Fully rolled out only when EVERY pod under the selector is on the
-        # target tag and Running+Ready -- old-revision pods still terminating
-        # keep this False, which is correct (rollout isn't done until they go).
-        healthy = all(
-            on_target(p, effective_sha) and p["phase"] == "Running" and p["ready"]
-            for p in pods
-        )
-        if healthy:
-            print(f"      => {label}/{dep} rolled out & healthy")
+        if not is_batched:
+            # Fully rolled out only when EVERY pod under the selector is on the
+            # target tag and Running+Ready -- old-revision pods still terminating
+            # keep this False, which is correct (rollout isn't done until they go).
+            healthy = all(
+                on_target(p, effective_sha) and p["phase"] == "Running" and p["ready"]
+                for p in pods
+            )
+            if healthy:
+                print(f"      => {label}/{dep} rolled out & healthy")
+            else:
+                all_done = False
+                waiting.append(f"[{label}] {dep}: pods updating")
         else:
-            all_done = False
-            waiting.append(f"[{label}] {dep}: pods updating")
+            # In the batched case, a pod counts as done-for-this-merge if it is
+            # Running+Ready AND its own spec tag either matches effective_sha
+            # OR resolves to a commit that is ahead/identical relative to our merge.
+            # Never false-pass: a pod tag that cannot be resolved or proven to
+            # contain the merge keeps the target "pods updating".
+            all_tags_proven = True
+            any_done = False
+            accepted_descendant_tags = set()
+
+            for p in pods:
+                tag_proven = False
+                if on_target(p, effective_sha):
+                    tag_proven = True
+                elif p["tag"] and merge_sha:
+                    p_cls = classify_deployed_tag(repo, merge_sha, p["tag"],
+                                                  containment_cache)
+                    if p_cls["kind"] == "contained":
+                        tag_proven = True
+                        if p["phase"] == "Running" and p["ready"]:
+                            accepted_descendant_tags.add(p["tag"])
+
+                if not tag_proven:
+                    all_tags_proven = False
+
+                if tag_proven and p["phase"] == "Running" and p["ready"]:
+                    any_done = True
+
+            healthy = all_tags_proven and any_done
+            if healthy:
+                desc_note = ""
+                if accepted_descendant_tags:
+                    tag_list = ", ".join(sorted(accepted_descendant_tags))
+                    desc_note = f" (accepted pods on intermediate descendant tag {tag_list})"
+                    batched[-1] += desc_note
+                print(f"      => {label}/{dep} rolled out & healthy{desc_note}")
+            else:
+                all_done = False
+                waiting.append(f"[{label}] {dep}: pods updating")
 
     # Precedence: a wedged pod is actionable even if other targets are still
     # legitimately rolling -- surface it so the agent stops idle-polling.

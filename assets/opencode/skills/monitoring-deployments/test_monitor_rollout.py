@@ -56,6 +56,7 @@ REPO = "acme/monorepo"
 OURS = "adf1a604e0ff86f1bd40cef9a117e0ba57c22455"
 LATER = "c09299320924d327476a35066c886b179f83af27"
 OLDER = "adb33b1feeba1cc4748dbfafeb3c7dcf975ee6f4"
+DESCENDANT = "b111111111111111111111111111111111111111"
 IMG = "registry.example.com/team/example-service"
 DIGEST = "sha256:d68597cae56bc0f346b9066bf8f9db182f54791cdcb1dec39f46701583389453"
 
@@ -117,11 +118,12 @@ class FakeCluster:
     `kubectl get deploy`, `kubectl get pods`, and the `gh api` containment
     lookups."""
 
-    def __init__(self, spec_tag, pods, *, later=LATER, ours=OURS):
+    def __init__(self, spec_tag, pods, *, later=LATER, ours=OURS, descendant=None):
         self.spec_tag = spec_tag
         self.pods = pods
         self.later = later
         self.ours = ours
+        self.descendant = descendant
         self.calls = []
 
     def __call__(self, cmd):
@@ -134,24 +136,24 @@ class FakeCluster:
             path = cmd[2]
             if "/commits/" in path:
                 rev = path.rsplit("/", 1)[-1]
-                for full in (self.later, self.ours, OLDER):
-                    if full.startswith(rev):
+                for full in (self.later, self.ours, OLDER, self.descendant):
+                    if full and full.startswith(rev):
                         return full
                 raise subprocess.CalledProcessError(1, cmd, stderr="no such commit")
             if "/compare/" in path:
                 base, head = path.rsplit("/", 1)[-1].split("...")
                 if head == base:
                     return "identical"
-                if head == self.later:
+                if head == self.later or (self.descendant and head == self.descendant):
                     return "ahead"
                 return "behind"
         raise AssertionError(f"unexpected command: {cmd}")
 
 
-def evaluate(spec_tag, pods, *, short=None, merge_sha=OURS, targets=(TARGET,)):
+def evaluate(spec_tag, pods, *, short=None, merge_sha=OURS, targets=(TARGET,), **cluster_kw):
     """Run one evaluate_rollout pass against a fake cluster, swallowing the
     script's progress output. Returns (exit_code, message, printed)."""
-    fake = FakeCluster(spec_tag, list(pods))
+    fake = FakeCluster(spec_tag, list(pods), **cluster_kw)
     parsed = [mr.parse_target(t) for t in targets]
     buf = io.StringIO()
     original = mr.run_cmd
@@ -370,7 +372,7 @@ class EvaluateRollout(unittest.TestCase):
         # the behaviour the fix must NOT loosen.
         code, msg, _ = evaluate(LATER, [
             pod_simple("new", LATER, LATER),
-            pod_simple("old", OURS, OURS),
+            pod_simple("old", OLDER, OLDER),
         ])
         self.assertIsNone(code)
         self.assertIn("pods updating", msg)
@@ -414,6 +416,47 @@ class EvaluateRollout(unittest.TestCase):
         _, _, printed = evaluate(LATER, [pod_simple("psd9l", LATER, OURS)])
         self.assertIn(OURS[: mr.SHORT_SHA_LEN], printed)
         self.assertIn("kubelet", printed.lower())
+
+    def test_exit_4_when_serving_pods_on_intermediate_descendant(self):
+        # (a) spec=Y, pods on X(ready, descendant) + Y(not ready) -> exit 4
+        # Intermediate descendant X contains our merge, and its pods are Ready.
+        code, msg, printed = evaluate(
+            LATER,
+            [
+                pod_simple("ready-x", DESCENDANT, DESCENDANT, ready=True),
+                pod_simple("unready-y", LATER, LATER, ready=False),
+            ],
+            descendant=DESCENDANT,
+        )
+        self.assertEqual(mr.EXIT_DEPLOYED_AS_ANCESTOR, code)
+        self.assertIn("intermediate descendant", (msg + printed).lower())
+        self.assertIn(DESCENDANT[: mr.SHORT_SHA_LEN], msg + printed)
+
+    def test_still_rolling_when_intermediate_pod_is_not_descendant(self):
+        # (b) same but X NOT a descendant (compare 'behind') -> exit 3
+        code, msg, _ = evaluate(
+            LATER,
+            [
+                pod_simple("ready-x", OLDER, OLDER, ready=True),
+                pod_simple("unready-y", LATER, LATER, ready=False),
+            ],
+            descendant=DESCENDANT,
+        )
+        self.assertIsNone(code)
+        self.assertIn("pods updating", msg)
+
+    def test_still_rolling_when_intermediate_pod_is_unresolvable(self):
+        # (c) X unresolvable -> exit 3
+        code, msg, _ = evaluate(
+            LATER,
+            [
+                pod_simple("ready-x", "deadbeef1234", "deadbeef1234", ready=True),
+                pod_simple("unready-y", LATER, LATER, ready=False),
+            ],
+            descendant=DESCENDANT,
+        )
+        self.assertIsNone(code)
+        self.assertIn("pods updating", msg)
 
 
 class SpecImageTag(unittest.TestCase):
