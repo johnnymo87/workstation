@@ -659,6 +659,7 @@ def estimate(rows: list[dict]) -> dict:
 
             by_model_map[key] = {
                 "provider": provider,
+                "rate_provider": rate_provider,
                 "model": model,
                 "backend": row.get("backend", "opencode"),
                 "msgs": 0,
@@ -668,6 +669,7 @@ def estimate(rows: list[dict]) -> dict:
                 "cache_read": 0,
                 "cache_write": 0,
                 "est_cost": 0.0,
+                "est_cost_recorded": 0.0,
                 "recorded_cost": 0.0,
                 "unrecorded_msgs": 0,
                 "tiers": {"base": 0, "long_context": 0, "unpriced": 0},
@@ -687,6 +689,8 @@ def estimate(rows: list[dict]) -> dict:
 
         if cost_usd is not None:
             agg["est_cost"] += cost_usd
+            if not row.get("recorded_missing"):
+                agg["est_cost_recorded"] += cost_usd
 
         if tier_label in agg["tiers"]:
             agg["tiers"][tier_label] += 1
@@ -739,10 +743,13 @@ def reconcile(
     total_recorded = 0.0
     for row in by_model:
         est = row.get("est_cost", 0.0) or 0.0
+        est_recorded = row.get("est_cost_recorded", est)
+        if est_recorded is None:
+            est_recorded = est
         recorded = row.get("recorded_cost", 0.0) or 0.0
-        delta = recorded - est
-        if est != 0:
-            delta_pct = delta / est * 100.0
+        delta = recorded - est_recorded
+        if est_recorded != 0:
+            delta_pct = delta / est_recorded * 100.0
         elif delta == 0:
             delta_pct = 0.0
         else:
@@ -759,7 +766,7 @@ def reconcile(
         "rows": rows,
         "total_est": total_est,
         "total_recorded": total_recorded,
-        "total_delta": total_recorded - total_est,
+        "total_delta": sum(r["delta"] for r in rows),
     }
 
 
@@ -975,7 +982,7 @@ def db_call_counts_by_vertex_model(by_model: list[dict]) -> dict[str, int]:
     that then collapse to the same model are summed."""
     counts: dict[str, int] = {}
     for row in by_model:
-        provider = row.get("provider") or ""
+        provider = row.get("rate_provider") or row.get("provider") or ""
         if not provider.startswith(_VERTEX_PROVIDER_PREFIX):
             continue
         model = (row.get("model") or "").split("@", 1)[0]
@@ -1179,13 +1186,13 @@ def render_text(report: dict) -> str:
     lines.append(
         f"  Estimated: {_fmt_usd(rec['total_est'])}   |   "
         f"Recorded: {_fmt_usd(rec['total_recorded'])}   |   "
-        f"Δ (recorded−estimated): {_fmt_usd(rec['total_delta'])}"
+        f"Δ (recorded−estimated, rows with a recorded cost): {_fmt_usd(rec['total_delta'])}"
     )
-    unrec = sum(m.get("unrecorded_msgs", 0) for m in est["by_model"])
+    unrec = sum(m.get("unrecorded_msgs", 0) for m in est["by_model"] if m.get("priced"))
     if unrec:
         lines.append(
             f"  Note: {unrec} goose messages have no recorded cost "
-            "(goose had no price for the model); their Δ is not a rate-book error."
+            "(goose had no price then); they are in Estimated but not in Δ."
         )
 
     if reconcile_full:
@@ -1372,16 +1379,28 @@ def main(argv: list[str] | None = None) -> int:
         goose_rows: list[dict] = []
         goose_kind_map: dict[str, str] = {}
         if not args.no_goose:
-            g_path = args.goose_db or _DEFAULT_GOOSE_DB
-            if os.path.exists(g_path):
-                try:
-                    goose_rows, goose_kind_map = query_goose_rows(g_path, start_ms, end_ms)
-                    goose_db_read = g_path
-                except Exception as e:
-                    print(f"Warning: goose usage not counted: {e}", file=sys.stderr)
-                    goose_rows = []
-                    goose_kind_map = {}
-                    goose_db_read = None
+            if args.goose_db:
+                if not os.path.exists(args.goose_db):
+                    print(f"Warning: goose DB not found: {args.goose_db}", file=sys.stderr)
+                else:
+                    try:
+                        goose_rows, goose_kind_map = query_goose_rows(args.goose_db, start_ms, end_ms)
+                        goose_db_read = args.goose_db
+                    except Exception as e:
+                        print(f"Warning: goose usage not counted: {e}", file=sys.stderr)
+                        goose_rows = []
+                        goose_kind_map = {}
+                        goose_db_read = None
+            elif not args.db:
+                if os.path.exists(_DEFAULT_GOOSE_DB):
+                    try:
+                        goose_rows, goose_kind_map = query_goose_rows(_DEFAULT_GOOSE_DB, start_ms, end_ms)
+                        goose_db_read = _DEFAULT_GOOSE_DB
+                    except Exception as e:
+                        print(f"Warning: goose usage not counted: {e}", file=sys.stderr)
+                        goose_rows = []
+                        goose_kind_map = {}
+                        goose_db_read = None
 
         if goose_rows:
             rows.extend(goose_rows)

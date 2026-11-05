@@ -1311,7 +1311,7 @@
         touch $out
       '';
 
-      # oc-cost: 132 tests over the cost model, sqlite in-memory, hermetic.
+      # oc-cost: 140 tests over the cost model, sqlite in-memory, hermetic.
       #
       # Read the gate below before changing the invocation. This file had NO
       # `if __name__ == "__main__"` block, so `python3 test_oc_cost.py` imported
@@ -1332,8 +1332,8 @@
 
         # The count is PINNED, following checks.oc-auto-attach. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 132 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 132 tests'. If you added or removed" >&2
+        grep -q '^Ran 140 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 140 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

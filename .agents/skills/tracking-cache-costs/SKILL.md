@@ -21,7 +21,7 @@ It replaces the older `analyze.mjs` script that used to live in this skill
 directory.
 
 Output sections:
-- Daily cache read/write/uncached ratios
+- Daily cache read/write/uncached ratios (the daily table mixes OpenCode and Goose; `oc-cost --no-goose` isolates OpenCode for cache-regression checks)
 - Per-model cost breakdown (Anthropic API rates)
 - Cost components — applies each model's own rates, not a dominant-model
   approximation

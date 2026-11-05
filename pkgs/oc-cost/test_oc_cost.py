@@ -775,6 +775,26 @@ class TestReconcile(unittest.TestCase):
         # order preserved
         self.assertEqual([r["model"] for r in rec["rows"]], ["a", "b"])
 
+    def test_reconcile_uses_est_cost_recorded_when_present(self):
+        by_model = [
+            {
+                "provider": "goose:gcp_vertex_ai",
+                "model": "claude-opus-5-5",
+                "est_cost": 0.40,
+                "est_cost_recorded": 0.20,
+                "recorded_cost": 0.20,
+            }
+        ]
+        rec = oc_cost.reconcile(by_model)
+        self.assertEqual(len(rec["rows"]), 1)
+        row = rec["rows"][0]
+        self.assertAlmostEqual(row["delta"], 0.0, places=6)
+        self.assertAlmostEqual(row["delta_pct"], 0.0, places=6)
+        self.assertFalse(row["flagged"])
+        self.assertAlmostEqual(rec["total_est"], 0.40, places=6)
+        self.assertAlmostEqual(rec["total_recorded"], 0.20, places=6)
+        self.assertAlmostEqual(rec["total_delta"], 0.0, places=6)
+
 
 class TestParseArgsReconcile(unittest.TestCase):
     def test_reconcile_default_false(self):
@@ -897,6 +917,15 @@ class TestDbCallCountsByVertexModel(unittest.TestCase):
         ]
         counts = oc_cost.db_call_counts_by_vertex_model(by_model)
         self.assertEqual(counts, {"gemini-3.5-flash": 3})
+
+    def test_sums_goose_vertex_calls_with_opencode(self):
+        by_model = [
+            {"provider": "google-vertex-anthropic", "rate_provider": "google-vertex-anthropic", "model": "claude-opus-5-5@default", "msgs": 10},
+            {"provider": "goose:gcp_vertex_ai", "rate_provider": "google-vertex-anthropic", "model": "claude-opus-5-5", "msgs": 5},
+            {"provider": "goose:mock-rolling", "rate_provider": None, "model": "claude-opus-5-5", "msgs": 3},
+        ]
+        counts = oc_cost.db_call_counts_by_vertex_model(by_model)
+        self.assertEqual(counts["claude-opus-5-5"], 15)
 
     def test_empty_input(self):
         self.assertEqual(oc_cost.db_call_counts_by_vertex_model([]), {})
@@ -1665,6 +1694,7 @@ class TestEstimateGoose(unittest.TestCase):
         self.assertEqual(len(est["by_model"]), 1)
         m = est["by_model"][0]
         self.assertEqual(m["provider"], "goose:gcp_vertex_ai")
+        self.assertEqual(m["rate_provider"], "google-vertex-anthropic")
         self.assertEqual(m["model"], "claude-opus-5-5")
         self.assertEqual(m["backend"], "goose")
         self.assertTrue(m["priced"])
@@ -1707,7 +1737,47 @@ class TestEstimateGoose(unittest.TestCase):
         est = oc_cost.estimate([row])
         m = est["by_model"][0]
         self.assertEqual(m["backend"], "opencode")
+        self.assertEqual(m["rate_provider"], "anthropic")
         self.assertEqual(m["unrecorded_msgs"], 0)
+        self.assertEqual(m["est_cost_recorded"], m["est_cost"])
+
+    def test_estimate_computes_est_cost_recorded(self):
+        row_rec = {
+            "session_id": "goose:s1",
+            "provider": "goose:gcp_vertex_ai",
+            "rate_provider": "google-vertex-anthropic",
+            "model": "claude-opus-5-5",
+            "day": "2026-10-01",
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache_read": 1_000_000,
+            "cache_write": 0,
+            "recorded_cost": 0.20,
+            "recorded_missing": False,
+            "backend": "goose",
+        }
+        row_null = {
+            "session_id": "goose:s2",
+            "provider": "goose:gcp_vertex_ai",
+            "rate_provider": "google-vertex-anthropic",
+            "model": "claude-opus-5-5",
+            "day": "2026-10-01",
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache_read": 1_000_000,
+            "cache_write": 0,
+            "recorded_cost": 0.0,
+            "recorded_missing": True,
+            "backend": "goose",
+        }
+        est = oc_cost.estimate([row_rec, row_null])
+        m = est["by_model"][0]
+        self.assertAlmostEqual(m["est_cost"], 0.40, places=6)
+        self.assertAlmostEqual(m["est_cost_recorded"], 0.20, places=6)
+        self.assertAlmostEqual(m["recorded_cost"], 0.20, places=6)
+        self.assertEqual(m["unrecorded_msgs"], 1)
 
     def test_goose_unpriced_model(self):
         row = {
@@ -1730,6 +1800,7 @@ class TestEstimateGoose(unittest.TestCase):
         self.assertIn(("goose:mock-rolling", "unknown-model"), est["unpriced"])
         m = est["by_model"][0]
         self.assertEqual(m["backend"], "goose")
+        self.assertIsNone(m["rate_provider"])
         self.assertEqual(m["unrecorded_msgs"], 1)
 
 
@@ -1854,7 +1925,7 @@ class TestMainGooseIntegration(unittest.TestCase):
             os.unlink(oc_path)
             os.unlink(g_path)
 
-    def test_missing_goose_db_silent(self):
+    def test_explicit_missing_goose_db_warns(self):
         import io
         import contextlib
         d0 = 1800000000000
@@ -1871,6 +1942,136 @@ class TestMainGooseIntegration(unittest.TestCase):
                     "--db", oc_path, "--goose-db", "/nonexistent/goose.db", "--json",
                     "--since", "2027-01-01", "--until", "2027-01-31",
                 ])
+            self.assertEqual(rc, 0)
+            self.assertIn("Warning: goose DB not found: /nonexistent/goose.db", err.getvalue())
+            data = json.loads(buf.getvalue())
+            self.assertIsNone(data["meta"]["goose_db_path"])
+        finally:
+            os.unlink(oc_path)
+
+    def test_default_missing_goose_db_silent(self):
+        import io
+        import contextlib
+        import warnings
+        d0 = 1800000000000
+        oc_msgs = [
+            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-5-5",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+        ]
+        oc_path = _write_db_file(oc_msgs)
+        orig_default_db = oc_cost._DEFAULT_DB
+        oc_cost._DEFAULT_DB = oc_path
+        try:
+            buf = io.StringIO()
+            err = io.StringIO()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                    rc = oc_cost.main([
+                        "--json",
+                        "--since", "2027-01-01", "--until", "2027-01-31",
+                    ])
+            self.assertEqual(rc, 0)
+            self.assertEqual(err.getvalue(), "")
+            data = json.loads(buf.getvalue())
+            self.assertIsNone(data["meta"]["goose_db_path"])
+        finally:
+            oc_cost._DEFAULT_DB = orig_default_db
+            os.unlink(oc_path)
+
+    def test_db_without_goose_db_skips_goose(self):
+        import io
+        import contextlib
+        import warnings
+        d0 = 1800000000000
+        oc_msgs = [
+            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-5-5",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+        ]
+        g_rows = [
+            goose_ledger_row("g1", (d0 + 2000) // 1000, model="claude-opus-5-5",
+                             cache_read_tokens=1_000_000, cost=0.20),
+        ]
+        oc_path = _write_db_file(oc_msgs)
+        g_path = make_goose_db(g_rows, [{"id": "g1", "provider_name": "gcp_vertex_ai"}])
+        oc_cost._DEFAULT_GOOSE_DB = g_path
+        try:
+            buf = io.StringIO()
+            err = io.StringIO()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                    rc = oc_cost.main([
+                        "--db", oc_path, "--json",
+                        "--since", "2027-01-01", "--until", "2027-01-31",
+                    ])
+            self.assertEqual(rc, 0)
+            self.assertEqual(err.getvalue(), "")
+            data = json.loads(buf.getvalue())
+            self.assertIsNone(data["meta"]["goose_db_path"])
+            self.assertAlmostEqual(data["estimate"]["total_est"], 0.20, places=6)
+        finally:
+            os.unlink(oc_path)
+            os.unlink(g_path)
+
+    def test_neither_db_nor_goose_db_uses_default_goose(self):
+        import io
+        import contextlib
+        import warnings
+        d0 = 1800000000000
+        oc_msgs = [
+            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-5-5",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+        ]
+        g_rows = [
+            goose_ledger_row("g1", (d0 + 2000) // 1000, model="claude-opus-5-5",
+                             cache_read_tokens=1_000_000, cost=0.20),
+        ]
+        oc_path = _write_db_file(oc_msgs)
+        g_path = make_goose_db(g_rows, [{"id": "g1", "provider_name": "gcp_vertex_ai"}])
+        orig_default_db = oc_cost._DEFAULT_DB
+        oc_cost._DEFAULT_DB = oc_path
+        oc_cost._DEFAULT_GOOSE_DB = g_path
+        try:
+            buf = io.StringIO()
+            err = io.StringIO()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                    rc = oc_cost.main([
+                        "--json",
+                        "--since", "2027-01-01", "--until", "2027-01-31",
+                    ])
+            self.assertEqual(rc, 0)
+            self.assertEqual(err.getvalue(), "")
+            data = json.loads(buf.getvalue())
+            self.assertEqual(data["meta"]["goose_db_path"], g_path)
+            self.assertAlmostEqual(data["estimate"]["total_est"], 0.40, places=6)
+        finally:
+            oc_cost._DEFAULT_DB = orig_default_db
+            os.unlink(oc_path)
+            os.unlink(g_path)
+
+    def test_no_goose_wins_over_missing_goose_db(self):
+        import io
+        import contextlib
+        import warnings
+        d0 = 1800000000000
+        oc_msgs = [
+            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-5-5",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+        ]
+        oc_path = _write_db_file(oc_msgs)
+        try:
+            buf = io.StringIO()
+            err = io.StringIO()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ResourceWarning)
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+                    rc = oc_cost.main([
+                        "--db", oc_path, "--goose-db", "/nonexistent/goose.db", "--no-goose", "--json",
+                        "--since", "2027-01-01", "--until", "2027-01-31",
+                    ])
             self.assertEqual(rc, 0)
             self.assertEqual(err.getvalue(), "")
             data = json.loads(buf.getvalue())
@@ -1962,7 +2163,46 @@ class TestMainGooseIntegration(unittest.TestCase):
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn(
-                "  Note: 1 goose messages have no recorded cost (goose had no price for the model); their Δ is not a rate-book error.",
+                "  Note: 1 goose messages have no recorded cost (goose had no price then); they are in Estimated but not in Δ.",
+                out,
+            )
+            self.assertIn("Δ (recorded−estimated, rows with a recorded cost):", out)
+        finally:
+            os.unlink(oc_path)
+            os.unlink(g_path)
+
+    def test_text_output_unrecorded_note_excludes_unpriced_mocks(self):
+        import io
+        import contextlib
+        d0 = 1800000000000
+        oc_msgs = [
+            assistant_msg("m1", "s1", d0 + 1000, model="claude-opus-5-5",
+                          provider="google-vertex-anthropic", cache_read=1_000_000),
+        ]
+        g_rows = [
+            goose_ledger_row("g1", (d0 + 2000) // 1000, model="claude-opus-5-5",
+                             cache_read_tokens=1_000_000, cost=None),
+            goose_ledger_row("g2", (d0 + 3000) // 1000, model="unknown-mock-model",
+                             input_tokens=100, cost=None),
+        ]
+        g_sessions = [
+            {"id": "g1", "provider_name": "gcp_vertex_ai"},
+            {"id": "g2", "provider_name": "mock-rolling"},
+        ]
+        oc_path = _write_db_file(oc_msgs)
+        g_path = make_goose_db(g_rows, g_sessions)
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = oc_cost.main([
+                    "--db", oc_path, "--goose-db", g_path,
+                    "--since", "2027-01-01", "--until", "2027-01-31",
+                ])
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            # Only the 1 priced message is counted, not the mock one.
+            self.assertIn(
+                "  Note: 1 goose messages have no recorded cost (goose had no price then); they are in Estimated but not in Δ.",
                 out,
             )
         finally:

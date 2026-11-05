@@ -127,9 +127,10 @@ upstream source (the opus case).
 - **Source table**: queries the `usage_ledger` table joined with `sessions` to obtain session providers and parent session relationships.
 - **Cache-inclusive input**: Goose records `input_tokens` inclusive of `cache_read_tokens` and `cache_write_tokens`. `oc-cost` calculates uncached input as `max(0, input - cache_read - cache_write)`.
 - **Estimate vs ledger cost**: headline cost is calculated from `oc-cost`'s rate book (`RATES`), while Goose's ledger `cost` column is used as the recorded cost in reconciliation.
-- **Unrecorded rows**: early Goose records lacked model pricing (`cost` is NULL). These are counted under `unrecorded_msgs` and surfaced with a note under reconciliation rather than flagged as rate-book drift.
+- **Unrecorded rows**: early Goose records lacked model pricing (`cost` is NULL). These are included in Estimated but excluded from reconciliation Δ (reconciliation compares like with like against `est_cost_recorded`), and surfaced with a note under reconciliation rather than flagged as rate-book drift.
 - **Mocks and unknown providers**: test runs with mock providers (e.g. `mock-rolling`) appear as unpriced models (`goose:mock-rolling/...`) and are excluded from estimated totals.
-- **`--vertex-reconcile` is OpenCode-only**: Vertex audit-log reconciliation queries BigQuery audit logs for OpenCode principals and skips `goose:*` rows.
+- **Vertex reconciliation**: Goose on cloudbox reaches GCP Vertex AI through the same failover proxy as OpenCode, so its calls appear in the same audit log; `--vertex-reconcile` counts Goose Vertex calls alongside OpenCode calls under the mapped rate provider.
+- **Imported sessions**: Goose's import_session copies accumulated totals, so the first call in a continued imported session writes a null-model `carried_forward` ledger row with the whole imported history, timestamped at that call; it is unpriced (no dollar effect) but its tokens land in that day's daily row and the 300k+ size bucket.
 
 ## Caveats
 

@@ -75,25 +75,41 @@ read-only connection, warn-and-continue on a goose read failure).
    min of min, max of max) and ordered by the fixed bucket order.
 5. **--by-kind**: goose rows are classified with the goose kind_map merged into
    the opencode one.
-6. **--vertex-reconcile is unchanged and stays opencode-only.** Goose rows'
-   provider starts with `goose:`, so `db_call_counts_by_vertex_model` already
-   skips them. Whether goose's Vertex calls land in the same audit table under
-   the same principal is unverified; counting them could manufacture a
-   negative delta. Documented as a limitation.
+6. **--vertex-reconcile counts goose Vertex calls.** Goose on cloudbox reaches
+   Vertex through the same claude-failover-proxy as opencode, so its calls are
+   in the same audit log. estimate()'s by_model rows gain `rate_provider`
+   (opencode rows: same as provider; goose rows: the mapped one, may be None).
+   db_call_counts_by_vertex_model matches on `row.get("rate_provider") or
+   row.get("provider") or ""` starting with `google-vertex`.
 7. **CLI.** `--goose-db PATH` (default
    `~/.local/share/goose/sessions/sessions.db`, via a module constant
-   `_DEFAULT_GOOSE_DB` that tests can patch), `--no-goose`. A missing goose DB is
-   silently skipped (macOS/devbox may have none). A goose read error prints
+   `_DEFAULT_GOOSE_DB` that tests can patch), `--no-goose`. `--db` given
+   without `--goose-db` skips goose (so `--db other.db` never mixes in this
+   host's live goose DB). Only when neither `--db` nor `--goose-db` is given
+   does the default goose path apply. `--no-goose` still wins over everything.
+   An explicitly passed `--goose-db` path that does not exist prints
+   `Warning: goose DB not found: <path>` to stderr and continues; the DEFAULT
+   path missing stays silent. A goose read error prints
    `Warning: goose usage not counted: <err>` to stderr and the report continues.
    The opencode DB stays required, unchanged.
 8. **Output.**
    - JSON: `meta.goose_db_path` (path read, or null when skipped/missing/failed);
-     `by_model[].backend`, `by_model[].unrecorded_msgs`. No other key changes.
+     `by_model[].backend`, `by_model[].unrecorded_msgs`,
+     `by_model[].rate_provider`, `by_model[].est_cost_recorded`. No other key changes.
+   - Reconciliation: compares like with like. A goose row whose ledger cost is
+     NULL has no recorded figure, so it must not create a Δ. by_model rows gain
+     `est_cost_recorded`: the estimate summed over rows that are NOT
+     recorded_missing (for opencode rows it equals est_cost). reconcile()
+     computes delta and delta_pct (and therefore flagged) from
+     `row.get("est_cost_recorded", est_cost)` vs recorded_cost; total_delta =
+     sum of deltas. Headline est_cost and total_est remain unchanged.
    - Text: heading `Usage Report (opencode + goose)` when goose rows were read,
      else unchanged `OpenCode Usage Report`. Goose labels show as
-     `goose:gcp_vertex_ai/claude-opus-5-5`. Under the reconciliation summary, when
-     any row has unrecorded msgs: `  Note: N goose messages have no recorded
-     cost (goose had no price for the model); their Δ is not a rate-book error.`
+     `goose:gcp_vertex_ai/claude-opus-5-5`. Summary line: `Estimated: $X   |
+     Recorded: $Y   |   Δ (recorded−estimated, rows with a recorded cost): $Z`.
+     Under the reconciliation summary, when any priced row has unrecorded
+     msgs: `  Note: N goose messages have no recorded cost (goose had no price
+     then); they are in Estimated but not in Δ.`
      Footer adds `Goose database: <path>` when read.
 9. **No rename.** Epic precedent c87c.1 kept `oc-revive`; `oc-cost` stays.
    Description strings (argparse, `default.nix` meta, README) say opencode and goose.
