@@ -639,6 +639,35 @@
         touch $out
       '';
 
+      # The BUILT monitor runs a real `#!/usr/bin/env bash` stack-health with a bare
+      # PATH, as a system unit does. The suite above fakes stack-health, so it cannot
+      # see that the monitor's own PATH lacks a tool stack-health needs.
+      em-stack-monitor-path = let
+        exec = self.nixosConfigurations.devbox.config.systemd.services.em-stack-monitor.serviceConfig.ExecStart;
+        cu = devboxPkgs.coreutils;
+      in devboxPkgs.runCommand "em-stack-monitor-path" { } ''
+        mkdir -p repo/bin state
+        printf '%s\n' '#!${cu}/bin/env bash' \
+          'for t in awk curl python3 pgrep ss jq; do command -v "$t" >/dev/null || echo "  missing      FAIL     $t"; done' \
+          'echo "SUMMARY: OK"' > repo/bin/stack-health
+        printf '%s\n' '#!${cu}/bin/env bash' 'echo manual-live' > mode
+        printf '%s\n' '#!${cu}/bin/env bash' 'echo 000' > fetch
+        chmod +x repo/bin/stack-health mode fetch
+        out_txt=$(${cu}/bin/env -i PATH=${cu}/bin STATE_DIRECTORY=$PWD/state \
+          EM_STACK_MONITOR_DRY_RUN=1 EM_STACK_REPO=$PWD/repo \
+          EM_STACK_GATE_CMD=${cu}/bin/true EM_STACK_MODE_CMD=$PWD/mode \
+          EM_STACK_FETCH_CMD=$PWD/fetch ${exec} 2>&1 || true)
+        echo "$out_txt"
+        if ! echo "$out_txt" | ${devboxPkgs.gnugrep}/bin/grep -q 'raw keys:'; then
+          echo "GATE FAILURE: the built monitor did not finish a dry pass." >&2; exit 1
+        fi
+        if echo "$out_txt" | ${devboxPkgs.gnugrep}/bin/grep -q 'monitor:blind\|fail:missing'; then
+          echo "GATE FAILURE: the built monitor cannot run stack-health with its own PATH." >&2
+          exit 1
+        fi
+        touch $out
+      '';
+
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
       # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
       credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {

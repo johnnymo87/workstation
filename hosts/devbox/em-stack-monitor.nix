@@ -45,8 +45,10 @@ let
     # What bin/stack-health needs besides the script's own tools: without
     # python3 every API check reads UNKNOWN, without procps the manager check
     # reads OK blind.
+    # bash too: bin/stack-health starts with `#!/usr/bin/env bash`, and a system
+    # unit's PATH has none (the first live pass read monitor:blind for that).
     runtimeInputs = with pkgs; [
-      coreutils curl jq gnused gnugrep gawk findutils procps iproute2 python3 git
+      bash coreutils curl jq gnused gnugrep gawk findutils procps iproute2 python3 git
     ];
     text = builtins.readFile ./em-stack-monitor.sh;
   };
