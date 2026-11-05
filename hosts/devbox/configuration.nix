@@ -678,8 +678,8 @@ in
       # runaway here (goose itself, or anything a goose tool shell runs: every
       # one is a child in this cgroup) could take the whole 30G host.
       #
-      # 6G = parity with each opencode-serve@ (users/dev/home.devbox.nix), so a
-      # goose session can run the same builds an opencode one can. Measured
+      # 6G = each opencode-serve@'s cap (users/dev/home.devbox.nix; devbox has
+      # no per-command scopes, so there both caps hold the tool commands too). Measured
       # peak over the 45 days to 2026-11-05: 565M (the Nov 4-5 run), so this is
       # 10x headroom for the coordinators this serve hosts. Worst case with the
       # user slice at its cap is 26G of 30G.
@@ -691,14 +691,16 @@ in
       MemoryMax = "6G";
       MemorySwapMax = "1G";
       # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
-      # cgroup, so the kernel usually picks a fat child (a build, a test run),
-      # and with `stop` that one kill would end every goose turn on the host,
-      # the coordinators' included. With `continue` only that command dies and
-      # its session sees a failed tool call. If goose itself is the victim the
-      # unit exits anyway and Restart=always brings it back.
+      # cgroup, and with `stop` ANY oom kill in it would end every goose turn on
+      # the host, the coordinators' included. With `continue`, a killed child
+      # fails one tool call. The cgroup OOM killer picks the single largest
+      # process, so a single fat build is the victim; a many-worker job whose
+      # workers are each smaller than goose can still get goose killed, which
+      # exits the unit and Restart=always brings it back (same as `stop`).
       #
-      # restartIfChanged=false means this lands at the next goose-serve
-      # restart, which reset-workspace does nightly at 03:00 (Step 6).
+      # LIVE AT SWITCH, despite restartIfChanged=false: the switch's
+      # daemon-reload re-realizes cgroup limits on the running unit. Check
+      # /sys/fs/cgroup/system.slice/goose-serve.service/memory.current first.
       OOMPolicy = "continue";
     };
   };
