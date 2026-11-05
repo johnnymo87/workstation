@@ -2636,8 +2636,8 @@
         python3 ${self}/assets/opencode/skills/monitoring-deployments/test_monitor_rollout.py 2>&1 \
           | tee "$TMPDIR/out.txt"
 
-        grep -q '^Ran 21 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 21 tests'. If you added or removed" >&2
+        grep -q '^Ran 27 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 27 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
