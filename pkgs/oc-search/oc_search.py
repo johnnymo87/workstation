@@ -1852,6 +1852,7 @@ def search_goose(
             "SELECT m.session_id, s.name, s.working_dir, count(*) AS matches, max(m.created_timestamp) AS max_ts",
             "FROM messages m JOIN sessions s ON s.id = m.session_id, json_each(m.content_json) j",
             "WHERE (s.session_type != 'hidden' OR s.session_type IS NULL)",
+            "  AND COALESCE(CASE WHEN json_valid(m.metadata_json) THEN json_extract(m.metadata_json, '$.turnContext') END, 0) = 0",
             "  AND json_valid(m.content_json)",
             "  AND instr(m.content_json, ?) > 0",
             "  AND instr(j.value, ?) > 0",
@@ -2169,10 +2170,11 @@ def run(argv: list[str], *, stats: dict[str, Any] | None = None) -> int:
         except (sqlite3.DatabaseError, TimedOut) as exc:
             if deadline.tripped.is_set() or isinstance(exc, TimedOut):
                 warn(
-                    f"aborted after {budget:g}s: goose search of {goose_db_path} did not finish."
+                    f"goose search of {goose_db_path} did not finish within {budget:g}s; "
+                    "showing opencode results only"
                 )
-                return 2
-            raise
+            else:
+                raise
 
     if args.limit > 0:
         rows = rows[: args.limit]

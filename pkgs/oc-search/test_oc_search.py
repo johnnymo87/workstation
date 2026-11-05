@@ -3294,13 +3294,19 @@ class GooseFixture:
         *,
         created_timestamp: int = 1_780_000_000,
         role: str = "assistant",
+        metadata_json: Any = None,
     ):
         self.msg_id += 1
         content_json = json.dumps(items) if not isinstance(items, str) else items
+        meta_json = (
+            json.dumps(metadata_json)
+            if metadata_json is not None and not isinstance(metadata_json, str)
+            else metadata_json
+        )
         self.conn.execute(
-            "INSERT INTO messages (id, message_id, session_id, role, content_json, created_timestamp)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (self.msg_id, f"msg_{self.msg_id}", sid, role, content_json, created_timestamp),
+            "INSERT INTO messages (id, message_id, session_id, role, content_json, created_timestamp, metadata_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (self.msg_id, f"msg_{self.msg_id}", sid, role, content_json, created_timestamp, meta_json),
         )
 
     def commit(self):
@@ -3588,9 +3594,13 @@ class GooseSearchTest(unittest.TestCase):
         f = Fixture()
         gf = GooseFixture()
         try:
+            add_session(f.conn, "ses_oc", title="OpenCode Title")
+            add_part(f.conn, "ses_oc", type="tool", text="needle_dl")
+            f.commit()
+
             gf.add_session("ses_g")
             for _ in range(500):
-                gf.add_message("ses_g", [{"type": "toolResponse", "text": "x" * 200}])
+                gf.add_message("ses_g", [{"type": "toolResponse", "text": "needle_dl"}])
             gf.commit()
 
             orig_open_source = oc_search.open_source
@@ -3618,12 +3628,53 @@ class GooseSearchTest(unittest.TestCase):
                             "10",
                             "--jobs",
                             "1",
-                            "x",
+                            "needle_dl",
                         ]
                     )
-            self.assertEqual(rc, 2)
-            self.assertIn("aborted after", err.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertIn("ses_oc", out.getvalue())
+            self.assertNotIn("goose:ses_g", out.getvalue())
             self.assertIn("goose search of", err.getvalue())
+            self.assertIn("did not finish within", err.getvalue())
+            self.assertIn("showing opencode results only", err.getvalue())
+        finally:
+            f.close()
+            gf.close()
+
+    def test_turn_context_messages_excluded(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            # Session s_turn: only match has turnContext: 1 -> excluded
+            gf.add_session("s_turn")
+            gf.add_message(
+                "s_turn",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json={"turnContext": 1},
+            )
+
+            # Session s_null: match has NULL metadata_json -> searched
+            gf.add_session("s_null")
+            gf.add_message(
+                "s_null",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json=None,
+            )
+
+            # Session s_invalid: match has invalid metadata_json string -> searched
+            gf.add_session("s_invalid")
+            gf.add_message(
+                "s_invalid",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json="not valid json",
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "target_turn_ctx")
+            matched_ids = {r["id"] for r in rows}
+            self.assertNotIn("goose:s_turn", matched_ids)
+            self.assertIn("goose:s_null", matched_ids)
+            self.assertIn("goose:s_invalid", matched_ids)
         finally:
             f.close()
             gf.close()

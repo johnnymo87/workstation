@@ -407,6 +407,11 @@ goose database is not opened.
 
 One match = one content item in `messages.content_json` (the analogue of one
 opencode `part`), matched via byte-exact case-sensitive substring (`instr`).
+For tools, a goose call is two items (`toolRequest` + `toolResponse`) where
+opencode stores one part, so a needle in both counts 2.
+
+Injected per-turn context messages (`metadata_json` with `turnContext: 1`) are
+excluded, mirroring goose's own chat search.
 
 `--types` maps opencode part types to goose item types:
 
@@ -421,10 +426,19 @@ opencode `part`), matched via byte-exact case-sensitive substring (`instr`).
 
 ### Hidden sessions
 
-Sessions with `session_type = 'hidden'` are excluded: goose itself hides them
-from its session list, and they are mostly re-quoted copies of other
-transcripts (stall-watch coordinator sessions, recipe retries), which would
-otherwise duplicate hits.
+Sessions with `session_type = 'hidden'` are excluded: they are goose-internal
+and short-lived (stall-watch "transcript input" runs, recipe retries, tests)
+and goose hides them itself. Note that `acp` sessions, including stall-watch
+per-program coordinators (working_dir under
+`~/.local/state/stall-watch/coord-sessions`), ARE included and can quote other
+sessions' transcripts, so they may rank high with many matches.
+
+### Timeouts
+
+A goose deadline trip does not discard finished opencode results: on a goose
+timeout, oc-search warns on stderr (`goose search of <path> did not finish
+within <budget>s; showing opencode results only`) and outputs opencode rows with
+exit 0. Opencode-side timeouts exit 2 as usual.
 
 ## Rollout and upgrade to v2
 

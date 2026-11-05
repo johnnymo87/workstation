@@ -30,10 +30,11 @@ Flipping the default (and having lgtm pass `--goose`) is a separate follow-up.
   `text`, `toolRequest`, `toolResponse`, `thinking`, `error`,
   `actionRequired`. Tool results are `toolResponse` items in user-role rows.
 - `messages.created_timestamp` is epoch **seconds**.
-- `sessions.session_type`: `hidden` 2,445 sessions (stall-watch coordinator
-  sessions whose input is other sessions' transcripts, plus recipe retries),
-  `user` 305, `acp` 171, `sub_agent` 6, `scheduled` 1. Hidden sessions hold
-  97 MB of the 180 MB and are mostly re-quoted transcripts.
+- `sessions.session_type`: `hidden` 2,445 sessions (goose-internal/short-lived
+  runs such as stall-watch "transcript input" runs, recipe retries, tests;
+  goose hides them itself), `user` 305, `acp` 171 (including stall-watch
+  per-program coordinators under `~/.local/state/stall-watch/coord-sessions`),
+  `sub_agent` 6, `scheduled` 1. Hidden sessions hold 97 MB of the 180 MB.
 
 ## Design
 
@@ -49,7 +50,11 @@ Flipping the default (and having lgtm pass `--goose`) is a separate follow-up.
 
 One match = one content item (the analogue of one opencode `part`), byte-exact
 case-sensitive substring (`instr`) over the item's JSON text, like opencode's
-`instr(part.data, ?)`.
+`instr(part.data, ?)`. For tools, a goose call is two items (`toolRequest` +
+`toolResponse`) where opencode stores one part, so a needle in both counts 2.
+
+Injected per-turn context messages (`metadata_json` with `turnContext: 1`) are
+excluded, mirroring goose's own chat search.
 
 `--types` maps opencode part types to goose item types:
 
@@ -70,6 +75,7 @@ Query shape (one statement, read-only connection, `mode=ro`, `busy_timeout`,
 SELECT m.session_id, count(*), max(m.created_timestamp)
 FROM messages m JOIN sessions s ON s.id = m.session_id, json_each(m.content_json) j
 WHERE s.session_type != 'hidden'
+  AND COALESCE(CASE WHEN json_valid(m.metadata_json) THEN json_extract(m.metadata_json, '$.turnContext') END, 0) = 0
   AND json_valid(m.content_json)
   AND instr(m.content_json, :q) > 0          -- cheap prefilter
   AND instr(j.value, :q) > 0
@@ -80,9 +86,11 @@ GROUP BY m.session_id
 Use `json_extract`, not `->>` (older SQLite on some hosts).
 `last_match_ms = max(created_timestamp) * 1000`.
 
-`hidden` sessions are excluded: goose itself hides them from its session
-list, and they are re-quoted copies of other transcripts, so they would
-duplicate every opencode hit.
+`hidden` sessions are excluded: they are goose-internal/short-lived (stall-watch
+"transcript input" runs, recipe retries, tests) and goose hides them itself.
+Note that `acp` sessions, including stall-watch per-program coordinators
+(working_dir under `~/.local/state/stall-watch/coord-sessions`), ARE included
+and can quote other sessions' transcripts, so they may rank high with many matches.
 
 ### Output rows
 
@@ -101,9 +109,11 @@ subset of each source's top N.
 
 - goose DB missing or unreadable with `--goose`: one `oc-search: ...` warning
   on stderr, opencode results printed as usual, exit 0.
-- The goose query runs under the existing `Deadline`; a deadline trip there
-  is the same exit-2 abort as for opencode.
+- A goose deadline trip does not discard finished opencode results: on a goose
+  timeout, it warns on stderr (`oc-search: goose search of <path> did not finish within <budget>s; showing opencode results only`)
+  and prints the opencode rows, exit 0. Opencode-side timeouts keep exit 2 as today.
 - The "no sessions matched" message covers both sources.
+
 
 ### Name
 
