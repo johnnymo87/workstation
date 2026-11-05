@@ -2160,7 +2160,7 @@ def run(argv: list[str], *, stats: dict[str, Any] | None = None) -> int:
     src.close()
 
     if args.goose:
-        goose_db_path = args.goose_db or DEFAULT_GOOSE_DB
+        goose_db_path = os.path.expanduser(args.goose_db or DEFAULT_GOOSE_DB)
         try:
             goose_rows = search_goose(goose_db_path, query, types, deadline)
             if goose_rows:

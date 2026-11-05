@@ -22,6 +22,7 @@ import random
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -3276,7 +3277,7 @@ class GooseFixture:
         sid: str,
         *,
         name: str = "a goose session",
-        session_type: str = "user",
+        session_type: str | None = "user",
         working_dir: str = "/tmp/goose",
         directory: str | None = None,
     ):
@@ -3592,26 +3593,82 @@ class GooseSearchTest(unittest.TestCase):
                 gf.add_message("ses_g", [{"type": "toolResponse", "text": "x" * 200}])
             gf.commit()
 
+            orig_open_source = oc_search.open_source
+
+            def fake_open_source(path, deadline=None):
+                conn = orig_open_source(path, deadline)
+                if path == gf.db and deadline is not None:
+                    deadline.deadline = time.monotonic() - 1
+                    deadline.tripped.set()
+                return conn
+
             out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = oc_search.run(
-                    [
-                        "--db",
-                        f.db,
-                        "--index-path",
-                        f.index,
-                        "--goose",
-                        "--goose-db",
-                        gf.db,
-                        "--timeout",
-                        "0.000001",
-                        "--jobs",
-                        "1",
-                        "x",
-                    ]
-                )
+            with mock.patch("oc_search.open_source", side_effect=fake_open_source):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = oc_search.run(
+                        [
+                            "--db",
+                            f.db,
+                            "--index-path",
+                            f.index,
+                            "--goose",
+                            "--goose-db",
+                            gf.db,
+                            "--timeout",
+                            "10",
+                            "--jobs",
+                            "1",
+                            "x",
+                        ]
+                    )
             self.assertEqual(rc, 2)
             self.assertIn("aborted after", err.getvalue())
+            self.assertIn("goose search of", err.getvalue())
+        finally:
+            f.close()
+            gf.close()
+
+    def test_types_compound_tool_text(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s1")
+            gf.add_message(
+                "s1",
+                [
+                    {"type": "toolRequest", "text": "target_compound"},
+                    {"type": "toolResponse", "text": "target_compound"},
+                    {"type": "text", "text": "target_compound"},
+                    {"type": "thinking", "text": "target_compound"},
+                    {"type": "redactedThinking", "text": "target_compound"},
+                ],
+            )
+            gf.commit()
+
+            rows = f.sessions(
+                "--goose", "--goose-db", gf.db, "--types", "tool,text", "target_compound"
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "goose:s1")
+            self.assertEqual(rows[0]["matches"], 3)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_null_session_type_is_included(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_null", session_type=None)
+            gf.add_message(
+                "s_null",
+                [{"type": "toolResponse", "text": "find_null_type"}],
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "find_null_type")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_null"])
+            self.assertEqual(rows[0]["matches"], 1)
         finally:
             f.close()
             gf.close()
