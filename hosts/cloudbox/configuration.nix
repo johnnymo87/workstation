@@ -839,6 +839,34 @@ in
       ''}";
       Restart = "always";
       RestartSec = 5;
+
+      # MEMORY CAP (workstation-pp9r.3). Until 2026-11 this unit was uncapped
+      # in system.slice. Every goose tool shell is a child in this cgroup, so
+      # its usage is goose plus whatever its sessions run.
+      #
+      # 14G + MemorySwapMax=1G: the opencode-serve@ numbers below, for the same
+      # Max-only reasons (h1y6: memory.high stalls instead of killing;
+      # unbounded swap lets the cap relocate into zram). Not true parity: an
+      # opencode tool command runs in its own oc-agent scope (10G), outside its
+      # serve's 14G, while goose's 14G holds goose AND every tool command.
+      # Nightly peaks over the 30 days to 2026-11-05 were 0.9-3.3G; the one
+      # outlier was 28.6G (Oct 20, 133.8G written: a session building, and
+      # memory.peak counts page cache, so less of it was unreclaimable). 14G
+      # sits 4x above the routine.
+      MemoryMax = "14G";
+      MemorySwapMax = "1G";
+      # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
+      # cgroup, and with `stop` ANY oom kill in it would end every goose turn on
+      # the host, the coordinators' included. With `continue`, a killed child
+      # fails one tool call. The cgroup OOM killer picks the single largest
+      # process, so a single fat build is the victim; a many-worker job whose
+      # workers are each smaller than goose can still get goose killed, which
+      # exits the unit and Restart=always brings it back (same as `stop`).
+      #
+      # LIVE AT SWITCH, despite restartIfChanged=false: the switch's
+      # daemon-reload re-realizes cgroup limits on the running unit. Check
+      # /sys/fs/cgroup/system.slice/goose-serve.service/memory.current first.
+      OOMPolicy = "continue";
     };
   };
 
