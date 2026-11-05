@@ -1,7 +1,7 @@
 # oc-cost
 
-Report OpenCode token usage and API cost from the local SQLite database
-(`~/.local/share/opencode/opencode.db`).
+Report OpenCode and Goose token usage and API cost from local SQLite databases
+(`~/.local/share/opencode/opencode.db` and `~/.local/share/goose/sessions/sessions.db`).
 
 Replaces the older `analyze.mjs` script under
 `.agents/skills/tracking-cache-costs/`.
@@ -15,7 +15,9 @@ Replaces the older `analyze.mjs` script under
     oc-cost --reconcile                  # expand the per-model estimated-vs-recorded table
     oc-cost --by-kind                    # split primary vs subagent sessions
     oc-cost --json                       # machine-readable
-    oc-cost --db /path/to/opencode.db    # override DB location
+    oc-cost --db /path/to/opencode.db    # override OpenCode DB location
+    oc-cost --goose-db /path/to/sessions.db  # override Goose DB location
+    oc-cost --no-goose                   # skip Goose accounting
 
 `--days` and `--since/--until` are mutually exclusive.
 
@@ -117,6 +119,18 @@ A row is **flagged** when `abs(Δ$) > $5` **OR** `abs(Δ%) > 5%` (tunable
 constants in `oc_cost.py`). Flagging both ways protects us in both directions:
 it catches under-counting from stale local rates *and* over-counting from a bad
 upstream source (the opus case).
+
+## Goose
+
+`oc-cost` also reads Goose LLM usage when `~/.local/share/goose/sessions/sessions.db` is present (or specified via `--goose-db`). To disable Goose accounting, pass `--no-goose`.
+
+- **Source table**: queries the `usage_ledger` table joined with `sessions` to obtain session providers and parent session relationships.
+- **Cache-inclusive input**: Goose records `input_tokens` inclusive of `cache_read_tokens` and `cache_write_tokens`. `oc-cost` calculates uncached input as `max(0, input - cache_read - cache_write)`.
+- **Estimate vs ledger cost**: headline cost is calculated from `oc-cost`'s rate book (`RATES`), while Goose's ledger `cost` column is used as the recorded cost in reconciliation.
+- **Unrecorded rows**: early Goose records lacked model pricing (`cost` is NULL). These are included in Estimated but excluded from reconciliation Δ (reconciliation compares like with like against `est_cost_recorded`), and surfaced with a note under reconciliation rather than flagged as rate-book drift.
+- **Mocks and unknown providers**: test runs with mock providers (e.g. `mock-rolling`) appear as unpriced models (`goose:mock-rolling/...`) and are excluded from estimated totals.
+- **Vertex reconciliation**: Goose on cloudbox reaches GCP Vertex AI through the same failover proxy as OpenCode, so its calls appear in the same audit log; `--vertex-reconcile` counts Goose Vertex calls alongside OpenCode calls under the mapped rate provider.
+- **Imported sessions**: Goose's import_session copies accumulated totals, so the first call in a continued imported session writes a null-model `carried_forward` ledger row with the whole imported history, timestamped at that call; it is unpriced (no dollar effect) but its tokens land in that day's daily row and the 300k+ size bucket.
 
 ## Caveats
 

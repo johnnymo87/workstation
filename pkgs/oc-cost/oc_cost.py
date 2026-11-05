@@ -230,6 +230,23 @@ def cost_for_message(
     return cost, label
 
 
+def goose_rate_provider(provider_name: Optional[str], model: Optional[str]) -> Optional[str]:
+    """Map a goose provider_name and model to an oc-cost rate-book provider.
+
+    - gcp_vertex_ai -> google-vertex-anthropic for claude* models, else google-vertex
+    - anthropic, google, openai -> map to themselves
+    - anything else -> None (unpriced)
+    """
+    if not provider_name:
+        return None
+    if provider_name == "gcp_vertex_ai":
+        if model and model.startswith("claude"):
+            return "google-vertex-anthropic"
+        return "google-vertex"
+    if provider_name in ("anthropic", "google", "openai"):
+        return provider_name
+    return None
+
 
 def _positive_int(value: str) -> int:
     n = int(value)
@@ -249,8 +266,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="oc-cost",
         description=(
-            "Report OpenCode token usage and API cost "
-            "from ~/.local/share/opencode/opencode.db."
+            "Report OpenCode and Goose token usage and API cost "
+            "from local SQLite databases."
         ),
     )
     parser.add_argument(
@@ -261,6 +278,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--until", help="ISO date YYYY-MM-DD (exclusive UTC midnight).")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of formatted text.")
     parser.add_argument("--db", help="Override path to opencode.db.")
+    parser.add_argument("--goose-db", help="Override path to goose sessions.db.")
+    parser.add_argument(
+        "--no-goose", action="store_true", dest="no_goose",
+        help="Skip reading the goose database.",
+    )
     parser.add_argument(
         "--by-kind", action="store_true", dest="by_kind",
         help=(
@@ -441,7 +463,167 @@ def query_message_rows(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> 
         """,
         {"start_ms": start_ms, "end_ms": end_ms},
     )
-    return [dict(r) for r in cur.fetchall()]
+    rows: list[dict] = []
+    for r in cur.fetchall():
+        d = dict(r)
+        d["backend"] = "opencode"
+        rows.append(d)
+    return rows
+
+
+def query_goose_rows(
+    goose_db_path: str, start_ms: int, end_ms: int
+) -> tuple[list[dict], dict[str, str]]:
+    """Query goose usage_ledger and sessions in [start_ms, end_ms] ms, inclusive like _BASE_WHERE.
+
+    Returns (rows, kind_map) where kind_map maps 'goose:'+sid -> 'subagent' | 'primary'.
+    """
+    uri = f"file:{goose_db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("BEGIN")
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT
+                u.session_id,
+                u.created_timestamp,
+                date(u.created_timestamp, 'unixepoch') AS day,
+                u.model,
+                u.input_tokens,
+                u.output_tokens,
+                u.cache_read_tokens,
+                u.cache_write_tokens,
+                u.cost,
+                s.provider_name,
+                s.parent_session_id
+            FROM usage_ledger u
+            LEFT JOIN sessions s ON u.session_id = s.id
+            WHERE u.created_timestamp * 1000 BETWEEN :start_ms AND :end_ms
+            ORDER BY u.created_timestamp ASC
+            """,
+            {"start_ms": start_ms, "end_ms": end_ms},
+        )
+        rows: list[dict] = []
+        kind_map: dict[str, str] = {}
+        for r in cur.fetchall():
+            sid = r["session_id"]
+            provider_name = r["provider_name"]
+            model = r["model"]
+            day = r["day"]
+            inp_raw = r["input_tokens"] or 0
+            cr = r["cache_read_tokens"] or 0
+            cw = r["cache_write_tokens"] or 0
+            out = r["output_tokens"] or 0
+            cost = r["cost"]
+            parent_id = r["parent_session_id"]
+
+            rate_prov = goose_rate_provider(provider_name, model)
+            uncached_inp = max(0, inp_raw - cr - cw)
+            goose_sid = f"goose:{sid}"
+
+            rows.append({
+                "session_id": goose_sid,
+                "provider": f"goose:{provider_name or 'unknown'}",
+                "rate_provider": rate_prov,
+                "model": model,
+                "day": day,
+                "input": uncached_inp,
+                "output": out,
+                "reasoning": 0,
+                "cache_read": cr,
+                "cache_write": cw,
+                "recorded_cost": float(cost) if cost is not None else 0.0,
+                "recorded_missing": cost is None,
+                "backend": "goose",
+            })
+            kind_map[goose_sid] = "subagent" if parent_id else "primary"
+        return rows, kind_map
+    finally:
+        try:
+            conn.rollback()
+        finally:
+            conn.close()
+
+
+_BUCKET_ORDER = ["0-50k", "50-100k", "100-150k", "150-200k", "200-300k", "300k+"]
+
+
+def _bucket_for_size(size: int) -> str:
+    if size <= 50000:
+        return "0-50k"
+    elif size <= 100000:
+        return "50-100k"
+    elif size <= 150000:
+        return "100-150k"
+    elif size <= 200000:
+        return "150-200k"
+    elif size <= 300000:
+        return "200-300k"
+    return "300k+"
+
+
+def merge_daily(opencode_daily: list[dict], goose_rows: list[dict]) -> list[dict]:
+    day_map: dict[str, dict] = {}
+    for d in opencode_daily:
+        day_map[d["day"]] = {
+            "day": d["day"],
+            "msgs": d["msgs"],
+            "cache_read": d["cache_read"],
+            "cache_write": d["cache_write"],
+            "uncached": d["uncached"],
+            "output": d["output"],
+        }
+    for r in goose_rows:
+        day = r.get("day")
+        if not day:
+            continue
+        if day not in day_map:
+            day_map[day] = {
+                "day": day,
+                "msgs": 0,
+                "cache_read": 0,
+                "cache_write": 0,
+                "uncached": 0,
+                "output": 0,
+            }
+        entry = day_map[day]
+        entry["msgs"] += 1
+        entry["cache_read"] += r["cache_read"]
+        entry["cache_write"] += r["cache_write"]
+        entry["uncached"] += r["input"]
+        entry["output"] += r["output"]
+
+    return [day_map[d] for d in sorted(day_map.keys())]
+
+
+def merge_size_buckets(opencode_buckets: list[dict], goose_rows: list[dict]) -> list[dict]:
+    bucket_map: dict[str, dict] = {}
+    for b in opencode_buckets:
+        bucket_map[b["bucket"]] = {
+            "bucket": b["bucket"],
+            "msgs": b["msgs"],
+            "min_size": b["min_size"],
+            "max_size": b["max_size"],
+        }
+    for r in goose_rows:
+        prompt_size = r["input"] + r["cache_read"] + r["cache_write"]
+        b_name = _bucket_for_size(prompt_size)
+        if b_name not in bucket_map:
+            bucket_map[b_name] = {
+                "bucket": b_name,
+                "msgs": 1,
+                "min_size": prompt_size,
+                "max_size": prompt_size,
+            }
+        else:
+            entry = bucket_map[b_name]
+            entry["msgs"] += 1
+            entry["min_size"] = min(entry["min_size"], prompt_size)
+            entry["max_size"] = max(entry["max_size"], prompt_size)
+
+    return [bucket_map[b] for b in _BUCKET_ORDER if b in bucket_map]
 
 
 def estimate(rows: list[dict]) -> dict:
@@ -453,6 +635,7 @@ def estimate(rows: list[dict]) -> dict:
     for row in rows:
         provider = row["provider"]
         model = row["model"]
+        rate_provider = row.get("rate_provider", provider)
         key = (provider, model)
 
         tokens = {
@@ -468,15 +651,17 @@ def estimate(rows: list[dict]) -> dict:
         # Price each row against the day it was recorded, not today, so a
         # window spanning a dated price change prices both sides correctly.
         day = row.get("day")
-        cost_usd, tier_label = cost_for_message(provider, model, tokens, day)
+        cost_usd, tier_label = cost_for_message(rate_provider, model, tokens, day)
 
         if key not in by_model_map:
-            rate_entry = rate_for(provider, model, day)
+            rate_entry = rate_for(rate_provider, model, day)
             priced = rate_entry is not None
 
             by_model_map[key] = {
                 "provider": provider,
+                "rate_provider": rate_provider,
                 "model": model,
+                "backend": row.get("backend", "opencode"),
                 "msgs": 0,
                 "input": 0,
                 "output": 0,
@@ -484,7 +669,9 @@ def estimate(rows: list[dict]) -> dict:
                 "cache_read": 0,
                 "cache_write": 0,
                 "est_cost": 0.0,
+                "est_cost_recorded": 0.0,
                 "recorded_cost": 0.0,
+                "unrecorded_msgs": 0,
                 "tiers": {"base": 0, "long_context": 0, "unpriced": 0},
                 "priced": priced,
             }
@@ -497,9 +684,13 @@ def estimate(rows: list[dict]) -> dict:
         agg["cache_read"] += row["cache_read"]
         agg["cache_write"] += row["cache_write"]
         agg["recorded_cost"] += row["recorded_cost"]
+        if row.get("recorded_missing"):
+            agg["unrecorded_msgs"] += 1
 
         if cost_usd is not None:
             agg["est_cost"] += cost_usd
+            if not row.get("recorded_missing"):
+                agg["est_cost_recorded"] += cost_usd
 
         if tier_label in agg["tiers"]:
             agg["tiers"][tier_label] += 1
@@ -516,7 +707,7 @@ def estimate(rows: list[dict]) -> dict:
     # 2. recorded_cost descending
     # 3. provider ascending
     # 4. model ascending
-    by_model_list.sort(key=lambda x: (-x["est_cost"], -x["recorded_cost"], x["provider"], x["model"]))
+    by_model_list.sort(key=lambda x: (-x["est_cost"], -x["recorded_cost"], x["provider"] or "", x["model"] or ""))
 
     total_est = sum(item["est_cost"] for item in by_model_list if item["priced"])
 
@@ -552,10 +743,13 @@ def reconcile(
     total_recorded = 0.0
     for row in by_model:
         est = row.get("est_cost", 0.0) or 0.0
+        est_recorded = row.get("est_cost_recorded", est)
+        if est_recorded is None:
+            est_recorded = est
         recorded = row.get("recorded_cost", 0.0) or 0.0
-        delta = recorded - est
-        if est != 0:
-            delta_pct = delta / est * 100.0
+        delta = recorded - est_recorded
+        if est_recorded != 0:
+            delta_pct = delta / est_recorded * 100.0
         elif delta == 0:
             delta_pct = 0.0
         else:
@@ -572,7 +766,7 @@ def reconcile(
         "rows": rows,
         "total_est": total_est,
         "total_recorded": total_recorded,
-        "total_delta": total_recorded - total_est,
+        "total_delta": sum(r["delta"] for r in rows),
     }
 
 
@@ -788,7 +982,7 @@ def db_call_counts_by_vertex_model(by_model: list[dict]) -> dict[str, int]:
     that then collapse to the same model are summed."""
     counts: dict[str, int] = {}
     for row in by_model:
-        provider = row.get("provider") or ""
+        provider = row.get("rate_provider") or row.get("provider") or ""
         if not provider.startswith(_VERTEX_PROVIDER_PREFIX):
             continue
         model = (row.get("model") or "").split("@", 1)[0]
@@ -854,6 +1048,7 @@ def vertex_reconciliation_report(
 
 
 _DEFAULT_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+_DEFAULT_GOOSE_DB = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
 
 
 def connect(db_path: str) -> sqlite3.Connection:
@@ -936,7 +1131,10 @@ def render_text(report: dict) -> str:
             f"\n  No usage data in window {meta['window']['start']} → "
             f"{meta['window']['end']}.\n"
         )
-        lines.append(f"Database: {meta['db_path']}\n")
+        lines.append(f"Database: {meta['db_path']}")
+        if meta.get("goose_db_path"):
+            lines.append(f"Goose database: {meta['goose_db_path']}")
+        lines.append("")
         return "\n".join(lines)
 
     est = report["estimate"]
@@ -945,7 +1143,9 @@ def render_text(report: dict) -> str:
     reconcile_full = meta.get("reconcile", False)
 
     # Daily section
-    lines.append(f"\n  OpenCode Usage Report ({meta['active_days']} active days)\n")
+    has_goose = any(m.get("backend") == "goose" for m in est["by_model"])
+    heading_title = "Usage Report (opencode + goose)" if has_goose else "OpenCode Usage Report"
+    lines.append(f"\n  {heading_title} ({meta['active_days']} active days)\n")
     lines.append("DATE        MSGS   READ%  WRITE%  UNCACHED%")
     lines.append("-" * 52)
     for d in daily:
@@ -986,8 +1186,14 @@ def render_text(report: dict) -> str:
     lines.append(
         f"  Estimated: {_fmt_usd(rec['total_est'])}   |   "
         f"Recorded: {_fmt_usd(rec['total_recorded'])}   |   "
-        f"Δ (recorded−estimated): {_fmt_usd(rec['total_delta'])}"
+        f"Δ (recorded−estimated, rows with a recorded cost): {_fmt_usd(rec['total_delta'])}"
     )
+    unrec = sum(m.get("unrecorded_msgs", 0) for m in est["by_model"] if m.get("priced"))
+    if unrec:
+        lines.append(
+            f"  Note: {unrec} goose messages have no recorded cost "
+            "(goose had no price then); they are in Estimated but not in Δ."
+        )
 
     if reconcile_full:
         # Full per-(provider,model) reconciliation table (priced rows only).
@@ -1105,7 +1311,10 @@ def render_text(report: dict) -> str:
         f"\nPeriod: {daily[0]['day']} to {daily[-1]['day']} "
         f"({len(daily)} active days)"
     )
-    lines.append(f"Database: {meta['db_path']}\n")
+    lines.append(f"Database: {meta['db_path']}")
+    if meta.get("goose_db_path"):
+        lines.append(f"Goose database: {meta['goose_db_path']}")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -1166,6 +1375,38 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             raise
 
+        goose_db_read: Optional[str] = None
+        goose_rows: list[dict] = []
+        goose_kind_map: dict[str, str] = {}
+        if not args.no_goose:
+            if args.goose_db:
+                if not os.path.exists(args.goose_db):
+                    print(f"Warning: goose DB not found: {args.goose_db}", file=sys.stderr)
+                else:
+                    try:
+                        goose_rows, goose_kind_map = query_goose_rows(args.goose_db, start_ms, end_ms)
+                        goose_db_read = args.goose_db
+                    except Exception as e:
+                        print(f"Warning: goose usage not counted: {e}", file=sys.stderr)
+                        goose_rows = []
+                        goose_kind_map = {}
+                        goose_db_read = None
+            elif not args.db:
+                if os.path.exists(_DEFAULT_GOOSE_DB):
+                    try:
+                        goose_rows, goose_kind_map = query_goose_rows(_DEFAULT_GOOSE_DB, start_ms, end_ms)
+                        goose_db_read = _DEFAULT_GOOSE_DB
+                    except Exception as e:
+                        print(f"Warning: goose usage not counted: {e}", file=sys.stderr)
+                        goose_rows = []
+                        goose_kind_map = {}
+                        goose_db_read = None
+
+        if goose_rows:
+            rows.extend(goose_rows)
+            daily = merge_daily(daily, goose_rows)
+            buckets = merge_size_buckets(buckets, goose_rows)
+
         # Headline cost is our own per-request tier-aware estimate; recorded
         # $.cost is shown alongside via reconciliation. Only priced rows are
         # reconciled; unpriced models are surfaced separately (never $0).
@@ -1176,6 +1417,7 @@ def main(argv: list[str] | None = None) -> int:
         report = {
             "meta": {
                 "db_path": db_path,
+                "goose_db_path": goose_db_read,
                 "window": {"start": _ms_to_iso(start_ms), "end": _ms_to_iso(end_ms)},
                 "active_days": len(daily),
                 "reconcile": args.reconcile,
@@ -1196,6 +1438,7 @@ def main(argv: list[str] | None = None) -> int:
         }
 
         if args.by_kind:
+            kind_map = None
             try:
                 kind_map = session_kind_map(conn)
             except sqlite3.OperationalError as e:
@@ -1205,9 +1448,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"Warning: --by-kind unavailable ({e}); skipping breakdown.",
                     file=sys.stderr,
                 )
-                kind_map = None
-            if kind_map is not None:
-                report["by_kind"] = summarize_by_kind(rows, kind_map)
+            if kind_map is not None or goose_kind_map:
+                merged_kind = {}
+                if kind_map is not None:
+                    merged_kind.update(kind_map)
+                if goose_kind_map:
+                    merged_kind.update(goose_kind_map)
+                report["by_kind"] = summarize_by_kind(rows, merged_kind)
 
         if args.vertex_reconcile:
             vr = vertex_reconciliation_report(args, est["by_model"], start_ms, end_ms)

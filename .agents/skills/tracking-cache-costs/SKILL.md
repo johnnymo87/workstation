@@ -15,12 +15,13 @@ oc-cost --json | jq '.cost_components.monthly_proj'
 ```
 
 `oc-cost` is a packaged Python CLI in `pkgs/oc-cost/` that queries the
-OpenCode SQLite database (`~/.local/share/opencode/opencode.db`) directly.
+OpenCode SQLite database (`~/.local/share/opencode/opencode.db`) directly,
+along with Goose usage from `~/.local/share/goose/sessions/sessions.db`.
 It replaces the older `analyze.mjs` script that used to live in this skill
 directory.
 
 Output sections:
-- Daily cache read/write/uncached ratios
+- Daily cache read/write/uncached ratios (the daily table mixes OpenCode and Goose; `oc-cost --no-goose` isolates OpenCode for cache-regression checks)
 - Per-model cost breakdown (Anthropic API rates)
 - Cost components — applies each model's own rates, not a dominant-model
   approximation

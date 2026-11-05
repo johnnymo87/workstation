@@ -22,7 +22,7 @@ python3.pkgs.buildPythonApplication {
   '';
 
   meta = with lib; {
-    description = "Report OpenCode token usage and API cost from opencode.db";
+    description = "Report OpenCode and Goose token usage and API cost from local databases";
     license = licenses.mit;
     platforms = platforms.unix;
     mainProgram = "oc-cost";
