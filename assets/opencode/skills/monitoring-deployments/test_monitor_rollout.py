@@ -443,6 +443,29 @@ class EvaluateRollout(unittest.TestCase):
         self.assertIn("intermediate descendant", (msg + printed).lower())
         self.assertIn(DESCENDANT[: mr.SHORT_SHA_LEN], msg + printed)
 
+    def test_still_rolling_when_batch_head_pods_are_not_all_ready(self):
+        # Every pod on the batch head, one Ready and two not: that is an
+        # unfinished (possibly crashing) rollout, not a served merge. Exit 4
+        # here would end the watch before a CrashLoopBackOff could surface.
+        code, msg, _ = evaluate(LATER, [
+            pod_simple("a", LATER, LATER, ready=True),
+            pod_simple("b", LATER, LATER, ready=False),
+            pod_simple("c", LATER, LATER, ready=False),
+        ])
+        self.assertIsNone(code)
+        self.assertIn("pods updating", msg)
+
+    def test_still_rolling_when_an_intermediate_pod_is_unready(self):
+        # Pods on the older proven head are what carry the merge in the
+        # mid-rollout case, so all of them must be serving.
+        code, msg, _ = evaluate(LATER, [
+            pod_simple("x1", DESCENDANT, DESCENDANT, ready=True),
+            pod_simple("x2", DESCENDANT, DESCENDANT, ready=False),
+            pod_simple("y", LATER, LATER, ready=False),
+        ], descendant=DESCENDANT)
+        self.assertIsNone(code)
+        self.assertIn("pods updating", msg)
+
     def test_still_rolling_when_intermediate_pod_is_not_descendant(self):
         # (b) same but X NOT a descendant (compare 'behind') -> exit 3
         code, msg, _ = evaluate(

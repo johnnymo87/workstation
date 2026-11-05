@@ -42,7 +42,10 @@ Exit codes:
      case: the queue landed your commit and one or more others in a single
      batch, and the deploy pipeline ran only on the batch head. Terminal and
      successful -- treat like 0, but the distinct code exists so "deployed"
-     and "deployed under someone else's tag" are never conflated.
+     and "deployed under someone else's tag" are never conflated. It also
+     covers a target caught mid-rollout from one such head to a later one:
+     every pod on the older head is Running+Ready, so your change is serving;
+     the message says the later head's rollout was not judged.
 
 Merge-queue batching (why exit 4 exists):
   On a repo with GitHub's merge queue enabled, the queue batches several PRs
@@ -627,39 +630,44 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
                 all_done = False
                 waiting.append(f"[{label}] {dep}: pods updating")
         else:
-            # In the batched case, a pod counts as done-for-this-merge if it is
-            # Running+Ready AND its own spec tag either matches effective_sha
-            # OR resolves to a commit that is ahead/identical relative to our merge.
-            # Never false-pass: a pod tag that cannot be resolved or proven to
-            # contain the merge keeps the target "pods updating".
+            # Batched case. Every pod must be on a commit PROVEN to contain our
+            # merge: the batch head itself (effective_sha), or an intermediate
+            # head that GitHub says is ahead of/identical to the merge. A tag
+            # that cannot be resolved or proven keeps "pods updating".
+            # Then either every pod is Running+Ready (the ordinary rolled-out
+            # case, as strict as the non-batched path), or the pods on the
+            # OLDER proven heads all are -- the merge is already serving from
+            # them while a later head rolls over them. That later head's own
+            # health is not this merge's question and is not judged here.
+            def serving(p):
+                return p["phase"] == "Running" and p["ready"]
+
             all_tags_proven = True
-            any_done = False
-            accepted_descendant_tags = set()
-
+            older_pods = []
             for p in pods:
-                tag_proven = False
                 if on_target(p, effective_sha):
-                    tag_proven = True
-                elif p["tag"] and merge_sha:
-                    p_cls = classify_deployed_tag(repo, merge_sha, p["tag"],
-                                                  containment_cache)
-                    if p_cls["kind"] == "contained":
-                        tag_proven = True
-                        if p["phase"] == "Running" and p["ready"]:
-                            accepted_descendant_tags.add(p["tag"])
-
-                if not tag_proven:
+                    continue
+                p_cls = (classify_deployed_tag(repo, merge_sha, p["tag"],
+                                               containment_cache)
+                         if p["tag"] and merge_sha else {"kind": "unknown"})
+                if p_cls["kind"] == "contained":
+                    older_pods.append(p)
+                else:
                     all_tags_proven = False
 
-                if tag_proven and p["phase"] == "Running" and p["ready"]:
-                    any_done = True
-
-            healthy = all_tags_proven and any_done
+            all_serving = all(serving(p) for p in pods)
+            older_serving = bool(older_pods) and all(serving(p) for p in older_pods)
+            healthy = all_tags_proven and (all_serving or older_serving)
             if healthy:
                 desc_note = ""
-                if accepted_descendant_tags:
-                    tag_list = ", ".join(sorted(accepted_descendant_tags))
-                    desc_note = f" (accepted pods on intermediate descendant tag {tag_list})"
+                if older_pods and not all_serving:
+                    tag_list = ", ".join(sorted({p["tag"][:SHORT_SHA_LEN] for p in older_pods}))
+                    desc_note = (f" (live on intermediate descendant {tag_list}; "
+                                 f"rollout of {effective_sha} still in progress and NOT judged)")
+                    batched[-1] += desc_note
+                elif older_pods:
+                    tag_list = ", ".join(sorted({p["tag"][:SHORT_SHA_LEN] for p in older_pods}))
+                    desc_note = f" (also pods on intermediate descendant {tag_list})"
                     batched[-1] += desc_note
                 print(f"      => {label}/{dep} rolled out & healthy{desc_note}")
             else:
@@ -679,7 +687,7 @@ def evaluate_rollout(targets, short_sha, selector_tmpl,
         # cluster only ever saw the batch head's tag.
         return EXIT_DEPLOYED_AS_ANCESTOR, (
             "Your commit IS deployed, as an ancestor of a later commit "
-            "(merge-queue batch head). All targets healthy:\n  - "
+            "(merge-queue batch head). Serving on every target:\n  - "
             + "\n  - ".join(batched)
         )
     if all_done:
