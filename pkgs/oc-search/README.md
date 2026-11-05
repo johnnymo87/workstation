@@ -19,6 +19,8 @@ ses_0e1f35200ffeh8OCz65MM0vpfd  Code review Task 1 (@code-reviewer subag   /home
     oc-search --all rules_oci               # every part type
     oc-search -- --some-dashy-string        # `--` protects a dashy query
     oc-search --json --limit 10 mono        # machine-readable
+    oc-search --goose mono                  # also search goose session transcripts
+    oc-search --goose-db ~/path/sessions.db # explicit goose db (implies --goose)
 
     oc-search --index                       # build / refresh the index
     oc-search --index --if-exists           # refresh only if one exists (timer)
@@ -389,6 +391,54 @@ belongs in the lgtm repo, not here.
    `"prune": false` — enabling it would make old parts stale).
 2. **`tmax` is monotonic:** `tmax` is never lowered, so a bogus future
    `time_created` would disable early stopping until `oc-search --index --rebuild`.
+
+## Goose transcripts (`--goose`)
+
+`oc-search --goose QUERY` also searches goose session transcripts
+(`~/.local/share/goose/sessions/sessions.db`, table `messages`) and merges the
+matching goose sessions into the same table/JSON output as opencode sessions
+with `goose:<id>` identifiers, ordered under the same total order
+`(last_match DESC, id DESC)`.
+
+Without `--goose` (or `--goose-db`), goose transcripts are not searched and the
+goose database is not opened.
+
+### Matching semantics and `--types` mapping
+
+One match = one content item in `messages.content_json` (the analogue of one
+opencode `part`), matched via byte-exact case-sensitive substring (`instr`).
+For tools, a goose call is two items (`toolRequest` + `toolResponse`) where
+opencode stores one part, so a needle in both counts 2.
+
+Injected per-turn context messages (`metadata_json` with `turnContext: 1`) are
+excluded, mirroring goose's own chat search.
+
+`--types` maps opencode part types to goose item types:
+
+| opencode `--types` value | goose item types |
+|---|---|
+| `tool` | `toolRequest`, `toolResponse` |
+| `text` | `text` |
+| `reasoning` | `thinking`, `redactedThinking` |
+| anything else (`patch`, `step-start`, `file`, ...) | none |
+
+`--all` matches every item type. Unmapped types yield no goose hits.
+
+### Hidden sessions
+
+Sessions with `session_type = 'hidden'` are excluded: they are goose-internal
+and short-lived (stall-watch "transcript input" runs, recipe retries, tests)
+and goose hides them itself. Note that `acp` sessions, including stall-watch
+per-program coordinators (working_dir under
+`~/.local/state/stall-watch/coord-sessions`), ARE included and can quote other
+sessions' transcripts, so they may rank high with many matches.
+
+### Timeouts
+
+A goose deadline trip does not discard finished opencode results: on a goose
+timeout, oc-search warns on stderr (`goose search of <path> did not finish
+within <budget>s; showing opencode results only`) and outputs opencode rows with
+exit 0. Opencode-side timeouts exit 2 as usual.
 
 ## Rollout and upgrade to v2
 

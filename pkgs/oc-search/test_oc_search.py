@@ -22,6 +22,7 @@ import random
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -29,6 +30,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oc_search  # noqa: E402
+
+# Guard against reading the real goose DB during test runs
+oc_search.DEFAULT_GOOSE_DB = os.path.join(
+    tempfile.gettempdir(), "nonexistent-test-goose-sessions.db"
+)
 
 
 BASE_MS = 1_780_000_000_000
@@ -3231,6 +3237,492 @@ class DifferentialTest(unittest.TestCase):
                 self.assertEqual(limit_got, [])
         finally:
             f.close()
+
+
+def make_goose_db(path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          name TEXT,
+          session_type TEXT,
+          working_dir TEXT
+        );
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY,
+          message_id TEXT,
+          session_id TEXT,
+          role TEXT,
+          content_json TEXT NOT NULL,
+          created_timestamp INTEGER NOT NULL,
+          timestamp TEXT,
+          tokens INTEGER,
+          metadata_json TEXT
+        );
+        """
+    )
+    return conn
+
+
+class GooseFixture:
+    def __init__(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.dir.name, "sessions.db")
+        self.conn = make_goose_db(self.db)
+        self.msg_id = 0
+
+    def add_session(
+        self,
+        sid: str,
+        *,
+        name: str = "a goose session",
+        session_type: str | None = "user",
+        working_dir: str = "/tmp/goose",
+        directory: str | None = None,
+    ):
+        wd = directory if directory is not None else working_dir
+        self.conn.execute(
+            "INSERT INTO sessions (id, name, session_type, working_dir) VALUES (?, ?, ?, ?)",
+            (sid, name, session_type, wd),
+        )
+
+    def add_message(
+        self,
+        sid: str,
+        items: Any,
+        *,
+        created_timestamp: int = 1_780_000_000,
+        role: str = "assistant",
+        metadata_json: Any = None,
+    ):
+        self.msg_id += 1
+        content_json = json.dumps(items) if not isinstance(items, str) else items
+        meta_json = (
+            json.dumps(metadata_json)
+            if metadata_json is not None and not isinstance(metadata_json, str)
+            else metadata_json
+        )
+        self.conn.execute(
+            "INSERT INTO messages (id, message_id, session_id, role, content_json, created_timestamp, metadata_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (self.msg_id, f"msg_{self.msg_id}", sid, role, content_json, created_timestamp, meta_json),
+        )
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+        self.dir.cleanup()
+
+
+class GooseSearchTest(unittest.TestCase):
+    def test_without_goose_default_goose_db_is_not_read(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            add_session(f.conn, "ses_oc", title="OpenCode Title")
+            add_part(f.conn, "ses_oc", type="tool", text="needle_test_1")
+            f.commit()
+
+            gf.add_session("ses_g", name="Goose Title")
+            gf.add_message("ses_g", [{"type": "toolResponse", "text": "needle_test_1"}])
+            gf.commit()
+
+            with mock.patch("oc_search.DEFAULT_GOOSE_DB", gf.db):
+                rows = f.sessions("needle_test_1")
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["id"], "ses_oc")
+
+                rc, out, err = f.search("needle_test_1")
+                self.assertEqual(rc, 0)
+                self.assertNotIn("goose:ses_g", out)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_goose_merges_rows_ordered(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            add_session(f.conn, "ses_oc", title="OC Title", directory="/dir/oc")
+            add_part(f.conn, "ses_oc", type="tool", text="shared_needle", t=10)
+            f.commit()
+
+            ts_sec = (BASE_MS + 20_000) // 1000
+            gf.add_session("ses_g", name="Goose Title", directory="/dir/goose")
+            gf.add_message(
+                "ses_g",
+                [{"type": "toolResponse", "text": "shared_needle"}],
+                created_timestamp=ts_sec,
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "shared_needle")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["id"], "goose:ses_g")
+            self.assertEqual(rows[0]["title"], "Goose Title")
+            self.assertEqual(rows[0]["directory"], "/dir/goose")
+            self.assertEqual(rows[0]["matches"], 1)
+            self.assertEqual(rows[0]["last_match_ms"], ts_sec * 1000)
+
+            self.assertEqual(rows[1]["id"], "ses_oc")
+            self.assertEqual(rows[1]["title"], "OC Title")
+            self.assertEqual(rows[1]["directory"], "/dir/oc")
+            self.assertEqual(rows[1]["matches"], 1)
+            self.assertEqual(rows[1]["last_match_ms"], BASE_MS + 10)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_types_mapping(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_tool")
+            gf.add_message(
+                "s_tool",
+                [
+                    {"type": "toolRequest", "text": "target_tool_req"},
+                    {"type": "toolResponse", "text": "target_tool_resp"},
+                ],
+            )
+
+            gf.add_session("s_text")
+            gf.add_message(
+                "s_text",
+                [
+                    {"type": "text", "text": "target_text"},
+                ],
+            )
+
+            gf.add_session("s_reasoning")
+            gf.add_message(
+                "s_reasoning",
+                [
+                    {"type": "thinking", "text": "target_thinking"},
+                    {"type": "redactedThinking", "text": "target_redacted"},
+                ],
+            )
+
+            gf.add_session("s_other")
+            gf.add_message(
+                "s_other",
+                [
+                    {"type": "unknown_type", "text": "target_unknown"},
+                ],
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--types", "tool", "target_")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_tool"])
+            self.assertEqual(rows[0]["matches"], 2)
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--types", "text", "target_")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_text"])
+            self.assertEqual(rows[0]["matches"], 1)
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--types", "reasoning", "target_")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_reasoning"])
+            self.assertEqual(rows[0]["matches"], 2)
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--all", "target_")
+            self.assertEqual(len(rows), 4)
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--types", "patch", "target_")
+            self.assertEqual(rows, [])
+        finally:
+            f.close()
+            gf.close()
+
+    def test_match_counted_per_item_not_per_message(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_multi")
+            gf.add_message(
+                "s_multi",
+                [
+                    {"type": "toolResponse", "text": "item_needle_1"},
+                    {"type": "toolResponse", "text": "item_needle_2"},
+                ],
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "item_needle")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "goose:s_multi")
+            self.assertEqual(rows[0]["matches"], 2)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_hidden_sessions_excluded(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_vis", session_type="user")
+            gf.add_message("s_vis", [{"type": "toolResponse", "text": "find_me"}])
+
+            gf.add_session("s_hid", session_type="hidden")
+            gf.add_message("s_hid", [{"type": "toolResponse", "text": "find_me"}])
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "find_me")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_vis"])
+        finally:
+            f.close()
+            gf.close()
+
+    def test_limit_across_both_sources(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            add_session(f.conn, "ses_oc1")
+            add_part(f.conn, "ses_oc1", type="tool", text="needle", t=10_000)
+            add_session(f.conn, "ses_oc2")
+            add_part(f.conn, "ses_oc2", type="tool", text="needle", t=8_000)
+            add_session(f.conn, "ses_oc3")
+            add_part(f.conn, "ses_oc3", type="tool", text="needle", t=6_000)
+            f.commit()
+
+            base_sec = BASE_MS // 1000
+            gf.add_session("g1")
+            gf.add_message(
+                "g1",
+                [{"type": "toolResponse", "text": "needle"}],
+                created_timestamp=base_sec + 9,
+            )
+            gf.add_session("g2")
+            gf.add_message(
+                "g2",
+                [{"type": "toolResponse", "text": "needle"}],
+                created_timestamp=base_sec + 7,
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--limit", "3", "needle")
+            self.assertEqual([r["id"] for r in rows], ["ses_oc1", "goose:g1", "ses_oc2"])
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "--limit", "1", "needle")
+            self.assertEqual([r["id"] for r in rows], ["ses_oc1"])
+        finally:
+            f.close()
+            gf.close()
+
+    def test_missing_or_corrupt_goose_db(self):
+        f = Fixture()
+        try:
+            add_session(f.conn, "ses_oc")
+            add_part(f.conn, "ses_oc", type="tool", text="oc_only_needle")
+            f.commit()
+
+            missing_path = os.path.join(f.dir.name, "does-not-exist.db")
+            rc, out, err = f.search("--goose", "--goose-db", missing_path, "oc_only_needle")
+            self.assertEqual(rc, 0)
+            self.assertIn("ses_oc", out)
+            self.assertIn("not found", err)
+
+            corrupt_path = os.path.join(f.dir.name, "corrupt.db")
+            with open(corrupt_path, "w") as fp:
+                fp.write("this is not a sqlite database")
+            rc, out, err = f.search("--goose", "--goose-db", corrupt_path, "oc_only_needle")
+            self.assertEqual(rc, 0)
+            self.assertIn("ses_oc", out)
+            self.assertIn("database error", err)
+        finally:
+            f.close()
+
+    def test_malformed_content_json_skipped(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_good")
+            gf.add_message("s_good", [{"type": "toolResponse", "text": "valid_json_needle"}])
+            gf.add_session("s_bad")
+            gf.add_message("s_bad", "NOT VALID JSON with valid_json_needle")
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "valid_json_needle")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_good"])
+            self.assertEqual(rows[0]["matches"], 1)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_goose_db_implies_goose(self):
+        args = oc_search.parse_args(["--goose-db", "/tmp/sessions.db", "needle"])
+        self.assertTrue(args.goose)
+        self.assertEqual(args.goose_db, "/tmp/sessions.db")
+
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s1")
+            gf.add_message("s1", [{"type": "toolResponse", "text": "implied_needle"}])
+            gf.commit()
+
+            rows = f.sessions("--goose-db", gf.db, "implied_needle")
+            self.assertEqual([r["id"] for r in rows], ["goose:s1"])
+        finally:
+            f.close()
+            gf.close()
+
+    def test_json_keys_match_both_sources(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            add_session(f.conn, "ses_oc")
+            add_part(f.conn, "ses_oc", type="tool", text="key_check_needle")
+            f.commit()
+
+            gf.add_session("ses_g")
+            gf.add_message("ses_g", [{"type": "toolResponse", "text": "key_check_needle"}])
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "key_check_needle")
+            self.assertEqual(len(rows), 2)
+            expected_keys = {"id", "title", "directory", "last_match_ms", "matches"}
+            self.assertEqual(set(rows[0].keys()), expected_keys)
+            self.assertEqual(set(rows[1].keys()), expected_keys)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_goose_deadline_trips(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            add_session(f.conn, "ses_oc", title="OpenCode Title")
+            add_part(f.conn, "ses_oc", type="tool", text="needle_dl")
+            f.commit()
+
+            gf.add_session("ses_g")
+            for _ in range(500):
+                gf.add_message("ses_g", [{"type": "toolResponse", "text": "needle_dl"}])
+            gf.commit()
+
+            orig_open_source = oc_search.open_source
+
+            def fake_open_source(path, deadline=None):
+                conn = orig_open_source(path, deadline)
+                if path == gf.db and deadline is not None:
+                    deadline.deadline = time.monotonic() - 1
+                    deadline.tripped.set()
+                return conn
+
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch("oc_search.open_source", side_effect=fake_open_source):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = oc_search.run(
+                        [
+                            "--db",
+                            f.db,
+                            "--index-path",
+                            f.index,
+                            "--goose",
+                            "--goose-db",
+                            gf.db,
+                            "--timeout",
+                            "10",
+                            "--jobs",
+                            "1",
+                            "needle_dl",
+                        ]
+                    )
+            self.assertEqual(rc, 0)
+            self.assertIn("ses_oc", out.getvalue())
+            self.assertNotIn("goose:ses_g", out.getvalue())
+            self.assertIn("goose search of", err.getvalue())
+            self.assertIn("did not finish within", err.getvalue())
+            self.assertIn("showing opencode results only", err.getvalue())
+        finally:
+            f.close()
+            gf.close()
+
+    def test_turn_context_messages_excluded(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            # Session s_turn: only match has turnContext: 1 -> excluded
+            gf.add_session("s_turn")
+            gf.add_message(
+                "s_turn",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json={"turnContext": 1},
+            )
+
+            # Session s_null: match has NULL metadata_json -> searched
+            gf.add_session("s_null")
+            gf.add_message(
+                "s_null",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json=None,
+            )
+
+            # Session s_invalid: match has invalid metadata_json string -> searched
+            gf.add_session("s_invalid")
+            gf.add_message(
+                "s_invalid",
+                [{"type": "toolResponse", "text": "target_turn_ctx"}],
+                metadata_json="not valid json",
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "target_turn_ctx")
+            matched_ids = {r["id"] for r in rows}
+            self.assertNotIn("goose:s_turn", matched_ids)
+            self.assertIn("goose:s_null", matched_ids)
+            self.assertIn("goose:s_invalid", matched_ids)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_types_compound_tool_text(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s1")
+            gf.add_message(
+                "s1",
+                [
+                    {"type": "toolRequest", "text": "target_compound"},
+                    {"type": "toolResponse", "text": "target_compound"},
+                    {"type": "text", "text": "target_compound"},
+                    {"type": "thinking", "text": "target_compound"},
+                    {"type": "redactedThinking", "text": "target_compound"},
+                ],
+            )
+            gf.commit()
+
+            rows = f.sessions(
+                "--goose", "--goose-db", gf.db, "--types", "tool,text", "target_compound"
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "goose:s1")
+            self.assertEqual(rows[0]["matches"], 3)
+        finally:
+            f.close()
+            gf.close()
+
+    def test_null_session_type_is_included(self):
+        f = Fixture()
+        gf = GooseFixture()
+        try:
+            gf.add_session("s_null", session_type=None)
+            gf.add_message(
+                "s_null",
+                [{"type": "toolResponse", "text": "find_null_type"}],
+            )
+            gf.commit()
+
+            rows = f.sessions("--goose", "--goose-db", gf.db, "find_null_type")
+            self.assertEqual([r["id"] for r in rows], ["goose:s_null"])
+            self.assertEqual(rows[0]["matches"], 1)
+        finally:
+            f.close()
+            gf.close()
 
 
 if __name__ == "__main__":

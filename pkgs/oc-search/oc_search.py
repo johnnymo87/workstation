@@ -77,6 +77,13 @@ from typing import Any, Callable, Iterable
 
 DEFAULT_DB = "~/.local/share/opencode/opencode.db"
 DEFAULT_TYPES = "tool"
+DEFAULT_GOOSE_DB = "~/.local/share/goose/sessions/sessions.db"
+
+GOOSE_TYPE_MAP: dict[str, tuple[str, ...]] = {
+    "tool": ("toolRequest", "toolResponse"),
+    "text": ("text",),
+    "reasoning": ("thinking", "redactedThinking"),
+}
 
 # Bump when the sidecar layout changes; a mismatch forces a rebuild.
 INDEX_SCHEMA_VERSION = 2
@@ -208,6 +215,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     p.add_argument("--db", help=f"Path to opencode.db (default: {DEFAULT_DB}).")
+    p.add_argument(
+        "--goose", action="store_true", help="Also search goose session transcripts."
+    )
+    p.add_argument(
+        "--goose-db",
+        metavar="PATH",
+        help=f"Path to goose sessions.db (default: {DEFAULT_GOOSE_DB}). Implies --goose.",
+    )
     p.add_argument("--index-path", help="Path to the sidecar index db.")
     p.add_argument(
         "--index",
@@ -259,6 +274,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     args = p.parse_args(argv)
+    if args.goose_db:
+        args.goose = True
     if not (args.index or args.index_info) and not args.query:
         p.error("a search query is required")
     return args
@@ -321,14 +338,18 @@ def file_ro_uri(path: str) -> str:
 
 def open_source(path: str, deadline: Deadline | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(file_ro_uri(path), uri=True, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only=ON")
-    conn.execute("PRAGMA busy_timeout=2000")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    conn.execute("PRAGMA cache_size=-65536")
-    if deadline is not None:
-        deadline.arm(conn)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=2000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA cache_size=-65536")
+        if deadline is not None:
+            deadline.arm(conn)
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def part_rowid_bounds(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -1799,6 +1820,80 @@ def resolve_types(args: argparse.Namespace) -> list[str] | None:
     return types or None
 
 
+def resolve_goose_types(types: list[str] | None) -> list[str] | None:
+    if types is None:
+        return None
+    goose_types: list[str] = []
+    for t in types:
+        for gt in GOOSE_TYPE_MAP.get(t, ()):
+            if gt not in goose_types:
+                goose_types.append(gt)
+    return goose_types
+
+
+def search_goose(
+    db_path: str,
+    query: str,
+    types: list[str] | None,
+    deadline: Deadline,
+) -> list[dict[str, Any]]:
+    deadline.check()
+    expanded_path = os.path.expanduser(db_path)
+    if not os.path.exists(expanded_path):
+        warn(f"goose database not found at {expanded_path}")
+        return []
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = open_source(expanded_path, deadline)
+        goose_types = resolve_goose_types(types)
+
+        sql = [
+            "SELECT m.session_id, s.name, s.working_dir, count(*) AS matches, max(m.created_timestamp) AS max_ts",
+            "FROM messages m JOIN sessions s ON s.id = m.session_id, json_each(m.content_json) j",
+            "WHERE (s.session_type != 'hidden' OR s.session_type IS NULL)",
+            "  AND COALESCE(CASE WHEN json_valid(m.metadata_json) THEN json_extract(m.metadata_json, '$.turnContext') END, 0) = 0",
+            "  AND json_valid(m.content_json)",
+            "  AND instr(m.content_json, ?) > 0",
+            "  AND instr(j.value, ?) > 0",
+        ]
+        params: list[Any] = [query, query]
+
+        if goose_types is None:
+            pass
+        elif goose_types:
+            placeholders = ",".join("?" * len(goose_types))
+            sql.append(f"  AND json_extract(j.value, '$.type') IN ({placeholders})")
+            params.extend(goose_types)
+        else:
+            sql.append("  AND 0")
+
+        sql.append("GROUP BY m.session_id")
+        q = "\n".join(sql)
+
+        rows: list[dict[str, Any]] = []
+        for r in conn.execute(q, params):
+            rows.append(
+                {
+                    "id": f"goose:{r['session_id']}",
+                    "title": r["name"] or "",
+                    "directory": r["working_dir"] or "",
+                    "last_match_ms": (int(r["max_ts"]) if r["max_ts"] is not None else 0) * 1000,
+                    "matches": int(r["matches"]),
+                }
+            )
+        deadline.check()
+        return rows
+    except (sqlite3.DatabaseError, TimedOut) as exc:
+        if deadline.tripped.is_set() or isinstance(exc, TimedOut):
+            raise
+        warn(f"goose database error: {exc}")
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def run(argv: list[str], *, stats: dict[str, Any] | None = None) -> int:
     args = parse_args(argv)
     db_path = os.path.expanduser(args.db or DEFAULT_DB)
@@ -2063,9 +2158,26 @@ def run(argv: list[str], *, stats: dict[str, Any] | None = None) -> int:
             idx.close()
 
     rows = decorate(src, hits)
+    src.close()
+
+    if args.goose:
+        goose_db_path = os.path.expanduser(args.goose_db or DEFAULT_GOOSE_DB)
+        try:
+            goose_rows = search_goose(goose_db_path, query, types, deadline)
+            if goose_rows:
+                rows.extend(goose_rows)
+                rows.sort(key=lambda r: (r["last_match_ms"], r["id"]), reverse=True)
+        except (sqlite3.DatabaseError, TimedOut) as exc:
+            if deadline.tripped.is_set() or isinstance(exc, TimedOut):
+                warn(
+                    f"goose search of {goose_db_path} did not finish within {budget:g}s; "
+                    "showing opencode results only"
+                )
+            else:
+                raise
+
     if args.limit > 0:
         rows = rows[: args.limit]
-    src.close()
 
     if args.json:
         print(json.dumps(rows, indent=2))

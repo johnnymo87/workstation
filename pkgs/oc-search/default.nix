@@ -42,7 +42,7 @@ python3.pkgs.buildPythonApplication {
   '';
 
   meta = with lib; {
-    description = "Search OpenCode session history (trigram-indexed substring search)";
+    description = "Search OpenCode and goose session history (trigram-indexed substring search)";
     license = licenses.mit;
     platforms = platforms.unix;
     mainProgram = "oc-search";
