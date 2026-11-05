@@ -2,10 +2,10 @@
 
 Global instructions for every agent session this user runs, on any machine and
 in any harness. This file is `~/.agents/AGENTS.md`, the harness-agnostic
-location: goose reads it natively as its global hints, and opencode loads it
-through the `instructions` key of its config. Rules that only make sense inside
-one harness live beside that harness instead (opencode:
-`~/.config/opencode/AGENTS.md`). Repo-specific instructions live in each
+location: goose reads it natively as its global hints, and opencode reads it
+as its global `~/.config/opencode/AGENTS.md`, which is a link to this file.
+Rules that only make sense inside one harness live beside that harness instead
+(opencode: `~/.config/opencode/AGENTS.opencode.md`). Repo-specific instructions live in each
 project's `AGENTS.md`.
 
 Source: `assets/agents/AGENTS.md` in the
@@ -110,7 +110,7 @@ harnesses, generated from the same agent definitions
 
 - **opencode:** Task-tool agents such as `oracle-opus` and
   `adversarial-reviewer-opus`. Which handle to use on which host, and what to do
-  when one is unavailable, is in `~/.config/opencode/AGENTS.md`.
+  when one is unavailable, is in `~/.config/opencode/AGENTS.opencode.md`.
 - **goose:** `delegate` with `source:` one of `oracle`, `adversarial-reviewer`,
   `code-reviewer`, `spec-reviewer`, `implementer`. The read-only roles get
   `ro-shell` in place of the developer shell.
@@ -398,7 +398,7 @@ agent's serve unit: an opencode bash call inside `opencode-serve@<port>.service`
 a goose tool shell inside the system unit `goose-serve.service`. Anything that
 restarts that unit — the nightly reset restarts both — kills your "detached"
 job mid-flight. (opencode on cloudbox is an exception: each bash call gets its
-own scope; see `~/.config/opencode/AGENTS.md`.)
+own scope; see `~/.config/opencode/AGENTS.opencode.md`.)
 
 Check with `cat /proc/self/cgroup` rather than assuming which case you are in.
 

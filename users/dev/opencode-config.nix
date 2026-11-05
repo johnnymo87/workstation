@@ -300,7 +300,7 @@ let
   # source's dropped `variant: high` loses nothing.
   #
   # Re-deploying a `-fable` handle overlaps with a stale serve's pre-rename
-  # `-fable` (the old DEFAULT, no CAUTION). assets/opencode/AGENTS.md tells
+  # `-fable` (the old DEFAULT, no CAUTION). assets/opencode/AGENTS.opencode.md tells
   # callers how to tell them apart: `-opus` listed means `-fable` is this
   # opt-in twin; `-opus` absent means the serve predates the rename.
   mkFableVariant = base:
@@ -994,14 +994,19 @@ let
       };
     });
 
-  # The harness-agnostic user-level instructions (users/dev/agents-instructions.nix)
-  # come in through `instructions`; opencode's own ~/.config/opencode/AGENTS.md,
-  # below, holds only the opencode-specific rules. An absolute path, because
-  # opencode globs an absolute `instructions` entry in its directory (a real
-  # file there; see agents-instructions.nix for why it is not a symlink). This
-  # replaces any runtime `instructions` array on merge (jq `*` replaces arrays).
+  # The opencode-ONLY user-level instructions (AGENTS.opencode.md, deployed
+  # below) come in through `instructions`; the harness-agnostic ones are
+  # opencode's global ~/.config/opencode/AGENTS.md slot, linked to
+  # ~/.agents/AGENTS.md. That way round, not the reverse, because a serve reads
+  # its config once (cached for its lifetime) but re-reads instruction FILES
+  # every turn: across a switch, a live serve keeps the shared rules and only
+  # lacks the opencode-only ones until it restarts. It also keeps the shared
+  # rules ahead of a project's AGENTS.md, where they always were.
+  # Absolute path: opencode globs an absolute entry in its directory (a
+  # home.file link resolves fine). This replaces any runtime `instructions`
+  # array on merge (jq `*` replaces arrays); none existed when this was added.
   opencodeManaged = lib.recursiveUpdate (lib.recursiveUpdate opencodeBase opencodeOverlay) {
-    instructions = [ "${config.home.homeDirectory}/.agents/AGENTS.md" ];
+    instructions = [ "${config.home.homeDirectory}/.config/opencode/AGENTS.opencode.md" ];
   };
 
   opencodeManagedFile = pkgs.writeText "opencode.managed.json"
@@ -1015,11 +1020,15 @@ in
   # TUI config (separate from opencode.json -- opencode reads tui settings from tui.json)
   xdg.configFile."opencode/tui.json".source = "${assetsPath}/opencode/tui.json";
 
-  # opencode-ONLY user-level instructions (Task-tool agent handles, plugins, the
-  # serve's bash scoping). Everything harness-agnostic is ~/.agents/AGENTS.md
-  # (assets/agents/AGENTS.md), loaded via `instructions` above and read by goose
-  # natively. Repo-specific instructions still live in each project's AGENTS.md.
-  xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
+  # User-level instructions. opencode's global slot is a link to the
+  # harness-agnostic ~/.agents/AGENTS.md (a real file written by
+  # users/dev/agents-instructions.nix, which goose reads natively): one source.
+  # The opencode-only rules (Task-tool agent handles, plugins, the serve's bash
+  # scoping) are AGENTS.opencode.md, loaded via `instructions` above.
+  # Repo-specific instructions still live in each project's AGENTS.md.
+  xdg.configFile."opencode/AGENTS.md".source =
+    config.lib.file.mkOutOfStoreSymlink "${config.home.homeDirectory}/.agents/AGENTS.md";
+  xdg.configFile."opencode/AGENTS.opencode.md".source = "${assetsPath}/opencode/AGENTS.opencode.md";
 
   # NOTE: the worktree-guard opencode plugin was removed 2026-07-25. It never
   # loaded on any process (see below), and its path heuristic flagged every

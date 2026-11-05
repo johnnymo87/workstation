@@ -2,10 +2,11 @@
 
 The shared rules for every harness (git safety, commit identity, reporting,
 bash, backgrounding, skills, ...) are in `~/.agents/AGENTS.md`, which opencode
-loads through the `instructions` key of its config. This file holds only what
-is specific to opencode: its Task-tool agents, its plugins, and its serve.
+reads as its global `~/.config/opencode/AGENTS.md` (a link to it). This file,
+loaded through the `instructions` key of opencode's config, holds only what is
+specific to opencode: its Task-tool agents, its plugins, and its serve.
 
-Source: `assets/opencode/AGENTS.md` in the
+Source: `assets/opencode/AGENTS.opencode.md` in the
 [workstation](https://github.com/johnnymo87/workstation) repo (the shared file
 is `assets/agents/AGENTS.md`). This one is deployed by `users/dev/opencode-config.nix`, the shared one by
 `users/dev/agents-instructions.nix`.

@@ -3,9 +3,9 @@
 # ONE source (assets/agents/AGENTS.md), read by every harness on every host:
 #   - goose reads ~/.agents/AGENTS.md natively as a global hint
 #     (crates/goose/src/hints/load_hints.rs, Paths::in_agents_home_dir).
-#   - opencode reads it through `instructions` in its managed config
-#     (users/dev/opencode-config.nix). opencode's own global file,
-#     ~/.config/opencode/AGENTS.md, carries only opencode-specific rules.
+#   - opencode reads it as its global ~/.config/opencode/AGENTS.md, which is a
+#     link to this file (users/dev/opencode-config.nix). Its opencode-only rules
+#     are a separate file loaded through `instructions`.
 #
 # A REAL FILE, NOT A HOME-MANAGER SYMLINK. goose canonicalizes the hint path and
 # skips it, with only a tracing warning, when the real path falls outside the
