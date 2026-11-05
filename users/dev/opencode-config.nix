@@ -994,7 +994,15 @@ let
       };
     });
 
-  opencodeManaged = lib.recursiveUpdate opencodeBase opencodeOverlay;
+  # The harness-agnostic user-level instructions (users/dev/agents-instructions.nix)
+  # come in through `instructions`; opencode's own ~/.config/opencode/AGENTS.md,
+  # below, holds only the opencode-specific rules. An absolute path, because
+  # opencode globs an absolute `instructions` entry in its directory (a real
+  # file there; see agents-instructions.nix for why it is not a symlink). This
+  # replaces any runtime `instructions` array on merge (jq `*` replaces arrays).
+  opencodeManaged = lib.recursiveUpdate (lib.recursiveUpdate opencodeBase opencodeOverlay) {
+    instructions = [ "${config.home.homeDirectory}/.agents/AGENTS.md" ];
+  };
 
   opencodeManagedFile = pkgs.writeText "opencode.managed.json"
     (builtins.toJSON opencodeManaged);
@@ -1007,9 +1015,10 @@ in
   # TUI config (separate from opencode.json -- opencode reads tui settings from tui.json)
   xdg.configFile."opencode/tui.json".source = "${assetsPath}/opencode/tui.json";
 
-  # User-level AGENTS.md -- global instructions for all OpenCode sessions
-  # (e.g. bash environment quirks like "no sleep"). Repo-specific instructions
-  # still live in each project's AGENTS.md.
+  # opencode-ONLY user-level instructions (Task-tool agent handles, plugins, the
+  # serve's bash scoping). Everything harness-agnostic is ~/.agents/AGENTS.md
+  # (assets/agents/AGENTS.md), loaded via `instructions` above and read by goose
+  # natively. Repo-specific instructions still live in each project's AGENTS.md.
   xdg.configFile."opencode/AGENTS.md".source = "${assetsPath}/opencode/AGENTS.md";
 
   # NOTE: the worktree-guard opencode plugin was removed 2026-07-25. It never
