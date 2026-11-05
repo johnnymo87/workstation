@@ -839,6 +839,30 @@ in
       ''}";
       Restart = "always";
       RestartSec = 5;
+
+      # MEMORY CAP (workstation-pp9r.3). Until 2026-11 this unit was uncapped
+      # in system.slice. Every goose tool shell is a child in this cgroup, so
+      # its usage is goose plus whatever its sessions run.
+      #
+      # 14G + MemorySwapMax=1G = parity with each opencode-serve@ below, so a
+      # goose session can run the same builds an opencode one can, and for the
+      # same Max-only reasons (h1y6: memory.high stalls instead of killing;
+      # unbounded swap lets the cap relocate into zram). Nightly peaks over
+      # the 30 days to 2026-11-05 were 0.9-3.3G; the one outlier was 28.6G
+      # (Oct 20, 133.8G written: a session building, the shape this cap is
+      # for). 14G sits 4x above the routine and far below the runaway.
+      MemoryMax = "14G";
+      MemorySwapMax = "1G";
+      # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
+      # cgroup, so the kernel usually picks a fat child (a build, a test run),
+      # and with `stop` that one kill would end every goose turn on the host,
+      # the coordinators' included. With `continue` only that command dies and
+      # its session sees a failed tool call. If goose itself is the victim the
+      # unit exits anyway and Restart=always brings it back.
+      #
+      # restartIfChanged=false means this lands at the next goose-serve
+      # restart, which reset-workspace does nightly at 03:00 (Step 6).
+      OOMPolicy = "continue";
     };
   };
 
