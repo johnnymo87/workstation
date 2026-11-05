@@ -408,6 +408,16 @@ function M.offer_revive(desc, result)
       )
       return
     end
+    if revive.is_goose_sid(sid) then
+      local msg = string.format(
+        "revived %s: worktree recreated at %s on %s @ %s. Tell the agent uncommitted work is gone.",
+        sid,
+        offer.path,
+        offer.branch,
+        offer.tip_short
+      )
+      vim.notify(msg, vim.log.levels.INFO)
+    end
     M.attach({ sid = sid })
   end)
   if not started then
@@ -424,7 +434,7 @@ end
 --- Refusing upfront and visibly warning the user prevents the silent turn hang.
 ---
 --- THE OFFER (ASYNC, SILENT ON FAILURE):
---- When desc.sid is valid (^ses_[%w]+$), `oc-revive plan <sid>` runs in the background.
+--- When desc.sid is valid (revive.valid_sid), `oc-revive plan <sid>` runs in the background.
 --- Spawn failure, non-zero exit, timeout, unparseable JSON, or a plan that fails
 --- revive.offers validation are all silent, so the refusal stays the whole story
 --- whenever there is nothing safe to offer. An actionable plan gets a confirm
@@ -443,7 +453,8 @@ function M.refuse_dir_missing(desc)
   )
 
   local sid = (type(desc) == "table" and type(desc.sid) == "string") and desc.sid or nil
-  if sid and sid:match("^ses_[%w]+$") then
+  local revive = require("user.session_switcher.revive")
+  if sid and revive.valid_sid(sid) then
     if M.revive_inflight[sid] then
       -- No second plan while an apply holds the repo lock.
       vim.notify("a revive of " .. sid .. " is already running", vim.log.levels.INFO)
@@ -461,12 +472,19 @@ function M.refuse_dir_missing(desc)
         if not ok then
           return
         end
-        local revive = require("user.session_switcher.revive")
         local offers = revive.offers(plan, sid, desc.directory)
         if not offers then
           if revive.blocked(plan, sid, desc.directory) then
             local msg = string.format(
               "revive blocked: a revive worktree for this branch already exists; run `oc-revive %s` for details",
+              sid
+            )
+            vim.schedule(function()
+              pcall(vim.notify, msg, vim.log.levels.WARN)
+            end)
+          elseif revive.sibling_refused(plan, sid, desc.directory) then
+            local msg = string.format(
+              "revive refused: an opencode session also lives in this directory; run `oc-revive %s` for the options",
               sid
             )
             vim.schedule(function()

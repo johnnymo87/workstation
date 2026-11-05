@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -18,9 +19,10 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Iterable
 
 DEFAULT_DB_PATH = "~/.local/share/opencode/opencode.db"
+DEFAULT_GOOSE_DB_PATH = "~/.local/share/goose/sessions/sessions.db"
 DEFAULT_FRONTDOOR_URL = "http://127.0.0.1:4700"
 
 # Guard against a late-landing move from an earlier attempt (e.g. 504 gateway timeout):
@@ -193,6 +195,21 @@ def get_session_referencing_path(conn: sqlite3.Connection, path: str) -> str | N
     return None
 
 
+def get_unarchived_opencode_sibling(conn: sqlite3.Connection, path: str) -> str | None:
+    """Return the ID of any unarchived opencode session referencing path or any subdirectory of it, or None."""
+    cur = conn.cursor()
+    paths_to_check = {path, os.path.realpath(path)}
+    for p in paths_to_check:
+        cur.execute(
+            "SELECT id FROM session WHERE (directory = ? OR directory LIKE ? || '/%') AND time_archived IS NULL LIMIT 1",
+            (p, p),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return row[0]
+    return None
+
+
 def is_path_referenced_in_db(conn: sqlite3.Connection, path: str) -> bool:
     """Check if path or any subdirectory of it is referenced by any session row."""
     return get_session_referencing_path(conn, path) is not None
@@ -210,6 +227,32 @@ def get_git_common_dir(repo: str) -> str:
     if not os.path.isabs(git_common):
         git_common = os.path.normpath(os.path.join(repo, git_common))
     return git_common
+
+
+@contextlib.contextmanager
+def repo_lock(repo: str) -> Any:
+    """Acquire flock on <git-common-dir>/oc-revive.lock with timeout."""
+    git_common = get_git_common_dir(repo)
+    lock_path = os.path.join(git_common, "oc-revive.lock")
+
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    lock_timeout = get_lock_timeout_seconds()
+    start_lock = time.time()
+    locked = False
+    try:
+        while not locked:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except (BlockingIOError, OSError):
+                if time.time() - start_lock > lock_timeout:
+                    raise ReviveError(f"Timed out waiting for lock on {lock_path}")
+                time.sleep(0.05)
+        yield
+    finally:
+        if locked:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def parse_ledger_line(line: str) -> tuple[str, float | None, str | None] | None:
@@ -368,17 +411,31 @@ COMMIT_OUTPUT_RE = re.compile(
 )
 
 
-def extract_last_commit_evidence(
-    db_conn: sqlite3.Connection,
-    session_id: str,
-) -> tuple[str, str] | None:
-    """Extract the LAST (branch, sha) from the session's bash tool outputs, ignoring detached HEAD."""
+def last_commit_evidence(outputs: Iterable[str]) -> tuple[str, str] | None:
+    """Extract the LAST (branch, sha) from tool outputs, ignoring detached HEAD."""
+    last_evidence = None
+    for output in outputs:
+        if not isinstance(output, str):
+            continue
+        for m in COMMIT_OUTPUT_RE.finditer(output):
+            if m.group(1):  # detached HEAD
+                continue
+            branch = m.group(2)
+            sha = m.group(3)
+            if branch in ("detached", "HEAD"):
+                continue
+            last_evidence = (branch, sha)
+    return last_evidence
+
+
+def opencode_tool_outputs(db_conn: sqlite3.Connection, session_id: str) -> list[str]:
+    """Read tool output strings from an opencode session's parts."""
     cur = db_conn.cursor()
     cur.execute(
         "SELECT data FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC",
         (session_id,),
     )
-    last_evidence = None
+    outputs: list[str] = []
     for (data_raw,) in cur.fetchall():
         try:
             data = json.loads(data_raw)
@@ -393,19 +450,56 @@ def extract_last_commit_evidence(
         if output is None and data.get("tool") == "bash":
             output = data.get("text")
 
-        if not isinstance(output, str):
+        if isinstance(output, str):
+            outputs.append(output)
+    return outputs
+
+
+def extract_last_commit_evidence(
+    db_conn: sqlite3.Connection,
+    session_id: str,
+) -> tuple[str, str] | None:
+    """Extract the LAST (branch, sha) from the session's bash tool outputs, ignoring detached HEAD."""
+    return last_commit_evidence(opencode_tool_outputs(db_conn, session_id))
+
+
+def goose_tool_outputs(conn: sqlite3.Connection, native_id: str) -> list[str]:
+    """Read tool output strings from a goose session's toolResponse messages."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT content_json FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id ASC",
+        (native_id,),
+    )
+    outputs: list[str] = []
+    for (content_json_raw,) in cur:
+        if not content_json_raw:
             continue
-
-        for m in COMMIT_OUTPUT_RE.finditer(output):
-            if m.group(1):  # detached HEAD
+        try:
+            items = json.loads(content_json_raw)
+        except Exception:
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
                 continue
-            branch = m.group(2)
-            sha = m.group(3)
-            if branch in ("detached", "HEAD"):
+            if item.get("type") != "toolResponse":
                 continue
-            last_evidence = (branch, sha)
-
-    return last_evidence
+            tool_result = item.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            val = tool_result.get("value")
+            if not isinstance(val, dict):
+                continue
+            content = val.get("content")
+            if not isinstance(content, list):
+                continue
+            for elem in content:
+                if isinstance(elem, dict) and elem.get("type") == "text":
+                    txt = elem.get("text")
+                    if isinstance(txt, str):
+                        outputs.append(txt)
+    return outputs
 
 
 def is_branch_merged(repo: str, tip_sha: str, trunk: str | None) -> bool:
@@ -428,11 +522,12 @@ def is_branch_merged(repo: str, tip_sha: str, trunk: str | None) -> bool:
     return res.returncode == 0
 
 
-def find_branch_candidates(
+def branch_candidates(
     repo: str,
-    session_id: str,
     dead_dir: str,
-    db_conn: sqlite3.Connection,
+    evidence: tuple[str, str] | None,
+    choose_path: Callable[[str], str],
+    action: str,
 ) -> list[dict[str, Any]]:
     """Find and validate branch candidates for reviving dead_dir."""
     slug = os.path.basename(dead_dir)
@@ -449,7 +544,6 @@ def find_branch_candidates(
         slug_cand = slug_branch
 
     # 2. Rule 2: bash-evidence branch
-    evidence = extract_last_commit_evidence(db_conn, session_id)
     bash_cand = None
     if evidence:
         ev_branch, ev_sha = evidence
@@ -527,7 +621,7 @@ def find_branch_candidates(
         ).stdout.strip()
 
         merged = is_branch_merged(repo, tip_sha, trunk)
-        revive_p = choose_revive_path(repo, dead_dir, db_conn)
+        revive_p = choose_path(branch)
 
         candidates.append({
             "branch": branch,
@@ -537,11 +631,28 @@ def find_branch_candidates(
             "subject": subject,
             "tip_ct": tip_ct,
             "merged": merged,
-            "action": "add",
+            "action": action,
             "path": revive_p,
         })
 
     return candidates
+
+
+def find_branch_candidates(
+    repo: str,
+    session_id: str,
+    dead_dir: str,
+    db_conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Find and validate branch candidates for reviving dead_dir in opencode."""
+    evidence = extract_last_commit_evidence(db_conn, session_id)
+    return branch_candidates(
+        repo=repo,
+        dead_dir=dead_dir,
+        evidence=evidence,
+        choose_path=lambda branch: choose_revive_path(repo, dead_dir, db_conn),
+        action="add",
+    )
 
 
 DEFAULT_BUSY_THRESHOLD_SECONDS = 600
@@ -665,6 +776,47 @@ def is_session_busy(
     return False
 
 
+def validate_directory_shape(dead_dir: str | None) -> tuple[str | None, str | None]:
+    """Validate dead_dir shape as <repo>/.worktrees/<single-segment>.
+    Returns (repo_dir, error_reason).
+    """
+    if not dead_dir:
+        return None, "invalid_directory_shape: session directory is empty or null"
+
+    norm_dead_dir = os.path.normpath(os.path.abspath(dead_dir))
+    wt_parent = os.path.dirname(norm_dead_dir)
+    repo_dir = os.path.dirname(wt_parent)
+    single_segment = os.path.basename(norm_dead_dir)
+
+    if (
+        os.path.basename(wt_parent) != ".worktrees"
+        or not single_segment
+        or single_segment in (".", "..")
+        or "/" in single_segment
+        or os.path.join(repo_dir, ".worktrees", single_segment) != norm_dead_dir
+    ):
+        return repo_dir, f"invalid_directory_shape: directory '{dead_dir}' is not shaped as <repo>/.worktrees/<single-segment>"
+
+    return repo_dir, None
+
+
+def validate_git_repo(repo_dir: str) -> str | None:
+    """Validate that repo_dir exists and is a git repository.
+    Returns error_reason, or None if valid.
+    """
+    if not os.path.isdir(repo_dir):
+        return f"not_a_git_repo: enclosing repository '{repo_dir}' does not exist"
+
+    git_check = subprocess.run(
+        ["git", "-C", repo_dir, "rev-parse", "--git-dir"],
+        capture_output=True,
+    )
+    if git_check.returncode != 0:
+        return f"not_a_git_repo: enclosing directory '{repo_dir}' is not a git repository"
+
+    return None
+
+
 def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     """Open opencode.db read-only with a 10s timeout."""
     path = db_path or os.environ.get("OPENCODE_DB", DEFAULT_DB_PATH)
@@ -676,8 +828,156 @@ def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
-def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
-    """Plan revival of session sid. Returns plan dictionary."""
+def get_goose_db_connection(db_path: str | None = None) -> sqlite3.Connection:
+    """Open goose sessions.db read-only with a 10s timeout."""
+    path = db_path or os.environ.get("GOOSE_SESSION_DB", DEFAULT_GOOSE_DB_PATH)
+    expanded = os.path.abspath(os.path.expanduser(path))
+    conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
+    return conn
+
+
+def check_opencode_sibling(
+    opencode_db_path: str | None,
+    dead_dir: str,
+) -> tuple[str | None, str | None]:
+    """Check if any unarchived opencode session references dead_dir or a subdirectory.
+    Returns (sibling_sid, unreadable_error).
+    """
+    path = opencode_db_path or os.environ.get("OPENCODE_DB", DEFAULT_DB_PATH)
+    expanded = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(expanded):
+        return None, None
+    try:
+        conn = sqlite3.connect(f"file:{expanded}?mode=ro", uri=True, timeout=10)
+        try:
+            sibling = get_unarchived_opencode_sibling(conn, dead_dir)
+            return sibling, None
+        finally:
+            conn.close()
+    except Exception as e:
+        return None, str(e)
+
+
+def format_opencode_sibling_refusal(sibling_sid: str) -> str:
+    """Format refusal message when an unarchived opencode session references the directory."""
+    return (
+        f"opencode_sibling: opencode session '{sibling_sid}' also has this directory. "
+        f"Recreating it would leave that session a zombie. "
+        f"If '{sibling_sid}' is finished, archive it and re-run. "
+        f"If you still need it, revive it instead (oc-revive {sibling_sid}); "
+        f"that moves its branch to a new worktree, and this goose session can then no longer be revived."
+    )
+
+
+def plan_goose_revive(
+    sid: str,
+    goose_db_path: str | None = None,
+    opencode_db_path: str | None = None,
+) -> dict[str, Any]:
+    """Plan revival of goose session sid (same-path recreation)."""
+    def _refuse(reason: str, dead_dir: str | None = None, repo: str | None = None) -> dict[str, Any]:
+        return {
+            "revivable": False,
+            "harness": "goose",
+            "reason": reason,
+            "sid": sid,
+            "dead_dir": dead_dir,
+            "repo": repo,
+            "snapshot": None,
+            "candidates": [],
+        }
+
+    if not sid.startswith("goose:"):
+        return _refuse(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
+    native_id = sid[len("goose:") :]
+    if not re.match(r"^[0-9]+_[0-9]+$", native_id):
+        return _refuse(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
+    conn = get_goose_db_connection(goose_db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, session_type, working_dir, parent_session_id, archived_at FROM sessions WHERE id = ?",
+            (native_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return _refuse(f"session_not_found: session '{sid}' not found in database")
+
+        _id, session_type, dead_dir, parent_session_id, archived_at = row
+
+        if parent_session_id is not None:
+            return _refuse(
+                f"child_session: session '{sid}' is a child session (parent_session_id={parent_session_id})",
+                dead_dir=dead_dir,
+            )
+
+        if session_type not in ("acp", "user"):
+            return _refuse(
+                f"unsupported_session_type: session '{sid}' has unsupported type '{session_type}'",
+                dead_dir=dead_dir,
+            )
+
+        if archived_at is not None:
+            return _refuse(f"archived_session: session '{sid}' is archived", dead_dir=dead_dir)
+
+        if dead_dir and os.path.lexists(dead_dir):
+            return _refuse(f"directory_exists: directory '{dead_dir}' still exists on disk", dead_dir=dead_dir)
+
+        repo_dir, shape_err = validate_directory_shape(dead_dir)
+        if shape_err:
+            return _refuse(shape_err, dead_dir=dead_dir, repo=repo_dir)
+
+        repo_err = validate_git_repo(repo_dir)
+        if repo_err:
+            return _refuse(repo_err, dead_dir=dead_dir, repo=repo_dir)
+
+        sibling_sid, oc_err = check_opencode_sibling(opencode_db_path, dead_dir)
+        if oc_err:
+            return _refuse(
+                f"opencode_db_unreadable: opencode database could not be read: {oc_err}",
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
+        if sibling_sid:
+            return _refuse(
+                format_opencode_sibling_refusal(sibling_sid),
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
+
+        evidence = last_commit_evidence(goose_tool_outputs(conn, native_id))
+        candidates = branch_candidates(
+            repo=repo_dir,
+            dead_dir=dead_dir,
+            evidence=evidence,
+            choose_path=lambda b: dead_dir,
+            action="recreate",
+        )
+        if not candidates:
+            return _refuse(
+                "no_candidates: zero branch candidates survive validation",
+                dead_dir=dead_dir,
+                repo=repo_dir,
+            )
+
+        return {
+            "revivable": True,
+            "harness": "goose",
+            "reason": None,
+            "sid": sid,
+            "dead_dir": dead_dir,
+            "repo": repo_dir,
+            "snapshot": None,
+            "candidates": candidates,
+        }
+    finally:
+        conn.close()
+
+
+def plan_opencode_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
+    """Plan revival of opencode session sid. Returns plan dictionary."""
     conn = get_db_connection(db_path)
     try:
         cur = conn.cursor()
@@ -723,33 +1023,11 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 "candidates": [],
             }
 
-        # Guard: dead directory must be exactly <repo>/.worktrees/<single-segment>
-        if not dead_dir:
+        repo_dir, shape_err = validate_directory_shape(dead_dir)
+        if shape_err:
             return {
                 "revivable": False,
-                "reason": "invalid_directory_shape: session directory is empty or null",
-                "sid": sid,
-                "dead_dir": None,
-                "repo": None,
-                "snapshot": None,
-                "candidates": [],
-            }
-
-        norm_dead_dir = os.path.normpath(os.path.abspath(dead_dir))
-        wt_parent = os.path.dirname(norm_dead_dir)
-        repo_dir = os.path.dirname(wt_parent)
-        single_segment = os.path.basename(norm_dead_dir)
-
-        if (
-            os.path.basename(wt_parent) != ".worktrees"
-            or not single_segment
-            or single_segment in (".", "..")
-            or "/" in single_segment
-            or os.path.join(repo_dir, ".worktrees", single_segment) != norm_dead_dir
-        ):
-            return {
-                "revivable": False,
-                "reason": f"invalid_directory_shape: directory '{dead_dir}' is not shaped as <repo>/.worktrees/<single-segment>",
+                "reason": shape_err,
                 "sid": sid,
                 "dead_dir": dead_dir,
                 "repo": repo_dir,
@@ -757,26 +1035,11 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
                 "candidates": [],
             }
 
-        # Guard: repo must exist and be a git repository
-        if not os.path.isdir(repo_dir):
+        repo_err = validate_git_repo(repo_dir)
+        if repo_err:
             return {
                 "revivable": False,
-                "reason": f"not_a_git_repo: enclosing repository '{repo_dir}' does not exist",
-                "sid": sid,
-                "dead_dir": dead_dir,
-                "repo": repo_dir,
-                "snapshot": None,
-                "candidates": [],
-            }
-
-        git_check = subprocess.run(
-            ["git", "-C", repo_dir, "rev-parse", "--git-dir"],
-            capture_output=True,
-        )
-        if git_check.returncode != 0:
-            return {
-                "revivable": False,
-                "reason": f"not_a_git_repo: enclosing directory '{repo_dir}' is not a git repository",
+                "reason": repo_err,
                 "sid": sid,
                 "dead_dir": dead_dir,
                 "repo": repo_dir,
@@ -901,6 +1164,17 @@ def plan_revive(sid: str, db_path: str | None = None) -> dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def plan_revive(
+    sid: str,
+    db_path: str | None = None,
+    goose_db_path: str | None = None,
+) -> dict[str, Any]:
+    """Plan revival of session sid. Returns plan dictionary."""
+    if sid.startswith("goose:"):
+        return plan_goose_revive(sid, goose_db_path=goose_db_path, opencode_db_path=db_path)
+    return plan_opencode_revive(sid, db_path=db_path)
 
 
 def fetch_door_session(frontdoor_url: str, sid: str) -> dict[str, Any]:
@@ -1043,6 +1317,181 @@ def _cpe_message(e: subprocess.CalledProcessError) -> str:
     return f"git command failed (exit {e.returncode}): {cmd}" + (f"\n  {details}" if details else "")
 
 
+def apply_goose_revive(
+    sid: str,
+    branch: str,
+    path: str,
+    action: str,
+    expect_tip: str,
+    expect_old_dir: str,
+    goose_db_path: str | None = None,
+    opencode_db_path: str | None = None,
+) -> dict[str, Any]:
+    """Execute revival of goose session sid by recreating the worktree in place."""
+    if action != "recreate":
+        raise ReviveError(f"Action '{action}' not permitted for goose revive. Only 'recreate' is supported.")
+
+    if not sid.startswith("goose:"):
+        raise ReviveError(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
+    native_id = sid[len("goose:") :]
+    if not re.match(r"^[0-9]+_[0-9]+$", native_id):
+        raise ReviveError(f"invalid_session_id: session '{sid}' is not a valid goose session id")
+
+    target_p = os.path.normpath(os.path.abspath(path))
+    expect_old_norm = os.path.normpath(os.path.abspath(expect_old_dir)) if expect_old_dir else ""
+    if (
+        not expect_old_dir
+        or (target_p != expect_old_norm and os.path.realpath(target_p) != os.path.realpath(expect_old_dir))
+    ):
+        raise ReviveError(
+            f"directory-mismatch: recreate needs --path == --expect-old-dir, got path='{path}' and expect-old-dir='{expect_old_dir}'"
+        )
+
+    repo_dir, shape_err = validate_directory_shape(target_p)
+    if shape_err:
+        raise ReviveError(shape_err)
+    repo_err = validate_git_repo(repo_dir)
+    if repo_err:
+        raise ReviveError(repo_err)
+    repo = repo_dir
+
+    with repo_lock(repo):
+        fresh_conn = get_goose_db_connection(goose_db_path)
+        try:
+            cur = fresh_conn.cursor()
+            cur.execute(
+                "SELECT id, session_type, working_dir, parent_session_id, archived_at FROM sessions WHERE id = ?",
+                (native_id,),
+            )
+            row = cur.fetchone()
+        finally:
+            fresh_conn.close()
+
+        if not row:
+            raise ReviveError(f"session_not_found: session '{sid}' not found in database")
+
+        _id, session_type, working_dir, parent_session_id, archived_at = row
+
+        if parent_session_id is not None:
+            raise ReviveError(f"child_session: session '{sid}' is a child session (parent_session_id={parent_session_id})")
+
+        if session_type not in ("acp", "user"):
+            raise ReviveError(f"unsupported_session_type: session '{sid}' has unsupported type '{session_type}'")
+
+        if archived_at is not None:
+            raise ReviveError(f"archived_session: session '{sid}' is archived")
+
+        if not working_dir:
+            raise ReviveError("invalid_directory_shape: session directory is empty or null")
+
+        working_dir_norm = os.path.normpath(os.path.abspath(working_dir))
+        if (
+            working_dir != expect_old_dir
+            and working_dir_norm != expect_old_norm
+            and os.path.realpath(working_dir) != os.path.realpath(expect_old_dir)
+        ):
+            raise ReviveError(
+                f"directory-mismatch: session '{sid}' working_dir is '{working_dir}', expected '{expect_old_dir}'"
+            )
+
+        if os.path.lexists(target_p):
+            raise ReviveError(f"plan-changed: path '{target_p}' already exists on disk")
+
+        sibling_sid, oc_err = check_opencode_sibling(opencode_db_path, target_p)
+        if oc_err:
+            raise ReviveError(f"opencode_db_unreadable: opencode database could not be read: {oc_err}")
+        if sibling_sid:
+            raise ReviveError(format_opencode_sibling_refusal(sibling_sid))
+
+        tip_res = subprocess.run(
+            ["git", "-C", repo, "rev-parse", f"refs/heads/{branch}"],
+            capture_output=True,
+            text=True,
+        )
+        if tip_res.returncode != 0:
+            raise ReviveError(f"plan-changed: branch '{branch}' no longer exists in repository '{repo}'")
+        current_tip = tip_res.stdout.strip()
+        if current_tip != expect_tip:
+            raise ReviveError(
+                f"plan-changed: branch '{branch}' tip moved from {expect_tip} to {current_tip}"
+            )
+
+        # The prune runs before the active-worktree check so the dead path's stale entry is not mistaken for a live checkout.
+        subprocess.run(["git", "-C", repo, "worktree", "prune"], check=True, capture_output=True)
+
+        active_wt_map = get_branch_to_active_worktree(repo)
+        if branch in active_wt_map:
+            raise ReviveError(
+                f"branch-checked-out: branch '{branch}' is already checked out at '{active_wt_map[branch]}'"
+            )
+
+        add_res = subprocess.run(
+            ["git", "-C", repo, "worktree", "add", target_p, branch],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if add_res.returncode != 0:
+            target_real = os.path.realpath(target_p)
+            entry = None
+            try:
+                for e in get_worktree_entries(repo):
+                    e_p = e.get("path")
+                    if e_p and (e_p == target_p or os.path.realpath(e_p) == target_real):
+                        entry = e
+                        break
+            except subprocess.CalledProcessError:
+                entry = None
+
+            raw_output = (add_res.stderr or "") + (add_res.stdout or "")
+            tail = _tail(raw_output)
+
+            if (
+                add_res.returncode > 0
+                and entry is not None
+                and not entry.get("prunable")
+                and not entry.get("locked")
+                and entry.get("branch") == branch
+                and entry.get("head") == expect_tip
+                and os.path.isdir(target_p)
+            ):
+                print(
+                    f"WARNING: git worktree add exited {add_res.returncode}, most likely a failing post-checkout hook, "
+                    f"but the worktree at '{target_p}' is on '{branch}' at {expect_tip[:9]}; continuing.\n"
+                    + (f"  Hook output (tail):\n    " + tail.replace("\n", "\n    ") + "\n" if tail else "")
+                    + "  Any setup that hook does was skipped; run it inside the repo's dev shell if you need it.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                raise ReviveError(
+                    f"plan-changed: git worktree add failed (exit {add_res.returncode}): {tail}; nothing was removed. Inspect {target_p} by hand."
+                )
+
+        if not os.path.isdir(target_p):
+            raise ReviveError(f"worktree-creation-failed: directory '{target_p}' was not created")
+
+        head_res = subprocess.run(
+            ["git", "-C", target_p, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if head_res.returncode != 0 or head_res.stdout.strip() != branch:
+            raise ReviveError(
+                f"worktree-creation-failed: worktree at '{target_p}' is not on expected branch '{branch}'"
+            )
+
+    return {
+        "ok": True,
+        "sid": sid,
+        "path": target_p,
+        "branch": branch,
+        "tip": expect_tip,
+        "harness": "goose",
+    }
+
+
 def apply_revive(
     sid: str,
     branch: str,
@@ -1087,22 +1536,7 @@ def apply_revive(
             raise ReviveError(f"Repo directory '{repo}' not found")
 
         git_common = get_git_common_dir(repo)
-        lock_path = os.path.join(git_common, "oc-revive.lock")
-
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-        lock_timeout = get_lock_timeout_seconds()
-        start_lock = time.time()
-        locked = False
-        try:
-            while not locked:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    locked = True
-                except (BlockingIOError, OSError):
-                    if time.time() - start_lock > lock_timeout:
-                        raise ReviveError(f"Timed out waiting for lock on {lock_path}")
-                    time.sleep(0.05)
-
+        with repo_lock(repo):
             # Step 1: Idempotent retry check on fresh connection
             fresh_conn = get_db_connection(db_path)
             try:
@@ -1520,11 +1954,6 @@ def apply_revive(
                             os.kill(os.getpid(), signal.SIGINT)
                     else:
                         os.kill(os.getpid(), received_signal)
-
-        finally:
-            if locked:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
     finally:
         conn.close()
 
@@ -1544,6 +1973,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_p = subparsers.add_parser("plan", help="Output revival plan as JSON")
     plan_p.add_argument("sid", help="Session ID")
     plan_p.add_argument("--db", help="Path to opencode.db")
+    plan_p.add_argument("--goose-db", help="Path to goose sessions.db")
 
     # apply subcommand
     apply_p = subparsers.add_parser("apply", help="Apply revival plan")
@@ -1552,13 +1982,14 @@ def main(argv: list[str] | None = None) -> int:
     apply_p.add_argument("--path", required=True, help="New worktree path")
     apply_p.add_argument(
         "--action",
-        choices=["add"],
+        choices=["add", "recreate"],
         default="add",
-        help="Action (only 'add' is supported in v1)",
+        help="Action ('add' for opencode, 'recreate' for goose)",
     )
     apply_p.add_argument("--expect-tip", required=True, help="Expected tip commit SHA")
     apply_p.add_argument("--expect-old-dir", required=True, help="Expected dead directory")
     apply_p.add_argument("--db", help="Path to opencode.db")
+    apply_p.add_argument("--goose-db", help="Path to goose sessions.db")
     apply_p.add_argument("--frontdoor-url", help="Frontdoor URL")
     apply_p.add_argument("--resume", action="store_true", help="Resume an in-flight revival without creating a worktree")
 
@@ -1570,6 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
     resume_p.add_argument("--expect-tip", required=True, help="Expected tip commit SHA")
     resume_p.add_argument("--expect-old-dir", required=True, help="Expected dead directory")
     resume_p.add_argument("--db", help="Path to opencode.db")
+    resume_p.add_argument("--goose-db", help="Path to goose sessions.db")
     resume_p.add_argument("--frontdoor-url", help="Frontdoor URL")
 
     # If first argument is neither 'plan', 'apply', 'resume' nor a help flag:
@@ -1580,6 +2012,7 @@ def main(argv: list[str] | None = None) -> int:
         extra_parser = argparse.ArgumentParser(prog="oc-revive")
         extra_parser.add_argument("sid", help="Session ID")
         extra_parser.add_argument("--db", help="Path to opencode.db")
+        extra_parser.add_argument("--goose-db", help="Path to goose sessions.db")
         extra_parser.add_argument("--frontdoor-url", help="Frontdoor URL")
         try:
             extra_args = extra_parser.parse_args(argv)
@@ -1587,7 +2020,7 @@ def main(argv: list[str] | None = None) -> int:
             return e.code if isinstance(e.code, int) else 2
 
         try:
-            plan = plan_revive(extra_args.sid, db_path=extra_args.db)
+            plan = plan_revive(extra_args.sid, db_path=extra_args.db, goose_db_path=extra_args.goose_db)
         except (sqlite3.Error, OSError) as e:
             print(f"Error opening database: {e}", file=sys.stderr)
             return 2
@@ -1597,6 +2030,8 @@ def main(argv: list[str] | None = None) -> int:
         if not plan["revivable"]:
             print(f"Session '{extra_args.sid}' cannot be revived: {plan['reason']}")
             return 0
+
+        is_goose = extra_args.sid.startswith("goose:")
 
         # Human-readable plan
         print(f"Plan for session: {plan['sid']}")
@@ -1621,7 +2056,8 @@ def main(argv: list[str] | None = None) -> int:
                 merged_info = " [MERGED - worktree will be swept ~7 days after session idles]"
             print(f"  [{idx}] Branch:  {c['branch']} (source: {c['source']})")
             print(f"      Tip:     {c['tip_short']} - {c['subject']} ({c['tip_ct']}){merged_info}")
-            print(f"      New cwd: {c['path']}")
+            path_label = "Recreate at:" if is_goose else "New cwd:"
+            print(f"      {path_label} {c['path']}")
 
         print("\nNote: Uncommitted files are NOT carried over; snapshot reference above.")
 
@@ -1645,6 +2081,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         try:
+            if is_goose:
+                res = apply_goose_revive(
+                    sid=extra_args.sid,
+                    branch=chosen_cand["branch"],
+                    path=chosen_cand["path"],
+                    action=chosen_cand["action"],
+                    expect_tip=chosen_cand["tip"],
+                    expect_old_dir=plan["dead_dir"],
+                    goose_db_path=extra_args.goose_db,
+                    opencode_db_path=extra_args.db,
+                )
+                print(
+                    f"worktree recreated at {res['path']} on {res['branch']} @ {res['tip']}; "
+                    f"uncommitted work from before the deletion is gone; verify HEAD before continuing."
+                )
+                return 0
+
             res = apply_revive(
                 sid=extra_args.sid,
                 branch=chosen_cand["branch"],
@@ -1665,6 +2118,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Successfully revived session '{extra_args.sid}' at {res['path']}")
             return 0
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 1
         except ReviveError as e:
             print(f"Revival failed: {e}", file=sys.stderr)
             return 1
@@ -1679,7 +2135,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "plan":
         try:
-            plan = plan_revive(args.sid, db_path=args.db)
+            plan = plan_revive(args.sid, db_path=args.db, goose_db_path=args.goose_db)
         except (sqlite3.Error, OSError) as e:
             print(f"Error opening database: {e}", file=sys.stderr)
             return 2
@@ -1692,6 +2148,53 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("apply", "resume"):
         is_resume = getattr(args, "resume", False) or args.command == "resume"
         action = getattr(args, "action", "add")
+
+        if args.sid.startswith("goose:"):
+            if is_resume:
+                print(
+                    f"Error: session '{args.sid}' is a goose session; goose revives have nothing to resume",
+                    file=sys.stderr,
+                )
+                return 2
+            if action != "recreate":
+                print(
+                    f"Error: --action recreate is required for goose sessions (got '{action}')",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                res = apply_goose_revive(
+                    sid=args.sid,
+                    branch=args.branch,
+                    path=args.path,
+                    action=action,
+                    expect_tip=args.expect_tip,
+                    expect_old_dir=args.expect_old_dir,
+                    goose_db_path=getattr(args, "goose_db", None),
+                    opencode_db_path=args.db,
+                )
+                print(
+                    f"worktree recreated at {res['path']} on {res['branch']} @ {res['tip']}; "
+                    f"uncommitted work from before the deletion is gone; verify HEAD before continuing."
+                )
+                return 0
+            except (sqlite3.Error, OSError) as e:
+                print(f"Error opening database: {e}", file=sys.stderr)
+                return 1
+            except ReviveError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            except subprocess.CalledProcessError as e:
+                print(f"Error: {_cpe_message(e)}", file=sys.stderr)
+                return 1
+
+        if action != "add":
+            print(
+                f"Error: --action add is required for opencode sessions (got '{action}')",
+                file=sys.stderr,
+            )
+            return 2
+
         try:
             res = apply_revive(
                 sid=args.sid,
@@ -1714,6 +2217,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"Successfully revived session '{args.sid}' at {res['path']}")
             return 0
+        except (sqlite3.Error, OSError) as e:
+            print(f"Error opening database: {e}", file=sys.stderr)
+            return 1
         except ReviveError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1

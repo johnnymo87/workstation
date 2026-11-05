@@ -32,6 +32,7 @@ def init_test_db(db_path: str) -> sqlite3.Connection:
             title TEXT,
             time_created INTEGER,
             time_updated INTEGER,
+            time_archived INTEGER,
             agent TEXT,
             model TEXT
         );
@@ -2557,6 +2558,27 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(parsed["revivable"])
         self.assertEqual(parsed["sid"], sid)
 
+    def test_cli_plan_goose_db_flag(self):
+        goose_db_path = os.path.join(self.tmpdir.name, "custom_goose.db")
+        g_conn = init_goose_test_db(goose_db_path)
+        native_id = "20261104_55"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "cli-goose-feat")
+        self._commit_branch("cli-goose-feat")
+        add_goose_session(g_conn, native_id, dead_dir)
+        g_conn.close()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main(["plan", sid, "--goose-db", goose_db_path])
+        self.assertEqual(rc, 0)
+        parsed = json.loads(stdout.getvalue())
+        self.assertTrue(parsed["revivable"])
+        self.assertEqual(parsed["harness"], "goose")
+        self.assertEqual(parsed["sid"], sid)
+        self.assertEqual(parsed["candidates"][0]["action"], "recreate")
+
     def test_cli_plan_unopenable_db_exits_2(self):
         stderr = io.StringIO()
         with mock.patch("sys.stderr", stderr):
@@ -2804,6 +2826,1014 @@ class TestCLI(unittest.TestCase):
         # Verify the created worktree path matches the moved destination and exists on disk
         dest_path = self.door.get_response_data["directory"]
         self.assertTrue(os.path.isdir(dest_path))
+
+
+def init_goose_test_db(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            session_type TEXT NOT NULL,
+            working_dir TEXT,
+            parent_session_id TEXT,
+            archived_at TEXT,
+            updated_at TEXT,
+            name TEXT
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content_json TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+def add_goose_session(
+    conn: sqlite3.Connection,
+    native_id: str,
+    working_dir: str | None,
+    session_type: str = "acp",
+    parent_session_id: str | None = None,
+    archived_at: str | None = None,
+) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO sessions (id, session_type, working_dir, parent_session_id, archived_at) VALUES (?, ?, ?, ?, ?)",
+        (native_id, session_type, working_dir, parent_session_id, archived_at),
+    )
+    conn.commit()
+
+
+def add_goose_tool_response(
+    conn: sqlite3.Connection,
+    native_id: str,
+    text: str,
+    msg_id: int | None = None,
+) -> None:
+    cur = conn.cursor()
+    content = [
+        {
+            "type": "toolResponse",
+            "id": f"toolu_{msg_id or 1}",
+            "toolResult": {
+                "status": "success",
+                "value": {
+                    "resultType": "complete",
+                    "content": [{"type": "text", "text": text}],
+                },
+            },
+        }
+    ]
+    content_json = json.dumps(content)
+    if msg_id is not None:
+        cur.execute(
+            "INSERT INTO messages (id, session_id, role, content_json) VALUES (?, ?, 'user', ?)",
+            (msg_id, native_id, content_json),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)",
+            (native_id, content_json),
+        )
+    conn.commit()
+
+
+class TestGoosePlan(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = init_git_repo(os.path.join(self.tmpdir.name, "repo"))
+        self.worktrees_dir = os.path.join(self.repo, ".worktrees")
+        os.makedirs(self.worktrees_dir, exist_ok=True)
+        self.oc_db_path = os.path.join(self.tmpdir.name, "opencode.db")
+        self.oc_conn = init_test_db(self.oc_db_path)
+        self.goose_db_path = os.path.join(self.tmpdir.name, "goose_sessions.db")
+        self.goose_conn = init_goose_test_db(self.goose_db_path)
+
+    def tearDown(self):
+        self.oc_conn.close()
+        self.goose_conn.close()
+        self.tmpdir.cleanup()
+
+    def _commit_branch(self, branch_name: str) -> str:
+        subprocess.run(["git", "branch", branch_name, "main"], cwd=self.repo, check=True, capture_output=True)
+        wt = os.path.join(self.tmpdir.name, f"wt_{branch_name}")
+        subprocess.run(["git", "worktree", "add", wt, branch_name], cwd=self.repo, check=True, capture_output=True)
+        with open(os.path.join(wt, f"{branch_name}.txt"), "w") as f:
+            f.write(f"content {branch_name}\n")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"Commit on {branch_name}"], cwd=wt, check=True, capture_output=True)
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True, capture_output=True, text=True)
+        tip_sha = res.stdout.strip()
+        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=self.repo, check=True, capture_output=True)
+        return tip_sha
+
+    def test_plan_goose_revivable_slug_branch(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        slug = "probe"
+        dead_dir = os.path.join(self.worktrees_dir, slug)
+        tip_sha = self._commit_branch(slug)
+        add_goose_session(self.goose_conn, native_id, dead_dir, session_type="acp")
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+        self.assertEqual(plan["harness"], "goose")
+        self.assertEqual(plan["sid"], sid)
+        self.assertIsNone(plan["snapshot"])
+        self.assertEqual(plan["dead_dir"], dead_dir)
+        self.assertEqual(plan["repo"], self.repo)
+        self.assertEqual(len(plan["candidates"]), 1)
+        cand = plan["candidates"][0]
+        self.assertEqual(cand["action"], "recreate")
+        self.assertEqual(cand["path"], dead_dir)
+        self.assertEqual(cand["branch"], slug)
+        self.assertEqual(cand["source"], "slug")
+        self.assertEqual(cand["tip"], tip_sha)
+        self.assertEqual(cand["tip_short"], tip_sha[:7])
+        self.assertFalse(cand["merged"])
+
+    def test_plan_goose_commit_evidence_disagreeing(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "slug-feat")
+        slug_tip = self._commit_branch("slug-feat")
+        bash_tip = self._commit_branch("bash-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir, session_type="user")
+        add_goose_tool_response(self.goose_conn, native_id, f"/tmp/probe\n[bash-feat {bash_tip[:7]}] Commit message")
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+        self.assertEqual(len(plan["candidates"]), 2)
+        by_source = {c["source"]: c for c in plan["candidates"]}
+        self.assertIn("slug", by_source)
+        self.assertIn("bash-evidence", by_source)
+        self.assertEqual(by_source["slug"]["branch"], "slug-feat")
+        self.assertEqual(by_source["slug"]["action"], "recreate")
+        self.assertEqual(by_source["slug"]["path"], dead_dir)
+        self.assertEqual(by_source["bash-evidence"]["branch"], "bash-feat")
+        self.assertEqual(by_source["bash-evidence"]["action"], "recreate")
+        self.assertEqual(by_source["bash-evidence"]["path"], dead_dir)
+
+    def test_plan_goose_both_agreeing(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "agree-feat")
+        tip = self._commit_branch("agree-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir, session_type="acp")
+        add_goose_tool_response(self.goose_conn, native_id, f"[agree-feat {tip[:7]}] Agreeing commit")
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+        self.assertEqual(len(plan["candidates"]), 1)
+        self.assertEqual(plan["candidates"][0]["source"], "both")
+        self.assertEqual(plan["candidates"][0]["action"], "recreate")
+        self.assertEqual(plan["candidates"][0]["path"], dead_dir)
+
+    def test_plan_goose_refusal_session_not_found(self):
+        sid = "goose:20261104_99"
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("session_not_found:"))
+        self.assertEqual(plan["sid"], sid)
+
+    def test_plan_goose_refusal_malformed_id(self):
+        sid = "goose:abc"
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("invalid_session_id:"))
+
+        empty_sid = "goose:"
+        plan_empty = oc_revive.plan_revive(empty_sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan_empty["revivable"])
+        self.assertTrue(plan_empty["reason"].startswith("invalid_session_id:"))
+
+    def test_plan_goose_refusal_child_session(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "child-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir, parent_session_id="20261104_01")
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("child_session:"))
+
+    def test_plan_goose_refusal_unsupported_session_type(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "hidden-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir, session_type="hidden")
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("unsupported_session_type:"))
+
+    def test_plan_goose_refusal_archived_session(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "arch-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir, archived_at="2026-11-04T12:00:00Z")
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("archived_session:"))
+
+    def test_plan_goose_refusal_directory_exists(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        existing_dir = os.path.join(self.worktrees_dir, "exists-feat")
+        os.makedirs(existing_dir, exist_ok=True)
+        add_goose_session(self.goose_conn, native_id, existing_dir)
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("directory_exists:"))
+
+    def test_plan_goose_refusal_invalid_directory_shape(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        bad_dir = os.path.join(self.tmpdir.name, "plain_folder")
+        add_goose_session(self.goose_conn, native_id, bad_dir)
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("invalid_directory_shape:"))
+
+    def test_plan_goose_refusal_not_a_git_repo(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        fake_repo = os.path.join(self.tmpdir.name, "not_git")
+        dead_dir = os.path.join(fake_repo, ".worktrees", "some-feat")
+        os.makedirs(fake_repo, exist_ok=True)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("not_a_git_repo:"))
+
+    def test_plan_goose_refusal_no_candidates(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "no-such-branch")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("no_candidates:"))
+
+    def test_plan_goose_refusal_no_candidates_checked_out_elsewhere(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        slug = "checked-out-feat"
+        dead_dir = os.path.join(self.worktrees_dir, slug)
+        self._commit_branch(slug)
+        live_wt = os.path.join(self.tmpdir.name, "live_wt")
+        subprocess.run(["git", "worktree", "add", live_wt, slug], cwd=self.repo, check=True, capture_output=True)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("no_candidates:"))
+
+    def test_plan_goose_refusal_no_candidates_trunk(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "main")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("no_candidates:"))
+
+    def test_plan_goose_refusal_opencode_sibling_at_dead_dir(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-feat")
+        self._commit_branch("sibling-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            ("ses_sibling_exact", dead_dir, 1000, 1000),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        expected_reason = (
+            "opencode_sibling: opencode session 'ses_sibling_exact' also has this directory. "
+            "Recreating it would leave that session a zombie. "
+            "If 'ses_sibling_exact' is finished, archive it and re-run. "
+            "If you still need it, revive it instead (oc-revive ses_sibling_exact); "
+            "that moves its branch to a new worktree, and this goose session can then no longer be revived."
+        )
+        self.assertEqual(plan["reason"], expected_reason)
+
+    def test_plan_goose_opencode_sibling_archived_is_allowed(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-archived-feat")
+        self._commit_branch("sibling-archived-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?)",
+            ("ses_sibling_archived", dead_dir, 1000, 1000, 2000),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+        self.assertEqual(len(plan["candidates"]), 1)
+
+    def test_plan_goose_opencode_sibling_child_session_non_archived_refused(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-child-feat")
+        self._commit_branch("sibling-child-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, parent_id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?, ?)",
+            ("ses_sibling_child", "ses_parent_id", dead_dir, 1000, 1000, None),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("opencode_sibling:"))
+        self.assertIn("ses_sibling_child", plan["reason"])
+
+    def test_plan_goose_refusal_opencode_sibling_at_subdir(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "sibling-sub-feat")
+        self._commit_branch("sibling-sub-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        sub_dir = os.path.join(dead_dir, "nested", "child")
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            ("ses_sibling_sub", sub_dir, 1000, 1000),
+        )
+        self.oc_conn.commit()
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("opencode_sibling:"))
+        self.assertIn("ses_sibling_sub", plan["reason"])
+
+    def test_plan_goose_refusal_opencode_db_unreadable(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "unreadable-feat")
+        self._commit_branch("unreadable-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        self.oc_conn.close()
+        with open(self.oc_db_path, "wb") as f:
+            f.write(b"NOT A SQLITE DATABASE FILE GARBAGE CONTENT")
+
+        plan = oc_revive.plan_revive(sid, db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertFalse(plan["revivable"])
+        self.assertTrue(plan["reason"].startswith("opencode_db_unreadable:"))
+
+    def test_plan_goose_missing_opencode_db_is_ok(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        dead_dir = os.path.join(self.worktrees_dir, "missing-oc-feat")
+        self._commit_branch("missing-oc-feat")
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        missing_db = os.path.join(self.tmpdir.name, "nonexistent_opencode.db")
+        plan = oc_revive.plan_revive(sid, db_path=missing_db, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+
+    def test_plan_goose_other_goose_session_at_same_path_allowed(self):
+        native_id_1 = "20261104_12"
+        native_id_2 = "20261104_13"
+        dead_dir = os.path.join(self.worktrees_dir, "shared-feat")
+        self._commit_branch("shared-feat")
+        add_goose_session(self.goose_conn, native_id_1, dead_dir)
+        add_goose_session(self.goose_conn, native_id_2, dead_dir)
+
+        plan = oc_revive.plan_revive(f"goose:{native_id_1}", db_path=self.oc_db_path, goose_db_path=self.goose_db_path)
+        self.assertTrue(plan["revivable"])
+
+
+class TestCommitEvidenceExtraction(unittest.TestCase):
+    def test_last_commit_evidence_extracted(self):
+        outputs = [
+            "some random output",
+            "[feature-x 1234567] Commit subject",
+            "other command output",
+            "[feature-y aabbccd] Later commit",
+        ]
+        ev = oc_revive.last_commit_evidence(outputs)
+        self.assertEqual(ev, ("feature-y", "aabbccd"))
+
+    def test_last_commit_evidence_skips_detached_head(self):
+        outputs = [
+            "[feature-a 1111111] Valid commit",
+            "[detached HEAD 2222222] Detached commit",
+        ]
+        ev = oc_revive.last_commit_evidence(outputs)
+        self.assertEqual(ev, ("feature-a", "1111111"))
+
+    def test_last_commit_evidence_empty_or_none(self):
+        self.assertIsNone(oc_revive.last_commit_evidence([]))
+        self.assertIsNone(oc_revive.last_commit_evidence(["no commit pattern here"]))
+
+    def test_goose_tool_outputs_skips_malformed_items(self):
+        conn = sqlite3.connect(":memory:")
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content_json TEXT NOT NULL
+            );
+        """)
+        sid = "20261104_12"
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, "NOT JSON {"))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps({"type": "toolResponse"})))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps(["string item", {"type": "notToolResponse"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": "not_dict"}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": "not_dict"}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": "not_list"}}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": [{"type": "image"}, {"type": "text", "text": 123}]}}}])))
+        cur.execute("INSERT INTO messages (session_id, role, content_json) VALUES (?, 'user', ?)", (sid, json.dumps([{"type": "toolResponse", "toolResult": {"value": {"content": [{"type": "text", "text": "valid output"}]}}}])))
+        conn.commit()
+
+        outputs = oc_revive.goose_tool_outputs(conn, sid)
+        self.assertEqual(outputs, ["valid output"])
+        conn.close()
+
+
+class TestGooseApply(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = init_git_repo(os.path.join(self.tmpdir.name, "repo"))
+        self.worktrees_dir = os.path.join(self.repo, ".worktrees")
+        os.makedirs(self.worktrees_dir, exist_ok=True)
+        self.oc_db_path = os.path.join(self.tmpdir.name, "opencode.db")
+        self.oc_conn = init_test_db(self.oc_db_path)
+        self.goose_db_path = os.path.join(self.tmpdir.name, "goose_sessions.db")
+        self.goose_conn = init_goose_test_db(self.goose_db_path)
+
+    def tearDown(self):
+        self.oc_conn.close()
+        self.goose_conn.close()
+        self.tmpdir.cleanup()
+
+    def _commit_branch(self, branch_name: str) -> str:
+        subprocess.run(["git", "branch", branch_name, "main"], cwd=self.repo, capture_output=True)
+        wt = os.path.join(self.tmpdir.name, f"wt_{branch_name}_{time.time_ns()}")
+        subprocess.run(["git", "worktree", "add", wt, branch_name], cwd=self.repo, check=True, capture_output=True)
+        with open(os.path.join(wt, f"{branch_name}.txt"), "a") as f:
+            f.write(f"content {time.time_ns()}\n")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", f"Commit on {branch_name}"], cwd=wt, check=True, capture_output=True)
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True, capture_output=True, text=True)
+        tip_sha = res.stdout.strip()
+        subprocess.run(["git", "worktree", "remove", "--force", wt], cwd=self.repo, check=True, capture_output=True)
+        return tip_sha
+
+    def test_apply_goose_success(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-goose-apply"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            res = oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+            mock_urlopen.assert_not_called()
+
+        self.assertTrue(res.get("ok"))
+        self.assertEqual(res.get("harness"), "goose")
+        self.assertEqual(res.get("path"), dead_dir)
+        self.assertEqual(res.get("branch"), branch)
+        self.assertEqual(res.get("tip"), tip)
+        self.assertTrue(os.path.isdir(dead_dir))
+        head_res = subprocess.run(
+            ["git", "-C", dead_dir, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(head_res.stdout.strip(), branch)
+
+    def test_cli_apply_goose_prints_pasteable_line(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-cli-apply"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr), mock.patch("urllib.request.urlopen") as mock_urlopen:
+            rc = oc_revive.main([
+                "apply",
+                sid,
+                "--branch", branch,
+                "--path", dead_dir,
+                "--action", "recreate",
+                "--expect-tip", tip,
+                "--expect-old-dir", dead_dir,
+                "--goose-db", self.goose_db_path,
+                "--db", self.oc_db_path,
+            ])
+            mock_urlopen.assert_not_called()
+
+        self.assertEqual(rc, 0)
+        expected_line = f"worktree recreated at {dead_dir} on {branch} @ {tip}; uncommitted work from before the deletion is gone; verify HEAD before continuing."
+        self.assertIn(expected_line, stdout.getvalue())
+
+    def test_apply_goose_directory_mismatch_working_dir(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-mismatch"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, os.path.join(self.worktrees_dir, "other-dir"))
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("directory-mismatch"))
+
+    def test_apply_goose_path_mismatch_expect_old_dir(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-path-mismatch"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        other_p = os.path.join(self.worktrees_dir, "different-dir")
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=other_p,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("directory-mismatch"))
+
+    def test_apply_goose_path_already_exists(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-exists"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+        os.makedirs(dead_dir, exist_ok=True)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("plan-changed"))
+
+    def test_apply_goose_tip_moved(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-tip-moved"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        old_tip = self._commit_branch(branch)
+        new_tip = self._commit_branch(branch)
+        self.assertNotEqual(old_tip, new_tip)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=old_tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("plan-changed"))
+
+    def test_apply_goose_opencode_sibling_refusal(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-sibling"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            ("ses_oc_sibling", dead_dir, 1000, 1000),
+        )
+        self.oc_conn.commit()
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        expected_err = (
+            f"opencode_sibling: opencode session 'ses_oc_sibling' also has this directory. "
+            f"Recreating it would leave that session a zombie. "
+            f"If 'ses_oc_sibling' is finished, archive it and re-run. "
+            f"If you still need it, revive it instead (oc-revive ses_oc_sibling); "
+            f"that moves its branch to a new worktree, and this goose session can then no longer be revived."
+        )
+        self.assertEqual(str(ctx.exception), expected_err)
+
+    def test_apply_goose_opencode_sibling_archived_is_allowed(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-sibling-archived"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated, time_archived) VALUES (?, ?, ?, ?, ?)",
+            ("ses_oc_sibling_archived", dead_dir, 1000, 1000, 2000),
+        )
+        self.oc_conn.commit()
+
+        res = oc_revive.apply_goose_revive(
+            sid=sid,
+            branch=branch,
+            path=dead_dir,
+            action="recreate",
+            expect_tip=tip,
+            expect_old_dir=dead_dir,
+            goose_db_path=self.goose_db_path,
+            opencode_db_path=self.oc_db_path,
+        )
+        self.assertTrue(res.get("ok"))
+        self.assertTrue(os.path.isdir(dead_dir))
+
+    def test_apply_goose_opencode_db_unreadable_refusal(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-corrupt"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        self.oc_conn.close()
+        with open(self.oc_db_path, "wb") as f:
+            f.write(b"CORRUPT NOT SQLITE")
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("opencode_db_unreadable"))
+
+    def test_apply_goose_branch_checked_out_in_live_worktree(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-checked-out"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        live_wt = os.path.join(self.tmpdir.name, "live_active_wt")
+        subprocess.run(["git", "worktree", "add", live_wt, branch], cwd=self.repo, check=True, capture_output=True)
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("branch-checked-out"))
+
+    def test_apply_goose_prunes_stale_worktree_entry(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-prune"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        subprocess.run(["git", "worktree", "add", dead_dir, branch], cwd=self.repo, check=True, capture_output=True)
+        import shutil
+        shutil.rmtree(dead_dir)
+
+        entries = oc_revive.get_worktree_entries(self.repo)
+        prunable_paths = [e.get("path") for e in entries if e.get("prunable")]
+        self.assertIn(dead_dir, prunable_paths)
+
+        res = oc_revive.apply_goose_revive(
+            sid=sid,
+            branch=branch,
+            path=dead_dir,
+            action="recreate",
+            expect_tip=tip,
+            expect_old_dir=dead_dir,
+            goose_db_path=self.goose_db_path,
+            opencode_db_path=self.oc_db_path,
+        )
+        self.assertTrue(res.get("ok"))
+        self.assertTrue(os.path.isdir(dead_dir))
+
+    def test_apply_goose_failing_post_checkout_hook(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-hook-fail"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        hooks_dir = os.path.join(self.repo, ".git", "hooks")
+        os.makedirs(hooks_dir, exist_ok=True)
+        hook_path = os.path.join(hooks_dir, "post-checkout")
+        with open(hook_path, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(hook_path, 0o755)
+
+        res = oc_revive.apply_goose_revive(
+            sid=sid,
+            branch=branch,
+            path=dead_dir,
+            action="recreate",
+            expect_tip=tip,
+            expect_old_dir=dead_dir,
+            goose_db_path=self.goose_db_path,
+            opencode_db_path=self.oc_db_path,
+        )
+        self.assertTrue(res.get("ok"))
+        self.assertTrue(os.path.isdir(dead_dir))
+
+    def test_cli_apply_goose_action_add_rejected(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "apply", "goose:20261104_12",
+                "--branch", "b",
+                "--path", "/tmp/p",
+                "--action", "add",
+                "--expect-tip", "deadbeef",
+                "--expect-old-dir", "/tmp/p",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("action", stderr.getvalue().lower())
+
+    def test_cli_apply_opencode_action_recreate_rejected(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "apply", "ses_test",
+                "--branch", "b",
+                "--path", "/tmp/p",
+                "--action", "recreate",
+                "--expect-tip", "deadbeef",
+                "--expect-old-dir", "/tmp/p",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("action", stderr.getvalue().lower())
+
+    def test_cli_resume_goose_rejected(self):
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "resume", "goose:20261104_12",
+                "--branch", "b",
+                "--path", "/tmp/p",
+                "--expect-tip", "deadbeef",
+                "--expect-old-dir", "/tmp/p",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("nothing to resume", stderr.getvalue().lower())
+
+    def test_cli_interactive_goose_applies(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-interactive"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        stdout = io.StringIO()
+        stdin = io.StringIO("y\n")
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stdin", stdin):
+            rc = oc_revive.main([sid, "--goose-db", self.goose_db_path, "--db", self.oc_db_path])
+        self.assertEqual(rc, 0)
+        out = stdout.getvalue()
+        self.assertIn("Recreate at:", out)
+        self.assertNotIn("New cwd:", out)
+        self.assertNotIn("Snapshot", out)
+        self.assertIn(f"worktree recreated at {dead_dir} on {branch} @ {tip}", out)
+        self.assertTrue(os.path.isdir(dead_dir))
+
+    def test_cli_apply_honours_goose_db_flag(self):
+        custom_goose_db = os.path.join(self.tmpdir.name, "flag_goose.db")
+        g_conn = init_goose_test_db(custom_goose_db)
+        native_id = "20261104_99"
+        sid = f"goose:{native_id}"
+        branch = "feat-flag"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(g_conn, native_id, dead_dir)
+        g_conn.close()
+
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            rc = oc_revive.main([
+                "apply", sid,
+                "--branch", branch,
+                "--path", dead_dir,
+                "--action", "recreate",
+                "--expect-tip", tip,
+                "--expect-old-dir", dead_dir,
+                "--goose-db", custom_goose_db,
+                "--db", self.oc_db_path,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isdir(dead_dir))
+
+    def test_apply_goose_toctou_path_appeared(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-toctou"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        original_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 5 and cmd[:4] == ["git", "-C", self.repo, "worktree"] and cmd[4] == "add":
+                os.makedirs(dead_dir, exist_ok=True)
+                with open(os.path.join(dead_dir, "foreign.txt"), "w") as f:
+                    f.write("foreign worktree content")
+            return original_run(cmd, *args, **kwargs)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(oc_revive.ReviveError) as ctx:
+                oc_revive.apply_goose_revive(
+                    sid=sid,
+                    branch=branch,
+                    path=dead_dir,
+                    action="recreate",
+                    expect_tip=tip,
+                    expect_old_dir=dead_dir,
+                    goose_db_path=self.goose_db_path,
+                    opencode_db_path=self.oc_db_path,
+                )
+        self.assertTrue(str(ctx.exception).startswith("plan-changed: git worktree add failed (exit 128):"))
+        self.assertIn("nothing was removed. Inspect", str(ctx.exception))
+        self.assertIn(dead_dir, str(ctx.exception))
+        self.assertTrue(os.path.exists(os.path.join(dead_dir, "foreign.txt")))
+
+    def test_apply_goose_failed_add_foreign_worktree_survives(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-target"
+        other_branch = "feat-foreign"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        other_tip = self._commit_branch(other_branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        # A concurrent work command registered a worktree at dead_dir on another branch
+        original_run = subprocess.run
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 5 and cmd[:4] == ["git", "-C", self.repo, "worktree"] and cmd[4] == "add":
+                # Create foreign worktree on other_branch
+                original_run(["git", "-C", self.repo, "worktree", "add", dead_dir, other_branch], check=True, capture_output=True)
+                with open(os.path.join(dead_dir, "sentinel.txt"), "w") as f:
+                    f.write("sentinel data")
+            return original_run(cmd, *args, **kwargs)
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            with self.assertRaises(oc_revive.ReviveError) as ctx:
+                oc_revive.apply_goose_revive(
+                    sid=sid,
+                    branch=branch,
+                    path=dead_dir,
+                    action="recreate",
+                    expect_tip=tip,
+                    expect_old_dir=dead_dir,
+                    goose_db_path=self.goose_db_path,
+                    opencode_db_path=self.oc_db_path,
+                )
+        err = str(ctx.exception)
+        self.assertTrue(err.startswith("plan-changed: git worktree add failed (exit "), f"unexpected err: {err}")
+        self.assertIn(f"; nothing was removed. Inspect {dead_dir} by hand.", err)
+        # Foreign worktree and its contents survived untouched
+        self.assertTrue(os.path.exists(os.path.join(dead_dir, "sentinel.txt")))
+        entries = oc_revive.get_worktree_entries(self.repo)
+        foreign_entries = [e for e in entries if e.get("path") == dead_dir]
+        self.assertEqual(len(foreign_entries), 1)
+        self.assertEqual(foreign_entries[0].get("branch"), other_branch)
+
+    def test_cli_apply_goose_db_unreadable_exits_1(self):
+        bad_db_dir = os.path.join(self.tmpdir.name, "is_a_dir")
+        os.makedirs(bad_db_dir, exist_ok=True)
+        branch = "feat-bad-db"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        stderr = io.StringIO()
+        with mock.patch("sys.stderr", stderr):
+            rc = oc_revive.main([
+                "apply", "goose:20261104_12",
+                "--branch", branch,
+                "--path", dead_dir,
+                "--action", "recreate",
+                "--expect-tip", tip,
+                "--expect-old-dir", dead_dir,
+                "--goose-db", bad_db_dir,
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("error opening database", stderr.getvalue().lower())
+
+    def test_apply_goose_opencode_sibling_at_subdir_refusal(self):
+        native_id = "20261104_12"
+        sid = f"goose:{native_id}"
+        branch = "feat-oc-sub-sibling"
+        dead_dir = os.path.join(self.worktrees_dir, branch)
+        tip = self._commit_branch(branch)
+        add_goose_session(self.goose_conn, native_id, dead_dir)
+
+        sub_dir = os.path.join(dead_dir, "nested", "child")
+        cur = self.oc_conn.cursor()
+        cur.execute(
+            "INSERT INTO session (id, directory, time_created, time_updated) VALUES (?, ?, ?, ?)",
+            ("ses_oc_sub_sibling", sub_dir, 1000, 1000),
+        )
+        self.oc_conn.commit()
+
+        with self.assertRaises(oc_revive.ReviveError) as ctx:
+            oc_revive.apply_goose_revive(
+                sid=sid,
+                branch=branch,
+                path=dead_dir,
+                action="recreate",
+                expect_tip=tip,
+                expect_old_dir=dead_dir,
+                goose_db_path=self.goose_db_path,
+                opencode_db_path=self.oc_db_path,
+            )
+        self.assertTrue(str(ctx.exception).startswith("opencode_sibling"))
+        self.assertIn("ses_oc_sub_sibling", str(ctx.exception))
 
 
 if __name__ == "__main__":

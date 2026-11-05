@@ -1365,8 +1365,8 @@
 
         # The count is PINNED, following checks.oc-tags-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 99 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 99 tests'. If you added or removed" >&2
+        grep -q '^Ran 146 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 146 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -1878,8 +1878,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 117 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (914 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 914 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (1000 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 1000 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (154 assertions via nvim -l)' "$TMPDIR/out.txt" || {

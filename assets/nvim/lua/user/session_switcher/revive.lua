@@ -51,9 +51,18 @@ local function valid_full_sha(s)
   return type(s) == "string" and (#s == 40 or #s == 64) and s:match("^%x+$") ~= nil
 end
 
---- The path must be EXACTLY <repo>/.worktrees/<one component>, and not the dead dir.
---- @return boolean
-function M.valid_path(path, repo, dead_dir)
+local SID_OPENCODE_PAT = "^ses_[%w]+$"
+local SID_GOOSE_PAT = "^goose:%d+_%d+$"
+
+local function is_opencode_sid(sid)
+  return type(sid) == "string" and sid:match(SID_OPENCODE_PAT) ~= nil
+end
+
+local function is_goose_sid(sid)
+  return type(sid) == "string" and sid:match(SID_GOOSE_PAT) ~= nil
+end
+
+local function valid_worktree_shape(path, repo)
   if not is_str(path) or not is_str(repo) or path:find("%c") then
     return false
   end
@@ -68,12 +77,21 @@ function M.valid_path(path, repo, dead_dir)
   if leaf == "" or leaf == "." or leaf == ".." or leaf:find("/", 1, true) or leaf:sub(1, 1) == "-" then
     return false
   end
-  return path ~= dead_dir
+  return true
 end
 
-local function valid_sid(sid)
-  return type(sid) == "string" and sid:match("^ses_[%w]+$") ~= nil
+--- The path must be EXACTLY <repo>/.worktrees/<one component>, and not the dead dir.
+--- @return boolean
+function M.valid_path(path, repo, dead_dir)
+  return valid_worktree_shape(path, repo) and path ~= dead_dir
 end
+
+function M.valid_sid(sid)
+  return is_opencode_sid(sid) or is_goose_sid(sid)
+end
+
+M.is_opencode_sid = is_opencode_sid
+M.is_goose_sid = is_goose_sid
 
 --- Validate a decoded plan and build the offers.
 ---
@@ -82,7 +100,7 @@ end
 --- @param dead_dir string the row's (missing) directory
 --- @return table|nil result { kind = "revive"|"resume", offers = { {branch, path, tip_short, subject?, date?, merged, source, argv} } }
 function M.offers(plan, sid, dead_dir)
-  if type(plan) ~= "table" or not valid_sid(sid) or plan.sid ~= sid then
+  if type(plan) ~= "table" or not M.valid_sid(sid) or plan.sid ~= sid then
     return nil
   end
   if not is_str(dead_dir) or plan.dead_dir ~= dead_dir then
@@ -91,6 +109,19 @@ function M.offers(plan, sid, dead_dir)
   local repo = plan.repo
   if not is_str(repo) then
     return nil
+  end
+
+  local is_goose = is_goose_sid(sid)
+  if is_goose then
+    if plan.resume ~= nil and plan.resume ~= vim.NIL then
+      return nil
+    end
+    if type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
+      return nil
+    end
+    if not valid_worktree_shape(dead_dir, repo) then
+      return nil
+    end
   end
 
   if plan.revivable == true then
@@ -104,10 +135,17 @@ function M.offers(plan, sid, dead_dir)
         or not valid_full_sha(c.tip)
         or type(c.tip_short) ~= "string" or c.tip_short:match("^%x+$") == nil
         or type(c.source) ~= "string" or c.source:match("^[%w%-]+$") == nil
-        or c.action ~= "add"
-        or not M.valid_path(c.path, repo, dead_dir)
       then
         return nil
+      end
+      if is_goose then
+        if c.action ~= "recreate" or c.path ~= dead_dir then
+          return nil
+        end
+      else
+        if c.action ~= "add" or not M.valid_path(c.path, repo, dead_dir) then
+          return nil
+        end
       end
       local date = type(c.tip_ct) == "string" and c.tip_ct:match("^(%d%d%d%d%-%d%d%-%d%d)") or nil
       table.insert(offers, {
@@ -122,7 +160,7 @@ function M.offers(plan, sid, dead_dir)
           "oc-revive", "apply", sid,
           "--branch", c.branch,
           "--path", c.path,
-          "--action", "add",
+          "--action", c.action,
           "--expect-tip", c.tip,
           "--expect-old-dir", dead_dir,
         },
@@ -134,7 +172,7 @@ function M.offers(plan, sid, dead_dir)
   -- Blocked by an earlier revive that created the worktree but never finished.
   -- A PREFIX token, never a match anywhere in the prose; and only the structured
   -- `resume` object is used -- the prose command is never parsed.
-  if type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
+  if not is_goose and type(plan.reason) == "string" and plan.reason:find("blocked_by_worktree:", 1, true) == 1 then
     local r = plan.resume
     if type(r) ~= "table"
       or not M.valid_branch(r.branch)
@@ -174,13 +212,26 @@ end
 --- shows #620's one-line WARN for this case rather than nothing.
 function M.blocked(plan, sid, dead_dir)
   return type(plan) == "table"
-    and valid_sid(sid)
+    and is_opencode_sid(sid)
     and plan.sid == sid
     and is_str(dead_dir)
     and plan.dead_dir == dead_dir
     and plan.revivable ~= true
     and type(plan.reason) == "string"
     and plan.reason:find("blocked_by_worktree:", 1, true) == 1
+end
+
+--- True when a goose plan was refused because an opencode session also references
+--- the dead directory (opencode_sibling: prefix). The caller shows a one-line WARN.
+function M.sibling_refused(plan, sid, dead_dir)
+  return type(plan) == "table"
+    and is_goose_sid(sid)
+    and plan.sid == sid
+    and is_str(dead_dir)
+    and plan.dead_dir == dead_dir
+    and plan.revivable ~= true
+    and type(plan.reason) == "string"
+    and plan.reason:find("opencode_sibling:", 1, true) == 1
 end
 
 local function rel(path, repo)
@@ -222,6 +273,8 @@ function M.prompt(result, title, sid)
   local offers = result.offers
   local lines = {}
   local choices = {}
+  local is_goose = is_goose_sid(sid)
+  local dir_label = is_goose and "recreate dir" or "new dir"
 
   if result.kind == "resume" then
     local o = offers[1]
@@ -233,7 +286,7 @@ function M.prompt(result, title, sid)
     local o = offers[1]
     table.insert(lines, string.format('Revive read-only session "%s"?', name))
     table.insert(lines, "  " .. describe(o))
-    table.insert(lines, "  new dir " .. rel(o.path, result.repo))
+    table.insert(lines, "  " .. dir_label .. " " .. rel(o.path, result.repo))
     if o.merged then
       table.insert(lines, "  ! branch already merged: the worktree is swept ~7 days after the session goes idle")
     end
@@ -245,12 +298,12 @@ function M.prompt(result, title, sid)
       same_path = same_path and o.path == offers[1].path
     end
     for i, o in ipairs(offers) do
-      local where = same_path and "" or (", new dir " .. rel(o.path, result.repo))
+      local where = same_path and "" or (", " .. dir_label .. " " .. rel(o.path, result.repo))
       table.insert(lines, string.format("  [%d] %s [%s]%s%s", i, describe(o), o.source, o.merged and " (merged)" or "", where))
       table.insert(choices, string.format("&%d %s", i, button(o.branch)))
     end
     if same_path then
-      table.insert(lines, "  new dir " .. rel(offers[1].path, result.repo))
+      table.insert(lines, "  " .. dir_label .. " " .. rel(offers[1].path, result.repo))
     end
     for _, o in ipairs(offers) do
       if o.merged then
@@ -262,6 +315,9 @@ function M.prompt(result, title, sid)
 
   if result.kind ~= "resume" then
     table.insert(lines, "  Uncommitted files are NOT carried over.")
+  end
+  if is_goose then
+    table.insert(lines, "  The agent is not told: tell it the worktree was recreated and uncommitted work is gone.")
   end
   table.insert(choices, "&Cancel")
   return table.concat(lines, "\n"), table.concat(choices, "\n"), #choices

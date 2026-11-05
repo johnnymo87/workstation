@@ -35,6 +35,28 @@ finished), its JSON carries a structured `resume` object (`branch`, `path`, `exp
 is absent, never `null`, whenever there is nothing to resume (for example, the worktree is held by
 another session).
 
+## Goose sessions
+
+Goose sessions (`goose:<id>`) are revived by recreating the worktree **at the session's original path**:
+- Neither goose nor honkd caches failed path lookups (opencode's `LayerMap` memo does not exist here; measured 2026-11-04). Recreating the worktree in place makes the next turn succeed immediately.
+- Refuses if any opencode session references the dead directory or any subdirectory (`opencode_sibling`), which would turn that opencode session into a zombie.
+- Recreation also revives every other goose session whose directory is that path, and none of those agents is told.
+- No notice is sent to the agent (goose has no `noReply` prompt, so tell the agent yourself; `apply` prints a paste-able summary line).
+- No busy check (recreating the directory under a running turn is safe) and no resume subcommand (if `apply` created the directory, the session works).
+
+Usage:
+
+```bash
+# Plan revival
+oc-revive plan goose:<id> [--goose-db <path>]
+
+# Interactive revival (prompts y/N, default No)
+oc-revive goose:<id> [--goose-db <path>]
+
+# Machine apply interface
+oc-revive apply goose:<id> --branch <branch> --path <dead_dir> --action recreate --expect-tip <sha> --expect-old-dir <dead_dir> [--goose-db <path>]
+```
+
 ## Failing post-checkout hooks
 
 `git worktree add` returns a failing post-checkout hook's exit status even though the worktree
