@@ -873,7 +873,7 @@ pkgs.writeShellApplication {
       # `systemctl restart` of a cgroup it lives in. Do NOT copy this shape for
       # a job that restarts its own unit -- setsid/nohup do not leave the
       # cgroup, and such a job is killed mid-flight (bead workstation-4qvx; see
-      # "Backgrounding Long-Running Processes" in assets/opencode/AGENTS.md and
+      # "Backgrounding Long-Running Processes" in assets/agents/AGENTS.md and
       # the systemd-run re-exec in pkgs/reset-workspace/default.nix).
       #
       # Missing oc-auto-attach is silently tolerated. NOTE this is not the

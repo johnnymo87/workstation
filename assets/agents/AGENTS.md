@@ -1,17 +1,29 @@
-# User-level OpenCode Instructions
+# User-level Agent Instructions
 
-Global instructions that apply to all OpenCode sessions for this user, on any
-machine. Repo-specific instructions live in each project's `AGENTS.md`.
+Global instructions for every agent session this user runs, on any machine and
+in any harness. This file is `~/.agents/AGENTS.md`, the harness-agnostic
+location: goose reads it natively as its global hints, and opencode reads it
+as its global `~/.config/opencode/AGENTS.md`, which is a link to this file.
+Rules that only make sense inside one harness live beside that harness instead
+(opencode: `~/.config/opencode/AGENTS.opencode.md`). Repo-specific instructions live in each
+project's `AGENTS.md`.
 
-Skills sources for this AGENTS.md live in `assets/opencode/skills/` of the
-[workstation](https://github.com/johnnymo87/workstation) repo. They're deployed
-to `~/.agents/skills/` by `users/dev/opencode-skills.nix` so OpenCode
-auto-discovers them.
+Source: `assets/agents/AGENTS.md` in the
+[workstation](https://github.com/johnnymo87/workstation) repo, deployed by
+`users/dev/agents-instructions.nix` as a **real file, not a symlink** (goose
+silently skips a global hints file whose real path is outside `~/.agents`, which
+a home-manager store link is). Edits made here are overwritten on the next
+switch; change the source.
+
+Skills sources live in `assets/opencode/skills/` of the same repo. They're
+deployed to `~/.agents/skills/` by `users/dev/opencode-skills.nix`, where both
+opencode and goose discover them.
 
 ## Skills
 
-OpenCode auto-discovers skills via the platform's skill mechanism (the
-`available_skills` block in the system prompt). The table below is a quick
+Both harnesses discover skills on their own (opencode lists them in the
+`available_skills` block of the system prompt; goose through its `skills`
+extension). The table below is a quick
 reference for humans reading this file directly, grouped by purpose. **Scope**
 is the deployment target: `cross` = all machines (devbox, cloudbox, macOS),
 `work-only` = macOS + cloudbox, `repo-only` = file present in the
@@ -84,77 +96,28 @@ here rather than patched into their files:
 |---|---|
 | `finishing-a-development-branch` → run `gh pr create` with its own body template | Load `shepherding-pull-requests` **first** and follow it: its pre-PR checks (rebase, stowaway commits, adversarial review), its title/description format, and its post-PR monitoring loop. There must be exactly one route to opening a PR, and this is it. |
 | `finishing-a-development-branch` Step 5 → `git worktree remove` after Option 2 (push + PR) | **Do not.** An open PR is not finished work — you still owe it the monitoring loop, and fixes have to land from somewhere. Removing the worktree you are sitting in kills this session silently (see `reviving-worktree-orphaned-sessions`) and any shepherd wake arrives in a corpse. Keep the worktree until the PR is merged or closed. Step 5 is correct for Options 1 and 4, which are terminal. |
-| `Task tool (general-purpose)` for implementation or review | The named agents — see the `<subagent-routing>` block, where deployed |
-| The injected bootstrap: "Superpowers skills are in `~/.config/opencode/skills/superpowers/`" | They are in `~/.agents/skills/superpowers/`, where every system-wide skill now lives. The plugin hardcodes the old path. Load skills with the `skill` tool; don't browse that path, and don't add a compatibility symlink there, because opencode would scan it and see every skill twice. |
 
 Two routes to `gh pr create` means two sets of pre-PR checks, one of which is
 nobody's. If you find a third, add a row here rather than following it.
+Harness-specific overrides (opencode's Task routing and its superpowers
+bootstrap path) are in that harness's own instructions file.
 
-## Oracle and Adversarial Reviewer: Which Handle, Per Host
+## Advisor and Reviewer Subagents
 
-**The `-opus` handle is the default on every host.** Other twins are opt-in:
+The oracle (read-only advisor) and the adversarial reviewer exist in both
+harnesses, generated from the same agent definitions
+(`assets/opencode/agents/*.md`):
 
-| Host | Oracle | Adversarial reviewer | If unavailable | Opt-in only when asked |
-|---|---|---|---|---|
-| devbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra` |
-| cloudbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra`, `-fable` |
-| macOS | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | — |
+- **opencode:** Task-tool agents such as `oracle-opus` and
+  `adversarial-reviewer-opus`. Which handle to use on which host, and what to do
+  when one is unavailable, is in `~/.config/opencode/AGENTS.opencode.md`.
+- **goose:** `delegate` with `source:` one of `oracle`, `adversarial-reviewer`,
+  `code-reviewer`, `spec-reviewer`, `implementer`. The read-only roles get
+  `ro-shell` in place of the developer shell.
 
-A dead `-opus` does not authorize an opt-in twin. When the human asked for
-astra and it is unavailable (not listed, `astra-probe` says DOWN, or the
-dispatch errors or returns empty — an empty result is no review), falling back
-to `-opus` is fine, but say so in one clause. If they asked for *both* twins,
-report the failure instead: two opus answers are not a second opinion.
+Wherever a skill says "dispatch `adversarial-reviewer-opus`" (or the oracle),
+it names a role; use your harness's handle for it.
 
-**A dead astra fails loudly, not silently.** The `subagent-failure` plugin
-runs `astra-probe` before every `-astra` dispatch and *refuses* the Task call
-when it says DOWN. The error names the `-opus` twin, so just follow it. If the
-child dies mid-dispatch, the plugin turns the empty or truncated "completed"
-result into a `state="error"` `<task_error>` that names the same twin.
-Truncated text in it is not a review. If codex-lb stalls before sending
-headers, `headerTimeout` ends the child in about 13 minutes. Every one of these
-counts as "errors" above.
-
-**A hang is still possible, and it is not yours to time out.** A dispatch can
-hang if codex-lb stalls *after* response headers, because keepalives defeat
-every client timeout. Elapsed time is not evidence of a hang: about 1 in 5
-healthy astra reviews run longer than 15 minutes, and some run for hours. The
-dispatching agent is blocked inside the call and cannot act anyway. The signal
-is lack of **progress**: the child session has gained no new parts for 15+
-minutes (in 30 days of astra children the largest within-turn gap was under
-5), or its status *stays* `retry` across several attempts. Whoever notices that (the human, or a
-watcher) aborts the child, and the parent then falls back as for an error.
-
-**`-fable` means one of two things, and the list tells you which.** It was
-the name of the default slot until 2026-09-28, when that slot was renamed
-`-opus` (same prompt, model moved from fable-5-1 to opus-5-5). A serve loads its
-agent list once at startup, so one started before a `home-manager switch` may
-still list the old names. On cloudbox, `-fable` is also deployed as an opt-in
-fable-5-1 twin.
-
-- **`-opus` is listed:** any `-fable` alongside it is the opt-in twin (cloudbox).
-  Dispatch it only when the human asks for fable.
-- **`-opus` is not listed but `-fable` is:** the serve predates the rename and
-  `-fable` *is* the default slot. Dispatch it wherever the docs say `-opus`.
-  fable-5-1 is still configured on every host, so it works; it just runs the
-  older model.
-
-An "Unknown agent type" for a handle in the default slot is a naming mismatch,
-not a reason to stop. A human asking for *fable* is a model choice, which is a
-different case. On cloudbox, dispatch `-fable`. On devbox and macOS there is no
-fable twin: say so rather than silently substituting another model.
-
-**A handle named in a request is a role.** Humans, older prompts and your own
-resumption prompt may name a suffixed handle out of habit — including
-`oracle-astra` / `adversarial-reviewer-astra`, which were devbox's defaults
-until 2026-11-02. Dispatch the host's default handle for that role, as above.
-A handle written into an agent-authored artifact (plan doc, bead note, queued
-wake) is always a role reference, not a model choice.
-The exceptions, honored on every host: the human deliberately picked the model
-("use astra"), or asked for both twins (independent opinions). Then dispatch
-exactly what they named. Never write a suffixed handle into a
-resumption prompt from memory. Write the role, or the handle the Task tool
-actually lists.
 
 ## Reporting to Humans
 
@@ -287,8 +250,9 @@ Do this instead:
 the permission layer (`assets/opencode/agents/*.md`). The twins are generated
 from the same source file as the `-opus` agents and only their model pin is
 rewritten, so the denylist is inherited rather than duplicated — there is no
-second copy to forget to update. The rule therefore holds even if a subagent
-forgets it. That guard is a backstop, not
+second copy to forget to update. goose's read-only delegate roles get the
+same effect from `ro-shell`, which limits git to read-only subcommands. The
+rule therefore holds even if a subagent forgets it. That guard is a backstop, not
 a license — the convention above binds all sessions and subagents regardless of
 which agent they run as.
 
@@ -324,18 +288,20 @@ above is convention only.
 
 ## Host Identification
 
-The `shell-env.ts` plugin injects `OPENCODE_HOSTNAME` into every bash tool
-call. Use it to disambiguate which machine you're on without spawning a
-subprocess:
+Check which machine you are on before acting on host-specific guidance:
 
 ```bash
-echo $OPENCODE_HOSTNAME    # devbox | cloudbox | <macOS hostname>
+hostname                   # devbox | cloudbox | <macOS hostname>
 ```
 
+opencode bash calls also carry `$OPENCODE_HOSTNAME` (injected by its
+`shell-env.ts` plugin), which saves the subprocess; goose tool shells do not
+have it, so use `hostname` there.
+
 The repo-level `AGENTS.md` (in any workstation checkout) has a full host
-table mapping hostnames to flake targets and rebuild commands; this env var
-is the primitive. Don't assume "devbox" — `cloudbox` and `devbox` are both
-NixOS hosts running on `dev@` and look identical from inside opencode.
+table mapping hostnames to flake targets and rebuild commands. Don't assume
+"devbox" — `cloudbox` and `devbox` are both NixOS hosts running on `dev@` and
+look identical from inside an agent session.
 
 ## Secrets in bash sessions
 
@@ -351,6 +317,12 @@ the Atlassian vars, etc. are all available in opencode bash sessions.
 
 The read is host-safe: where `/run/secrets/*` does not exist
 (devbox/macOS) each lookup returns `undefined` and nothing is injected.
+
+goose tool shells get the same credentials by a different route:
+`goose-serve.service` sources `agent-secret-env-sh` **once, at start**, and its
+shells inherit that environment. A secret added or rotated since goose-serve
+last started is therefore not visible to goose until goose-serve restarts
+(nightly, or by hand).
 
 ### Jenkins is reachable, through a path that fails loud
 
@@ -421,30 +393,12 @@ They do **not** escape the systemd unit's **cgroup**. `systemctl restart` (and
 `stop`) kills the entire control group, so a `setsid nohup` child started from
 inside a unit dies with it.
 
-This matters constantly here, because an opencode bash tool call runs inside
-`opencode-serve@<port>.service`. Anything that restarts the serve pool — or any
-unit your session lives in — kills your "detached" job mid-flight.
-
-**On cloudbox this is no longer true, and the difference matters in both
-directions.** The `oc-scoped-shell` wrapper now runs every bash-tool command in its
-own transient scope under `oc-agent.slice` (beads `workstation-yt0p` and `workstation-rdsq.4`), so:
-
-- Your command's cgroup is `…/user@1000.service/oc-agent.slice/oc-agent-*.scope`,
-  **not** the serve's. A `setsid nohup` job therefore *survives* a serve restart
-  here. `systemd-run --user --unit=…` is still the right tool for anything
-  genuinely durable — an `oc-agent` scope is per-command and unnamed.
-- Your command has a **10 G memory cap**. A process killed at that cap reports
-  **exit 137**; that is the scope cap, not the host running out of memory, and
-  retrying unchanged will fail identically. Reduce the workload's parallelism
-  instead (for vitest, `--maxWorkers`; for a build, its job count).
-- Every bash-tool command is scoped, including ones that mention or invoke
-  `git`. The wrap happens at spawn time (opencode's `shell` config points at
-  `oc-scoped-shell`) rather than by rewriting the command text, so it no longer
-  interferes with permission parsing and the `git …` deny rules keep matching.
-  The one exception is the degrade path: if `systemd-run --user` is unusable,
-  the wrapper prints a `WARNING: ... running UNSCOPED` line and runs the command
-  in the serve cgroup. Seeing that line in your output means the memory
-  protection is off, not that your command failed.
+This matters constantly here, because an agent's tool shell runs inside the
+agent's serve unit: an opencode bash call inside `opencode-serve@<port>.service`,
+a goose tool shell inside the system unit `goose-serve.service`. Anything that
+restarts that unit — the nightly reset restarts both — kills your "detached"
+job mid-flight. (opencode on cloudbox is an exception: each bash call gets its
+own scope; see `~/.config/opencode/AGENTS.opencode.md`.)
 
 Check with `cat /proc/self/cgroup` rather than assuming which case you are in.
 

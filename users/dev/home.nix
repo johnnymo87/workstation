@@ -15,6 +15,7 @@
     ./home.darwin.nix
     ./codex-lb.nix
     ./oc-tags-serve.nix
+    ./agents-instructions.nix
     ./opencode-config.nix
     ./opencode-skills.nix
     ./goose-roles.nix

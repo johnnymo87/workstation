@@ -2436,7 +2436,7 @@ lib.mkMerge [
   #
   # NOTE THE POLICY INTERACTION, which cuts the yield further: the obvious
   # orphan source is "agent finishes a PR and runs `git worktree remove`", but
-  # ~/.config/opencode/AGENTS.md explicitly BANS that -- an open PR keeps its
+  # ~/.agents/AGENTS.md explicitly BANS that -- an open PR keeps its
   # worktree until merged. So the mechanism that would generate orphans during
   # the day is partly suppressed by convention, which is consistent with the
   # 8-in-39 measurement above.
