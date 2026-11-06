@@ -128,7 +128,9 @@ an absence.
 - **`no such program in programs.toml`** usually means the tag is wrong. Run
   `coordinator --all`, which lists only this host's programs that have a
   coordinator, or check `programs.toml` (see "Which tag?") for the right tag
-  before you tell anyone anything.
+  before you tell anyone anything. If you are sure of the tag, the program may
+  be newer than this host's checkout of `programs.toml`: say that, not that
+  there is no coordinator.
 - **`not routable in pigeon`** can be temporary while a coordinator is being
   rebound. Retry once after a few minutes.
 - **Otherwise,** tell the human that program X has no reachable coordinator.

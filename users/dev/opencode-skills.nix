@@ -102,6 +102,11 @@ let
       echo "no stall-watch on THIS host (no $script). Each machine with stall-watch runs its own coordinators for its own programs; this host cannot look them up. Ask the human to forward the finding."
       exit 2
     fi
+    # stallwatch needs python >= 3.11 (tomllib). Pin it rather than take the
+    # caller's: the Mac's serve PATH reaches /usr/bin/python3 (3.9), whose
+    # import failure would read as exit 3 ("unverified") instead of exit 2.
+    # coreutils too: coordinator.sh needs GNU `readlink -f`.
+    export PATH="${pkgs.python3}/bin:${pkgs.coreutils}/bin:$PATH"
     exec ${pkgs.bash}/bin/bash "$script" "$@"
   '';
 
