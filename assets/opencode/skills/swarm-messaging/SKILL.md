@@ -111,9 +111,9 @@ human's standing infrastructure, not a session routing a swarm. When something
 you found belongs to another program, that program's coordinator is the right
 recipient. Look it up with the `finding-program-coordinators` skill (deployed
 on work hosts). Never conclude "there is no coordinator" from `swarm_list` or
-from bead notes. A coordinator can be messaged only from cloudbox: goose
-sessions are not reachable from another machine (see "Sessions on other
-machines").
+from bead notes. Message a coordinator from cloudbox: a goose session is
+reachable from another machine only after it has itself reached out to that
+machine (see "Sessions on other machines").
 
 A coordinator is a session that holds shared context, turns direction into
 `task.assign` messages, aggregates worker reports, and owns the upward channel
@@ -375,9 +375,16 @@ configured. Check before you send; do not assume it works.
   delivered when the machine wakes, or you get a failure notice about a day
   later. You are not told separately that it is being held. So silence proves nothing, and a payload whose meaning depends on time
   should say when it was written.
-- **Goose sessions are reachable from their own machine only.** That includes
-  every stall-watch program coordinator (`gse_…`). A `gse_` id that is not on
-  your machine is refused at once.
+- **A goose session (`gse_…`) on another machine is reachable only once it
+  has reached out across machines itself**: it launched you with
+  `swarm_launch`, or a message it sent to another machine was accepted. So a
+  session a goose session launched can always `swarm_send` its report back to
+  the `gse_` id named in the launch framing. Any other `gse_` on another
+  machine, including a stall-watch program coordinator that has never reached
+  out, is refused at once with a 409. If the 409 says "no machine has
+  registered it with the relay" and that session contacted you just now,
+  retry in a few minutes. `swarm_list remote: true` never lists goose
+  sessions, so get the id from the message or the launch that named it.
 - **Read the failure notice's verb; it tells you what to do.** A cross-machine
   `delivery.failed` comes from the receiving machine or the worker:
   - "was NOT received … safe to resend": resend once (but see
@@ -418,6 +425,10 @@ opencode session on another machine with your prompt. Use it when work has to
 happen on that machine (a deploy, a rebuild check, something only it can
 reach) instead of asking the human to paste commands, or borrowing an existing
 session there that was doing something else.
+
+Goose sessions have the same tool (from honk's swarm extension, along with
+`swarm_schedule` and `swarm_scheduled`). The launched session is opencode
+either way, and it reports back to the launching `ses_` or `gse_` id.
 
 - **It is off unless both machines opt in.** Yours needs
   `PIGEON_REMOTE_LAUNCH_SEND=1` (otherwise the tool errors with
