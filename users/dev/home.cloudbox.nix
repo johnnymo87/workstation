@@ -1102,6 +1102,11 @@ lib.mkIf isCloudbox {
   #   (honk#24; reason required for `!` servers; removing the flag + restart hides the tools
   #   from newly spawned swarm servers). Needs honk with honk#24: an older honkd refuses
   #   the unknown flags and fails to start.
+  # - --project-mcp: a new session also gets the MCP servers its cwd's repo declares in
+  #   opencode.json[c] (walked up to the git root), enabled automatically only when remote,
+  #   loopback, header- and OAuth-free (e.g. eternal-machinery's `tec` on :4006). Other
+  #   project servers are listed in `/mcp` and need a person's `name!`; user-catalog names win.
+  #   Needs honk with honk#30.
   # - --swarm-*, --swarm-default: `/mcp` gains a built-in `swarm` entry (`honk swarm-mcp`),
   #   giving goose sessions swarm_send/swarm_read/swarm_list through pigeon (honk#23, pigeon#187).
   #   `--swarm-default` turns swarm on for every new session (pigeon /launch, coordinators),
@@ -1118,7 +1123,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --mcp-self-grant --swarm-default --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --mcp-self-grant --swarm-default --project-mcp --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
