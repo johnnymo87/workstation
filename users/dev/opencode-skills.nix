@@ -38,6 +38,10 @@ let
     "attributing-causes"
     "beads"
     "enabling-mcp-servers"
+    # Cross, not work-only: stall-watch runs on devbox too since 2026-11-04
+    # (personal programs such as eternal-machinery). On a host without
+    # stall-watch, `coordinator` exits 2 and the skill says what that means.
+    "finding-program-coordinators"
     "formatting-slack-messages"
     "migrating-beads-schema"
     "opencode-launch"
@@ -67,7 +71,6 @@ let
     "cleaning-disk"
     "escalating-azure-aks-rbac"
     "figma-mcp-setup"
-    "finding-program-coordinators"
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
@@ -78,6 +81,29 @@ let
     "using-gcloud-bq-cli"
     "working-with-kubernetes"
   ];
+
+  # `coordinator <tag>` / `coordinator --all`, the finding-program-coordinators
+  # skill's lookup: prints the swarm_send id of a program's stall-watch
+  # coordinator. The script is owned by the private repo that owns stall-watch's
+  # state (eng-agent-platform), so the lookup cannot drift from that schema; this
+  # wrapper only execs that checkout's copy, which tracks the checkout without a
+  # rebuild.
+  #
+  # A package (~/.nix-profile/bin), not a ~/.local/bin link: ~/.local/bin is on
+  # login shells' PATH but not on the opencode serves' or goose's, so agents --
+  # the callers the skill is for -- got `command not found` (2026-11-05, devbox).
+  # Installed on every host so the skill's exit codes hold everywhere: with no
+  # checkout it exits 2, like coordinator.sh on a host with no stall-watch.
+  coordinatorScript =
+    "${config.home.homeDirectory}/${if isDarwin then "Code" else "projects"}/eng-agent-platform/stallwatch/coordinator.sh";
+  coordinatorCmd = pkgs.writeShellScriptBin "coordinator" ''
+    script="${coordinatorScript}"
+    if [ ! -f "$script" ]; then
+      echo "no stall-watch on THIS host (no $script). Each machine with stall-watch runs its own coordinators for its own programs; this host cannot look them up. Ask the human to forward the finding."
+      exit 2
+    fi
+    exec ${pkgs.bash}/bin/bash "$script" "$@"
+  '';
 
   # beads has additional reference files
   beadsReferences = {
@@ -329,6 +355,8 @@ let
   '';
 in
 {
+  home.packages = [ coordinatorCmd ];
+
   home.file =
     mkSkills crossPlatformSkills
     // beadsReferences
