@@ -5,16 +5,27 @@ description: Looks up the coordinator session of a program of work (a session-ta
 
 # Finding a Program's Coordinator
 
-On cloudbox, almost every active program of work has a **coordinator**. It is a
-long-lived goose session run by `stall-watch`, one per program, and it is keyed
-by the program's session-tags tag. You reach it with `swarm_send` to a **`gse_`** id.
+Almost every active program of work has a **coordinator**. It is a long-lived
+goose session run by `stall-watch`, one per program, and it is keyed by the
+program's session-tags tag. You reach it with `swarm_send` to a **`gse_`** id.
 The lookup is one read-only query.
+
+**Each machine that runs stall-watch has coordinators for its own programs**:
+cloudbox for the work programs, devbox (since 2026-11-04) for the personal ones,
+such as `eternal-machinery`. A coordinator lives on the machine that runs its
+program, which may not be the machine you are on.
 
 This is not the coordinator role that `swarm-messaging` bans. That ban covers
 an opencode session that appoints itself, or is appointed, to route messages
 inside a swarm. Program coordinators are the human's standing infrastructure.
 If a finding belongs to another program, its coordinator is the right
 recipient.
+
+**"The coordinator" can mean something else in a repo.** eternal-machinery, for
+one, has an in-game AgentOS agent named `coordinator`. When the human says
+"report this to the coordinator" while you are working on a program, they mean
+that program's stall-watch coordinator unless the context is plainly the
+in-repo thing. If you can't tell, ask.
 
 ## Why this skill exists
 
@@ -33,10 +44,15 @@ concluded that no coordinator existed, which was wrong. Here is what it tried:
 The tag was enough. It is the key to the registry, and the session never
 queried the registry.
 
+On 2026-11-05 it happened again on devbox, for a different reason: stall-watch
+had been running there for a day, but this skill was still deployed to work
+hosts only and `coordinator` was not on the agent's PATH. The session guessed
+a recipient instead. Both are fixed; the skill and the command are on every host.
+
 ## The lookup
 
-Run `coordinator`, printing its exit code. It is on PATH on cloudbox, and it is
-read-only:
+Run `coordinator`, printing its exit code. It is on PATH on every host, and it
+is read-only. It sees only **this host's** stall-watch:
 
 ```bash
 coordinator <tag>; echo "exit=$?"
@@ -51,9 +67,9 @@ not by the text.**
 |---|---|---|
 | 0 | `<tag>  to=gse_…  heartbeat=on\|off` | Verified. `swarm_send` to the `to=` id. `heartbeat` does not affect delivery (see "Before you send"). |
 | 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, a line ending `not a live coordinator, do not send` (the program is paused, disabled, or gone from `programs.toml`), or a line saying pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
-| 2 | `no stall-watch on THIS host…` | You are not on cloudbox. See "No coordinator found". |
+| 2 | `no stall-watch on THIS host…`, or `program <tag>'s coordinator runs on <machine>; this host cannot reach it…` | The coordinator, if any, is on another machine. See "No coordinator found". |
 | 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
-| 127 | `coordinator: command not found` | Run `hostname`. On `cloudbox`, the install is broken: treat it as exit 3, and include `ls -l ~/.local/bin/coordinator` in what you tell the human. On any other host, treat it as exit 2, because only cloudbox installs the command. |
+| 127 | `coordinator: command not found` | The install is broken (workstation installs it on every host). Treat it as exit 3, and include `hostname` and `ls -l ~/.nix-profile/bin/coordinator` in what you tell the human. |
 
 A Python traceback counts as exit 3, whatever the exit code says.
 
@@ -75,7 +91,8 @@ mailbox. Every coordinator is registered there under the label
 
 **Which tag?** Use the tag of the program that owns the problem, not your own.
 If you only know the epic, the mapping from tag to `beads_epic` is in
-`~/projects/eng-agent-platform/stallwatch/programs.toml` (a private repo).
+`~/projects/eng-agent-platform/stallwatch/programs.toml` (a private repo). Each
+program there also names the `machine` it runs on.
 `session-tags which <ses_>` on any of that program's worker sessions also gives you
 the tag.
 
@@ -105,22 +122,25 @@ the tag.
 
 ## No coordinator found
 
-Report the absence only after `coordinator` exits 1 on cloudbox. Exit 3 is not
+Report the absence only after `coordinator` exits 1. Exit 2 and exit 3 are not
 an absence.
 
 - **`no such program in programs.toml`** usually means the tag is wrong. Run
-  `coordinator --all`, which lists only programs that have a coordinator, or
-  check `programs.toml` (see "Which tag?") for the right tag before you tell
-  anyone anything.
+  `coordinator --all`, which lists only this host's programs that have a
+  coordinator, or check `programs.toml` (see "Which tag?") for the right tag
+  before you tell anyone anything. If you are sure of the tag, the program may
+  be newer than this host's checkout of `programs.toml`: say that, not that
+  there is no coordinator.
 - **`not routable in pigeon`** can be temporary while a coordinator is being
   rebound. Retry once after a few minutes.
 - **Otherwise,** tell the human that program X has no reachable coordinator.
   Quote the line `coordinator` printed rather than paraphrasing it, and wait
   for them to say where the finding should go.
 
-On macOS or devbox there is no state DB. That does **not** mean there is no
-coordinator. It means this host cannot reach one. Say exactly that, and ask
-the human to forward the finding.
+Exit 2 (the program runs on another machine, or this host has no stall-watch)
+does **not** mean there is no coordinator. It means this host cannot look one
+up. Say exactly that, name the machine `coordinator` printed, and ask the human
+to forward the finding.
 
 In either case, don't fall back to messaging a worker or a launcher session. A
 dead `ses_` produces `delivery.failed`. A live one is the wrong recipient.

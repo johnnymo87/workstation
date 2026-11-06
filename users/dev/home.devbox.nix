@@ -1997,12 +1997,7 @@ down and its silence means nothing. This host has no second leg.
     "L+ %h/.local/state/honk/secret - - - - /run/secrets/pigeon_goose_acp_token"
   ];
 
-  # `coordinator <tag>` / `coordinator --all`: print the swarm_send id of a program's stall-watch
-  # coordinator, for any session (opencode, goose, human). The finding-program-coordinators skill
-  # calls it. The script is owned by the private repo that owns stall-watch's state, so the lookup
-  # cannot drift from that schema; an out-of-store link tracks its checkout without a rebuild.
-  home.file.".local/bin/coordinator".source = config.lib.file.mkOutOfStoreSymlink
-    "${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/coordinator.sh";
+  # `coordinator` is installed on every host by users/dev/opencode-skills.nix.
 
   # ---- stall-watch dead-man watcher (same as cloudbox's) ---------------------
   # devbox runs its own stall-watch for its own programs since 2026-11-04 (the
