@@ -1974,7 +1974,7 @@ down and its silence means nothing. This host has no second leg.
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-self-grant --swarm-default --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-self-grant --swarm-default --project-mcp --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
