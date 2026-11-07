@@ -17,10 +17,11 @@
 # most keys must be seen on 2 passes in a row before they alert.
 #
 # Secrets: Telegram's are pigeon's (telegram_bot_token, telegram_chat_id), read
-# via LoadCredential. The dead-man's ping is off (hcEnabled below): when on, it
-# adds sops secret em_stack_hc_ping_url (root 0400, a healthchecks.io ping URL;
-# suggested check: period 10 m, grace 20 m). The script pings only when the
-# credential exists, with em-ci-monitor's contract (em-stack-monitor.sh).
+# via LoadCredential. The dead-man's ping (hcEnabled below) reads sops secret
+# em_stack_hc_ping_url (root 0400): the healthchecks.io check "devbox em-stack
+# monitor", in em-ci's project, period 10 m, grace 20 m, email + Telegram. The
+# script pings only when the credential exists, with em-ci-monitor's contract
+# (em-stack-monitor.sh).
 #
 # Run a pass now:  sudo systemctl start em-stack-monitor; journalctl -u em-stack-monitor -n 30
 # Dry run (prints the raw key set before debounce and the message it would
@@ -33,9 +34,9 @@
 { config, lib, pkgs, ... }:
 
 let
-  # Flip to true once the healthchecks.io check exists and its ping URL is in
-  # devbox sops as em_stack_hc_ping_url.
-  hcEnabled = false;
+  # On since 2026-11-07 (EM bead eternal-machinery-xlrzi). Turning it off
+  # also drops the sops secret from the build. The key may stay in devbox.yaml.
+  hcEnabled = true;
 
   repo = "/home/dev/projects/eternal-machinery";
   uid = toString config.users.users.dev.uid;
