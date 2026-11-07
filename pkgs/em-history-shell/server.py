@@ -27,6 +27,30 @@ FAIL CLOSED: a missing bwrap, seccomp file or tool path, or a bad request, answe
 with a refusal before anything runs. There is no path that runs the command outside
 bwrap.
 
+PROTOCOL v2 (EM bead qpmfc.18.16.49.2.14, character memory spec section 3.5) adds her
+skills folder. A `run` names a `character` (or null) and how she may use her folder,
+`own` ("edit", "read", or null with no character):
+
+- /skills/own, "edit": COPY IN, COPY OUT. The service copies her folder
+  (<base>/skills-own/<history root name>/<key>/) into a fresh size-limited tmpfs (the
+  unit's TemporaryFileSystem, `--skills-work`) and binds that copy read-write. After
+  the command it reads the copy once, checking it as it reads (`read_tree`: folders
+  and plain files only, no links or second names, the name grammar, depth and the
+  runaway caps), writes what it read to a staging folder and swaps it in with an
+  atomic rename. A killed command, a failed check, a full tmpfs or a folder that
+  changed on disk meanwhile keeps nothing, and the answer says why in one sentence.
+- /skills/own, "read": her folder bound read only (a player reads its character's).
+- /skills/shared: the shared skills AgentOS publishes at boot
+  (<base>/skills-shared[-<profile>]/, marker `.agent-skills-shared-root`), read only.
+  Missing or unmarked: not mounted.
+- /skills/characters: the view `*` (the Coordinator) also reads every character's
+  folder of the profile, read only.
+
+The skills roots are the service's own (<base>/skills-own/ is made by tmpfiles, owned
+by this user, with an ACL that lets dev read): dev never writes there. A reviewed skill
+reaches her folder through the `sync` op, and leaves it through `remove`, each guarded
+by the folder's `files_sha256` as the caller last saw it.
+
 Everything the server reads is on fd 0; stdout is the same socket, so nothing else may
 print there. Diagnostics go to stderr (the journal).
 """
@@ -34,11 +58,16 @@ print there. Diagnostics go to stderr (the journal).
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
+import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import select
+import shutil
 import signal
 import socket
 import stat
@@ -48,7 +77,7 @@ import sys
 import time
 from dataclasses import dataclass, field, replace
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 #: Largest request line, in bytes (without the newline).
 MAX_REQUEST_BYTES = 256 * 1024
@@ -87,8 +116,52 @@ _ROOT_NAME = re.compile(r"agent-history(-[A-Za-z0-9_-]+)?")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _VERSION = re.compile(r"[0-9]+(\.[0-9]+){2}")
 
-RUN_KEYS = frozenset({"v", "op", "root", "view", "agent", "command"})
+# --- her skills folder (protocol v2) -------------------------------------------------
+#: Under the base: the service's own folder (tmpfiles makes it). One profile root per
+#: history root inside it, named as the history root is, then one folder per name key.
+SKILLS_OWN = "skills-own"
+#: Inside SKILLS_OWN: where new trees are written before they are swapped in, and where
+#: old ones wait to be deleted. Same filesystem, so a rename moves them.
+STAGING = ".staging"
+#: Staging entries older than this are left over from a crash and are deleted.
+STAGING_STALE_S = 3600
+#: The shared root AgentOS publishes is marked with this file.
+SHARED_MARKER = ".agent-skills-shared-root"
+SANDBOX_SKILLS = "/skills"
+SANDBOX_OWN = "/skills/own"
+SANDBOX_SHARED = "/skills/shared"
+SANDBOX_CHARACTERS = "/skills/characters"
+#: The folder inside `--skills-work` (a tmpfs) that is bound at /skills/own.
+WORK_OWN = "own"
+#: Runaway guards, not style rules: files in her whole folder, bytes per file, bytes in
+#: all, folders below /skills/own (a file in /skills/own/a/b/c/ is at depth 4).
+MAX_SKILL_FILES = 2000
+MAX_FILE_BYTES = 1024 * 1024
+MAX_TOTAL_BYTES = 8 * 1024 * 1024
+MAX_DEPTH = 4
+#: Below this much free space or these many free inodes, the work tmpfs counts as full:
+#: a write cut short there can still exit 0.
+WORK_LOW_BYTES = 256 * 1024
+WORK_LOW_INODES = 8
+#: Kept files and folders get these modes (no exec bits). The ACL gives dev r-X.
+FILE_MODE = 0o640
+DIR_MODE = 0o750
+
+#: Capitalised words separated by single spaces (and at most 64 characters).
+_CHARACTER = re.compile(r"[A-Z][a-z]+( [A-Z][a-z]+)*")
+MAX_CHARACTER_CHARS = 64
+#: A skill folder's name: skill-check's name rule (and at most 64 characters).
+_SKILL_NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
+#: Every other path component below /skills/own.
+_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_SHARED_NAME = re.compile(r"skills-shared(-[A-Za-z0-9_-]+)?")
+
+RUN_KEYS = frozenset(
+    {"v", "op", "root", "view", "agent", "command", "character", "own"}
+)
 PING_KEYS = frozenset({"v", "op"})
+SYNC_KEYS = frozenset({"v", "op", "root", "character", "skill", "expect_sha256", "files"})
+REMOVE_KEYS = frozenset({"v", "op", "root", "character", "skill", "expect_sha256"})
 
 
 class Refused(Exception):
@@ -121,6 +194,9 @@ class Config:
     #: both from default.nix, reported by `ping`.
     libseccomp_version: str = ""
     policy_sha256: str = ""
+    #: The tmpfs (the unit's TemporaryFileSystem) where her folder is copied in for an
+    #: "edit" run, from `--skills-work`. None: "edit" runs are refused.
+    skills_work: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +226,14 @@ class Request:
     agent: str
     command: str
     mounts: list[tuple[str, str]] = field(default_factory=list)
+    #: Her name key, or None when the run has no character.
+    key: str | None = None
+    #: "edit", "read" or None.
+    own: str | None = None
+    #: The history root's name, which names its profile root under SKILLS_OWN.
+    profile: str = ""
+    #: The validated shared root, or None (not mounted).
+    shared: str | None = None
 
 
 # --- config -------------------------------------------------------------------------
@@ -396,20 +480,762 @@ def validate_run(msg: dict, base: str) -> Request:
     view = parse_view(msg["view"])
     agent = check_agent(msg["agent"], view)
     command = check_command(msg["command"])
+    key = character_key(msg["character"])
+    own = check_own(msg["own"], key)
     root = check_root(msg["root"], base)
     mounts = view_mounts(root, view)
     check_mounts(mounts, root)
-    return Request(root=root, view=view, agent=agent, command=command, mounts=mounts)
+    return Request(
+        root=root,
+        view=view,
+        agent=agent,
+        command=command,
+        mounts=mounts,
+        key=key,
+        own=own,
+        profile=os.path.basename(root),
+        shared=shared_root(root, base),
+    )
+
+
+# --- her skills folder: names and roots -----------------------------------------------
+
+
+def character_key(character) -> str | None:
+    """The folder key for a character name: casefolded, each space a hyphen ("Aelinthia
+    Corvella" is "aelinthia-corvella"). One-to-one under the grammar, which has no
+    hyphens. None for no character. Raises `Refused`."""
+    if character is None:
+        return None
+    if (
+        not isinstance(character, str)
+        or len(character) > MAX_CHARACTER_CHARS
+        or not _CHARACTER.fullmatch(character)
+    ):
+        raise Refused(
+            "The character must be a name of capitalised words with single spaces, "
+            f"at most {MAX_CHARACTER_CHARS} characters."
+        )
+    return character.casefold().replace(" ", "-")
+
+
+def check_own(own, key: str | None) -> str | None:
+    if key is None:
+        if own is not None:
+            raise Refused("A run with no character has no skills folder to use.")
+        return None
+    if own not in ("edit", "read"):
+        raise Refused('With a character, own must be "edit" or "read".')
+    return own
+
+
+def check_skill_name(skill) -> str:
+    if not isinstance(skill, str) or len(skill) > 64 or not _SKILL_NAME.fullmatch(skill):
+        raise Refused(
+            "The skill must be named with lowercase letters, digits and single "
+            "hyphens, at most 64 characters."
+        )
+    return skill
+
+
+def shared_root(root: str, base: str) -> str | None:
+    """The shared skills root that pairs with the history root (agent-history goes with
+    skills-shared, agent-history-<p> with skills-shared-<p>) when it is a real directory
+    (not a link) holding its marker as a regular file. Anything else: None, and nothing
+    is mounted at /skills/shared. Never raises."""
+    suffix = os.path.basename(root)[len("agent-history") :]
+    name = "skills-shared" + suffix
+    if not _SHARED_NAME.fullmatch(name):
+        return None
+    path = os.path.join(os.path.realpath(base), name)
+    try:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            return None
+        if not stat.S_ISREG(os.lstat(os.path.join(path, SHARED_MARKER)).st_mode):
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def _open_dir(name: str, dir_fd: int | None = None) -> int:
+    """A directory fd, never through a symlink at the last component."""
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+
+
+def open_skills_own(base: str) -> int:
+    """The fd of <base>/skills-own when it is this user's real directory and nobody else
+    can write it. Raises `Refused(kind="unavailable")`."""
+    say = (
+        "Her skills folder is not set up on this host (the service's skills-own "
+        "folder is missing or not its own)."
+    )
+    try:
+        fd = _open_dir(os.path.join(os.path.realpath(base), SKILLS_OWN))
+    except OSError:
+        raise Refused(say, "unavailable") from None
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise Refused(say, "unavailable")
+    return fd
+
+
+def _open_child(parent_fd: int, name: str) -> int | None:
+    """A real directory below `parent_fd` (no link), or None when there is none."""
+    try:
+        return _open_dir(name, parent_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        if err.errno in (errno.ENOTDIR, errno.ELOOP):
+            raise Refused(
+                "Her skills folder holds something that is not a folder where a "
+                "folder belongs.",
+                "internal",
+            ) from None
+        raise
+
+
+# --- her skills folder: the tree check -------------------------------------------------
+
+
+class TreeRefused(Exception):
+    """The folder does not pass the check. The message is the reason, a clause the
+    answer puts after "Your skills were not saved because"."""
+
+
+@dataclass(frozen=True)
+class Tree:
+    """A folder as read: every directory and file by its path below the folder, with
+    the files' bytes. Paths use "/" and have no leading slash."""
+
+    dirs: tuple[str, ...]
+    files: tuple[tuple[str, bytes], ...]
+
+    def digest(self) -> str:
+        """Changes when any path, folder or file content changes (empty folders count,
+        unlike `files_sha256`)."""
+        h = hashlib.sha256()
+        for path in self.dirs:
+            h.update(b"d " + path.encode("utf-8", "surrogateescape") + b"\n")
+        for path, data in self.files:
+            h.update(b"f " + path.encode("utf-8", "surrogateescape") + b"\0")
+            h.update(hashlib.sha256(data).hexdigest().encode() + b"\n")
+        return h.hexdigest()
+
+    def total(self) -> int:
+        return sum(len(data) for _, data in self.files)
+
+    def skill(self, name: str) -> Tree | None:
+        """The part of the tree below one top-level folder, or None."""
+        if name not in self.dirs:
+            return None
+        prefix = name + "/"
+        return Tree(
+            dirs=tuple(d[len(prefix) :] for d in self.dirs if d.startswith(prefix)),
+            files=tuple((p[len(prefix) :], b) for p, b in self.files if p.startswith(prefix)),
+        )
+
+    def without(self, name: str) -> Tree:
+        prefix = name + "/"
+        return Tree(
+            dirs=tuple(d for d in self.dirs if d != name and not d.startswith(prefix)),
+            files=tuple((p, b) for p, b in self.files if not p.startswith(prefix)),
+        )
+
+
+EMPTY_TREE = Tree(dirs=(), files=())
+
+
+def files_sha256(tree: Tree | None) -> str | None:
+    """The hash the review ledger keys on, for one skill folder (None: no folder).
+    EXACTLY: for each regular file, in the order of its "/"-joined path below the skill
+    folder sorted by UTF-8 bytes, the bytes `path + "\\0" + sha256hex(content) + "\\n"`,
+    all concatenated and hashed with sha256 (hex). Folders do not count. AgentOS
+    computes the same host-side."""
+    if tree is None:
+        return None
+    h = hashlib.sha256()
+    for path, data in sorted(tree.files, key=lambda item: item[0].encode("utf-8", "surrogateescape")):
+        h.update(path.encode("utf-8", "surrogateescape") + b"\0")
+        h.update(hashlib.sha256(data).hexdigest().encode() + b"\n")
+    return h.hexdigest()
+
+
+def _show(path: str) -> str:
+    """A path as she sees it, safe to put in a sentence."""
+    text = os.fsencode(SANDBOX_OWN + "/" + path).decode("ascii", "backslashreplace")
+    return text if len(text) <= 200 else text[:200] + "..."
+
+
+def check_name(path: str, depth: int) -> None:
+    """One path component's rule: a skill folder's at depth 1, the general one below."""
+    name = path.rsplit("/", 1)[-1]
+    if depth == 1:
+        if len(name) > 64 or not _SKILL_NAME.fullmatch(name):
+            raise TreeRefused(
+                f"{_show(path)} is not a skill name. Name a skill folder with lowercase "
+                "letters, digits and single hyphens, at most 64 characters"
+            )
+    elif not _COMPONENT.fullmatch(name):
+        raise TreeRefused(
+            f"{_show(path)} has a name that is not allowed. Use letters, digits, dots, "
+            "hyphens and underscores, not starting with a dot, at most 64 characters"
+        )
+
+
+def check_tree(tree: Tree) -> None:
+    """The rules a whole folder must pass (names, depth, caps), on a tree already read.
+    Used for a `sync`, whose files never went through `read_tree`."""
+    for path in tree.dirs:
+        depth = path.count("/") + 1
+        check_name(path, depth)
+        if depth > MAX_DEPTH:
+            raise TreeRefused(f"{_show(path)} is nested too deep. Keep files at most {MAX_DEPTH} folders down")
+    dirs = set(tree.dirs)
+    for path, data in tree.files:
+        parts = path.split("/")
+        if len(parts) == 1:
+            raise TreeRefused(
+                f"{_show(path)} is a file at the top of your skills folder. Each skill is a folder"
+            )
+        for i in range(1, len(parts)):
+            if "/".join(parts[:i]) not in dirs:
+                raise TreeRefused(f"{_show(path)} has no folder above it")
+        check_name(path, len(parts))
+        if len(parts) - 1 > MAX_DEPTH:
+            raise TreeRefused(f"{_show(path)} is nested too deep. Keep files at most {MAX_DEPTH} folders down")
+        if len(data) > MAX_FILE_BYTES:
+            raise TreeRefused(f"{_show(path)} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB")
+    if len(tree.files) > MAX_SKILL_FILES:
+        raise TreeRefused(f"your skills folder holds more than {MAX_SKILL_FILES} files")
+    if tree.total() > MAX_TOTAL_BYTES:
+        raise TreeRefused(
+            f"your skills folder holds more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB"
+        )
+
+
+def read_tree(dir_fd: int) -> Tree:
+    """Read the folder at `dir_fd` once, checking it as it is read: folders and regular
+    files only (a link, a device, a fifo or a socket is refused, and so is a file with a
+    second name), every name, the depth and the caps. What is returned is what was
+    checked, so a change made after a file was read cannot slip in. Raises
+    `TreeRefused`."""
+    dirs: list[str] = []
+    files: list[tuple[str, bytes]] = []
+    total = 0
+
+    def walk(fd: int, prefix: str, depth: int) -> None:
+        nonlocal total
+        try:
+            names = sorted(os.listdir(fd))
+        except OSError:
+            raise TreeRefused(f"{_show(prefix.rstrip('/')) if prefix else SANDBOX_OWN} cannot be read") from None
+        for name in names:
+            path = prefix + name
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                raise TreeRefused(f"{_show(path)} cannot be read") from None
+            if stat.S_ISLNK(info.st_mode):
+                raise TreeRefused(f"{_show(path)} is a link. Only plain files and folders are kept")
+            if stat.S_ISREG(info.st_mode) and depth == 1:
+                raise TreeRefused(
+                    f"{_show(path)} is a file at the top of your skills folder. Each skill is a folder"
+                )
+            check_name(path, depth)
+            if stat.S_ISDIR(info.st_mode):
+                if depth > MAX_DEPTH:
+                    raise TreeRefused(f"{_show(path)} is nested too deep. Keep files at most {MAX_DEPTH} folders down")
+                try:
+                    child = _open_dir(name, fd)
+                except OSError:
+                    raise TreeRefused(f"{_show(path)} cannot be read") from None
+                try:
+                    dirs.append(path)
+                    walk(child, path + "/", depth + 1)
+                finally:
+                    os.close(child)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise TreeRefused(f"{_show(path)} is not a plain file or folder. Only plain files and folders are kept")
+            try:
+                ffd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+            except OSError:
+                raise TreeRefused(f"{_show(path)} cannot be read") from None
+            try:
+                opened = os.fstat(ffd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise TreeRefused(f"{_show(path)} is not a plain file or folder. Only plain files and folders are kept")
+                if opened.st_nlink != 1:
+                    raise TreeRefused(f"{_show(path)} has a second name (a hard link). Only plain files and folders are kept")
+                chunks = []
+                size = 0
+                while size <= MAX_FILE_BYTES:
+                    chunk = os.read(ffd, 65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+            finally:
+                os.close(ffd)
+            if size > MAX_FILE_BYTES:
+                raise TreeRefused(f"{_show(path)} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB")
+            files.append((path, b"".join(chunks)))
+            total += size
+            if len(files) > MAX_SKILL_FILES:
+                raise TreeRefused(f"your skills folder holds more than {MAX_SKILL_FILES} files")
+            if total > MAX_TOTAL_BYTES:
+                raise TreeRefused(
+                    f"your skills folder holds more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB"
+                )
+
+    walk(dir_fd, "", 1)
+    return Tree(dirs=tuple(dirs), files=tuple(files))
+
+
+def write_tree(dir_fd: int, tree: Tree) -> None:
+    """Write `tree` into the empty folder at `dir_fd`: folders DIR_MODE, files
+    FILE_MODE, every file and folder synced. Never follows a link."""
+    fds = {"": dir_fd}
+    try:
+        for path in tree.dirs:
+            parent, _, name = path.rpartition("/")
+            os.mkdir(name, DIR_MODE, dir_fd=fds[parent])
+            fds[path] = _open_dir(name, fds[parent])
+        for path, data in tree.files:
+            parent, _, name = path.rpartition("/")
+            ffd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                FILE_MODE,
+                dir_fd=fds[parent],
+            )
+            try:
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(ffd, view) :]
+                os.fsync(ffd)
+            finally:
+                os.close(ffd)
+        for path in sorted(tree.dirs, key=len, reverse=True):
+            os.fsync(fds[path])
+        os.fsync(dir_fd)
+    finally:
+        for path, fd in fds.items():
+            if path:
+                os.close(fd)
+
+
+# --- her skills folder: swapping a tree in ---------------------------------------------
+
+_RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
+_libc = None
+
+
+def _renameat2(old_fd: int, old: str, new_fd: int, new: str, flags: int) -> None:
+    global _libc
+    if _libc is None:
+        _libc = ctypes.CDLL(None, use_errno=True)
+    if _libc.renameat2(old_fd, os.fsencode(old), new_fd, os.fsencode(new), flags) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
+class Store:
+    """<base>/skills-own, held open, with its lock. Every change to a character's
+    folder happens under the lock, so a copy out and a sync never interleave."""
+
+    def __init__(self, base: str):
+        self.fd = open_skills_own(base)
+        self.staging_fd: int | None = None
+
+    def close(self) -> None:
+        if self.staging_fd is not None:
+            os.close(self.staging_fd)
+            self.staging_fd = None
+        os.close(self.fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def lock(self) -> None:
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+
+    def unlock(self) -> None:
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+
+    def profile_fd(self, profile: str, *, create: bool) -> int | None:
+        fd = _open_child(self.fd, profile)
+        if fd is None and create:
+            try:
+                os.mkdir(profile, DIR_MODE, dir_fd=self.fd)
+            except FileExistsError:
+                pass
+            fd = _open_child(self.fd, profile)
+        return fd
+
+    def key_fd(self, profile: str, key: str) -> int | None:
+        """Her folder's fd, or None when she has none yet."""
+        pfd = self.profile_fd(profile, create=False)
+        if pfd is None:
+            return None
+        try:
+            return _open_child(pfd, key)
+        finally:
+            os.close(pfd)
+
+    def read_key(self, profile: str, key: str) -> Tree:
+        fd = self.key_fd(profile, key)
+        if fd is None:
+            return EMPTY_TREE
+        try:
+            return read_tree(fd)
+        finally:
+            os.close(fd)
+
+    def _staging(self) -> int:
+        if self.staging_fd is None:
+            try:
+                os.mkdir(STAGING, DIR_MODE, dir_fd=self.fd)
+            except FileExistsError:
+                pass
+            self.staging_fd = _open_dir(STAGING, self.fd)
+            self._sweep()
+        return self.staging_fd
+
+    def _sweep(self) -> None:
+        """Delete what a crash left in staging. Best effort."""
+        now = time.time()
+        try:
+            names = os.listdir(self.staging_fd)
+        except OSError:
+            return
+        for name in names:
+            try:
+                if now - os.stat(name, dir_fd=self.staging_fd, follow_symlinks=False).st_mtime > STAGING_STALE_S:
+                    shutil.rmtree(name, dir_fd=self.staging_fd)
+            except OSError:
+                pass
+
+    def stage(self, tree: Tree) -> str:
+        """Write `tree` into a new staging folder and return its name."""
+        sfd = self._staging()
+        name = "t-" + secrets.token_hex(8)
+        os.mkdir(name, DIR_MODE, dir_fd=sfd)
+        fd = _open_dir(name, sfd)
+        try:
+            write_tree(fd, tree)
+        finally:
+            os.close(fd)
+        return name
+
+    def discard(self, name: str) -> None:
+        try:
+            shutil.rmtree(name, dir_fd=self._staging())
+        except OSError as err:
+            print(f"em-history-shell: could not delete staging {name}: {err!r}", file=sys.stderr)
+
+    def put(self, parent_fd: int, target: str, staged: str | None) -> str | None:
+        """Make `target` (in `parent_fd`) the staged folder, or remove it when `staged`
+        is None. Atomic: a reader sees the old folder or the new one. Returns the
+        staging name now holding the old folder (to `discard`), or None."""
+        sfd = self._staging()
+        exists = _open_child(parent_fd, target)
+        if exists is not None:
+            os.close(exists)
+        if staged is None:
+            if not exists:
+                return None
+            old = "o-" + secrets.token_hex(8)
+            _renameat2(parent_fd, target, sfd, old, _RENAME_NOREPLACE)
+            return old
+        if exists is None:
+            _renameat2(sfd, staged, parent_fd, target, _RENAME_NOREPLACE)
+            return None
+        _renameat2(sfd, staged, parent_fd, target, _RENAME_EXCHANGE)
+        os.fsync(parent_fd)
+        return staged
+
+
+def replace_key(store: Store, profile: str, key: str, before: str, tree: Tree) -> str | None:
+    """Swap her whole folder for `tree`, but only if it still reads as `before` (a
+    `Tree.digest`). Returns the reason it was not kept, or None. Caller holds no lock."""
+    staged = store.stage(tree) if (tree.dirs or tree.files) else None
+    old = None
+    try:
+        store.lock()
+        try:
+            try:
+                now = store.read_key(profile, key).digest()
+            except TreeRefused:
+                now = None
+            if now != before:
+                return "they changed while the command ran. Look again and redo the change"
+            pfd = store.profile_fd(profile, create=staged is not None)
+            if pfd is None:
+                return None  # nothing there and nothing to write
+            try:
+                old = store.put(pfd, key, staged)
+                staged = None
+                os.fsync(pfd)
+            finally:
+                os.close(pfd)
+        finally:
+            store.unlock()
+    finally:
+        if staged is not None:
+            store.discard(staged)
+        if old is not None:
+            store.discard(old)
+    return None
+
+
+# --- her skills folder: a run's mounts, copy in and copy out --------------------------
+
+
+def _not_saved(reason: str) -> str:
+    return f"Your skills were not saved because {reason}."
+
+
+def work_is_full(path: str) -> bool:
+    """The work tmpfs is (nearly) out of space or inodes: a write may have been cut."""
+    info = os.statvfs(path)
+    return info.f_bavail * info.f_frsize < WORK_LOW_BYTES or info.f_favail < WORK_LOW_INODES
+
+
+@dataclass
+class EditState:
+    store: Store
+    work: str
+    before: str
+
+
+def skills_mounts(
+    request: Request, config: Config, base: str
+) -> tuple[list[tuple[str, str | None, str]], EditState | None]:
+    """The /skills mounts of a run, `(bwrap flag, host path or None, sandbox path)`,
+    and for an "edit" run the state `finish_edit` needs (her folder is copied into the
+    work tmpfs here). Raises `Refused`."""
+    mounts: list[tuple[str, str | None, str]] = []
+    real_base = os.path.realpath(base)
+    own_root = os.path.join(real_base, SKILLS_OWN)
+    state = None
+    if request.own == "edit":
+        work_base = config.skills_work
+        if not work_base or not os.path.isdir(work_base) or os.path.islink(work_base):
+            raise Refused(
+                "Her skills folder cannot be edited on this host (the service has no "
+                "work space for it).",
+                "unavailable",
+            )
+        store = Store(base)
+        try:
+            try:
+                before = store.read_key(request.profile, request.key)
+            except TreeRefused as err:
+                raise Refused(
+                    f"Her skills folder on disk does not pass the check ({err}).", "internal"
+                ) from None
+            work = os.path.join(work_base, WORK_OWN)
+            shutil.rmtree(work, ignore_errors=True)
+            os.mkdir(work, 0o700)
+            fd = _open_dir(work)
+            try:
+                write_tree(fd, before)
+            finally:
+                os.close(fd)
+        except BaseException:
+            store.close()
+            raise
+        state = EditState(store=store, work=work, before=before.digest())
+        mounts.append(("--bind", work, SANDBOX_OWN))
+    elif request.own == "read":
+        host = None
+        try:
+            with Store(base) as store:
+                fd = store.key_fd(request.profile, request.key)
+                if fd is not None:
+                    os.close(fd)
+                    host = os.path.join(own_root, request.profile, request.key)
+        except Refused:
+            host = None  # no skills-own on this host: she has nothing to read yet
+        mounts.append(("--ro-bind", host, SANDBOX_OWN) if host else ("--dir", None, SANDBOX_OWN))
+    if request.shared is not None:
+        mounts.append(("--ro-bind", request.shared, SANDBOX_SHARED))
+    if request.view == ("*",):
+        host = None
+        try:
+            with Store(base) as store:
+                fd = store.profile_fd(request.profile, create=False)
+                if fd is not None:
+                    os.close(fd)
+                    host = os.path.join(own_root, request.profile)
+        except Refused:
+            host = None
+        mounts.append(
+            ("--ro-bind", host, SANDBOX_CHARACTERS) if host else ("--dir", None, SANDBOX_CHARACTERS)
+        )
+    return mounts, state
+
+
+def finish_edit(state: EditState, request: Request, result: Result, work_base: str) -> dict:
+    """Copy out: what the answer's `skills` says after an "edit" run."""
+    killed = result.timed_out or result.flooded or result.exit_code is None or result.exit_code < 0
+    after = None
+    reason = None
+    try:
+        fd = _open_dir(state.work)
+    except OSError:
+        reason = "your skills folder was gone after the command"
+    else:
+        try:
+            after = read_tree(fd)
+        except TreeRefused as err:
+            reason = str(err)
+        finally:
+            os.close(fd)
+    if after is not None and after.digest() == state.before:
+        return {"changed": False, "kept": True, "why": None}
+    if killed:
+        reason = "the command was stopped before it finished"
+    elif work_is_full(work_base):
+        reason = "your skills folder ran out of room"
+    if reason is not None:
+        return {"changed": False, "kept": False, "why": _not_saved(reason)}
+    try:
+        reason = replace_key(state.store, request.profile, request.key, state.before, after)
+    except OSError as err:
+        print(f"em-history-shell: could not keep her skills: {err!r}", file=sys.stderr)
+        reason = "the service could not write them. Try again later"
+    if reason is not None:
+        return {"changed": False, "kept": False, "why": _not_saved(reason)}
+    return {"changed": True, "kept": True, "why": None}
+
+
+# --- her skills folder: the dev-only ops ----------------------------------------------
+
+
+def check_expect(value) -> str | None:
+    if value is None or (isinstance(value, str) and _DIGEST.fullmatch(value)):
+        return value
+    raise Refused("expect_sha256 must be null or 64 lowercase hex digits.")
+
+
+def files_tree(skill: str, files) -> Tree:
+    """A skill folder from a sync's `files` ({relative path: UTF-8 text}), as a tree
+    below her folder. Raises `Refused` on a bad shape, `TreeRefused` on a bad name."""
+    if not isinstance(files, dict) or not files:
+        raise Refused("files must be a non-empty object of path to text.")
+    dirs = {skill}
+    out = []
+    for rel, text in files.items():
+        if not isinstance(rel, str) or not isinstance(text, str):
+            raise Refused("files must map each path to its text.")
+        parts = rel.split("/")
+        if any(not _COMPONENT.fullmatch(p) for p in parts):
+            raise Refused(f"The file path {rel!r} is not allowed.")
+        for i in range(1, len(parts)):
+            dirs.add(skill + "/" + "/".join(parts[:i]))
+        try:
+            data = text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise Refused(f"The text of {rel!r} is not valid UTF-8.") from None
+        out.append((skill + "/" + rel, data))
+    return Tree(dirs=tuple(sorted(dirs)), files=tuple(sorted(out)))
+
+
+def _merge(base_tree: Tree, skill_tree: Tree) -> Tree:
+    return Tree(
+        dirs=tuple(sorted(set(base_tree.dirs) | set(skill_tree.dirs))),
+        files=tuple(sorted(base_tree.files + skill_tree.files)),
+    )
+
+
+def handle_change(msg: dict, base: str) -> dict:
+    """A `sync` (write one reviewed skill) or a `remove`, each only if the skill folder
+    still hashes to `expect_sha256` (null: it must not exist). Returns the answer body.
+    Raises `Refused` (kind `conflict` when the hash does not match)."""
+    op = msg["op"]
+    root = check_root(msg["root"], base)
+    key = character_key(msg["character"])
+    if key is None:
+        raise Refused("A sync or remove needs a character.")
+    skill = check_skill_name(msg["skill"])
+    expect = check_expect(msg["expect_sha256"])
+    new_skill = files_tree(skill, msg["files"]) if op == "sync" else None
+    profile = os.path.basename(root)
+    with Store(base) as store:
+        staged = old = None
+        store.lock()
+        try:
+            try:
+                current = store.read_key(profile, key)
+            except TreeRefused as err:
+                raise Refused(f"Her skills folder on disk does not pass the check ({err}).", "internal") from None
+            now = files_sha256(current.skill(skill))
+            if now != expect:
+                raise Refused(
+                    f"The skill {skill} is not as expected (it hashes to {now}).", "conflict"
+                )
+            if new_skill is not None:
+                try:
+                    check_tree(_merge(current.without(skill), new_skill))
+                except TreeRefused as err:
+                    raise Refused(f"The skill cannot be kept: {err}.") from None
+                staged = store.stage(new_skill.skill(skill))
+            pfd = store.profile_fd(profile, create=new_skill is not None)
+            if pfd is None:
+                return {"ok": True} if op == "remove" else {"ok": True, "files_sha256": None}
+            try:
+                kfd = _open_child(pfd, key)
+                if kfd is None and new_skill is not None:
+                    os.mkdir(key, DIR_MODE, dir_fd=pfd)
+                    kfd = _open_child(pfd, key)
+                if kfd is not None:
+                    try:
+                        old = store.put(kfd, skill, staged)
+                        staged = None
+                        os.fsync(kfd)
+                        empty = not os.listdir(kfd)
+                    finally:
+                        os.close(kfd)
+                    if empty:
+                        os.rmdir(key, dir_fd=pfd)
+                        os.fsync(pfd)
+            finally:
+                os.close(pfd)
+        finally:
+            store.unlock()
+            if staged is not None:
+                store.discard(staged)
+            if old is not None:
+                store.discard(old)
+    if op == "remove":
+        return {"ok": True}
+    return {"ok": True, "files_sha256": files_sha256(new_skill.skill(skill))}
 
 
 # --- the sandbox ---------------------------------------------------------------------
 
 
 def build_argv(
-    config: Config, mounts: list[tuple[str, str]], *, seccomp_fd: int, command: str
+    config: Config,
+    mounts: list[tuple[str, str]],
+    *,
+    seccomp_fd: int,
+    command: str,
+    skills: list[tuple[str, str | None, str]] = (),
 ) -> list[str]:
-    """The bwrap command line for one command. Pure: no filesystem access. The same
-    argv as phase 1 (history_shell.build_argv)."""
+    """The bwrap command line for one command. Pure: no filesystem access. Phase 1's
+    argv (history_shell.build_argv) plus, from protocol v2, an empty /skills and the
+    `skills` mounts in it (from `skills_mounts`): `("--dir", None, inside)` or
+    `(flag, host, inside)`. Only an "edit" run has a writable one (`--bind`)."""
     argv = [
         config.bwrap,
         "--unshare-user",
@@ -450,9 +1276,14 @@ def build_argv(
     ]
     for host, inside in mounts:
         argv += ["--ro-bind", host, inside]
+    argv += ["--dir", SANDBOX_SKILLS]
+    for flag, host, inside in skills:
+        argv += [flag, inside] if host is None else [flag, host, inside]
     # The root tmpfs (and with it the directories bwrap made above the history
     # mounts) and /dev (a tmpfs of its own, /dev/shm inside it) are read only. Only
-    # /scratch and /tmp are writable, each with its own size.
+    # /scratch and /tmp are writable, each with its own size, and /skills/own in an
+    # "edit" run (a bind of the work tmpfs, which has its own size). --remount-ro is
+    # not recursive, so it leaves those mounts as they are.
     for path in ("/", "/dev"):
         argv += ["--remount-ro", path]
     for name, value in (
@@ -533,6 +1364,7 @@ def execute(
     limits: Limits = Limits(),
     peer_fd: int | None = None,
     set_oom: bool = True,
+    skills: list[tuple[str, str | None, str]] = (),
 ) -> Result:
     """Run `command` once in a sandbox. The checks are the caller's. When `peer_fd`
     (the client's socket) hangs up, the command is killed and `PeerGone` raised. Only
@@ -541,7 +1373,9 @@ def execute(
     seccomp_fd = os.open(config.seccomp, os.O_RDONLY)
     try:
         os.set_inheritable(seccomp_fd, True)
-        argv = build_argv(config, mounts, seccomp_fd=seccomp_fd, command=command)
+        argv = build_argv(
+            config, mounts, seccomp_fd=seccomp_fd, command=command, skills=skills
+        )
         try:
             proc = subprocess.Popen(  # noqa: S603 -- argv is built here, never from the model
                 argv,
@@ -699,12 +1533,17 @@ def _answer(config: Config, body: dict) -> dict:
 def refusal(config: Config, kind: str, error: str) -> dict:
     # A refusal happens before the sandbox starts, and the agent should not have to
     # wonder whether the command ran (an internal error says what is known instead).
-    if kind != "internal" and "Nothing was run" not in error:
+    if kind == "conflict":
+        error = f"{error} Nothing was changed."
+    elif kind != "internal" and "Nothing was run" not in error:
         error = f"{error} Nothing was run."
     return _answer(config, {"ok": False, "kind": kind, "error": error})
 
 
-def run_answer(config: Config, result: Result) -> dict:
+def run_answer(config: Config, result: Result, skills: dict | None = None) -> dict:
+    """`skills` is None for a run with no character, else `{"changed", "kept", "why"}`:
+    kept false means nothing was written and `why` says so in a sentence she can act
+    on. changed is true only when something was kept."""
     return _answer(
         config,
         {
@@ -719,6 +1558,7 @@ def run_answer(config: Config, result: Result) -> dict:
             # Scratch is per command in this phase, so it is never reset behind the
             # agent's back. The field stays so the answer shape is protocol v1's.
             "scratch_reset": False,
+            "skills": skills,
         },
     )
 
@@ -782,20 +1622,36 @@ def handle_request(
                 "policy_sha256": config.policy_sha256,
             },
         )
+    if op in ("sync", "remove"):
+        check_keys(msg, SYNC_KEYS if op == "sync" else REMOVE_KEYS)
+        return _answer(config, handle_change(msg, base))
     if op != "run":
         raise Refused(f"Unknown operation {op!r}. Nothing was run.")
     check_keys(msg, RUN_KEYS)
     request = validate_run(msg, base)
     check_installed(config)
-    result = execute(
-        config,
-        request.mounts,
-        request.command,
-        limits=limits,
-        peer_fd=peer_fd,
-        set_oom=set_oom,
-    )
-    return run_answer(config, result)
+    skills, state = skills_mounts(request, config, base)
+    try:
+        result = execute(
+            config,
+            request.mounts,
+            request.command,
+            limits=limits,
+            peer_fd=peer_fd,
+            set_oom=set_oom,
+            skills=skills,
+        )
+        if state is not None:
+            own = finish_edit(state, request, result, config.skills_work)
+        elif request.own == "read":
+            own = {"changed": False, "kept": False, "why": None}
+        else:
+            own = None
+    finally:
+        if state is not None:
+            shutil.rmtree(state.work, ignore_errors=True)
+            state.store.close()
+    return run_answer(config, result, own)
 
 
 def send_answer(sock: socket.socket, body: dict) -> None:
@@ -913,6 +1769,11 @@ def main(argv=None) -> int:
         help="sha256 of the unit's settings (hosts/devbox/em-history-shell.nix)",
     )
     parser.add_argument(
+        "--skills-work",
+        required=True,
+        help="the unit's TemporaryFileSystem, where her folder is copied in",
+    )
+    parser.add_argument(
         "--config",
         default=os.path.join(
             os.path.dirname(os.path.realpath(__file__)),
@@ -929,7 +1790,7 @@ def main(argv=None) -> int:
         print(f"em-history-shell: bad config {args.config}: {err}", file=sys.stderr)
         tell_broken(None, args.unit_digest)
         return 2
-    config = replace(config, unit_digest=args.unit_digest)
+    config = replace(config, unit_digest=args.unit_digest, skills_work=args.skills_work)
     try:
         sock = socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM)
         peer_uid(sock)

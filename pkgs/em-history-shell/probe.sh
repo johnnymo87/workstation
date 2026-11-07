@@ -30,7 +30,8 @@
 # (CapabilityBoundingSet, ProtectHome) cannot be tested that way. Use it to check the
 # script, not to decide.
 #
-# Keep PROPS in step with serviceConfig in hosts/devbox/em-history-shell.nix.
+# Keep PROPS in step with serviceConfig in hosts/devbox/em-history-shell.nix (the one
+# deliberate difference is TemporaryFileSystem's mode, see WORK below).
 set -euo pipefail
 # systemd-run comes from the running system (it must match the running systemd).
 PATH="@coreutils@/bin:$PATH"
@@ -65,7 +66,9 @@ if [ "$DRY" = 1 ]; then
 else
   STAND_IN=$(mktemp -d "$STAND_BASE/em-hs-probe.XXXXXX")
   trap 'rm -rf "$STAND_IN"' EXIT
-  mkdir -p "$STAND_IN/agent-history/jonathan/warrior" "$STAND_IN/agent-history/livia/son"
+  mkdir -p "$STAND_IN/agent-history/jonathan/warrior" "$STAND_IN/agent-history/livia/son" \
+    "$STAND_IN/skills-shared/fishing" "$STAND_IN/skills-own/agent-history"
+  echo 'shared text' > "$STAND_IN/skills-shared/fishing/SKILL.md"
   : > "$STAND_IN/agent-history/.agent-history-root"
   echo '{"turn":1,"text":"hello from the stand-in view"}' \
     > "$STAND_IN/agent-history/jonathan/warrior/2026-01-01.jsonl"
@@ -73,6 +76,18 @@ else
   chmod -R a+rX "$STAND_IN"
 fi
 VIEW="$STAND_IN/agent-history/jonathan/warrior"
+SHARED="$STAND_IN/skills-shared"
+CHARACTERS="$STAND_IN/skills-own/agent-history"
+# The work tmpfs (TemporaryFileSystem) of an "edit" run. The unit's own line has
+# mode=0700,uid=<the service>; a DynamicUser's uid is not known here, so the probe's has
+# mode=1777. Inside the transient unit, the bash in front of bwrap makes a fresh folder
+# in $WORK and puts it where the argv says @OWN@; without the prop (NONE,
+# -TemporaryFileSystem) it falls back to a fresh folder in /tmp (left there, small),
+# so those runs test the rest and not the tmpfs.
+# systemd does not make a TemporaryFileSystem's mount point (the unit's comes from
+# tmpfiles), so the probe's lives in the stand-in, which exists before any run.
+WORK="$STAND_IN/work"
+[ "$DRY" = 1 ] || { mkdir -p "$WORK"; chmod 755 "$WORK"; }
 
 # The hardening of the unit, one prop per element. DynamicUser stands in for
 # User=em-history-shell; the socket (StandardInput) is not part of the sandbox.
@@ -99,6 +114,8 @@ PROPS=(
   'TasksMax=48'
   'CPUQuota=100%'
   'ReadOnlyPaths=-/var/lib/eternal-machinery'
+  'ReadWritePaths=-/var/lib/eternal-machinery/skills-own'
+  "TemporaryFileSystem=$WORK:size=16M,nr_inodes=4096,mode=1777"
 )
 if [ "$USER_MODE" = 1 ]; then
   # A user manager cannot drop capabilities (exit 218), and ProtectHome=tmpfs hides
@@ -132,6 +149,13 @@ grep -q "^Seccomp:.2" /proc/self/status
 head -c 20 /history/jonathan/warrior/2026-01-01.jsonl >/dev/null
 echo hi > /scratch/f; test "$(cat /scratch/f)" = hi
 test ! -e /history/livia
+mkdir /skills/own/notes; echo kept > /skills/own/notes/SKILL.md
+test "$(cat /skills/own/notes/SKILL.md)" = kept
+test "$(cat /skills/shared/fishing/SKILL.md)" = "shared text"
+! touch /skills/shared/x 2>/dev/null
+! touch /skills/characters/x 2>/dev/null
+! touch /skills/x 2>/dev/null
+! touch /history/x 2>/dev/null
 echo PROBE-OK'
 
 # server.py build_argv, in shell. Keep in step with it.
@@ -147,6 +171,8 @@ bwrap_argv() {
     --symlink "$TOOLS/bin" /bin --proc /proc --dev /dev
     --size 67108864 --tmpfs /scratch --size 16777216 --tmpfs /tmp
     --dir /history --ro-bind "$VIEW" /history/jonathan/warrior
+    --dir /skills --bind @OWN@ /skills/own --ro-bind "$SHARED" /skills/shared
+    --ro-bind "$CHARACTERS" /skills/characters
     --remount-ro / --remount-ro /dev
     --setenv PATH /bin --setenv HOME /scratch --setenv TMPDIR /tmp
     --setenv LANG C.UTF-8 --setenv PYTHONNOUSERSITE 1 --setenv PYTHONDONTWRITEBYTECODE 1
@@ -175,7 +201,13 @@ run_one() {
   done
   for prop in "$@"; do head+=(-p "$prop"); done
   # fd 3 is the seccomp program, as in the server; the unit's bash opens it for bwrap.
-  local cmd=("${head[@]}" -- @bash@ -c 'exec 3<"$1"; shift; exec "$@"' probe "$SECCOMP" "${BWRAP_ARGV[@]}")
+  # It also makes the /skills/own work folder (see WORK above) and puts it in for @OWN@.
+  local inner='exec 3<"$1"; work=$2; shift 2
+own=$(@coreutils@/bin/mktemp -d "$work/own.XXXXXX" 2>/dev/null) \
+  || own=$(@coreutils@/bin/mktemp -d /tmp/em-skills-own.XXXXXX)
+args=(); for a in "$@"; do [ "$a" = @OWN@ ] && a=$own; args+=("$a"); done
+exec "${args[@]}"'
+  local cmd=("${head[@]}" -- @bash@ -c "$inner" probe "$SECCOMP" "$WORK" "${BWRAP_ARGV[@]}")
   if [ "$DRY" = 1 ]; then
     printf '# %s\n' "$label"
     printf '%q ' "${head[@]}"
