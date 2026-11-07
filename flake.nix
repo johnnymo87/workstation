@@ -1497,8 +1497,8 @@
         # directly followed by the path.
         PYTHONWARNINGS=error::ResourceWarning python3 pkgs/em-history-shell/test_server.py 2>&1 | tee "$TMPDIR/hs.txt"
         grep -q '^OK$' "$TMPDIR/hs.txt" || { echo "GATE FAILURE: em-history-shell suite did not pass." >&2; exit 1; }
-        grep -q '^Ran 73 tests' "$TMPDIR/hs.txt" || {
-          echo "GATE FAILURE: expected 'Ran 73 tests'. If you added or removed tests" >&2
+        grep -q '^Ran 139 tests' "$TMPDIR/hs.txt" || {
+          echo "GATE FAILURE: expected 'Ran 139 tests'. If you added or removed tests" >&2
           echo "deliberately, update the count here in the same commit." >&2
           exit 1
         }

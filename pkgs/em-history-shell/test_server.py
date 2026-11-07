@@ -59,6 +59,12 @@ with open({log!r}, "w") as handle:
         "oom": open("/proc/self/oom_score_adj").read().strip(),
     }}, handle)
 os.environ["PATH"] = {path!r}  # the real sandbox has /bin; the stand-in needs a PATH
+# The /skills mounts, as host paths, so a test command can stand in for the sandbox.
+for flag, env in (("/skills/own", "SKILLS_OWN"), ("/skills/shared", "SKILLS_SHARED"),
+                  ("/skills/characters", "SKILLS_CHARACTERS")):
+    for i, word in enumerate(argv):
+        if word == flag and argv[i - 2] in ("--bind", "--ro-bind"):
+            os.environ[env] = argv[i - 1]
 os.execv({sh!r}, ["sh", "-c", argv[-1]])
 """
 
@@ -80,6 +86,10 @@ class Base(unittest.TestCase):
             handle.write(b"BPF-fake-program")
         self.tools = os.path.join(self.tmp, "tools")
         os.makedirs(os.path.join(self.tools, "bin"))
+        self.skills_own = os.path.join(self.base, server.SKILLS_OWN)
+        os.mkdir(self.skills_own, 0o750)
+        self.work = os.path.join(self.tmp, "work")
+        os.mkdir(self.work, 0o700)
         self.config = server.Config(
             server=SERVER_PATH,
             bwrap=self.bwrap,
@@ -89,6 +99,7 @@ class Base(unittest.TestCase):
             unit_digest=UNIT_DIGEST,
             libseccomp_version=LIBSECCOMP,
             policy_sha256=POLICY_SHA,
+            skills_work=self.work,
         )
 
     def make_root(self, name="agent-history", marker=True):
@@ -103,12 +114,14 @@ class Base(unittest.TestCase):
 
     def run_request(self, **over):
         msg = {
-            "v": 1,
+            "v": 2,
             "op": "run",
             "root": self.root,
             "view": "*",
             "agent": "jonathan/warrior",
             "command": "echo hi",
+            "character": None,
+            "own": None,
         }
         msg.update(over)
         return msg
@@ -339,6 +352,7 @@ class TestBuildArgv(unittest.TestCase):
                 "--size", "16777216", "--tmpfs", "/tmp",
                 "--dir", "/history",
                 "--ro-bind", "/b/jonathan/warrior", "/history/jonathan/warrior",
+                "--dir", "/skills",
                 "--remount-ro", "/", "--remount-ro", "/dev",
                 "--setenv", "PATH", "/bin",
                 "--setenv", "HOME", "/scratch",
@@ -546,7 +560,7 @@ class Exchange(Base):
         self.assertTrue(data.endswith(b"\n"), data)
         self.assertEqual(data.count(b"\n"), 1)  # one line each way
         answer = json.loads(data)
-        self.assertEqual(answer["v"], 1)
+        self.assertEqual(answer["v"], 2)
         self.assertEqual(answer["server"], SERVER_PATH)  # on every answer
         self.assertEqual(answer["unit_digest"], UNIT_DIGEST)  # and so is the unit digest
         return answer
@@ -565,11 +579,11 @@ class Exchange(Base):
 
 class TestProtocol(Exchange):
     def test_ping(self):
-        answer = self.ask({"v": 1, "op": "ping"})
+        answer = self.ask({"v": 2, "op": "ping"})
         self.assertEqual(
             answer,
             {
-                "v": 1,
+                "v": 2,
                 "ok": True,
                 "uid": UID,
                 "seccomp_sha256": hashlib.sha256(b"BPF-fake-program").hexdigest(),
@@ -583,22 +597,22 @@ class TestProtocol(Exchange):
 
     def test_ping_with_extra_key_refused(self):
         self.assertRefused(
-            self.ask({"v": 1, "op": "ping", "command": "id"}), "refused", "unexpected"
+            self.ask({"v": 2, "op": "ping", "command": "id"}), "refused", "unexpected"
         )
 
     def test_ping_when_broken_is_unavailable(self):
         os.unlink(self.seccomp)
-        self.assertRefused(self.ask({"v": 1, "op": "ping"}), "unavailable")
+        self.assertRefused(self.ask({"v": 2, "op": "ping"}), "unavailable")
 
     def test_version_mismatch(self):
-        for v in (2, 0, "1", 1.0, True, None):
+        for v in (1, 3, 0, "2", 2.0, True, None):
             with self.subTest(v=v):
                 self.assertRefused(
-                    self.ask({"v": v, "op": "ping"}), "version", "version 1"
+                    self.ask({"v": v, "op": "ping"}), "version", "version 2"
                 )
         self.assertRefused(self.ask({"op": "ping"}), "version")
         # the version is judged before the other fields
-        self.assertRefused(self.ask({"v": 2, "op": "future", "zzz": 1}), "version")
+        self.assertRefused(self.ask({"v": 3, "op": "future", "zzz": 1}), "version")
 
     def test_not_json(self):
         for raw in (b"hello\n", b"\xff\xfe\n", b"\n", b"[1]\n", b'"x"\n', b"null\n",
@@ -607,8 +621,8 @@ class TestProtocol(Exchange):
                 self.assertRefused(self.ask(raw), "refused")
 
     def test_unknown_op(self):
-        self.assertRefused(self.ask({"v": 1, "op": "stop"}), "refused", "Unknown operation")
-        self.assertRefused(self.ask({"v": 1}), "refused", "Unknown operation")
+        self.assertRefused(self.ask({"v": 2, "op": "stop"}), "refused", "Unknown operation")
+        self.assertRefused(self.ask({"v": 2}), "refused", "Unknown operation")
 
     def test_exact_key_set(self):
         good = self.run_request()
@@ -664,7 +678,7 @@ class TestProtocol(Exchange):
         self.assertEqual(
             answer,
             {
-                "v": 1,
+                "v": 2,
                 "ok": True,
                 "exit_code": 3,
                 "stdout": "out\n",
@@ -674,6 +688,7 @@ class TestProtocol(Exchange):
                 "stdout_dropped": 0,
                 "stderr_dropped": 0,
                 "scratch_reset": False,
+                "skills": None,
                 "server": SERVER_PATH,
                 "unit_digest": UNIT_DIGEST,
             },
@@ -839,7 +854,7 @@ class TestWholeProcess(unittest.TestCase):
     def command(self, tmp, cfg, *, uid=None, digest=UNIT_DIGEST):
         argv = [sys.executable, os.path.join(HERE, "server.py"),
                 "--allowed-uid", str(UID if uid is None else uid),
-                "--base", tmp, "--config", cfg]
+                "--base", tmp, "--config", cfg, "--skills-work", tmp]
         if digest is not None:
             argv += ["--unit-digest", digest]
         return argv
@@ -870,7 +885,7 @@ class TestWholeProcess(unittest.TestCase):
         py = self.store_python()
         with tempfile.TemporaryDirectory() as tmp:
             store, cfg = self.write_config(tmp, py)
-            code, data, err = self.talk(self.command(tmp, cfg), b'{"v":1,"op":"ping"}\n')
+            code, data, err = self.talk(self.command(tmp, cfg), b'{"v":2,"op":"ping"}\n')
             self.assertEqual(code, 0, err)
             answer = json.loads(data)
             self.assertTrue(answer["ok"])
@@ -910,7 +925,7 @@ class TestWholeProcess(unittest.TestCase):
         self.assertEqual(done.returncode, 2)
         self.assertEqual(
             json.loads(written),
-            {"v": 1, "ok": False, "kind": "unavailable",
+            {"v": 2, "ok": False, "kind": "unavailable",
              "error": "The history shell is broken on this host. Nothing was run.",
              "server": store, "unit_digest": UNIT_DIGEST},
         )
@@ -927,7 +942,7 @@ class TestWholeProcess(unittest.TestCase):
     def test_bad_config_answers_unavailable_on_the_socket(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, data, err = self.talk(
-                self.command(tmp, os.path.join(tmp, "no")), b'{"v":1,"op":"ping"}\n'
+                self.command(tmp, os.path.join(tmp, "no")), b'{"v":2,"op":"ping"}\n'
             )
         self.assertEqual(code, 2)
         self.assertIn(b"bad config", err)
@@ -936,7 +951,7 @@ class TestWholeProcess(unittest.TestCase):
         # no config, so no server to name; the digest comes from the command line
         self.assertEqual(
             answer,
-            {"v": 1, "ok": False, "kind": "unavailable",
+            {"v": 2, "ok": False, "kind": "unavailable",
              "error": "The history shell is broken on this host. Nothing was run.",
              "unit_digest": UNIT_DIGEST},
         )
@@ -1015,7 +1030,7 @@ class TestAgentVisibleText(Exchange):
                 continue
             func = node.func
             name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name not in ("Refused", "refusal"):
+            if name not in ("Refused", "refusal", "TreeRefused", "_not_saved"):
                 continue
             for part in ast.walk(node):
                 # literal pieces of f-strings and plain strings, but not the .join(...)
@@ -1028,20 +1043,700 @@ class TestAgentVisibleText(Exchange):
     def test_answers(self):
         good = self.run_request()
         cases = [
-            {"v": 2, "op": "ping"},
-            {"v": 1, "op": "ping", "x": 1},
+            {"v": 3, "op": "ping"},
+            {"v": 2, "op": "ping", "x": 1},
             {k: v for k, v in good.items() if k != "agent"},
             {**good, "env": 1, "x": 1},
             {**good, "view": "a"},
             {**good, "root": "/tmp"},
             {**good, "command": " "},
-            {"v": 1, "op": "nope"},
+            {"v": 2, "op": "nope"},
         ]
         for request in cases:
             with self.subTest(request=request):
                 answer = self.ask(request)
                 self.assertFalse(answer["ok"])
                 self.assertPlain(answer["error"])
+
+
+# --- protocol v2: her skills folder ---------------------------------------------------
+
+
+def _tree_of(**files):
+    """A Tree from path=text keyword pairs (use __ for /), with its folders."""
+    out = []
+    dirs = set()
+    for key, text in files.items():
+        path = key.replace("__", "/")
+        parts = path.split("/")
+        for i in range(1, len(parts)):
+            dirs.add("/".join(parts[:i]))
+        out.append((path, text.encode()))
+    return server.Tree(dirs=tuple(sorted(dirs)), files=tuple(sorted(out)))
+
+
+class TestCharacter(unittest.TestCase):
+    def test_key(self):
+        self.assertEqual(server.character_key("Aelinthia Corvella"), "aelinthia-corvella")
+        self.assertEqual(server.character_key("Lyra"), "lyra")
+        self.assertIsNone(server.character_key(None))
+        self.assertEqual(server.character_key("A" + "b" * 63), "a" + "b" * 63)
+
+    def test_bad_names(self):
+        for bad in ("lyra", "Lyra  Vance", "Lyra vance", " Lyra", "Lyra ", "Lyra-Vance",
+                    "../Etc", "Lyra/Vance", ".Lyra", "LYRA", "L", "Lyr4", "Lyra\nVance",
+                    "A" + "b" * 64, "", 7, ["Lyra"], "Ly\u00e9ra"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Refused):
+                    server.character_key(bad)
+
+    def test_own(self):
+        self.assertIsNone(server.check_own(None, None))
+        self.assertEqual(server.check_own("edit", "lyra"), "edit")
+        self.assertEqual(server.check_own("read", "lyra"), "read")
+        for own, key in (("edit", None), ("read", None), (None, "lyra"), ("write", "lyra"),
+                         (True, "lyra")):
+            with self.subTest(own=own, key=key):
+                with self.assertRaises(Refused):
+                    server.check_own(own, key)
+
+    def test_skill_name(self):
+        self.assertEqual(server.check_skill_name("keistos-shack"), "keistos-shack")
+        for bad in ("Keistos", "a--b", "-a", "a-", "a_b", "a" * 65, "", None, "a/b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Refused):
+                    server.check_skill_name(bad)
+
+
+class TestTree(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="em-hs-tree-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def put(self, rel, text="x"):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(text)
+        return path
+
+    def read(self):
+        fd = os.open(self.tmp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return server.read_tree(fd)
+        finally:
+            os.close(fd)
+
+    def refused(self, *words):
+        with self.assertRaises(server.TreeRefused) as ctx:
+            self.read()
+        for word in words:
+            self.assertIn(word, str(ctx.exception))
+        return str(ctx.exception)
+
+    def patch(self, name, value):
+        old = getattr(server, name)
+        setattr(server, name, value)
+        self.addCleanup(setattr, server, name, old)
+
+    def test_good_tree(self):
+        self.put("keistos/SKILL.md", "hello")
+        self.put("keistos/references/sources.md", "src")
+        os.makedirs(os.path.join(self.tmp, "empty-skill"))
+        tree = self.read()
+        self.assertEqual(tree.dirs, ("empty-skill", "keistos", "keistos/references"))
+        self.assertEqual(
+            tree.files,
+            (("keistos/SKILL.md", b"hello"), ("keistos/references/sources.md", b"src")),
+        )
+
+    def test_file_at_top(self):
+        self.put("notes.txt")
+        self.refused("/skills/own/notes.txt", "Each skill is a folder")
+
+    def test_skill_names(self):
+        self.put("Keistos/SKILL.md")
+        self.refused("/skills/own/Keistos", "not a skill name")
+
+    def test_component_names(self):
+        for bad in (".hidden", "a b", "-x", "\u00e9", "x" * 65):
+            with self.subTest(bad=bad):
+                shutil.rmtree(self.tmp)
+                os.mkdir(self.tmp)
+                self.put(f"skill/{bad}")
+                self.refused("name that is not allowed")
+
+    def test_symlink(self):
+        self.put("skill/SKILL.md")
+        os.symlink("/etc/passwd", os.path.join(self.tmp, "skill", "link.md"))
+        self.refused("/skills/own/skill/link.md is a link")
+
+    def test_symlinked_folder(self):
+        os.makedirs(os.path.join(self.tmp, "real"))
+        os.symlink("real", os.path.join(self.tmp, "skill"))
+        self.refused("is a link")
+
+    def test_fifo(self):
+        os.makedirs(os.path.join(self.tmp, "skill"))
+        os.mkfifo(os.path.join(self.tmp, "skill", "pipe"))
+        self.refused("not a plain file or folder")
+
+    def test_socket(self):
+        os.makedirs(os.path.join(self.tmp, "skill"))
+        path = os.path.join(self.tmp, "skill", "sock")
+        if len(path) > 100:
+            self.skipTest("path too long for a unix socket")
+        sock = socket.socket(socket.AF_UNIX)
+        self.addCleanup(sock.close)
+        sock.bind(path)
+        self.refused("not a plain file or folder")
+
+    def test_hardlink(self):
+        path = self.put("skill/SKILL.md")
+        os.link(path, os.path.join(self.tmp, "skill", "again.md"))
+        self.refused("hard link")
+
+    def test_hardlink_to_outside(self):
+        outside = os.path.join(tempfile.mkdtemp(prefix="em-hs-out-"), "secret")
+        self.addCleanup(shutil.rmtree, os.path.dirname(outside), True)
+        with open(outside, "w") as handle:
+            handle.write("s")
+        os.makedirs(os.path.join(self.tmp, "skill"))
+        os.link(outside, os.path.join(self.tmp, "skill", "SKILL.md"))
+        self.refused("hard link")
+
+    def test_depth(self):
+        self.put("a/b/c/d/ok.md")  # a file four folders down
+        self.read()
+        self.put("a/b/c/d/e/deep.md")
+        self.refused("nested too deep")
+
+    def test_file_cap(self):
+        self.patch("MAX_FILE_BYTES", 10)
+        self.put("skill/SKILL.md", "x" * 10)
+        self.read()
+        self.put("skill/SKILL.md", "x" * 11)
+        self.refused("larger than")
+
+    def test_count_cap(self):
+        self.patch("MAX_SKILL_FILES", 3)
+        for i in range(3):
+            self.put(f"skill/f{i}")
+        self.read()
+        self.put("skill/f3")
+        self.refused("more than 3 files")
+
+    def test_total_cap(self):
+        self.patch("MAX_TOTAL_BYTES", 10)
+        self.put("a/x", "x" * 6)
+        self.put("b/x", "x" * 5)
+        self.refused("more than 0 MiB")
+
+    def test_unreadable_file(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads everything")
+        path = self.put("skill/SKILL.md")
+        os.chmod(path, 0)
+        self.refused("cannot be read")
+
+    def test_check_tree_matches_read_tree(self):
+        server.check_tree(_tree_of(skill__SKILL_md="x"))
+        for tree, word in (
+            (_tree_of(top="x"), "Each skill is a folder"),
+            (_tree_of(Bad__x="x"), "not a skill name"),
+            (_tree_of(skill___x="x"), "not allowed"),
+            (_tree_of(a__b__c__d__e__f="x"), "nested too deep"),
+            (server.Tree(dirs=(), files=(("skill/x", b""),)), "no folder above"),
+        ):
+            with self.subTest(word=word):
+                with self.assertRaises(server.TreeRefused) as ctx:
+                    server.check_tree(tree)
+                self.assertIn(word, str(ctx.exception))
+
+    def test_write_tree_round_trip_and_modes(self):
+        tree = _tree_of(skill__SKILL_md="hello", skill__refs__a_md="a")
+        tree = server.Tree(dirs=tree.dirs + ("empty",), files=tree.files)
+        tree = server.Tree(dirs=tuple(sorted(tree.dirs)), files=tree.files)
+        fd = os.open(self.tmp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            server.write_tree(fd, tree)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.read(), tree)
+        st = os.stat(os.path.join(self.tmp, "skill", "SKILL_md"))
+        self.assertEqual(stat.S_IMODE(st.st_mode) & ~0o022, server.FILE_MODE & ~0o022)
+        self.assertFalse(st.st_mode & 0o111)
+        dst = os.stat(os.path.join(self.tmp, "skill"))
+        self.assertEqual(stat.S_IMODE(dst.st_mode) & ~0o022, server.DIR_MODE & ~0o022)
+
+    def test_files_sha256_definition(self):
+        tree = server.Tree(dirs=("refs",), files=(("refs/b.md", b"B"), ("SKILL.md", b"A")))
+        h = hashlib.sha256()
+        for path, data in (("SKILL.md", b"A"), ("refs/b.md", b"B")):
+            h.update(path.encode() + b"\0" + hashlib.sha256(data).hexdigest().encode() + b"\n")
+        self.assertEqual(server.files_sha256(tree), h.hexdigest())
+        # folders do not count, and None is no folder
+        self.assertEqual(
+            server.files_sha256(server.Tree(dirs=("refs", "x"), files=tree.files)),
+            h.hexdigest(),
+        )
+        self.assertIsNone(server.files_sha256(None))
+        # sorted by UTF-8 bytes: "Z" (0x5a) before "a" (0x61)
+        two = server.Tree(dirs=(), files=(("a", b"1"), ("Z", b"2")))
+        h = hashlib.sha256()
+        for path, data in (("Z", b"2"), ("a", b"1")):
+            h.update(path.encode() + b"\0" + hashlib.sha256(data).hexdigest().encode() + b"\n")
+        self.assertEqual(server.files_sha256(two), h.hexdigest())
+
+    def test_files_sha256_vector_shared_with_agentos(self):
+        # The same vector is pinned in eternal-machinery (EM bead qpmfc.18.16.49.2.7).
+        tree = server.Tree(dirs=("references",),
+                           files=(("SKILL.md", b"a\n"), ("references/b.md", b"b\n")))
+        self.assertEqual(
+            server.files_sha256(tree),
+            "bd9ff7d3a35dc92eb80d355fbe8ac2c39f1f1eb6548708286666924da6fd9c27",
+        )
+
+    def test_entry_cap_counts_empty_folders(self):
+        self.patch("MAX_OWN_ENTRIES", 5)
+        for i in range(4):
+            os.makedirs(os.path.join(self.tmp, "skill", f"d{i}"))
+        self.read()  # 5 entries
+        os.makedirs(os.path.join(self.tmp, "skill", "d4"))
+        self.refused("more than 5 files and folders")
+        with self.assertRaises(server.TreeRefused):
+            server.check_tree(server.Tree(dirs=tuple(f"s{i}" for i in range(6)), files=()))
+
+    def test_digest_sees_empty_folders(self):
+        a = _tree_of(skill__x="1")
+        b = server.Tree(dirs=a.dirs + ("zz",), files=a.files)
+        self.assertNotEqual(a.digest(), b.digest())
+        self.assertEqual(a.digest(), _tree_of(skill__x="1").digest())
+
+    def test_renameat2_exchange(self):
+        for name, text in (("a", "A"), ("b", "B")):
+            os.mkdir(os.path.join(self.tmp, name))
+            self.put(f"{name}/f", text)
+        fd = os.open(self.tmp, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            server._renameat2(fd, "a", fd, "b", server._RENAME_EXCHANGE)
+            with self.assertRaises(OSError):
+                server._renameat2(fd, "a", fd, "b", server._RENAME_NOREPLACE)
+        finally:
+            os.close(fd)
+        with open(os.path.join(self.tmp, "b", "f")) as handle:
+            self.assertEqual(handle.read(), "A")
+
+
+class SkillsExchange(Exchange):
+    def edit(self, command, character="Lyra Vance", **kw):
+        return self.ask(
+            self.run_request(view="jonathan/warrior", character=character, own="edit",
+                             command=command),
+            **kw,
+        )
+
+    def her(self, *parts, profile="agent-history", key="lyra-vance"):
+        return os.path.join(self.skills_own, profile, key, *parts)
+
+    def seed(self, rel, text, **kw):
+        path = self.her(*rel.split("/"), **kw)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            handle.write(text)
+
+    def staging_left(self):
+        """What staging holds besides replaced folders waiting for the sweep (each of
+        which must be dated now, so a reader that walked into it can finish)."""
+        path = os.path.join(self.skills_own, server.STAGING)
+        names = os.listdir(path) if os.path.isdir(path) else []
+        for name in names:
+            if name.startswith("o-"):
+                age = time.time() - os.stat(os.path.join(path, name)).st_mtime
+                self.assertLess(age, 30, name)
+        return [n for n in names if not n.startswith("o-")]
+
+    def argv(self):
+        return self.bwrap_log()["argv"]
+
+    def patch(self, name, value):
+        old = getattr(server, name)
+        setattr(server, name, value)
+        self.addCleanup(setattr, server, name, old)
+
+
+class TestSkillsRun(SkillsExchange):
+    def test_no_character_has_an_empty_skills_dir(self):
+        answer = self.ask(self.run_request(view="jonathan/warrior", command="true"))
+        self.assertIsNone(answer["skills"])
+        argv = self.argv()
+        self.assertIn("/skills", argv)
+        self.assertNotIn("/skills/own", argv)
+        self.assertNotIn("/skills/characters", argv)
+
+    def test_first_write_is_kept(self):
+        answer = self.edit('mkdir "$SKILLS_OWN/keistos" && echo hi > "$SKILLS_OWN/keistos/SKILL.md"')
+        self.assertEqual(answer["skills"], {"changed": True, "kept": True, "why": None})
+        with open(self.her("keistos", "SKILL.md")) as handle:
+            self.assertEqual(handle.read(), "hi\n")
+        self.assertFalse(os.stat(self.her("keistos", "SKILL.md")).st_mode & 0o111)
+        self.assertEqual(self.staging_left(), [])
+        self.assertEqual(os.listdir(self.work), [])  # the copy is gone
+
+    def test_the_bind_is_the_only_writable_skills_mount(self):
+        self.edit("true")
+        argv = self.argv()
+        i = argv.index("/skills/own")
+        self.assertEqual(argv[i - 2], "--bind")
+        self.assertEqual(argv[i - 1], os.path.join(self.work, server.WORK_OWN))
+        self.assertEqual(argv.count("--bind"), 1)
+        self.assertLess(i, argv.index("--remount-ro"))
+
+    def test_copy_in_shows_her_folder(self):
+        self.seed("keistos/SKILL.md", "old text")
+        answer = self.edit('cat "$SKILLS_OWN/keistos/SKILL.md"')
+        self.assertEqual(answer["stdout"], "old text")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+
+    def test_unchanged_writes_nothing(self):
+        answer = self.edit("true")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+        self.assertFalse(os.path.exists(os.path.join(self.skills_own, "agent-history")))
+
+    def test_edit_replaces_and_deletes(self):
+        self.seed("keistos/SKILL.md", "old")
+        self.seed("gone/SKILL.md", "bye")
+        answer = self.edit(
+            'echo new > "$SKILLS_OWN/keistos/SKILL.md"; rm -r "$SKILLS_OWN/gone"; exit 1'
+        )
+        self.assertEqual(answer["exit_code"], 1)  # any exit code keeps
+        self.assertTrue(answer["skills"]["kept"])
+        self.assertTrue(answer["skills"]["changed"])
+        with open(self.her("keistos", "SKILL.md")) as handle:
+            self.assertEqual(handle.read(), "new\n")
+        self.assertFalse(os.path.exists(self.her("gone")))
+        self.assertEqual(self.staging_left(), [])
+
+    def test_emptying_her_folder_removes_it(self):
+        self.seed("keistos/SKILL.md", "old")
+        answer = self.edit('rm -r "$SKILLS_OWN/keistos"')
+        self.assertTrue(answer["skills"]["changed"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_a_link_keeps_nothing(self):
+        self.seed("keistos/SKILL.md", "old")
+        answer = self.edit(
+            'echo new > "$SKILLS_OWN/keistos/SKILL.md"; ln -s /etc/passwd "$SKILLS_OWN/keistos/p"'
+        )
+        skills = answer["skills"]
+        self.assertFalse(skills["kept"])
+        self.assertFalse(skills["changed"])
+        self.assertEqual(
+            skills["why"],
+            "Your skills were not saved because /skills/own/keistos/p is a link. "
+            "Only plain files and folders are kept.",
+        )
+        with open(self.her("keistos", "SKILL.md")) as handle:
+            self.assertEqual(handle.read(), "old")
+
+    def test_a_stopped_command_keeps_nothing(self):
+        answer = self.edit(
+            'mkdir "$SKILLS_OWN/k"; echo x > "$SKILLS_OWN/k/SKILL.md"; sleep 30',
+            limits=Limits(timeout_s=0.7),
+        )
+        self.assertTrue(answer["timed_out"])
+        self.assertEqual(
+            answer["skills"],
+            {"changed": False, "kept": False,
+             "why": "Your skills were not saved because the command was stopped before it finished."},
+        )
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_a_stopped_command_that_changed_nothing_is_fine(self):
+        answer = self.edit("sleep 30", limits=Limits(timeout_s=0.5))
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+
+    def test_a_kill_inside_the_sandbox_keeps_nothing(self):
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; echo half > "$SKILLS_OWN/k/SKILL.md"; sh -c \'kill -9 $$\'; exit $?')
+        self.assertEqual(answer["exit_code"], 137)
+        self.assertIn("stopped before it finished", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_an_oom_kill_in_the_instance_keeps_nothing(self):
+        counts = iter([3, 4])
+        self.patch("oom_kills", lambda: next(counts))
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; echo half > "$SKILLS_OWN/k/SKILL.md"')
+        self.assertEqual(answer["exit_code"], 0)
+        self.assertIn("stopped before it finished", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_no_oom_count_still_keeps(self):
+        self.patch("oom_kills", lambda: None)
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; : > "$SKILLS_OWN/k/SKILL.md"')
+        self.assertTrue(answer["skills"]["changed"])
+
+    def test_a_failed_copy_in_still_runs_read_only(self):
+        self.seed("keistos/SKILL.md", "old")
+
+        def boom(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        self.patch("_copy_in", boom)
+        answer = self.edit('cat "$SKILLS_OWN/keistos/SKILL.md"')
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["stdout"], "old")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": False, "why": server.COPY_IN_FAILED})
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("/skills/own") - 2], "--ro-bind")
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_a_full_work_space_keeps_nothing(self):
+        self.patch("work_is_full", lambda path: True)
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; echo x > "$SKILLS_OWN/k/SKILL.md"')
+        self.assertIn("ran out of room", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_a_racing_writer_wins_and_she_hears_why(self):
+        self.seed("keistos/SKILL.md", "old")
+        disk = self.her("keistos", "SKILL.md")
+        answer = self.edit(f'echo mine > "$SKILLS_OWN/keistos/SKILL.md"; echo theirs > {disk}')
+        self.assertFalse(answer["skills"]["kept"])
+        self.assertIn("changed while the command ran", answer["skills"]["why"])
+        with open(disk) as handle:
+            self.assertEqual(handle.read(), "theirs\n")
+        self.assertEqual(self.staging_left(), [])
+
+    def test_names_key_her_folder_not_the_agent(self):
+        self.edit('mkdir "$SKILLS_OWN/a"; : > "$SKILLS_OWN/a/SKILL.md"', character="Mira")
+        self.assertTrue(os.path.isfile(self.her("a", "SKILL.md", key="mira")))
+        # the same name from another agent of the profile is the same folder
+        answer = self.ask(self.run_request(
+            view="jonathan/coach", agent="jonathan/coach", character="Mira", own="edit",
+            command='ls "$SKILLS_OWN"'))
+        self.assertEqual(answer["stdout"], "a\n")
+
+    def test_profiles_have_their_own_roots(self):
+        livia = self.make_root("agent-history-livia")
+        self.ask(self.run_request(root=livia, view="livia/son", agent="livia/son",
+                                  character="Lyra Vance", own="edit",
+                                  command='mkdir "$SKILLS_OWN/a"; : > "$SKILLS_OWN/a/SKILL.md"'))
+        self.assertTrue(os.path.isfile(self.her("a", "SKILL.md", profile="agent-history-livia")))
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_no_work_space_or_no_skills_root_is_unavailable(self):
+        shutil.rmtree(self.work)
+        self.assertRefused(self.edit("true"), "unavailable", "cannot be edited")
+        os.mkdir(self.work)
+        os.rmdir(self.skills_own)
+        self.assertRefused(self.edit("true"), "unavailable", "not set up")
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_skills_root_not_ours_or_writable_by_others(self):
+        os.chmod(self.skills_own, 0o770)
+        self.assertRefused(self.edit("true"), "unavailable", "not set up")
+        os.chmod(self.skills_own, 0o750)
+        os.rename(self.skills_own, self.skills_own + ".real")
+        os.symlink(self.skills_own + ".real", self.skills_own)
+        self.assertRefused(self.edit("true"), "unavailable", "not set up")
+
+    def test_a_linked_profile_root_is_an_error_not_followed(self):
+        os.mkdir(os.path.join(self.tmp, "elsewhere"))
+        os.symlink(os.path.join(self.tmp, "elsewhere"), os.path.join(self.skills_own, "agent-history"))
+        answer = self.edit("true")
+        self.assertRefused(answer, "internal")
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_request_rules(self):
+        for over in ({"character": "lyra", "own": "edit"},
+                     {"character": None, "own": "edit"},
+                     {"character": "Lyra", "own": None},
+                     {"character": "Lyra", "own": "write"}):
+            with self.subTest(over=over):
+                self.assertRefused(self.ask(self.run_request(**over)), "refused", "Nothing was run")
+        self.assertFalse(os.path.exists(self.log))
+
+    def test_read_binds_her_folder_read_only(self):
+        self.seed("keistos/SKILL.md", "old")
+        answer = self.ask(self.run_request(view="jonathan/warrior", character="Lyra Vance",
+                                           own="read", command='cat "$SKILLS_OWN/keistos/SKILL.md"'))
+        self.assertEqual(answer["stdout"], "old")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": False, "why": None})
+        argv = self.argv()
+        i = argv.index("/skills/own")
+        self.assertEqual(argv[i - 2:i], ["--ro-bind", self.her()])
+        self.assertNotIn("--bind", argv)
+
+    def test_read_with_no_folder_is_an_empty_dir(self):
+        self.ask(self.run_request(view="jonathan/warrior", character="Lyra Vance",
+                                  own="read", command="true"))
+        argv = self.argv()
+        i = argv.index("/skills/own")
+        self.assertEqual(argv[i - 1], "--dir")
+
+    def test_shared_root(self):
+        shared = os.path.join(self.base, "skills-shared")
+        os.makedirs(os.path.join(shared, "fishing"))
+        self.ask(self.run_request(view="jonathan/warrior", command="true"))
+        self.assertNotIn("/skills/shared", self.argv())  # no marker
+        with open(os.path.join(shared, server.SHARED_MARKER), "w"):
+            pass
+        self.ask(self.run_request(view="jonathan/warrior", command="true"))
+        argv = self.argv()
+        i = argv.index("/skills/shared")
+        self.assertEqual(argv[i - 2:i], ["--ro-bind", os.path.realpath(shared)])
+        # another profile's shared root is not this one's
+        livia = self.make_root("agent-history-livia")
+        self.ask(self.run_request(root=livia, view="livia/son", agent="livia/son", command="true"))
+        self.assertNotIn("/skills/shared", self.argv())
+
+    def test_linked_shared_root_is_not_mounted(self):
+        real = os.path.join(self.tmp, "real-shared")
+        os.mkdir(real)
+        with open(os.path.join(real, server.SHARED_MARKER), "w"):
+            pass
+        os.symlink(real, os.path.join(self.base, "skills-shared"))
+        self.ask(self.run_request(view="jonathan/warrior", command="true"))
+        self.assertNotIn("/skills/shared", self.argv())
+
+    def test_star_view_reads_every_character(self):
+        self.ask(self.run_request(command="true"))
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("/skills/characters") - 1], "--dir")
+        self.seed("keistos/SKILL.md", "x")
+        self.ask(self.run_request(command='cat "$SKILLS_CHARACTERS/lyra-vance/keistos/SKILL.md"'))
+        argv = self.argv()
+        i = argv.index("/skills/characters")
+        self.assertEqual(argv[i - 2:i], ["--ro-bind", os.path.join(self.skills_own, "agent-history")])
+        self.ask(self.run_request(view="jonathan/warrior", command="true"))
+        self.assertNotIn("/skills/characters", self.argv())
+
+
+class TestSyncRemove(SkillsExchange):
+    def sync(self, files, expect=None, skill="keistos", character="Lyra Vance", **kw):
+        return self.ask({"v": 2, "op": "sync", "root": self.root, "character": character,
+                         "skill": skill, "expect_sha256": expect, "files": files}, **kw)
+
+    def remove(self, expect, skill="keistos", character="Lyra Vance"):
+        return self.ask({"v": 2, "op": "remove", "root": self.root, "character": character,
+                         "skill": skill, "expect_sha256": expect})
+
+    def sha(self, files):
+        return server.files_sha256(server.Tree(
+            dirs=(), files=tuple((p, t.encode()) for p, t in files.items())))
+
+    def test_an_emptied_profile_root_goes_too(self):
+        throwaway = self.make_root("agent-history-escape-x")
+        msg = {"v": 2, "op": "sync", "root": throwaway, "character": "Escape Probe",
+               "skill": "probe", "expect_sha256": None, "files": {"SKILL.md": "x"}}
+        self.assertTrue(self.ask(msg)["ok"])
+        profile = os.path.join(self.skills_own, "agent-history-escape-x")
+        self.assertTrue(os.path.isdir(os.path.join(profile, "escape-probe")))
+        self.ask({"v": 2, "op": "remove", "root": throwaway, "character": "Escape Probe",
+                  "skill": "probe", "expect_sha256": self.sha({"SKILL.md": "x"})})
+        self.assertFalse(os.path.exists(profile))
+        # and an edit run that empties the last folder of a profile
+        self.seed("k/SKILL.md", "x")
+        self.edit('rm -r "$SKILLS_OWN/k"')
+        self.assertFalse(os.path.exists(os.path.join(self.skills_own, "agent-history")))
+
+    def test_sync_new_then_replace_then_remove(self):
+        files = {"SKILL.md": "reviewed", "references/sources.md": "codex"}
+        answer = self.sync(files)
+        self.assertEqual(answer["ok"], True)
+        self.assertEqual(answer["files_sha256"], self.sha(files))
+        with open(self.her("keistos", "references", "sources.md")) as handle:
+            self.assertEqual(handle.read(), "codex")
+        new = {"SKILL.md": "second"}
+        answer = self.sync(new, expect=self.sha(files))
+        self.assertEqual(answer["files_sha256"], self.sha(new))
+        self.assertFalse(os.path.exists(self.her("keistos", "references")))
+        self.assertEqual(self.remove(self.sha(new))["ok"], True)
+        self.assertFalse(os.path.exists(self.her()))  # an emptied key folder goes too
+        self.assertEqual(self.staging_left(), [])
+
+    def test_sync_leaves_her_other_skills(self):
+        self.seed("mine/SKILL.md", "hers")
+        self.sync({"SKILL.md": "x"})
+        with open(self.her("mine", "SKILL.md")) as handle:
+            self.assertEqual(handle.read(), "hers")
+        self.remove(self.sha({"SKILL.md": "x"}))
+        self.assertTrue(os.path.isfile(self.her("mine", "SKILL.md")))
+
+    def test_conflicts_change_nothing(self):
+        self.seed("keistos/SKILL.md", "she edited it")
+        answer = self.sync({"SKILL.md": "reviewed"}, expect=self.sha({"SKILL.md": "old"}))
+        self.assertRefused(answer, "conflict", "not as expected", "Nothing was changed")
+        self.assertRefused(self.sync({"SKILL.md": "r"}), "conflict")  # null: must not exist
+        self.assertRefused(self.remove(self.sha({"SKILL.md": "old"})), "conflict")
+        with open(self.her("keistos", "SKILL.md")) as handle:
+            self.assertEqual(handle.read(), "she edited it")
+
+    def test_remove_of_nothing_with_null_is_fine(self):
+        self.assertEqual(self.remove(None)["ok"], True)
+
+    def test_bad_requests(self):
+        good_files = {"SKILL.md": "x"}
+        for label, kw in (
+            ("path dotdot", {"files": {"../x": "x"}}),
+            ("path hidden", {"files": {".x": "x"}}),
+            ("path abs", {"files": {"/x": "x"}}),
+            ("path empty part", {"files": {"a//b": "x"}}),
+            ("not text", {"files": {"SKILL.md": 1}}),
+            ("empty files", {"files": {}}),
+            ("bad skill", {"files": good_files, "skill": "Bad"}),
+            ("bad character", {"files": good_files, "character": "lyra"}),
+            ("no character", {"files": good_files, "character": None}),
+            ("bad expect", {"files": good_files, "expect": "abc"}),
+            ("too deep", {"files": {"a/b/c/d/e": "x"}}),
+        ):
+            with self.subTest(label):
+                self.assertRefused(self.sync(**kw), "refused")
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_sync_respects_the_caps_on_her_whole_folder(self):
+        self.patch("MAX_TOTAL_BYTES", 10)
+        self.seed("mine/SKILL.md", "x" * 6)
+        self.assertRefused(self.sync({"SKILL.md": "y" * 6}), "refused", "cannot be kept")
+
+    def test_key_sets(self):
+        msg = {"v": 2, "op": "sync", "root": self.root, "character": "Lyra",
+               "skill": "k", "expect_sha256": None, "files": {"SKILL.md": "x"}, "x": 1}
+        self.assertRefused(self.ask(msg), "refused", "wrong fields")
+        msg = {"v": 2, "op": "remove", "root": self.root, "character": "Lyra",
+               "skill": "k", "expect_sha256": None, "files": {}}
+        self.assertRefused(self.ask(msg), "refused", "wrong fields")
+
+    def test_a_run_sees_what_sync_wrote(self):
+        self.sync({"SKILL.md": "reviewed"})
+        answer = self.edit('cat "$SKILLS_OWN/keistos/SKILL.md"')
+        self.assertEqual(answer["stdout"], "reviewed")
+
+    def test_stale_staging_is_swept(self):
+        staging = os.path.join(self.skills_own, server.STAGING)
+        os.makedirs(os.path.join(staging, "t-old", "x"))
+        os.makedirs(os.path.join(staging, "o-old"))
+        os.makedirs(os.path.join(staging, "t-new"))
+        old = time.time() - server.STAGING_STALE_S - 10
+        for name in ("t-old", "o-old"):
+            os.utime(os.path.join(staging, name), (old, old))
+        self.sync({"SKILL.md": "x"})
+        self.assertEqual(sorted(os.listdir(staging)), ["t-new"])
+
+    def test_file_and_folder_clash_is_refused_and_leaves_nothing(self):
+        self.assertRefused(self.sync({"a": "x", "a/b": "y"}), "refused", "both a file and a folder")
+        self.assertEqual(self.staging_left(), [])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_remove_reads_only_its_skill(self):
+        self.sync({"SKILL.md": "x"})
+        os.makedirs(self.her("other"))
+        os.symlink("/etc/passwd", self.her("other", "bad"))  # a stricter rule, say
+        self.assertEqual(self.remove(self.sha({"SKILL.md": "x"}))["ok"], True)
+        self.assertFalse(os.path.exists(self.her("keistos")))
+
+    def test_a_large_reviewed_skill_fits_one_request(self):
+        files = {"SKILL.md": "x" * (900 * 1024)}
+        self.assertEqual(self.sync(files)["files_sha256"], self.sha(files))
 
 
 if __name__ == "__main__":

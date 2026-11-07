@@ -27,6 +27,15 @@
 # would expose every 0644 file in it by name. Not setgid: dev's chmod strips S_ISGID
 # when dev is not in the group.
 #
+# HER SKILLS FOLDER (protocol v2, EM bead qpmfc.18.16.49.2.14, character memory spec
+# 3.5) is the one thing a command may change, and only through the server's copy in,
+# copy out (pkgs/em-history-shell/server.py). The skills roots live in ${base}/skills-own,
+# OWNED BY THIS SERVICE (dev reads them through an ACL and never writes there; a reviewed
+# skill reaches her folder through the socket's `sync` op). The unit's ReadWritePaths
+# is that folder and nothing else. Each instance gets its own small tmpfs
+# (TemporaryFileSystem, `--skills-work`) where her folder is copied in for the command;
+# its size is a hard cap, charged to the instance's memory.
+#
 # NOT YET: persistent per-agent scratch (EM resolution 5). Scratch is a per-command
 # tmpfs inside bwrap, as in phase 1; there is no scratch mount and no quota.
 #
@@ -50,6 +59,11 @@ let
 
   base = "/var/lib/eternal-machinery";
   user = "em-history-shell";
+  # The service's own folder of skills roots (one per history root, then one folder
+  # per character name key). Made by tmpfiles; the server makes what is below it.
+  skillsOwn = "${base}/skills-own";
+  # Where each instance copies her folder in, a tmpfs of its own (see TemporaryFileSystem).
+  skillsWork = "/run/em-skills";
 
   socketConfig = {
     Accept = "yes";
@@ -126,6 +140,19 @@ let
     # them read-only, this says so (and "-" lets the unit run before the dir exists,
     # so the server can answer "no such root" instead of the unit failing).
     ReadOnlyPaths = [ "-${base}" ];
+    # Her skills folders: the only place on disk the service writes. More specific
+    # than the ReadOnlyPaths above, so it wins there.
+    ReadWritePaths = [ "-${skillsOwn}" ];
+    # The work space of one "edit" run: her folder is copied here and bound at
+    # /skills/own. size is a hard cap on what a command can write there and is charged
+    # to MemoryMax; nr_inodes caps files and folders. The server's own caps (2000 files,
+    # 4096 files and folders, 8 MiB) sit below both with room to spare: tmpfs takes at
+    # least a 4 KiB page per file, so the largest folder the caps allow needs about
+    # 16 MiB, and a tmpfs left with under 256 KiB or 8 inodes free counts as full and
+    # keeps nothing.
+    TemporaryFileSystem = [
+      "${skillsWork}:size=24M,nr_inodes=4200,mode=0700,uid=${toString serviceId},gid=${toString serviceId}"
+    ];
 
     # Left OFF on purpose, each for a measured reason (probe.sh shows them):
     #  - RestrictAddressFamilies: bwrap's --unshare-net sets up loopback over
@@ -140,8 +167,8 @@ let
   allowedUid = config.users.users.dev.uid;
 
   # sha256 of the settings that make up the sandbox's outer wall: the instance's
-  # serviceConfig without ExecStart, the socket's socketConfig, and the two ExecStart
-  # arguments that matter (--allowed-uid and --base). Passed to the server as
+  # serviceConfig without ExecStart, the socket's socketConfig, and the three ExecStart
+  # arguments that matter (--allowed-uid, --base and --skills-work). Passed to the server as
   # --unit-digest and put on every answer as "unit_digest", so a client that proved one
   # unit can tell it from a changed one without reading systemd. The rest of ExecStart
   # is left out: it carries the digest itself, and the server path is the answer's
@@ -152,7 +179,7 @@ let
       service = serviceConfigBase;
       socket = socketConfig;
       args = {
-        inherit allowedUid base;
+        inherit allowedUid base skillsWork;
       };
     }
   );
@@ -171,6 +198,13 @@ in
     # a+ adds to the ACL (a plain `a` would replace it). The default entry is
     # what the agent-history* directories dev creates below inherit.
     "a+ ${base} - - - - group:${user}:r-X,default:group:${user}:r-X"
+    # Her skills folders: the service's, readable by dev (AgentOS reads her folder to
+    # build her index). The default entry is what every folder the server makes inherits.
+    "d ${skillsOwn} 0750 ${user} ${user} -"
+    "a+ ${skillsOwn} - - - - user:dev:r-X,default:user:dev:r-X"
+    # The mount point of each instance's TemporaryFileSystem: systemd does not make it,
+    # and a missing one fails the instance at NAMESPACE (measured with the probe).
+    "d ${skillsWork} 0700 root root -"
   ];
 
   systemd.sockets.em-history-shell = {
@@ -190,6 +224,7 @@ in
         "${server}/bin/em-history-shell-server"
         "--allowed-uid ${toString allowedUid}"
         "--base ${base}"
+        "--skills-work ${skillsWork}"
         "--unit-digest ${unitDigest}"
       ];
     } // serviceConfigBase;

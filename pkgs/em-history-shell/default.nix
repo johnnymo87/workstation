@@ -72,7 +72,7 @@ let
 in
 stdenv.mkDerivation {
   pname = "em-history-shell";
-  version = "1";
+  version = "2";
 
   src = lib.fileset.toSource {
     root = ./.;
