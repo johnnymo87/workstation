@@ -140,6 +140,8 @@ WORK_OWN = "own"
 #: Runaway guards, not style rules: files in her whole folder, bytes per file, bytes in
 #: all, folders below /skills/own (a file in /skills/own/a/b/c/ is at depth 4).
 MAX_SKILL_FILES = 2000
+#: Files and folders together (an empty-folder flood), below the work tmpfs's inodes.
+MAX_OWN_ENTRIES = 4096
 MAX_FILE_BYTES = 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_DEPTH = 4
@@ -689,6 +691,10 @@ def check_name(path: str, depth: int) -> None:
         )
 
 
+def _TOO_MANY_ENTRIES() -> str:  # noqa: N802 -- read at call time, so tests can patch the cap
+    return f"your skills folder holds more than {MAX_OWN_ENTRIES} files and folders"
+
+
 def check_tree(tree: Tree) -> None:
     """The rules a whole folder must pass (names, depth, caps), on a tree already read.
     Used for a `sync`, whose files never went through `read_tree`."""
@@ -717,6 +723,8 @@ def check_tree(tree: Tree) -> None:
             raise TreeRefused(f"{_show(path)} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MiB")
     if len(tree.files) > MAX_SKILL_FILES:
         raise TreeRefused(f"your skills folder holds more than {MAX_SKILL_FILES} files")
+    if len(tree.files) + len(tree.dirs) > MAX_OWN_ENTRIES:
+        raise TreeRefused(_TOO_MANY_ENTRIES())
     if tree.total() > MAX_TOTAL_BYTES:
         raise TreeRefused(
             f"your skills folder holds more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB"
@@ -755,6 +763,8 @@ def read_tree(dir_fd: int, _prefix: str = "") -> Tree:
             if stat.S_ISDIR(info.st_mode):
                 if depth > MAX_DEPTH:
                     raise TreeRefused(f"{_show(path)} is nested too deep. Keep files at most {MAX_DEPTH} folders down")
+                if len(files) + len(dirs) >= MAX_OWN_ENTRIES:
+                    raise TreeRefused(_TOO_MANY_ENTRIES())
                 try:
                     child = _open_dir(name, fd)
                 except OSError:
@@ -793,6 +803,8 @@ def read_tree(dir_fd: int, _prefix: str = "") -> Tree:
             total += size
             if len(files) > MAX_SKILL_FILES:
                 raise TreeRefused(f"your skills folder holds more than {MAX_SKILL_FILES} files")
+            if len(files) + len(dirs) > MAX_OWN_ENTRIES:
+                raise TreeRefused(_TOO_MANY_ENTRIES())
             if total > MAX_TOTAL_BYTES:
                 raise TreeRefused(
                     f"your skills folder holds more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB"
@@ -898,6 +910,14 @@ class Store:
                 pass
             fd = _open_child(self.fd, profile)
         return fd
+
+    def drop_profile(self, profile: str) -> None:
+        """Delete a profile root its last character left (a throwaway root of the
+        escape suite, say). Call with the lock held. Not empty after all: kept."""
+        try:
+            os.rmdir(profile, dir_fd=self.fd)
+        except OSError:
+            pass
 
     def key_fd(self, profile: str, key: str) -> int | None:
         """Her folder's fd, or None when she has none yet."""
@@ -1030,12 +1050,16 @@ def replace_key(store: Store, profile: str, key: str, before: str, tree: Tree) -
             pfd = store.profile_fd(profile, create=staged is not None)
             if pfd is None:
                 return None  # nothing there and nothing to write
+            gone = False
             try:
                 old = store.put(pfd, key, staged)
                 staged = None
                 os.fsync(pfd)
+                gone = not os.listdir(pfd)
             finally:
                 os.close(pfd)
+            if gone:
+                store.drop_profile(profile)
         finally:
             store.unlock()
     finally:
@@ -1329,8 +1353,11 @@ def handle_change(msg: dict, base: str) -> dict:
                     if empty:
                         os.rmdir(key, dir_fd=pfd)
                         os.fsync(pfd)
+                gone = not os.listdir(pfd)
             finally:
                 os.close(pfd)
+            if gone:
+                store.drop_profile(profile)
         finally:
             store.unlock()
             if staged is not None:

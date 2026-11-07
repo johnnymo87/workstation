@@ -1288,6 +1288,25 @@ class TestTree(unittest.TestCase):
             h.update(path.encode() + b"\0" + hashlib.sha256(data).hexdigest().encode() + b"\n")
         self.assertEqual(server.files_sha256(two), h.hexdigest())
 
+    def test_files_sha256_vector_shared_with_agentos(self):
+        # The same vector is pinned in eternal-machinery (EM bead qpmfc.18.16.49.2.7).
+        tree = server.Tree(dirs=("references",),
+                           files=(("SKILL.md", b"a\n"), ("references/b.md", b"b\n")))
+        self.assertEqual(
+            server.files_sha256(tree),
+            "bd9ff7d3a35dc92eb80d355fbe8ac2c39f1f1eb6548708286666924da6fd9c27",
+        )
+
+    def test_entry_cap_counts_empty_folders(self):
+        self.patch("MAX_OWN_ENTRIES", 5)
+        for i in range(4):
+            os.makedirs(os.path.join(self.tmp, "skill", f"d{i}"))
+        self.read()  # 5 entries
+        os.makedirs(os.path.join(self.tmp, "skill", "d4"))
+        self.refused("more than 5 files and folders")
+        with self.assertRaises(server.TreeRefused):
+            server.check_tree(server.Tree(dirs=tuple(f"s{i}" for i in range(6)), files=()))
+
     def test_digest_sees_empty_folders(self):
         a = _tree_of(skill__x="1")
         b = server.Tree(dirs=a.dirs + ("zz",), files=a.files)
@@ -1604,6 +1623,21 @@ class TestSyncRemove(SkillsExchange):
     def sha(self, files):
         return server.files_sha256(server.Tree(
             dirs=(), files=tuple((p, t.encode()) for p, t in files.items())))
+
+    def test_an_emptied_profile_root_goes_too(self):
+        throwaway = self.make_root("agent-history-escape-x")
+        msg = {"v": 2, "op": "sync", "root": throwaway, "character": "Escape Probe",
+               "skill": "probe", "expect_sha256": None, "files": {"SKILL.md": "x"}}
+        self.assertTrue(self.ask(msg)["ok"])
+        profile = os.path.join(self.skills_own, "agent-history-escape-x")
+        self.assertTrue(os.path.isdir(os.path.join(profile, "escape-probe")))
+        self.ask({"v": 2, "op": "remove", "root": throwaway, "character": "Escape Probe",
+                  "skill": "probe", "expect_sha256": self.sha({"SKILL.md": "x"})})
+        self.assertFalse(os.path.exists(profile))
+        # and an edit run that empties the last folder of a profile
+        self.seed("k/SKILL.md", "x")
+        self.edit('rm -r "$SKILLS_OWN/k"')
+        self.assertFalse(os.path.exists(os.path.join(self.skills_own, "agent-history")))
 
     def test_sync_new_then_replace_then_remove(self):
         files = {"SKILL.md": "reviewed", "references/sources.md": "codex"}

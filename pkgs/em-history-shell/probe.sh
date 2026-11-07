@@ -115,7 +115,7 @@ PROPS=(
   'CPUQuota=100%'
   'ReadOnlyPaths=-/var/lib/eternal-machinery'
   'ReadWritePaths=-/var/lib/eternal-machinery/skills-own'
-  "TemporaryFileSystem=$WORK:size=24M,nr_inodes=4096,mode=1777"
+  "TemporaryFileSystem=$WORK:size=24M,nr_inodes=4200,mode=1777"
 )
 if [ "$USER_MODE" = 1 ]; then
   # A user manager cannot drop capabilities (exit 218), and ProtectHome=tmpfs hides
