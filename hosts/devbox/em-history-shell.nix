@@ -145,10 +145,12 @@ let
     ReadWritePaths = [ "-${skillsOwn}" ];
     # The work space of one "edit" run: her folder is copied here and bound at
     # /skills/own. size is a hard cap on what a command can write there and is charged
-    # to MemoryMax; nr_inodes caps files and folders (the server's own caps, 2000 files
-    # and 8 MiB, sit below both, and a full tmpfs keeps nothing).
+    # to MemoryMax; nr_inodes caps files and folders. The server's own caps (2000 files,
+    # 8 MiB) sit below both with room to spare: tmpfs takes at least a 4 KiB page per
+    # file, so the largest folder the caps allow needs about 16 MiB, and a tmpfs left
+    # with under 256 KiB free counts as full and keeps nothing.
     TemporaryFileSystem = [
-      "${skillsWork}:size=16M,nr_inodes=4096,mode=0700,uid=${toString serviceId},gid=${toString serviceId}"
+      "${skillsWork}:size=24M,nr_inodes=4096,mode=0700,uid=${toString serviceId},gid=${toString serviceId}"
     ];
 
     # Left OFF on purpose, each for a measured reason (probe.sh shows them):

@@ -115,7 +115,7 @@ PROPS=(
   'CPUQuota=100%'
   'ReadOnlyPaths=-/var/lib/eternal-machinery'
   'ReadWritePaths=-/var/lib/eternal-machinery/skills-own'
-  "TemporaryFileSystem=$WORK:size=16M,nr_inodes=4096,mode=1777"
+  "TemporaryFileSystem=$WORK:size=24M,nr_inodes=4096,mode=1777"
 )
 if [ "$USER_MODE" = 1 ]; then
   # A user manager cannot drop capabilities (exit 218), and ProtectHome=tmpfs hides
@@ -152,10 +152,10 @@ test ! -e /history/livia
 mkdir /skills/own/notes; echo kept > /skills/own/notes/SKILL.md
 test "$(cat /skills/own/notes/SKILL.md)" = kept
 test "$(cat /skills/shared/fishing/SKILL.md)" = "shared text"
-! touch /skills/shared/x 2>/dev/null
-! touch /skills/characters/x 2>/dev/null
-! touch /skills/x 2>/dev/null
-! touch /history/x 2>/dev/null
+# (not `! touch`: set -e ignores a command that starts with !)
+for p in /skills/shared/x /skills/characters/x /skills/x /history/x; do
+  if touch "$p" 2>/dev/null; then echo "WRITABLE: $p"; exit 1; fi
+done
 echo PROBE-OK'
 
 # server.py build_argv, in shell. Keep in step with it.

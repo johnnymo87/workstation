@@ -1327,8 +1327,15 @@ class SkillsExchange(Exchange):
             handle.write(text)
 
     def staging_left(self):
+        """What staging holds besides replaced folders waiting for the sweep (each of
+        which must be dated now, so a reader that walked into it can finish)."""
         path = os.path.join(self.skills_own, server.STAGING)
-        return os.listdir(path) if os.path.isdir(path) else []
+        names = os.listdir(path) if os.path.isdir(path) else []
+        for name in names:
+            if name.startswith("o-"):
+                age = time.time() - os.stat(os.path.join(path, name)).st_mtime
+                self.assertLess(age, 30, name)
+        return [n for n in names if not n.startswith("o-")]
 
     def argv(self):
         return self.bwrap_log()["argv"]
@@ -1429,6 +1436,40 @@ class TestSkillsRun(SkillsExchange):
     def test_a_stopped_command_that_changed_nothing_is_fine(self):
         answer = self.edit("sleep 30", limits=Limits(timeout_s=0.5))
         self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+
+    def test_a_kill_inside_the_sandbox_keeps_nothing(self):
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; echo half > "$SKILLS_OWN/k/SKILL.md"; sh -c \'kill -9 $$\'; exit $?')
+        self.assertEqual(answer["exit_code"], 137)
+        self.assertIn("stopped before it finished", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_an_oom_kill_in_the_instance_keeps_nothing(self):
+        counts = iter([3, 4])
+        self.patch("oom_kills", lambda: next(counts))
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; echo half > "$SKILLS_OWN/k/SKILL.md"')
+        self.assertEqual(answer["exit_code"], 0)
+        self.assertIn("stopped before it finished", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_no_oom_count_still_keeps(self):
+        self.patch("oom_kills", lambda: None)
+        answer = self.edit('mkdir "$SKILLS_OWN/k"; : > "$SKILLS_OWN/k/SKILL.md"')
+        self.assertTrue(answer["skills"]["changed"])
+
+    def test_a_failed_copy_in_still_runs_read_only(self):
+        self.seed("keistos/SKILL.md", "old")
+
+        def boom(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        self.patch("_copy_in", boom)
+        answer = self.edit('cat "$SKILLS_OWN/keistos/SKILL.md"')
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["stdout"], "old")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": False, "why": server.COPY_IN_FAILED})
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("/skills/own") - 2], "--ro-bind")
+        self.assertEqual(os.listdir(self.work), [])
 
     def test_a_full_work_space_keeps_nothing(self):
         self.patch("work_is_full", lambda path: True)
@@ -1639,11 +1680,29 @@ class TestSyncRemove(SkillsExchange):
     def test_stale_staging_is_swept(self):
         staging = os.path.join(self.skills_own, server.STAGING)
         os.makedirs(os.path.join(staging, "t-old", "x"))
+        os.makedirs(os.path.join(staging, "o-old"))
         os.makedirs(os.path.join(staging, "t-new"))
         old = time.time() - server.STAGING_STALE_S - 10
-        os.utime(os.path.join(staging, "t-old"), (old, old))
+        for name in ("t-old", "o-old"):
+            os.utime(os.path.join(staging, name), (old, old))
         self.sync({"SKILL.md": "x"})
         self.assertEqual(sorted(os.listdir(staging)), ["t-new"])
+
+    def test_file_and_folder_clash_is_refused_and_leaves_nothing(self):
+        self.assertRefused(self.sync({"a": "x", "a/b": "y"}), "refused", "both a file and a folder")
+        self.assertEqual(self.staging_left(), [])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_remove_reads_only_its_skill(self):
+        self.sync({"SKILL.md": "x"})
+        os.makedirs(self.her("other"))
+        os.symlink("/etc/passwd", self.her("other", "bad"))  # a stricter rule, say
+        self.assertEqual(self.remove(self.sha({"SKILL.md": "x"}))["ok"], True)
+        self.assertFalse(os.path.exists(self.her("keistos")))
+
+    def test_a_large_reviewed_skill_fits_one_request(self):
+        files = {"SKILL.md": "x" * (900 * 1024)}
+        self.assertEqual(self.sync(files)["files_sha256"], self.sha(files))
 
 
 if __name__ == "__main__":

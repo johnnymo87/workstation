@@ -79,8 +79,9 @@ from dataclasses import dataclass, field, replace
 
 PROTOCOL_VERSION = 2
 
-#: Largest request line, in bytes (without the newline).
-MAX_REQUEST_BYTES = 256 * 1024
+#: Largest request line, in bytes (without the newline). Big enough for a `sync` of a
+#: skill up to the folder caps after JSON escaping (only dev can connect).
+MAX_REQUEST_BYTES = 16 * 1024 * 1024
 #: How long a client may take to send its request line.
 REQUEST_TIMEOUT_S = 10.0
 #: How long a client may take to take its answer.
@@ -123,8 +124,11 @@ SKILLS_OWN = "skills-own"
 #: Inside SKILLS_OWN: where new trees are written before they are swapped in, and where
 #: old ones wait to be deleted. Same filesystem, so a rename moves them.
 STAGING = ".staging"
-#: Staging entries older than this are left over from a crash and are deleted.
-STAGING_STALE_S = 3600
+#: Staging entries older than this are deleted by the next change. A tree being written
+#: lives less than the unit's RuntimeMaxSec (60 s). A replaced folder is NOT deleted at
+#: once (its mtime is set to the swap): a reader that walked into it just before the
+#: swap (another instance's copy in, or AgentOS building her index) can finish.
+STAGING_STALE_S = 120
 #: The shared root AgentOS publishes is marked with this file.
 SHARED_MARKER = ".agent-skills-shared-root"
 SANDBOX_SKILLS = "/skills"
@@ -694,6 +698,9 @@ def check_tree(tree: Tree) -> None:
         if depth > MAX_DEPTH:
             raise TreeRefused(f"{_show(path)} is nested too deep. Keep files at most {MAX_DEPTH} folders down")
     dirs = set(tree.dirs)
+    for path, _ in tree.files:
+        if path in dirs:
+            raise TreeRefused(f"{_show(path)} is both a file and a folder")
     for path, data in tree.files:
         parts = path.split("/")
         if len(parts) == 1:
@@ -716,7 +723,7 @@ def check_tree(tree: Tree) -> None:
         )
 
 
-def read_tree(dir_fd: int) -> Tree:
+def read_tree(dir_fd: int, _prefix: str = "") -> Tree:
     """Read the folder at `dir_fd` once, checking it as it is read: folders and regular
     files only (a link, a device, a fifo or a socket is refused, and so is a file with a
     second name), every name, the depth and the caps. What is returned is what was
@@ -791,8 +798,17 @@ def read_tree(dir_fd: int) -> Tree:
                     f"your skills folder holds more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB"
                 )
 
-    walk(dir_fd, "", 1)
+    if _prefix:
+        dirs.append(_prefix)
+        walk(dir_fd, _prefix + "/", 2)
+    else:
+        walk(dir_fd, "", 1)
     return Tree(dirs=tuple(dirs), files=tuple(files))
+
+
+def read_tree_below(skill_fd: int, skill: str) -> Tree:
+    """`read_tree` of one skill folder, with paths as below her folder."""
+    return read_tree(skill_fd, skill)
 
 
 def write_tree(dir_fd: int, tree: Tree) -> None:
@@ -867,6 +883,9 @@ class Store:
     def lock(self) -> None:
         fcntl.flock(self.fd, fcntl.LOCK_EX)
 
+    def lock_shared(self) -> None:
+        fcntl.flock(self.fd, fcntl.LOCK_SH)
+
     def unlock(self) -> None:
         fcntl.flock(self.fd, fcntl.LOCK_UN)
 
@@ -899,6 +918,24 @@ class Store:
         finally:
             os.close(fd)
 
+    def read_skill(self, profile: str, key: str, skill: str) -> Tree:
+        """Her folder as a tree holding only `skill` (empty if she has no such skill).
+        Raises TreeRefused, but only for what is inside that skill."""
+        fd = self.key_fd(profile, key)
+        if fd is None:
+            return EMPTY_TREE
+        try:
+            sfd = _open_child(fd, skill)
+            if sfd is None:
+                return EMPTY_TREE
+            try:
+                inner = read_tree_below(sfd, skill)
+            finally:
+                os.close(sfd)
+        finally:
+            os.close(fd)
+        return inner
+
     def _staging(self) -> int:
         if self.staging_fd is None:
             try:
@@ -928,12 +965,23 @@ class Store:
         sfd = self._staging()
         name = "t-" + secrets.token_hex(8)
         os.mkdir(name, DIR_MODE, dir_fd=sfd)
-        fd = _open_dir(name, sfd)
         try:
-            write_tree(fd, tree)
-        finally:
-            os.close(fd)
+            fd = _open_dir(name, sfd)
+            try:
+                write_tree(fd, tree)
+            finally:
+                os.close(fd)
+        except BaseException:
+            self.discard(name)
+            raise
         return name
+
+    def retire(self, name: str) -> None:
+        """A replaced folder, now in staging: leave it for the sweep, from now."""
+        try:
+            os.utime(name, dir_fd=self._staging(), follow_symlinks=False)
+        except OSError as err:
+            print(f"em-history-shell: could not date {name}: {err!r}", file=sys.stderr)
 
     def discard(self, name: str) -> None:
         try:
@@ -960,7 +1008,9 @@ class Store:
             return None
         _renameat2(sfd, staged, parent_fd, target, _RENAME_EXCHANGE)
         os.fsync(parent_fd)
-        return staged
+        old = "o-" + secrets.token_hex(8)
+        _renameat2(sfd, staged, sfd, old, _RENAME_NOREPLACE)
+        return old
 
 
 def replace_key(store: Store, profile: str, key: str, before: str, tree: Tree) -> str | None:
@@ -992,7 +1042,7 @@ def replace_key(store: Store, profile: str, key: str, before: str, tree: Tree) -
         if staged is not None:
             store.discard(staged)
         if old is not None:
-            store.discard(old)
+            store.retire(old)
     return None
 
 
@@ -1016,16 +1066,57 @@ class EditState:
     before: str
 
 
+COPY_IN_FAILED = (
+    "Your skills folder could not be opened for writing this time, so it is read "
+    "only and nothing you change there is kept."
+)
+
+
+def _own_read_mount(request: Request, base: str) -> tuple[str, str | None, str]:
+    """Her folder bound read only at /skills/own, or an empty folder if she has none."""
+    host = None
+    try:
+        with Store(base) as store:
+            fd = store.key_fd(request.profile, request.key)
+            if fd is not None:
+                os.close(fd)
+                host = os.path.join(os.path.realpath(base), SKILLS_OWN, request.profile, request.key)
+    except Refused as err:
+        if err.kind == "internal":
+            raise
+        host = None  # no skills-own on this host: she has nothing to read yet
+    return ("--ro-bind", host, SANDBOX_OWN) if host else ("--dir", None, SANDBOX_OWN)
+
+
+def _copy_in(store: Store, request: Request, work: str) -> str:
+    """Copy her folder into `work` (under a shared lock, so no writer swaps it
+    meanwhile) and return its digest. Raises TreeRefused or OSError."""
+    store.lock_shared()
+    try:
+        before = store.read_key(request.profile, request.key)
+    finally:
+        store.unlock()
+    shutil.rmtree(work, ignore_errors=True)
+    os.mkdir(work, 0o700)
+    fd = _open_dir(work)
+    try:
+        write_tree(fd, before)
+    finally:
+        os.close(fd)
+    return before.digest()
+
+
 def skills_mounts(
     request: Request, config: Config, base: str
-) -> tuple[list[tuple[str, str | None, str]], EditState | None]:
-    """The /skills mounts of a run, `(bwrap flag, host path or None, sandbox path)`,
-    and for an "edit" run the state `finish_edit` needs (her folder is copied into the
-    work tmpfs here). Raises `Refused`."""
+) -> tuple[list[tuple[str, str | None, str]], EditState | None, dict | None]:
+    """The /skills mounts of a run, `(bwrap flag, host path or None, sandbox path)`;
+    for an "edit" run the state `finish_edit` needs (her folder is copied into the
+    work tmpfs here); and, when the copy in failed, the answer's `skills` (she then
+    gets her folder read only, rather than no shell at all). Raises `Refused`."""
     mounts: list[tuple[str, str | None, str]] = []
-    real_base = os.path.realpath(base)
-    own_root = os.path.join(real_base, SKILLS_OWN)
+    own_root = os.path.join(os.path.realpath(base), SKILLS_OWN)
     state = None
+    fallback = None
     if request.own == "edit":
         work_base = config.skills_work
         if not work_base or not os.path.isdir(work_base) or os.path.islink(work_base):
@@ -1035,37 +1126,24 @@ def skills_mounts(
                 "unavailable",
             )
         store = Store(base)
+        work = os.path.join(work_base, WORK_OWN)
         try:
-            try:
-                before = store.read_key(request.profile, request.key)
-            except TreeRefused as err:
-                raise Refused(
-                    f"Her skills folder on disk does not pass the check ({err}).", "internal"
-                ) from None
-            work = os.path.join(work_base, WORK_OWN)
+            before = _copy_in(store, request, work)
+        except (TreeRefused, OSError) as err:
+            print(f"em-history-shell: copy in failed: {err!r}", file=sys.stderr)
+            store.close()
             shutil.rmtree(work, ignore_errors=True)
-            os.mkdir(work, 0o700)
-            fd = _open_dir(work)
-            try:
-                write_tree(fd, before)
-            finally:
-                os.close(fd)
+            mounts.append(_own_read_mount(request, base))
+            fallback = {"changed": False, "kept": False, "why": COPY_IN_FAILED}
         except BaseException:
             store.close()
+            shutil.rmtree(work, ignore_errors=True)
             raise
-        state = EditState(store=store, work=work, before=before.digest())
-        mounts.append(("--bind", work, SANDBOX_OWN))
+        else:
+            state = EditState(store=store, work=work, before=before)
+            mounts.append(("--bind", work, SANDBOX_OWN))
     elif request.own == "read":
-        host = None
-        try:
-            with Store(base) as store:
-                fd = store.key_fd(request.profile, request.key)
-                if fd is not None:
-                    os.close(fd)
-                    host = os.path.join(own_root, request.profile, request.key)
-        except Refused:
-            host = None  # no skills-own on this host: she has nothing to read yet
-        mounts.append(("--ro-bind", host, SANDBOX_OWN) if host else ("--dir", None, SANDBOX_OWN))
+        mounts.append(_own_read_mount(request, base))
     if request.shared is not None:
         mounts.append(("--ro-bind", request.shared, SANDBOX_SHARED))
     if request.view == ("*",):
@@ -1081,12 +1159,50 @@ def skills_mounts(
         mounts.append(
             ("--ro-bind", host, SANDBOX_CHARACTERS) if host else ("--dir", None, SANDBOX_CHARACTERS)
         )
-    return mounts, state
+    return mounts, state, fallback
 
 
-def finish_edit(state: EditState, request: Request, result: Result, work_base: str) -> dict:
-    """Copy out: what the answer's `skills` says after an "edit" run."""
-    killed = result.timed_out or result.flooded or result.exit_code is None or result.exit_code < 0
+def oom_kills() -> int | None:
+    """How many processes the kernel's OOM killer has taken in this instance's cgroup
+    (`oom_kill` in its memory.events), or None when that cannot be read."""
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as handle:
+            line = next(ln for ln in handle.read().splitlines() if ln.startswith("0::"))
+        path = os.path.join("/sys/fs/cgroup", line[3:].lstrip("/"), "memory.events")
+        with open(path, encoding="utf-8") as handle:
+            for ln in handle:
+                name, _, value = ln.partition(" ")
+                if name == "oom_kill":
+                    return int(value)
+    except (OSError, StopIteration, ValueError):
+        return None
+    return None
+
+
+#: bash's exit status for a command killed by SIGKILL (128 + 9): inside the sandbox
+#: that is the OOM killer or a kill -9, and bwrap passes it on as a plain exit code.
+KILLED_EXIT = 137
+
+
+def finish_edit(
+    state: EditState,
+    request: Request,
+    result: Result,
+    work_base: str,
+    oom_before: int | None = None,
+) -> dict:
+    """Copy out: what the answer's `skills` says after an "edit" run. A killed command
+    (stopped by us, killed by a signal, or with an OOM kill in the instance) keeps
+    nothing, since a file it was writing may be cut short."""
+    oom_after = oom_kills() if oom_before is not None else None
+    killed = (
+        result.timed_out
+        or result.flooded
+        or result.exit_code is None
+        or result.exit_code < 0
+        or result.exit_code == KILLED_EXIT
+        or (oom_after is not None and oom_after > oom_before)
+    )
     after = None
     reason = None
     try:
@@ -1175,7 +1291,12 @@ def handle_change(msg: dict, base: str) -> dict:
         store.lock()
         try:
             try:
-                current = store.read_key(profile, key)
+                if new_skill is None:
+                    # A remove reads only the skill it removes, so it can take away an
+                    # entry that a stricter rule would now refuse.
+                    current = store.read_skill(profile, key, skill)
+                else:
+                    current = store.read_key(profile, key)
             except TreeRefused as err:
                 raise Refused(f"Her skills folder on disk does not pass the check ({err}).", "internal") from None
             now = files_sha256(current.skill(skill))
@@ -1215,7 +1336,7 @@ def handle_change(msg: dict, base: str) -> dict:
             if staged is not None:
                 store.discard(staged)
             if old is not None:
-                store.discard(old)
+                store.retire(old)
     if op == "remove":
         return {"ok": True}
     return {"ok": True, "files_sha256": files_sha256(new_skill.skill(skill))}
@@ -1630,7 +1751,8 @@ def handle_request(
     check_keys(msg, RUN_KEYS)
     request = validate_run(msg, base)
     check_installed(config)
-    skills, state = skills_mounts(request, config, base)
+    skills, state, fallback = skills_mounts(request, config, base)
+    oom_before = oom_kills()
     try:
         result = execute(
             config,
@@ -1642,7 +1764,9 @@ def handle_request(
             skills=skills,
         )
         if state is not None:
-            own = finish_edit(state, request, result, config.skills_work)
+            own = finish_edit(state, request, result, config.skills_work, oom_before)
+        elif fallback is not None:
+            own = fallback
         elif request.own == "read":
             own = {"changed": False, "kept": False, "why": None}
         else:
