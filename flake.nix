@@ -1898,6 +1898,51 @@
         touch $out
       '';
 
+      # lgtm-review-slice-wiring: pins the workstation half of the contract
+      # for lgtm's goose review slice on cloudbox.
+      #
+      # Note: the other half (the literal `--slice=lgtm-review.slice` in the
+      # private lgtm repo's src/gooseReview.ts) cannot be checked from this
+      # flake (private repo, not a flake input). What this asserts is that
+      # the cloudbox generation actually ships lgtm-review.slice with MemoryMax
+      # and X-SwitchMethod=keep-old, and without MemoryHigh (pinning MAX-only
+      # to prevent a no-kill stall band).
+      lgtm-review-slice-wiring = devboxPkgs.runCommand "lgtm-review-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        unit="$gen/home-files/.config/systemd/user/lgtm-review.slice"
+        if [ ! -e "$unit" ]; then
+          echo "FAIL: no lgtm-review.slice in the cloudbox generation."
+          echo "      systemd would create it transiently with NO MemoryMax, so the"
+          echo "      aggregate cap would silently not exist."
+          exit 1
+        fi
+
+        grep -q '^MemoryMax=' "$unit" || {
+          echo "FAIL: lgtm-review.slice ships without MemoryMax; the aggregate cap is the"
+          echo "      entire reason the slice exists."
+          exit 1
+        }
+
+        grep -q '^X-SwitchMethod=keep-old' "$unit" || {
+          echo "FAIL: lgtm-review.slice ships without X-SwitchMethod=keep-old."
+          echo "      A future change to this unit would make sd-switch stop the slice,"
+          echo "      propagating stop to in-flight review turns."
+          exit 1
+        }
+
+        if grep -q '^MemoryHigh=' "$unit"; then
+          echo "FAIL: lgtm-review.slice sets MemoryHigh, but review turns must be MAX-only."
+          echo "      MemoryHigh creates a no-kill stall band under MemorySwapMax=0"
+          echo "      that holds review slots without killing runaway commands."
+          exit 1
+        fi
+
+        echo "ALL PASS (lgtm-review slice wiring: capped at MemoryMax, keep-old, no MemoryHigh stall band)"
+        touch $out
+      '';
+
       oc-scoped-shell = devboxPkgs.runCommand "oc-scoped-shell-tests" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils ];
         WRAPPER_BIN = "${(localPkgsFor devboxSystem).oc-scoped-shell}/bin/oc-scoped-shell";
