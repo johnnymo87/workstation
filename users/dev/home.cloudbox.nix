@@ -30,6 +30,14 @@ let
   # does NOT fail on a slice that was never declared. It creates a transient one with no
   # limits, so a rename on either side stays green and silently unbounded until the host OOMs.
   agentSliceName = "oc-agent";
+
+  # Slice for lgtm's goose review turns. The OTHER side of this name is
+  # the literal `--slice=lgtm-review.slice` in the lgtm repo's `src/gooseReview.ts`
+  # (`buildSystemdRunArgv`), which this flake cannot read (private repo, not a flake
+  # input), so they are tied by convention + this comment. A rename on either side
+  # is silent: `systemd-run --slice=NAME` does not fail on an undeclared slice; it
+  # creates a transient slice with NO limits, leaving review turns silently unbounded.
+  lgtmReviewSliceName = "lgtm-review";
   bazelScope = pkgs.callPackage ../../pkgs/bazel-scope {
     sliceName = bazelSliceName;
     # Concurrency gate (workstation-o5s1.19): at most this many build/test/
@@ -377,6 +385,9 @@ lib.mkIf isCloudbox {
 
     # Serve-pool operator tooling
     opencode-pool-auth # provider-credential rotation across the whole pool
+
+    # Operator CLI for lgtm goose review units (status, stop, stop-all, logs)
+    localPkgs.lgtm-review
   ];
 
   # GCP project: read from sops in initExtra below (org-identifying, not in public source)
@@ -913,6 +924,33 @@ lib.mkIf isCloudbox {
     Slice = {
       MemoryMax = "20G";
       MemorySwapMax = "4G";
+    };
+  };
+
+  # lgtm goose review turns, capped as a group.
+  #
+  # Review turns run via `systemd-run --user ... --slice=lgtm-review.slice` from
+  # lgtm's goose review backend (src/gooseReview.ts). This slice bounds the aggregate
+  # memory footprint across all concurrent review turns on cloudbox.
+  systemd.user.slices.${lgtmReviewSliceName} = {
+    Unit = {
+      Description = "lgtm goose review turns, capped as a group";
+
+      # DO NOT REMOVE. A future change to this slice must not stop it, because
+      # stopping a slice propagates stop to every unit in it (the in-flight review
+      # turns), and pull-workstation switches unattended. keep-old is safe because
+      # a slice carries no process of its own, and cgroup attributes re-realize on
+      # daemon-reload without a restart (see bazel.slice verification above).
+      X-SwitchMethod = "keep-old";
+    };
+    Slice = {
+      # Sizing: from lgtm's design doc (docs/plans/2026-10-16-goose-review-sessions-design.md,
+      # "Slice lgtm-review.slice" bullet): arithmetic not measured — 12 units (lgtm's
+      # reviewConcurrency) × ~265 MiB goose + two capped jest runs ~1 GiB each ≈ 4.7 GiB.
+      # Per-unit MemoryMax=2G and MemorySwapMax=0 are set by lgtm on each unit.
+      # Re-tune from lgtm's Phase 2 data (per-turn .exit memory.peak, slice memory.events).
+      MemoryHigh = "6G";
+      MemoryMax = "8G";
     };
   };
 

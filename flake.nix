@@ -151,6 +151,7 @@
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
       lgtm-gh = import ./pkgs/lgtm-gh { pkgs = p; };
+      lgtm-review = import ./pkgs/lgtm-review { pkgs = p; };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
@@ -1589,6 +1590,40 @@
           # testing less than it claims. Update deliberately, in the same commit.
           grep -q '^14 passed, 0 failed' "$TMPDIR/out.txt" || {
             echo "GATE FAILURE: expected '14 passed, 0 failed'." >&2
+            exit 1
+          }
+          touch $out
+        '';
+
+      # lgtm-review, THE LAUNCHER. The operator CLI script lives in the lgtm repo
+      # (scripts/lgtm-review), so all that ships from here is default.nix.
+      # Built twice -- once aimed at a fixture script that reports what it was handed,
+      # once at a path that does not exist.
+      lgtm-review-launcher-tests =
+        let
+          launcher = import ./pkgs/lgtm-review {
+            pkgs = devboxPkgs;
+            script = "${./pkgs/lgtm-review/fixture-script.sh}";
+          };
+          launcherMissing = import ./pkgs/lgtm-review {
+            pkgs = devboxPkgs;
+            script = "/nonexistent/lgtm/scripts/lgtm-review";
+          };
+        in
+        devboxPkgs.runCommand "lgtm-review-launcher-tests" {
+          nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
+        } ''
+          cd ${self}
+          bash pkgs/lgtm-review/test.sh ${launcher}/bin/lgtm-review ${launcherMissing}/bin/lgtm-review \
+            2>&1 | tee "$TMPDIR/out.txt"
+          grep -q '^all lgtm-review launcher tests passed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: lgtm-review launcher suite did not reach its final pass line." >&2
+            exit 1
+          }
+          # Pinned so a silently dropped assertion cannot leave a green check
+          # testing less than it claims. Update deliberately, in the same commit.
+          grep -q '^8 passed, 0 failed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: expected '8 passed, 0 failed'." >&2
             exit 1
           }
           touch $out
