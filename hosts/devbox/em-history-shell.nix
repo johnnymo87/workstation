@@ -60,7 +60,8 @@ let
   base = "/var/lib/eternal-machinery";
   user = "em-history-shell";
   # The service's own folder of skills roots (one per history root, then one folder
-  # per character name key). Made by tmpfiles; the server makes what is below it.
+  # per character name key). Made by em-skills-own-setup below (not tmpfiles); the
+  # server makes what is below it.
   skillsOwn = "${base}/skills-own";
   # Where each instance copies her folder in, a tmpfs of its own (see TemporaryFileSystem).
   skillsWork = "/run/em-skills";
@@ -198,14 +199,39 @@ in
     # a+ adds to the ACL (a plain `a` would replace it). The default entry is
     # what the agent-history* directories dev creates below inherit.
     "a+ ${base} - - - - group:${user}:r-X,default:group:${user}:r-X"
-    # Her skills folders: the service's, readable by dev (AgentOS reads her folder to
-    # build her index). The default entry is what every folder the server makes inherits.
-    "d ${skillsOwn} 0750 ${user} ${user} -"
-    "a+ ${skillsOwn} - - - - user:dev:r-X,default:user:dev:r-X"
     # The mount point of each instance's TemporaryFileSystem: systemd does not make it,
     # and a missing one fails the instance at NAMESPACE (measured with the probe).
     "d ${skillsWork} 0700 root root -"
   ];
+
+  # Her skills folders: the service's, readable by dev (AgentOS reads her folder to
+  # build her index). The default ACL entry is what every folder the server makes
+  # inherits. NOT tmpfiles: tmpfiles refuses an "unsafe path transition" from the
+  # dev-owned base to a folder owned by another user, and skipped the ACL on the first
+  # deploy (2026-11-08, journal of systemd-tmpfiles-resetup). Idempotent, every boot.
+  systemd.services.em-skills-own-setup = {
+    description = "em-history-shell: her skills folders (owner and ACL)";
+    wantedBy = [ "sockets.target" ];
+    before = [ "em-history-shell.socket" "sockets.target" ];
+    after = [ "local-fs.target" "systemd-tmpfiles-setup.service" ];
+    unitConfig.DefaultDependencies = false;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    path = [ pkgs.coreutils pkgs.acl ];
+    script = ''
+      dir=${skillsOwn}
+      if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+        echo "$dir is not a folder; leaving it alone" >&2
+        exit 1
+      fi
+      mkdir -p "$dir"
+      chown ${user}:${user} "$dir"
+      chmod 0750 "$dir"
+      setfacl -m user:dev:r-X,default:user:dev:r-X "$dir"
+    '';
+  };
 
   systemd.sockets.em-history-shell = {
     description = "em-history-shell socket (only dev may connect)";
