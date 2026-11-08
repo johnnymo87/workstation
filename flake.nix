@@ -151,6 +151,7 @@
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
       lgtm-gh = import ./pkgs/lgtm-gh { pkgs = p; };
+      lgtm-review = import ./pkgs/lgtm-review { pkgs = p; };
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
@@ -1594,6 +1595,40 @@
           touch $out
         '';
 
+      # lgtm-review, THE LAUNCHER. The operator CLI script lives in the lgtm repo
+      # (scripts/lgtm-review), so all that ships from here is default.nix.
+      # Built twice -- once aimed at a fixture script that reports what it was handed,
+      # once at a path that does not exist.
+      lgtm-review-launcher-tests =
+        let
+          launcher = import ./pkgs/lgtm-review {
+            pkgs = devboxPkgs;
+            script = "${./pkgs/lgtm-review/fixture-script.sh}";
+          };
+          launcherMissing = import ./pkgs/lgtm-review {
+            pkgs = devboxPkgs;
+            script = "/nonexistent/lgtm/scripts/lgtm-review";
+          };
+        in
+        devboxPkgs.runCommand "lgtm-review-launcher-tests" {
+          nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.gnused devboxPkgs.coreutils ];
+        } ''
+          cd ${self}
+          bash pkgs/lgtm-review/test.sh ${launcher}/bin/lgtm-review ${launcherMissing}/bin/lgtm-review \
+            2>&1 | tee "$TMPDIR/out.txt"
+          grep -q '^all lgtm-review launcher tests passed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: lgtm-review launcher suite did not reach its final pass line." >&2
+            exit 1
+          }
+          # Pinned so a silently dropped assertion cannot leave a green check
+          # testing less than it claims. Update deliberately, in the same commit.
+          grep -q '^8 passed, 0 failed' "$TMPDIR/out.txt" || {
+            echo "GATE FAILURE: expected '8 passed, 0 failed'." >&2
+            exit 1
+          }
+          touch $out
+        '';
+
       # git-work: the `work` worktree helper, sourced from its BUILT script.
       #
       # Two things had to change before this could be a check, neither of them
@@ -1860,6 +1895,51 @@
         }
 
         echo "ALL PASS (agent slice wiring: wrapper --slice=$slice matches a capped $slice.slice)"
+        touch $out
+      '';
+
+      # lgtm-review-slice-wiring: pins the workstation half of the contract
+      # for lgtm's goose review slice on cloudbox.
+      #
+      # Note: the other half (the literal `--slice=lgtm-review.slice` in the
+      # private lgtm repo's src/gooseReview.ts) cannot be checked from this
+      # flake (private repo, not a flake input). What this asserts is that
+      # the cloudbox generation actually ships lgtm-review.slice with MemoryMax
+      # and X-SwitchMethod=keep-old, and without MemoryHigh (pinning MAX-only
+      # to prevent a no-kill stall band).
+      lgtm-review-slice-wiring = devboxPkgs.runCommand "lgtm-review-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        gen = self.homeConfigurations.cloudbox.activationPackage;
+      } ''
+        unit="$gen/home-files/.config/systemd/user/lgtm-review.slice"
+        if [ ! -e "$unit" ]; then
+          echo "FAIL: no lgtm-review.slice in the cloudbox generation."
+          echo "      systemd would create it transiently with NO MemoryMax, so the"
+          echo "      aggregate cap would silently not exist."
+          exit 1
+        fi
+
+        grep -q '^MemoryMax=' "$unit" || {
+          echo "FAIL: lgtm-review.slice ships without MemoryMax; the aggregate cap is the"
+          echo "      entire reason the slice exists."
+          exit 1
+        }
+
+        grep -q '^X-SwitchMethod=keep-old' "$unit" || {
+          echo "FAIL: lgtm-review.slice ships without X-SwitchMethod=keep-old."
+          echo "      A future change to this unit would make sd-switch stop the slice,"
+          echo "      propagating stop to in-flight review turns."
+          exit 1
+        }
+
+        if grep -q '^MemoryHigh=' "$unit"; then
+          echo "FAIL: lgtm-review.slice sets MemoryHigh, but review turns must be MAX-only."
+          echo "      MemoryHigh creates a no-kill stall band under MemorySwapMax=0"
+          echo "      that holds review slots without killing runaway commands."
+          exit 1
+        fi
+
+        echo "ALL PASS (lgtm-review slice wiring: capped at MemoryMax, keep-old, no MemoryHigh stall band)"
         touch $out
       '';
 
