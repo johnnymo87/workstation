@@ -8,12 +8,13 @@
 #
 # The script itself lives in the lgtm repo (scripts/lgtm-review) and runs from
 # the lgtm checkout, so it deploys when that checkout is pulled.
-# No PATH pinning is needed: the script and lgtm's code use absolute
-# /run/current-system/sw/bin paths for node, realpath, and tsx.
+# No PATH pinning is needed: the script runs /run/current-system/sw/bin/node (and
+# realpath) on the checkout's own node_modules/tsx/dist/cli.mjs, and lgtm's code
+# calls systemctl/systemd-run by absolute /run/current-system/sw/bin paths.
 #
-# Where the script is missing it refuses and runs nothing. That happens on a
-# host with no lgtm checkout (macOS, devbox), and on cloudbox if this lands
-# before the lgtm change that added the script is pulled.
+# It is installed only on cloudbox (home.cloudbox.nix), where lgtm-run runs, and
+# refuses if the checkout lacks the script (e.g. this lands before the lgtm
+# change that added it is pulled).
 #
 # Behaviour is locked by test.sh (flake check lgtm-review-launcher-tests); the
 # script's underlying CLI runs under `npm test` in the lgtm repo.

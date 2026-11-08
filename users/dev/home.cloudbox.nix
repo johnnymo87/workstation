@@ -33,7 +33,7 @@ let
 
   # Slice for lgtm's goose review turns. The OTHER side of this name is
   # the literal `--slice=lgtm-review.slice` in the lgtm repo's `src/gooseReview.ts`
-  # (`buildSystemdRunArgv`), which this flake cannot read (private repo, not a flake
+  # (`buildReviewUnitArgv`), which this flake cannot read (private repo, not a flake
   # input), so they are tied by convention + this comment. A rename on either side
   # is silent: `systemd-run --slice=NAME` does not fail on an undeclared slice; it
   # creates a transient slice with NO limits, leaving review turns silently unbounded.
