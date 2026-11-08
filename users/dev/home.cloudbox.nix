@@ -941,15 +941,42 @@ lib.mkIf isCloudbox {
       # turns), and pull-workstation switches unattended. keep-old is safe because
       # a slice carries no process of its own, and cgroup attributes re-realize on
       # daemon-reload without a restart (see bazel.slice verification above).
+      #
+      # Note: keep-old covers only LATER edits to this unit. It does NOT cover
+      # adding the unit (a slice of this name may already be live as a transient
+      # slice from manual smoke turns; when the unit file first appears, sd-switch
+      # stops and restarts it — verified with `sd-switch --dry-run`:
+      # "Stopping units: lgtm-review.slice / Starting units: lgtm-review.slice")
+      # nor removing it. Both send stop to every review turn in the slice. So:
+      # switch the add only while no lgtm-review-* units are running (today nothing
+      # runs there), and a revert of this block must come after `lgtm-review stop-all`
+      # (drain), not before.
       X-SwitchMethod = "keep-old";
     };
     Slice = {
-      # Sizing: from lgtm's design doc (docs/plans/2026-10-16-goose-review-sessions-design.md,
-      # "Slice lgtm-review.slice" bullet): arithmetic not measured — 12 units (lgtm's
-      # reviewConcurrency) × ~265 MiB goose + two capped jest runs ~1 GiB each ≈ 4.7 GiB.
-      # Per-unit MemoryMax=2G and MemorySwapMax=0 are set by lgtm on each unit.
-      # Re-tune from lgtm's Phase 2 data (per-turn .exit memory.peak, slice memory.events).
-      MemoryHigh = "6G";
+      # MAX-ONLY, no MemoryHigh. Deliberately departs from lgtm's design doc
+      # (docs/plans/2026-10-16-goose-review-sessions-design.md, "Slice lgtm-review.slice" bullet),
+      # which originally proposed MemoryHigh=6G / MemoryMax=8G.
+      #
+      # Why MAX-only: every review unit has MemorySwapMax=0, so above a MemoryHigh mark
+      # reclaim can only drop page cache, after which every allocating thread in every
+      # review unit stalls in the over-high handler (mem_cgroup_handle_over_high) with
+      # nothing killed until MemoryMax. That no-kill stall band would hold admission
+      # slots (lgtm counts active units) for up to RuntimeMaxSec=7200.
+      #
+      # This follows this host's MAX-only precedent: the serve units in hosts/cloudbox/configuration.nix
+      # (measured 13-minute wedge at the high mark where tasks froze while liveness passed),
+      # user-1000.slice dropping MemoryHigh after the 2026-10-11 incident to remove the throttle
+      # band, and the bazel.slice no-MemoryHigh decision documented above in this file.
+      #
+      # At MemoryMax the kernel OOM-kills inside the slice and units survive via
+      # OOMPolicy=continue (the designed path: the runaway command dies, goose reports and
+      # finishes).
+      #
+      # Sizing: arithmetic not measured — 12 units (lgtm's reviewConcurrency) × ~265 MiB goose
+      # + two capped jest runs ~1 GiB each ≈ 4.7 GiB. Per-unit MemoryMax=2G and MemorySwapMax=0
+      # are set by lgtm on each unit. Re-tune from lgtm's Phase 2 data (per-turn .exit memory.peak,
+      # slice memory.events).
       MemoryMax = "8G";
     };
   };
