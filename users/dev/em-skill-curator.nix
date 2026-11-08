@@ -26,7 +26,7 @@
 #
 # NEEDS (all local to devbox, nothing is read from or written to them here):
 #   - AgentOS DB   AGENTOS_DB_URL (curator default: postgresql on 127.0.0.1:5434), read only
-#   - OAuth proxy  AGENTOS_PROXY_BASE_URL (curator default: http://127.0.0.1:4319)
+#   - OAuth proxy  AGENTOS_PROXY_BASE_URL (the live stack proxy, http://127.0.0.1:4318)
 #   - codex        CODEX_URL (curator default: http://localhost:4010)
 #   - SSH key      the push (and the root's fetch) goes over SSH: origin is
 #                  git@github.com:..., the key comes from the ssh config. No
@@ -47,7 +47,7 @@
 #                 agent_skills/README.md differ from origin/main or have local
 #                 edits, i.e. the curator code on disk is not main's
 #   stack-down    the AgentOS DB (127.0.0.1:5434), the OAuth proxy
-#                 (127.0.0.1:4319) or codex (localhost:4010) does not accept a
+#                 (127.0.0.1:4318) or codex (localhost:4010) does not accept a
 #                 TCP connection (overridable for tests: EM_SKILL_CURATOR_DB_ADDR,
 #                 _PROXY_ADDR, _CODEX_ADDR as host:port)
 #
@@ -102,7 +102,7 @@ lib.mkIf isDevbox {
       LOCK_FILE="$STATE_DIR/lock"
       RUN_ROOT="''${XDG_DATA_HOME:-$HOME/.local/share}/eternal-machinery/curator"
       DB_ADDR="''${EM_SKILL_CURATOR_DB_ADDR:-127.0.0.1:5434}"
-      PROXY_ADDR="''${EM_SKILL_CURATOR_PROXY_ADDR:-127.0.0.1:4319}"
+      PROXY_ADDR="''${EM_SKILL_CURATOR_PROXY_ADDR:-127.0.0.1:4318}"
       CODEX_ADDR="''${EM_SKILL_CURATOR_CODEX_ADDR:-localhost:4010}"
       # The curator's own code and rules; the root must match origin/main here.
       WATCHED=(agentos agent_spec bin/skill-curator agent_skills/README.md)
