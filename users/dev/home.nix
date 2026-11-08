@@ -10,6 +10,7 @@
     ./gnome-keyring.nix
     ./disk-cleanup.nix
     ./em-drift-detector.nix
+    ./em-skill-curator.nix
     ./hm-deploy-gate.nix
     ./opencode-llm-audit.nix
     ./home.darwin.nix
