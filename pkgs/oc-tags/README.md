@@ -44,7 +44,10 @@ lgtm's goose review turns and goose gather runs each run in a private `GOOSE_PAT
 - **Tag**: `lgtm-runs`, the same tag lgtm's opencode reviews carry, unless `tags.db` names the root. Roots are `lgtm-goose:<review session>` and `lgtm-goose:gather:<repo>#<pr>`.
 - **Dedupe**: rows are deduped on `key`, first wins. File order is not time order: lgtm backfills old rows late, and windowing uses each row's `at`.
 - **Cost**: lgtm's `costUsd`. A zero-cost row with tokens is repriced from the rate table when it carries a cache split (gather), and otherwise listed under "Unpriced models".
-- **Not double-counted**: these runs never touch goose-serve's database, and lgtm's opencode sessions never write the ledger. Like goose-serve spend, ledger spend is excluded from the Claude-only cfp coverage and cap numerators.
+- **Not double-counted**: these runs never touch goose-serve's database, and lgtm's opencode sessions never write the ledger.
+- **Late rows**: lgtm can append a row days after the spend (a superseded review session's last turn, the one-shot gather backfill), so a finished day's bar can grow after the fact.
+- **Loud on schema drift**: a keyed row with an unknown `v`, `kind` or timestamp is not counted and is reported on stderr.
+- **Known gaps**: ledger spend, like goose-serve spend, is left out of the Claude-only cfp coverage and cap numerators even though goose traffic goes through cfp, so coverage reads low; `oc-cost` does not read the ledger. `--lgtm-ledger ""` turns the source off.
 
 ### Directory rules (removed)
 

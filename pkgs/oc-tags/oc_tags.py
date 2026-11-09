@@ -885,17 +885,26 @@ def read_lgtm_ledger(
 
     Root ids are `lgtm-goose:<session>` (review) and
     `lgtm-goose:gather:<repo>#<pr>` (gather), tagged `lgtm-runs` unless
-    tags.db says otherwise. Like goose-serve's spend, none of it enters
-    claude_day (the cfp coverage/cap numerators read opencode only).
+    tags.db says otherwise.
+
+    None of it enters claude_day, matching goose-serve's spend. That is a
+    known undercount, not a rule: goose traffic does go through cfp, so the
+    coverage/cap numerators miss it. Fixing it needs goose-serve and this
+    ledger together, time-sorted for cap_hits (workstation-9ep3).
     """
     if not path or not os.path.exists(path):
         return
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        # errors="replace": a torn multibyte tail must not raise out of aggregate.
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             raw_lines = fh.readlines()
     except OSError as e:
         warnings.append(f"lgtm goose ledger not counted: {e}")
         return
+    # The ledger is the ONLY record of this spend (lgtm reaps the review roots),
+    # so a keyed row this reader cannot use -- an lgtm schema change -- must be
+    # loud, the way "goose usage not counted" is. Keyless torn lines stay quiet.
+    rejected = 0
     seen: set[str] = set()
     for line in raw_lines:
         line = line.strip()
@@ -911,8 +920,14 @@ def read_lgtm_ledger(
         if not isinstance(key, str) or key in seen:
             continue
         seen.add(key)
+        if row.get("v") != 1:
+            rejected += 1
+            continue
         ts = _iso_to_ms(row.get("at"))
-        if ts is None or ts < since_ms or ts >= until_ms:
+        if ts is None:
+            rejected += 1
+            continue
+        if ts < since_ms or ts >= until_ms:
             continue
         kind = row.get("kind")
         repo = row.get("repo") if isinstance(row.get("repo"), str) else "unknown"
@@ -924,6 +939,7 @@ def read_lgtm_ledger(
             root = f"lgtm-goose:gather:{repo}#{pr}"
             title = f"{repo}#{pr} (goose gather)"
         else:
+            rejected += 1
             continue
         if root in session_tags:
             tag, source = session_tags[root], "manual"
@@ -956,6 +972,10 @@ def read_lgtm_ledger(
                 cost = 0.0
                 unpriced_model = model or "unknown"
         yield root, tag, source, title, ts, float(cost), unpriced_model, toks
+    if rejected:
+        warnings.append(
+            f"lgtm goose ledger: {rejected} row(s) not counted (unknown schema, kind, or timestamp) in {path}"
+        )
 
 
 def calculate_window(days: int, now_ms: int | None = None) -> Window:
@@ -1990,6 +2010,18 @@ def cmd_which(args: argparse.Namespace) -> int:
 
     root_sid = target_sid
     directory: str | None = None
+    if target_sid.startswith("lgtm-goose:"):
+        # lgtm's goose spend ledger roots: the chart bills them to lgtm-runs
+        # unless tags.db names the root (read_lgtm_ledger).
+        with open_store(args.tags_db, readonly=True) as st:
+            warn_retired_dir_tags(st)
+            s_tags = session_tags(st)
+        if target_sid in s_tags:
+            tag, kind = s_tags[target_sid], "session"
+        else:
+            tag, kind = LGTM_LEDGER_TAG, "auto"
+        print(f"{tag}\tmanual\t{target_sid}\t{kind}")
+        return 0
     if target_sid.startswith("goose:"):
         goose_sid = target_sid[len("goose:"):]
         goose_db = getattr(args, "goose_db", DEFAULT_GOOSE_DB)

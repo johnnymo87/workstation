@@ -3198,7 +3198,30 @@ class TestLgtmGooseLedger(unittest.TestCase):
             _ledger_row(key="review-no-session", session=None),
             raw_tail='not json\n{"key": "torn',
         )
-        self.assertAlmostEqual(self.agg(session_tags={}).totals["lgtm-runs"], 1.25)
+        agg = self.agg(session_tags={})
+        self.assertAlmostEqual(agg.totals["lgtm-runs"], 1.25)
+        # Keyed rows it could not use are reported; keyless torn lines are not.
+        self.assertEqual(len(agg.warnings), 1)
+        self.assertIn("4 row(s) not counted", agg.warnings[0])
+
+    def test_an_unknown_schema_version_is_loud(self):
+        self.write(_ledger_row(), _ledger_row(key="v2", v=2))
+        agg = self.agg(session_tags={})
+        self.assertAlmostEqual(agg.totals["lgtm-runs"], 1.25)
+        self.assertIn("1 row(s) not counted", agg.warnings[0])
+
+    def test_which_agrees_with_the_chart_for_ledger_roots(self):
+        root = "lgtm-goose:lgr-food-truck_mono-7-aaaaaa"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            oc_tags.main(["which", root, "--tags-db", self.tags_db, "--db", self.opencode_db])
+        self.assertEqual(out.getvalue().strip().split("\t"), ["lgtm-runs", "manual", root, "auto"])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, root, "goose-pilot")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            oc_tags.main(["which", root, "--tags-db", self.tags_db, "--db", self.opencode_db])
+        self.assertEqual(out.getvalue().strip().split("\t"), ["goose-pilot", "manual", root, "session"])
 
     def test_missing_ledger_is_silent(self):
         agg = oc_tags.aggregate(
@@ -3215,7 +3238,9 @@ class TestLgtmGooseLedger(unittest.TestCase):
         self.assertEqual(agg.sources["goose-pilot"], "manual")
 
     def test_not_counted_toward_claude_day_or_cap(self):
-        # Matches goose-serve spend: claude_day is the opencode-only cfp numerator.
+        # Matches goose-serve spend today. A known undercount (goose traffic does
+        # pass through cfp), to be fixed for both sources together; this pins
+        # the current behaviour, not a rule.
         self.write(_ledger_row(costUsd=500.0))
         agg = self.agg(session_tags={})
         self.assertAlmostEqual(agg.claude_day.get("2026-09-08", 0.0), 2.0)
