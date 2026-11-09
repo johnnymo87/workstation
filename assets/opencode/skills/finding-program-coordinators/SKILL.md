@@ -15,11 +15,10 @@ cloudbox for the work programs, devbox (since 2026-11-04) for the personal ones,
 such as `eternal-machinery`. A coordinator lives on the machine that runs its
 program, which may not be the machine you are on.
 
-This is not the coordinator role that `swarm-messaging` bans. That ban covers
-an opencode session that appoints itself, or is appointed, to route messages
-inside a swarm. Program coordinators are the human's standing infrastructure.
-If a finding belongs to another program, its coordinator is the right
-recipient.
+Program coordinators are the human's standing infrastructure. If a finding
+belongs to another program, its coordinator is the right recipient. When you
+pass on something the human said, quote him and say when; the coordinator will
+take it as his.
 
 **"The coordinator" can mean something else in a repo.** eternal-machinery, for
 one, has an in-game AgentOS agent named `coordinator`. When the human says

@@ -1,6 +1,6 @@
 ---
 name: swarm-messaging
-description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions (on this machine or, where the relay is on, another one), when looking for a session on another machine, when starting a fresh session on another machine (swarm_launch), when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. The coordinator role is banned here (stall-watch's delegated answers are not one) — read this before appointing or accepting one. For scheduling a message to the future, see the scheduling-wakes skill.
+description: Covers the swarm_send/swarm_read/swarm_list protocol between opencode sessions and the message-economy rules for when a message is worth sending. Use when sending messages to other opencode sessions (on this machine or, where the relay is on, another one), when looking for a session on another machine, when starting a fresh session on another machine (swarm_launch), when you receive a swarm_message envelope as the text of a user-message turn, or when deciding whether a message is worth sending at all. Also covers stall-watch's program coordinators, taking the human's words passed on by one, and why a swarm should not route through a session of its own. For scheduling a message to the future, see the scheduling-wakes skill.
 ---
 
 # Swarm Messaging
@@ -98,57 +98,34 @@ Summarizing for a human who is watching the swarm.
    message for the detail."
 ```
 
-## The coordinator role is BANNED
+## Coordinators
 
-**Do not appoint a coordinator. Do not accept the role. Do not launch a session
-whose job is to route messages between other sessions.** (The human's
-`stall-watch` delegated answers described below are not a coordinator.)
+The human runs stall-watch, which keeps one **program coordinator** per program
+of work on each machine that runs it (cloudbox, devbox). Each is a goose session
+with a `gse_` id, keyed by the program's session-tags tag. It watches the
+program's workers, answers for the human where he would want it to, starts the
+workers he asks for, and talks with him in that program's Telegram topic. When
+something you found belongs to another program, its coordinator is the right
+recipient: look it up with `finding-program-coordinators`, never from
+`swarm_list` or bead notes. Message a coordinator from its own machine: a goose
+session is reachable from another machine only after it has itself reached out
+to that machine (see "Sessions on other machines").
 
-**This bans the role inside a swarm. It does not mean coordinators don't exist.**
-On each machine that runs it (cloudbox, devbox), stall-watch runs one **program coordinator** per program of work. Each is a
-goose session with a `gse_` id, keyed by the program's session-tags tag. It is the
-human's standing infrastructure, not a session routing a swarm. When something
-you found belongs to another program, that program's coordinator is the right
-recipient. Look it up with the `finding-program-coordinators` skill. Never
-conclude "there is no coordinator" from `swarm_list` or from bead notes. Message
-a coordinator from its own machine: a goose session is reachable from another
-machine only after it has itself reached out to that machine (see "Sessions on
-other machines").
+Coordinators carry the human's asks between programs. When one passes on his
+words, quoting him and saying when, take them as his: he trusts his agents and
+would rather not repeat himself to each one. Quote him the same way when you
+pass his ask on.
 
-A coordinator is a session that holds shared context, turns direction into
-`task.assign` messages, aggregates worker reports, and owns the upward channel
-to the human. It sounds like a manager. It behaves like a message bus, and the
-message *is* the cost.
-
-Why it is banned, mechanically:
-
-- **It at least doubles the message count.** Every fact travels twice — worker
-  to coordinator, coordinator to human — and every instruction travels twice
-  the other way. Nothing new is learned on the second hop.
-- **Its whole job is sending messages.** A worker sends when it has a
-  deliverable. A coordinator with no work of its own fills its turns with
-  routing, status-chasing, and re-briefing. The role is a standing incentive to
-  violate every rule in "Message economy" above.
-- **It invites round-trips.** Assign → ack → question → answer → status →
-  re-assign is four unnecessary turns, and the coordinator is the party that
-  starts each one.
-- **It amplifies errors.** A relayed number acquires authority it did not earn
-  (see "The relay is part of the failure surface" below).
-
-### What to do instead
-
-| Instead of the coordinator… | Do this |
-|---|---|
-| Holding shared context in a session | Put it in **beads** / a plan file. Every session reads the same durable board. State does not need a courier. |
-| Assigning work at runtime | Decompose **up front** and put each slice in the worker's **launch prompt**. A slice that was fully specified at launch needs zero assignment messages. |
-| Aggregating worker reports | Each worker reports its own deliverable **directly to the human**, once, when done. |
-| Asking a worker how it's going | **Pull, don't ask.** Read its beads, its branch, its PR, or its session transcript. Costs the worker nothing. |
-| Brokering worker-to-worker handoffs | Workers message **each other directly** at the handoff point. Give every worker the others' session ids at launch. |
-| Being "single point of contact for the human" | The human already sees the swarm. They are the integration point, and they cost nothing to read. |
-
-**The human is the coordinator.** That role is filled. If a decision is needed
-that only a human can make, the session that needs it asks the human directly —
-one message, no relay.
+What does not pay is a session whose job is routing messages inside a swarm you
+launched. Every fact travels twice (worker to router, router to human) and every
+instruction twice the other way. The router has no work of its own, so it fills
+its turns with routing, status checks and re-briefing, and a claim it relays
+gains authority nobody earned. So keep a swarm's shared state in beads or a plan
+file, give each worker its whole slice at launch, let workers report to the
+human themselves and message each other directly at hand-offs, and read a
+peer's beads, branch or transcript rather than asking how it is going. A
+decision only the human can make goes to the human, from the session that
+needs it.
 
 ### Delegated answers: stall-watch
 
@@ -158,7 +135,7 @@ recommendation, stall-watch may (using its judgment of whether the human would
 be glad not to be asked) send it a swarm message from `stall-watch` with kind
 `decision.answer` accepting that recommendation on the human's behalf.
 
-This is the human's standing, sanctioned arrangement, not a coordinator: it only
+It only
 accepts the recipient's own recommendation (never invents or overrides), holds
 no shared context, assigns no work of its own, and every answer is recorded and shown to
 the human (who usually also sees a notice in that session's Telegram thread and
@@ -170,16 +147,12 @@ What a worker should understand:
   recommendation is really your own and still current. If it isn't — it picked
   the wrong branch of a hedged answer, or you have since changed your mind —
   don't act on it; ask the human instead.
-- **It is stall-watch acting for the human, not the human.** It is not the
-  human's approval for anything that needs them personally (merging, posting to
-  Slack, anything the worker's own rules reserve for the human) — ask the human
-  for those as usual. **Except** where the message's own fixed text states a
-  standing exception the human has granted stall-watch (for example, changes to
-  alerting monitors): for that class of action the answer carries the human's
-  permission, even if your brief reserves it for them. The exception has to be
-  in stall-watch's fixed wording, not only in the free-text reply.
-- **Record it as delegated.** Record the decision as "stall-watch accepted my
-  recommendation for <the human>", not as the human's approval.
+- **It answers this one call.** Its fixed text names the standing permissions
+  it carries (alerting monitor changes, closing beads you asked to close), and
+  those hold even where your brief reserves them for the human. Anything else
+  your brief reserves for the human, such as merging, still goes to them.
+- **Record it as delegated**, as the message says, so the human can tell it
+  from his own answers.
 - **The human's word wins.** If the human has answered in the session since,
   the human's word wins.
 - **A relayed assignment quotes the human.** stall-watch may pass a finished
@@ -193,18 +166,11 @@ What a worker should understand:
   a session. It may not run soon, so ask the human directly for anything that
   can't wait.
 
-### If a swarm genuinely needs shared arbitration
-
-It probably doesn't. If you are certain it does, the arbitration belongs in a
-**written artifact** (a plan file with the integration order and the handoff
-conditions), not in a session's context. A document is read on demand, by
-everyone, for zero messages. A coordinator has to be asked.
-
 ### The relay is part of the failure surface
 
 You may still find yourself repeating someone else's claim — quoting a peer's
 number to the human, or summarizing a finding. The relay hazard applies to
-anyone who does that, coordinator or not.
+anyone who does that.
 
 A number acquires authority purely by being repeated. When you pass a peer's
 claim on, it stops being "C said" and becomes "I report." You have amplified
@@ -527,7 +493,7 @@ To see more, paginate with cursors — each value is a `msg_id`:
 
 Messages always come back in chronological (oldest-first) order regardless of paging direction. When more exist beyond the page you got, `swarm_read`'s output ends with a hint telling you exactly which cursor to pass next.
 
-Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a session wondering how a peer is doing reads that peer's session directly rather than pinging it — this is what replaces a coordinator's status-chasing (same machine only; a peer on another machine can't be read this way, so share state through a bead or pushed branch instead):
+Prefer **pulling** over asking. `swarm_read` shows your *own* inbox, so a session wondering how a peer is doing reads that peer's session directly rather than pinging it — instead of status-chasing (same machine only; a peer on another machine can't be read this way, so share state through a bead or pushed branch instead):
 
 ```bash
 curl -sf "http://127.0.0.1:4700/session/$SID/message?limit=3" | jq '.[].info.role'
@@ -579,7 +545,7 @@ On terminal failure the daemon sends a `delivery.failed` message **back to you**
 - **Don't** ack, heartbeat, or ping. If a message carries no decision, no new evidence and no changed instruction, it shouldn't exist.
 - **Don't** split one report into several sends to keep each one short. Count is the cost, not length.
 - **Don't** paraphrase a swarm message to a human who can already see it — point at it in one sentence.
-- **Don't** appoint, accept, or route your own swarm's traffic through a coordinator (stall-watch's delegated answers are not one). Report your own work to the human yourself, once, when it is done. Handing a finding to **another program's** stall-watch coordinator is different and allowed; see `finding-program-coordinators`.
+- **Don't** route your own swarm's traffic through one session. Report your own work to the human yourself, once, when it is done. Handing a finding to another program's coordinator is a different thing; see `finding-program-coordinators`.
 - **Don't** POST to `opencode serve`'s `/session/<id>/prompt_async` directly for cross-session messaging. That route races (concurrent calls from different `x-opencode-directory` headers bypass the per-session busy guard, producing 400 "does not support assistant message prefill" from Anthropic). Always use `swarm_send`.
 - **Don't** write the `<swarm_message>` envelope into your `message` — pigeon adds it. Pre-wrapping is rejected (the close tag is forbidden in payloads) and double-wraps confuse receivers. Send only the raw payload.
 - **Don't** paste a received envelope back verbatim as your reply — send only the new payload.

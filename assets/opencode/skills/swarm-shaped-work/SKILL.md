@@ -1,13 +1,13 @@
 ---
 name: swarm-shaped-work
-description: Use when planning a multi-piece task to decide whether to swarm (spawn parallel worker sessions) or do the work serially in one session. Covers the heuristic, the flat coordinator-free topology, and the spin-up sequence.
+description: Use when planning a multi-piece task to decide whether to swarm (spawn parallel worker sessions) or do the work serially in one session. Covers the heuristic, the flat worker topology, and the spin-up sequence.
 ---
 
 # Swarm-Shaped Work
 
 A "swarm" is a small set of opencode sessions on the same machine that cooperate on one outcome. Every session is a **worker** — each owns one slice of the work.
 
-The topology is **flat**. There is no coordinator session: the role is banned (see the `swarm-messaging` skill for the full argument — in short, a coordinator doubles the message count, and messages are the dominant cost of a swarm). Shared context lives in a **durable artifact** (beads, a plan file), the human is the integration point, and workers talk to each other directly.
+The topology is **flat**: shared context lives in a **durable artifact** (beads, a plan file), the human is the integration point, and workers talk to each other directly. A session that only routes messages doubles their count, and messages are a swarm's main cost (see `swarm-messaging`). stall-watch's program coordinators are a different thing: they watch a whole program, and a worker launched with the program's tag is visible to its coordinator without sending it anything.
 
 This skill answers: when is a task swarm-shaped, and how do you spin one up.
 
@@ -31,13 +31,13 @@ Other signals that often accompany the above:
 - **You don't have a clear decomposition.** If you can't write down "Worker A does X, Worker B does Y, here are the integration points", you don't have a swarm-shaped task — you have an exploratory task. Do that solo first; swarm later if a shape emerges.
 - **The slices race on the same files.** Workers must own disjoint surface area or they'll fight for git locks and you'll spend more time merging than implementing.
 - **The coordination overhead exceeds the parallel speedup.** A 4-worker swarm where each worker takes 5 minutes is probably not worth the spin-up + envelope traffic.
-- **You cannot specify the slices up front.** With no coordinator to assign work at runtime, each worker's slice must be fully described in its launch prompt. If you cannot write those prompts, you are not ready to swarm.
+- **You cannot specify the slices up front.** Nobody assigns work at runtime, so each worker's slice must be fully described in its launch prompt. If you cannot write those prompts, you are not ready to swarm.
 
 ## Roles
 
 ### The shared artifact (not a session)
 
-What a coordinator used to hold in its context goes in a file instead: the design doc / plan file with the decomposition, the integration order, and the hand-off conditions; plus beads for live state. A document is read on demand, by everyone, for zero messages.
+Shared context goes in a file: the design doc / plan file with the decomposition, the integration order, and the hand-off conditions; plus beads for live state. A document is read on demand, by everyone, for zero messages.
 
 Write it **before** you launch anything, and give every worker its path.
 
@@ -70,8 +70,8 @@ If you can't write this, don't swarm (see "When NOT To Swarm").
 For each worker, launch from its own dir with a prompt that includes:
 
 - Its slice of the work, and the path to the plan file.
-- The other workers' session ids for its known direct hand-offs (e.g. BE → FE for "schema is live"). A worker that doesn't know its peers' ids will route through someone, and that someone becomes an accidental coordinator.
-- An explicit statement that there is no coordinator: report to the human, pull peer state rather than asking for it.
+- The other workers' session ids for its known direct hand-offs (e.g. BE → FE for "schema is live"). A worker that doesn't know its peers' ids will route through someone else.
+- That it reports to the human itself, and pulls peer state rather than asking for it.
 
 **Workers are writable — launch them with `--worktree <slug>`.** A swarm worker
 edits code, so it must NOT start in a repo's primary root (in the monorepo that's the
@@ -96,8 +96,7 @@ You are the BE worker for PROJ-1234. Your slice: implement the GraphQL
 endpoints for X. You are in a fresh worktree off trunk — commit here and open
 a PR from this branch when done.
 
-There is NO coordinator in this swarm. Report your finished slice to the human
-directly, once. Do not send progress updates to anyone. To learn what a peer is
+Report your finished slice to the human directly, once. Do not send progress updates to anyone. To learn what a peer is
 doing, read its beads/PR rather than asking it.
 
 Peers: FE=ses_<fe-id>, proto=ses_<proto-id>
@@ -116,7 +115,7 @@ Capture each worker's session id.
 Every worker needs every other worker's id. Ids only exist after launch, so this is one message per worker — the last unavoidable broadcast:
 
 ```
-Swarm roster (no coordinator — report to the human, message peers directly):
+Swarm roster (report to the human, message peers directly):
 - BE:     ses_<be-id>
 - FE:     ses_<fe-id>
 - proto: ses_<proto-id>
@@ -164,9 +163,8 @@ Old swarm messages stay in the daemon's `swarm_messages` table. They aren't auto
 
 ## Anti-Patterns
 
-- **Appointing a coordinator.** Banned. It doubles message count, and messages are the cost. See `swarm-messaging`.
-- **Growing one by accident.** A worker that everyone reports to, or that everyone asks for status, has become a coordinator whether or not you called it one. Warning signs: one session's transcript is mostly `swarm_send` calls; the human hears findings second-hand; a worker asks a peer "how's it going?" instead of reading its beads.
-- **Spinning up workers without giving them each other's ids.** They can't coordinate directly and will funnel everything through whoever they do know, manufacturing a coordinator.
+- **Routing through one session.** A worker that everyone reports to, or that everyone asks for status, doubles the message count whether or not anyone meant it to. Warning signs: one session's transcript is mostly `swarm_send` calls; the human hears findings second-hand; a worker asks a peer "how's it going?" instead of reading its beads.
+- **Spinning up workers without giving them each other's ids.** They can't coordinate directly and will funnel everything through whoever they do know.
 - **Spawning more workers than there are decoupled slices.** Two workers fighting over the same code is worse than one worker doing both.
 - **Forgetting `reply_to` in chained conversations.** Without threading, the receiver has to reconstruct context from prose. Cheap to set; expensive to omit.
 - **Not telling workers how to escalate.** Workers that don't know they should ask the human directly will silently get stuck, or make decisions that should have been the human's.
@@ -174,5 +172,5 @@ Old swarm messages stay in the daemon's `swarm_messages` table. They aren't auto
 ## See Also
 
 - [`opencode-launch`](../opencode-launch/SKILL.md) — spawn headless sessions.
-- [`swarm-messaging`](../swarm-messaging/SKILL.md) — message economy, the coordinator ban, sender + receiver protocol; the `swarm_send`/`swarm_read`/`swarm_list` tools; envelope format; kinds; replay.
+- [`swarm-messaging`](../swarm-messaging/SKILL.md) — message economy, coordinators, sender + receiver protocol; the `swarm_send`/`swarm_read`/`swarm_list` tools; envelope format; kinds; replay.
 - pigeon repo `swarm-architecture` / `swarm-operations` skills — daemon internals if you need to debug delivery.
