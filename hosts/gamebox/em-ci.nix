@@ -57,11 +57,16 @@
   # needed a retry for timing-test flakes. With performance set (2026-11-08,
   # experiment A of bead eternal-machinery-kdubj.37) 4 of 4 sat at the median
   # with no retry. The cost is higher idle power and heat.
-  # The governor is set at boot by this option. power-profiles-daemon owns the
-  # EPP and keeps its profile across reboots in its state file; powerdevilrc
-  # (streaming.nix) also asks Plasma for the performance profile on AC, so a
-  # login cannot move it back to balanced.
+  # One owner: this option sets the governor at boot (cpufreq.service), and
+  # under the performance governor the kernel holds EPP at performance too.
+  # power-profiles-daemon (on by default with Plasma) is off because its
+  # intel_pstate driver writes scaling_governor=powersave every time it
+  # starts, after cpufreq.service, which undid this (checked 2026-11-09: a
+  # restart of the daemon put all 8 CPUs back on powersave). Plasma's power
+  # profile switcher has nothing to switch without it, which this headless box
+  # does not use.
   powerManagement.cpuFreqGovernor = "performance";
+  services.power-profiles-daemon.enable = false;
 
   # Builds the containers request run in nix-daemon's cgroup, outside the
   # container caps. Max-only (no MemoryHigh): a throttled daemon is the

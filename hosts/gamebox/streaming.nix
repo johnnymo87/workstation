@@ -111,9 +111,6 @@ in
     DimDisplayWhenIdle=false
     TurnOffDisplayWhenIdle=false
 
-    [AC][Performance]
-    PowerProfile=performance
-
     [AC][SuspendAndShutdown]
     AutoSuspendAction=0
   '';
