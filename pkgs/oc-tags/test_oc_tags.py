@@ -3090,5 +3090,197 @@ class TestGooseFailureHandling(unittest.TestCase):
 # every test, runs NONE, prints nothing and exits 0 -- the exact failure mode
 # documented at the bottom of pkgs/oc-cost/test_oc_cost.py. The flake check
 # runs this file directly, so the guard is what makes the check able to fail.
+def _ledger_row(**kw):
+    row = {
+        "v": 1,
+        "kind": "review",
+        "key": "review:lgr-food-truck_mono-7-aaaaaa:t1-1111",
+        "at": "2026-09-08T13:00:00.000Z",
+        "repo": "food-truck/mono",
+        "pr": 7,
+        "session": "lgr-food-truck_mono-7-aaaaaa",
+        "turnId": "t1-1111",
+        "model": "claude-opus-5-5",
+        "inputTokens": 1000,
+        "outputTokens": 100,
+        "costUsd": 1.25,
+        "costSource": "goose",
+        "recordedAt": "2026-09-08T13:05:00.000Z",
+    }
+    row.update(kw)
+    return row
+
+
+class TestLgtmGooseLedger(unittest.TestCase):
+    """lgtm's goose spend ledger counts under lgtm-runs (eng-agent-platform-kz5a.2.11)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.ledger = os.path.join(self.td.name, "goose-usage.jsonl")
+        self.goose_db = os.path.join(self.td.name, "goose.db")
+        self.opencode_db = os.path.join(self.td.name, "opencode.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        _fixture_goose_db(self.goose_db)
+        conn = sqlite3.connect(self.opencode_db)
+        conn.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            """
+        )
+        # An opencode lgtm review, tagged lgtm-runs the way opencode-launch --tag does.
+        conn.execute("INSERT INTO session VALUES ('ses_lgtm', NULL, '/home/dev/projects/mono/.worktrees/lgtm-pr-8', 'review')")
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_lgtm', ?, ?)",
+            (FIXTURE_NOW_MS - 3_600_000, json.dumps({"role": "assistant", "cost": 2.0, "modelID": "claude-opus-5-5", "providerID": "google-vertex-anthropic"})),
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def write(self, *rows, raw_tail=""):
+        with open(self.ledger, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+            fh.write(raw_tail)
+
+    def agg(self, session_tags=None, goose=False, since_ms=None, until_ms=None):
+        return oc_tags.aggregate(
+            self.opencode_db,
+            since_ms=since_ms if since_ms is not None else FIXTURE_NOW_MS - 86400 * 1000,
+            until_ms=until_ms if until_ms is not None else FIXTURE_NOW_MS + 86400 * 1000,
+            bucket="day",
+            session_tags={"ses_lgtm": "lgtm-runs"} if session_tags is None else session_tags,
+            goose_db_path=self.goose_db if goose else None,
+            lgtm_ledger_path=self.ledger,
+            now_ms=FIXTURE_NOW_MS,
+        )
+
+    def test_review_and_gather_rows_join_lgtm_runs_alongside_opencode_reviews(self):
+        self.write(
+            _ledger_row(),
+            _ledger_row(key="review:lgr-food-truck_mono-7-aaaaaa:t2-2222", turnId="t2-2222", costUsd=0.75),
+            _ledger_row(kind="gather", key="gather:food_truck_mono-7-1-abc", session=None, turnId=None,
+                        cacheReadTokens=10, cacheWriteTokens=5, costUsd=0.5),
+        )
+        agg = self.agg()
+        self.assertAlmostEqual(agg.totals["lgtm-runs"], 2.0 + 1.25 + 0.75 + 0.5)
+        self.assertEqual(agg.sources["lgtm-runs"], "manual")
+        self.assertAlmostEqual(agg.root_totals["lgtm-goose:lgr-food-truck_mono-7-aaaaaa"], 2.0)
+        self.assertAlmostEqual(agg.root_totals["lgtm-goose:gather:food-truck/mono#7"], 0.5)
+        self.assertEqual(agg.root_meta["lgtm-goose:gather:food-truck/mono#7"]["title"], "food-truck/mono#7 (goose gather)")
+        self.assertEqual(agg.series["lgtm-runs"], {"2026-09-08": 4.5})
+
+    def test_dedupes_on_key_first_row_wins(self):
+        # The mirror and a racing writer may append the same turn twice.
+        self.write(_ledger_row(), _ledger_row(costUsd=99.0))
+        self.assertAlmostEqual(self.agg(session_tags={}).totals["lgtm-runs"], 1.25)
+
+    def test_window_uses_at_not_file_order(self):
+        self.write(
+            _ledger_row(key="late-backfill", at="2026-09-01T12:00:00.000Z", costUsd=7.0),
+            _ledger_row(),
+        )
+        agg = self.agg(session_tags={})
+        self.assertAlmostEqual(agg.totals["lgtm-runs"], 1.25)
+        wide = self.agg(session_tags={}, since_ms=FIXTURE_NOW_MS - 30 * 86400 * 1000)
+        self.assertAlmostEqual(wide.totals["lgtm-runs"], 8.25)
+
+    def test_malformed_torn_and_unknown_rows_are_skipped(self):
+        self.write(
+            _ledger_row(),
+            {"no": "key"},
+            _ledger_row(key="bad-at", at="yesterday"),
+            _ledger_row(key="naive-at", at="2026-09-08T13:00:00"),
+            _ledger_row(key="other-kind", kind="assist"),
+            _ledger_row(key="review-no-session", session=None),
+            raw_tail='not json\n{"key": "torn',
+        )
+        self.assertAlmostEqual(self.agg(session_tags={}).totals["lgtm-runs"], 1.25)
+
+    def test_missing_ledger_is_silent(self):
+        agg = oc_tags.aggregate(
+            self.opencode_db, since_ms=0, until_ms=FIXTURE_NOW_MS * 2, bucket="day",
+            session_tags={}, lgtm_ledger_path=os.path.join(self.td.name, "absent.jsonl"), now_ms=FIXTURE_NOW_MS,
+        )
+        self.assertEqual(agg.warnings, [])
+        self.assertNotIn("lgtm-runs", agg.totals)
+
+    def test_tags_db_overrides_the_default_tag(self):
+        self.write(_ledger_row())
+        agg = self.agg(session_tags={"lgtm-goose:lgr-food-truck_mono-7-aaaaaa": "goose-pilot"})
+        self.assertAlmostEqual(agg.totals["goose-pilot"], 1.25)
+        self.assertEqual(agg.sources["goose-pilot"], "manual")
+
+    def test_not_counted_toward_claude_day_or_cap(self):
+        # Matches goose-serve spend: claude_day is the opencode-only cfp numerator.
+        self.write(_ledger_row(costUsd=500.0))
+        agg = self.agg(session_tags={})
+        self.assertAlmostEqual(agg.claude_day.get("2026-09-08", 0.0), 2.0)
+        self.assertEqual(agg.cap_hits, {})
+
+    def test_zero_cost_with_tokens_is_repriced_or_loud(self):
+        self.write(
+            # Review turn: no cache split, cannot be repriced -> unpriced, not $0 silence.
+            _ledger_row(costUsd=0, costSource="tokens", model="mystery-model"),
+            # Gather run with a cache split and a known model -> repriced.
+            _ledger_row(kind="gather", key="gather:g1", session=None, costUsd=0, costSource=None,
+                        inputTokens=1000, outputTokens=500, cacheReadTokens=200, cacheWriteTokens=100),
+        )
+        agg = self.agg(session_tags={})
+        self.assertEqual(agg.unpriced, {"mystery-model": {"messages": 1, "tokens": 1100}})
+        # (700*4 + 500*20 + 200*0.2 + 100*5)/1e6
+        self.assertAlmostEqual(agg.root_totals["lgtm-goose:gather:food-truck/mono#7"], 0.01334)
+
+    def test_goose_serve_spend_is_unchanged_by_the_ledger(self):
+        base = oc_tags.aggregate(
+            self.opencode_db, since_ms=FIXTURE_NOW_MS - 86400 * 1000, until_ms=FIXTURE_NOW_MS + 86400 * 1000,
+            bucket="day", session_tags={}, goose_db_path=self.goose_db, now_ms=FIXTURE_NOW_MS,
+        )
+        self.write(_ledger_row())
+        both = self.agg(session_tags={}, goose=True)
+        for tag, dollars in base.totals.items():
+            if tag != "lgtm-runs":
+                self.assertAlmostEqual(both.totals[tag], dollars)
+        self.assertAlmostEqual(both.totals["lgtm-runs"], 1.25)
+
+    def test_report_and_chart_read_the_ledger_by_default(self):
+        self.write(_ledger_row(at="2026-09-08T13:00:00.000Z", costUsd=3.5))
+        with mock.patch.object(oc_tags, "DEFAULT_LGTM_LEDGER", self.ledger), \
+                mock.patch.dict(os.environ, {"OC_TAGS_NOW_MS": str(FIXTURE_NOW_MS)}):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                rc = oc_tags.main(["report", "--days", "1", "--db", self.opencode_db,
+                                   "--tags-db", self.tags_db, "--goose-db", self.goose_db + ".absent"])
+            self.assertEqual(rc, 0)
+            self.assertRegex(buf.getvalue(), r"lgtm-runs\s+3\.50")
+            status, _, svg = oc_tags.handle_request(
+                "/", "days=1", db_path=self.opencode_db, tags_db=self.tags_db,
+                goose_db=self.goose_db + ".absent", now_ms=FIXTURE_NOW_MS,
+            )
+            self.assertEqual(status, 200)
+            self.assertIn("lgtm-runs", svg)
+        # And an explicit --lgtm-ledger wins.
+        other = os.path.join(self.td.name, "other.jsonl")
+        with open(other, "w") as fh:
+            fh.write(json.dumps(_ledger_row(costUsd=9.0)) + "\n")
+        with mock.patch.dict(os.environ, {"OC_TAGS_NOW_MS": str(FIXTURE_NOW_MS)}):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                oc_tags.main(["report", "--days", "1", "--db", self.opencode_db, "--tags-db", self.tags_db,
+                              "--goose-db", self.goose_db + ".absent", "--lgtm-ledger", other])
+            self.assertRegex(buf.getvalue(), r"lgtm-runs\s+9\.00")
+
+    def test_ledger_alone_is_enough_to_report(self):
+        self.write(_ledger_row())
+        agg = oc_tags.load_aggregate(
+            db_path=os.path.join(self.td.name, "none.db"), tags_db=self.tags_db, days=1,
+            now_ms=FIXTURE_NOW_MS, goose_db=os.path.join(self.td.name, "none-goose.db"), lgtm_ledger=self.ledger,
+        )
+        self.assertAlmostEqual(agg.totals["lgtm-runs"], 1.25)
+
+
 if __name__ == "__main__":
     unittest.main()

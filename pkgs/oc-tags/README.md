@@ -37,6 +37,15 @@ session-tags set alpha-runs --goose-dir /path/to/dir1 --goose-dir /path/to/dir2 
 
 `--goose-dir` performs a one-shot write to `tags.db` for all matching goose sessions whose working directory matches (path-normalised) and whose `created_at` timestamp is at or after `--since` (if provided). It is a one-shot operation that writes session tags, not a stored directory rule.
 
+### lgtm goose spend source
+
+lgtm's goose review turns and goose gather runs each run in a private `GOOSE_PATH_ROOT` that lgtm later deletes, so none of that spend is in any `sessions.db` above. lgtm records it in an append-only ledger, `~/.local/state/lgtm/goose-usage.jsonl` (override with `--lgtm-ledger`; schema in lgtm's `src/gooseUsageLedger.ts`), and `session-tags` counts it in both `report` and the chart.
+
+- **Tag**: `lgtm-runs`, the same tag lgtm's opencode reviews carry, unless `tags.db` names the root. Roots are `lgtm-goose:<review session>` and `lgtm-goose:gather:<repo>#<pr>`.
+- **Dedupe**: rows are deduped on `key`, first wins. File order is not time order: lgtm backfills old rows late, and windowing uses each row's `at`.
+- **Cost**: lgtm's `costUsd`. A zero-cost row with tokens is repriced from the rate table when it carries a cache split (gather), and otherwise listed under "Unpriced models".
+- **Not double-counted**: these runs never touch goose-serve's database, and lgtm's opencode sessions never write the ledger. Like goose-serve spend, ledger spend is excluded from the Claude-only cfp coverage and cap numerators.
+
 ### Directory rules (removed)
 
 Directory rules (`dir_tag`, `session-tags set --dir`) were removed; precedence is session tag > `auto:`. If `session-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `session-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:

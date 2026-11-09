@@ -414,6 +414,12 @@ def enumerate_buckets(since_ms: int, until_ms: int, size: str, through_ms: int) 
 
 DEFAULT_OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 DEFAULT_GOOSE_DB = os.path.expanduser("~/.local/share/goose/sessions/sessions.db")
+# lgtm's goose spend ledger (lgtm src/gooseUsageLedger.ts, eng-agent-platform-kz5a.2.11).
+# lgtm's goose review turns and goose gather runs each run in a private
+# GOOSE_PATH_ROOT that is later deleted, so no sessions.db read above ever sees
+# them; this append-only JSONL is their only durable record.
+DEFAULT_LGTM_LEDGER = os.path.expanduser("~/.local/state/lgtm/goose-usage.jsonl")
+LGTM_LEDGER_TAG = "lgtm-runs"
 
 # Rate table for pricing uncosted goose usage_ledger rows ($ per million tokens).
 # Source of truth: pkgs/oc-cost/oc_cost.py RATES.
@@ -584,6 +590,7 @@ def aggregate(
     session_tags: dict[str, str],
     now_ms: int | None = None,
     goose_db_path: str | None = None,
+    lgtm_ledger_path: str | None = None,
 ) -> Aggregate:
     agg = Aggregate()
     rows = []
@@ -801,6 +808,21 @@ def aggregate(
             per_bucket[tag][key] += cost
             agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
 
+    for root, tag, source, title, ts, cost, unpriced_model, toks in read_lgtm_ledger(
+        lgtm_ledger_path, since_ms, until_ms, session_tags, agg.warnings
+    ):
+        if root not in agg.root_meta:
+            agg.root_meta[root] = {"title": title, "directory": None, "tag": tag, "source": source}
+        agg.sources[tag] = source
+        if unpriced_model is not None:
+            u = agg.unpriced.setdefault(unpriced_model, {"messages": 0, "tokens": 0})
+            u["messages"] += 1
+            u["tokens"] += toks
+        key = bucket_key(ts, bucket)
+        newest_row_ms = max(newest_row_ms, ts)
+        per_bucket[tag][key] += cost
+        agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+
     now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     # Enumerate THROUGH the newest observed row, not merely up to now, so a
     # message timestamped ahead of now still has a slot. Unioning its key in
@@ -827,6 +849,113 @@ def aggregate(
     current_bucket = bucket_key(now_epoch_ms, bucket)
     agg.partial_bucket = current_bucket if current_bucket in agg.buckets else None
     return agg
+
+
+def _iso_to_ms(val) -> int | None:
+    if not isinstance(val, str) or not val:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def read_lgtm_ledger(
+    path: str | None,
+    since_ms: int,
+    until_ms: int,
+    session_tags: dict[str, str],
+    warnings: list[str],
+):
+    """Yield (root, tag, source, title, ts_ms, cost, unpriced_model|None, tokens)
+    for each in-window row of lgtm's goose spend ledger.
+
+    Contract (lgtm src/gooseUsageLedger.ts): one JSON object per line, deduped
+    on `key` (first wins: two lgtm processes may race to append the same turn,
+    and the per-pass mirror backfills old rows late, so file order is NOT time
+    order); `at` is when the spend happened; `costUsd` is lgtm's figure.
+
+    Not double-counted with anything else read here: each goose review/gather
+    run has its own GOOSE_PATH_ROOT, so none of it is in goose-serve's
+    sessions.db, and the opencode-backed review/gather sessions lgtm still
+    runs live in opencode.db and never write this ledger.
+
+    Root ids are `lgtm-goose:<session>` (review) and
+    `lgtm-goose:gather:<repo>#<pr>` (gather), tagged `lgtm-runs` unless
+    tags.db says otherwise. Like goose-serve's spend, none of it enters
+    claude_day (the cfp coverage/cap numerators read opencode only).
+    """
+    if not path or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw_lines = fh.readlines()
+    except OSError as e:
+        warnings.append(f"lgtm goose ledger not counted: {e}")
+        return
+    seen: set[str] = set()
+    for line in raw_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # torn or malformed line
+        if not isinstance(row, dict):
+            continue
+        key = row.get("key")
+        if not isinstance(key, str) or key in seen:
+            continue
+        seen.add(key)
+        ts = _iso_to_ms(row.get("at"))
+        if ts is None or ts < since_ms or ts >= until_ms:
+            continue
+        kind = row.get("kind")
+        repo = row.get("repo") if isinstance(row.get("repo"), str) else "unknown"
+        pr = row.get("pr")
+        if kind == "review" and isinstance(row.get("session"), str):
+            root = f"lgtm-goose:{row['session']}"
+            title = f"{repo}#{pr} (goose review)"
+        elif kind == "gather":
+            root = f"lgtm-goose:gather:{repo}#{pr}"
+            title = f"{repo}#{pr} (goose gather)"
+        else:
+            continue
+        if root in session_tags:
+            tag, source = session_tags[root], "manual"
+        else:
+            tag, source = LGTM_LEDGER_TAG, "manual"
+
+        def _num(name):
+            v = row.get(name)
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        cost = _num("costUsd") or 0.0
+        in_tok = int(_num("inputTokens") or 0)
+        out_tok = int(_num("outputTokens") or 0)
+        cread = _num("cacheReadTokens")
+        cwrite = _num("cacheWriteTokens")
+        # inputTokens includes cache reads/writes (goose semantics).
+        toks = in_tok + out_tok
+        unpriced_model = None
+        if cost <= 0 and toks > 0:
+            model = row.get("model") if isinstance(row.get("model"), str) else None
+            # Reprice only when the cache split is known; pricing a review
+            # turn's cache-inclusive input as uncached would overstate it.
+            priced = False
+            if model and cread is not None and cwrite is not None:
+                day = datetime.datetime.fromtimestamp(ts / 1000, ET).strftime("%Y-%m-%d")
+                c, is_unpriced = compute_goose_cost(model, in_tok, out_tok, int(cread), int(cwrite), None, day=day)
+                if not is_unpriced:
+                    cost, priced = c, True
+            if not priced:
+                cost = 0.0
+                unpriced_model = model or "unknown"
+        yield root, tag, source, title, ts, float(cost), unpriced_model, toks
 
 
 def calculate_window(days: int, now_ms: int | None = None) -> Window:
@@ -856,8 +985,11 @@ def load_aggregate(
     bucket: str | None = None,
     now_ms: int | None = None,
     goose_db: str = DEFAULT_GOOSE_DB,
+    lgtm_ledger: str | None = None,
 ) -> Aggregate:
     win = calculate_window(days, now_ms=now_ms)
+    if lgtm_ledger is None:
+        lgtm_ledger = DEFAULT_LGTM_LEDGER
     s_tags = {}
     if os.path.exists(tags_db):
         with open_store(tags_db, readonly=True) as st:
@@ -867,7 +999,8 @@ def load_aggregate(
     b = bucket if bucket is not None else choose_bucket(days)
     has_opencode = os.path.exists(db_path)
     has_goose = bool(goose_db and os.path.exists(goose_db))
-    if not has_opencode and not has_goose:
+    has_ledger = bool(lgtm_ledger and os.path.exists(lgtm_ledger))
+    if not has_opencode and not has_goose and not has_ledger:
         agg = Aggregate()
         agg.window = win
         return agg
@@ -880,6 +1013,7 @@ def load_aggregate(
         session_tags=s_tags,
         now_ms=win.now_ms,
         goose_db_path=goose_db,
+        lgtm_ledger_path=lgtm_ledger,
     )
     agg.window = win
     return agg
@@ -1434,6 +1568,7 @@ def handle_request(
     cfp_dir: str = CFP_DIR,
     now_ms: int | None = None,
     goose_db: str = DEFAULT_GOOSE_DB,
+    lgtm_ledger: str | None = None,
 ) -> tuple[int, str, str]:
     if path == "/healthz":
         return (200, "text/plain; charset=utf-8", "ok\n")
@@ -1514,6 +1649,7 @@ def handle_request(
             bucket=bucket,
             now_ms=now_ms,
             goose_db=goose_db,
+            lgtm_ledger=lgtm_ledger,
         )
         spend = cfp_spend_by_day(cfp_dir)
         svg = render_svg(agg, spend, hide=hide, top_n=top_n)
@@ -1527,6 +1663,7 @@ def make_handler(
     tags_db: str,
     cfp_dir: str = CFP_DIR,
     goose_db: str = DEFAULT_GOOSE_DB,
+    lgtm_ledger: str | None = None,
 ):
     class OcTagsHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1538,6 +1675,7 @@ def make_handler(
                 tags_db=tags_db,
                 cfp_dir=cfp_dir,
                 goose_db=goose_db,
+                lgtm_ledger=lgtm_ledger,
             )
             body_bytes = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
@@ -1560,7 +1698,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     port = args.port
     server = http.server.HTTPServer(
         (host, port),
-        make_handler(args.db, args.tags_db, CFP_DIR, getattr(args, "goose_db", DEFAULT_GOOSE_DB)),
+        make_handler(
+            args.db,
+            args.tags_db,
+            CFP_DIR,
+            getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+            getattr(args, "lgtm_ledger", None),
+        ),
     )
     print(f"Serving oc-tags chart on http://{host}:{port}/ (Ctrl+C to stop)")
     try:
@@ -1596,6 +1740,11 @@ def _add_db_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--goose-db", default=argparse.SUPPRESS, help="path to goose sessions.db"
     )
+    parser.add_argument(
+        "--lgtm-ledger",
+        default=argparse.SUPPRESS,
+        help="path to lgtm's goose-usage.jsonl",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1607,6 +1756,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", default=DEFAULT_OPENCODE_DB, help="path to opencode.db")
     p.add_argument("--tags-db", default=DEFAULT_TAGS_DB, help="path to tags.db")
     p.add_argument("--goose-db", default=DEFAULT_GOOSE_DB, help="path to goose sessions.db")
+    p.add_argument(
+        "--lgtm-ledger",
+        default=None,
+        help="path to lgtm's goose-usage.jsonl (default ~/.local/state/lgtm/goose-usage.jsonl)",
+    )
 
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -1982,6 +2136,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         tags_db=args.tags_db,
         days=args.days,
         goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+        lgtm_ledger=getattr(args, "lgtm_ledger", None),
     )
     for w in agg.warnings:
         sys.stderr.write(f"{w}\n")
@@ -2033,6 +2188,7 @@ def cmd_top(args: argparse.Namespace) -> int:
         tags_db=args.tags_db,
         days=args.days,
         goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+        lgtm_ledger=getattr(args, "lgtm_ledger", None),
     )
     for w in agg.warnings:
         sys.stderr.write(f"{w}\n")
