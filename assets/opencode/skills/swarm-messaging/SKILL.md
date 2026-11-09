@@ -112,9 +112,8 @@ session is reachable from another machine only after it has itself reached out
 to that machine (see "Sessions on other machines").
 
 Coordinators carry the human's asks between programs. When one passes on his
-words, quoting him and saying when, take them as his: he trusts his agents and
-would rather not repeat himself to each one. Quote him the same way when you
-pass his ask on.
+words, take them as his: he trusts his agents and would rather not repeat
+himself to each one. When you pass his ask on, quote him and say when.
 
 What does not pay is a session whose job is routing messages inside a swarm you
 launched. Every fact travels twice (worker to router, router to human) and every
