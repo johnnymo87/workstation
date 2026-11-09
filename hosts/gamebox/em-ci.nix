@@ -50,6 +50,19 @@
     pauseFlag = "/run/em-ci-paused";
   };
 
+  # CPU frequency: performance, always. Under intel_pstate's powersave governor
+  # with EPP balance_performance, an otherwise idle box drops its cores to
+  # 0.8 GHz, so a CI job that runs nearly alone runs slow: before this, 32 of
+  # 33 such Elixir jobs used about twice the median CPU-seconds and every one
+  # needed a retry for timing-test flakes. With performance set (2026-11-08,
+  # experiment A of bead eternal-machinery-kdubj.37) 4 of 4 sat at the median
+  # with no retry. The cost is higher idle power and heat.
+  # The governor is set at boot by this option. power-profiles-daemon owns the
+  # EPP and keeps its profile across reboots in its state file; powerdevilrc
+  # (streaming.nix) also asks Plasma for the performance profile on AC, so a
+  # login cannot move it back to balanced.
+  powerManagement.cpuFreqGovernor = "performance";
+
   # Builds the containers request run in nix-daemon's cgroup, outside the
   # container caps. Max-only (no MemoryHigh): a throttled daemon is the
   # alive-but-frozen trap. If a gamebox rebuild itself (Sunshine+CUDA compiles
