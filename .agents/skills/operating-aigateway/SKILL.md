@@ -20,7 +20,7 @@ In the commands below, set it once (it expands in your shell, so labels stay
 copy-pasteable):
 
 ```bash
-GW=//YOUR_ORG/data/aigateway   # the gateway's monorepo Bazel package
+GW=//YOUR_ORG/ai/aigateway   # the gateway's monorepo Bazel package
 ```
 
 The GCP project is read from the `google_cloud_project` secret (never hardcoded).
