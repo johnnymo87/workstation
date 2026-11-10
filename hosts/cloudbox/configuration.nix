@@ -278,16 +278,6 @@ in
         group = "dev";
         mode = "0400";
       };
-      # Anthropic enterprise (Developer Platform / api_team org) API key. The
-      # claude-failover-proxy exports it as CFP_ENTERPRISE_API_KEY to enable the
-      # opt-in enterprise failover tier (vertex -> enterprise -> max). Empty/unset
-      # => tier disabled. Rotating means regenerating the key in the Anthropic
-      # console and re-encrypting anthropic_enterprise_api_key in secrets/cloudbox.yaml.
-      anthropic_enterprise_api_key = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Pigeon daemon secrets
       ccr_api_key = {
         owner = "dev";
@@ -5244,20 +5234,18 @@ Forensics: $DUMP"
         # cfp default, set explicitly so a future default change can't quietly
         # shorten the window.
         "CFP_EVENTS_RETENTION_DAYS=30"
-        # Enterprise failover tier (opt-in). CFP_ENTERPRISE_API_KEY is exported
-        # from the sops secret in the shim below (RAW value, see note). The
-        # enterprise spend ledger defaults to spend-enterprise.json beside
-        # spend.json (same StateDirectory), so no CFP_ENTERPRISE_STATE_PATH needed.
-        "CFP_ENTERPRISE_BUDGET_DOLLARS=100"
+        # Enterprise failover tier: OFF since 2026-11-11, when the employer's
+        # Anthropic enterprise API key was retired. cfp disables the tier when
+        # CFP_ENTERPRISE_API_KEY is unset, so the chain is now Vertex -> Max.
+        # To restore it, re-add the sops secret anthropic_enterprise_api_key, its
+        # export in the shim below, and CFP_ENTERPRISE_BUDGET_DOLLARS.
       ];
-      # CFP_TEAMCLAUDE_API_KEY and CFP_ENTERPRISE_API_KEY are RAW values (not
-      # KEY=VALUE) so they can't go via EnvironmentFile; export them from the sops
-      # secrets in a shell shim (same pattern as aigateway). set -e makes a
+      # CFP_TEAMCLAUDE_API_KEY is a RAW value (not KEY=VALUE) so it can't go via
+      # EnvironmentFile; export it from the sops secret in a shell shim (same pattern as aigateway). set -e makes a
       # missing/unreadable secret fail loud.
       ExecStart = "${pkgs.writeShellScript "claude-failover-proxy-start" ''
         set -euo pipefail
         export CFP_TEAMCLAUDE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/teamclaude_api_key)"
-        export CFP_ENTERPRISE_API_KEY="$(${pkgs.coreutils}/bin/cat /run/secrets/anthropic_enterprise_api_key)"
         exec ${claude-failover-proxy}/bin/claude-failover-proxy
       ''}";
       # Restart=ALWAYS, not on-failure (2026-08-06 outage, 36 minutes).
@@ -5468,8 +5456,8 @@ Diagnose (on cloudbox):
   journalctl -u claude-failover-proxy -n 100 --no-pager
   systemctl status claude-failover-proxy
 
-Usual suspects: unreadable /run/secrets/teamclaude_api_key or
-/run/secrets/anthropic_enterprise_api_key (the ExecStart shim is set -e), or a
+Usual suspects: unreadable /run/secrets/teamclaude_api_key (the ExecStart
+shim is set -e), or a
 bad cfp binary from a package bump.
 EOF
 )
@@ -5518,7 +5506,7 @@ EOF
           rm -f "$FAILFILE"
 
           # ---- 4. Vertex leg failures (cfp >= v0.12.0, bead claude-failover-proxy-end)
-          # cfp now falls back off a failing Vertex leg to enterprise/Max, so the
+          # cfp now falls back off a failing Vertex leg to Max, so the
           # client usually no longer sees the failure. The condition for shipping
           # that was that failures stay LOUD: page on growth of
           # counters.vertexFailures. Unknown (field missing on an older cfp,
@@ -5573,7 +5561,6 @@ EOF
               VF_STATUS=$(jq -r '.vertex.lastFailure.status // "none"' "$BODY_FILE" 2>/dev/null || echo none)
               VF_SERVED=$(jq -r '.counters.vertexFallbackServed // "?"' "$BODY_FILE" 2>/dev/null || echo "?")
               VF_MAX=$(jq -r '.maxAvailable // "?"' "$BODY_FILE" 2>/dev/null || echo "?")
-              VF_ENT=$(jq -r 'if .enterprise.available == true and .enterprise.overBudget != true then "yes" else "no" end' "$BODY_FILE" 2>/dev/null || echo "?")
               case "$VF_REASON" in
                 gateway_refused) VF_HINT="aigateway could not resolve the caller's identity: a bad or under-scoped Google credential, Google tokeninfo slow or down, or aigateway's tokeninfo circuit open. Check: docker logs dev-gateway-1 --since 10m" ;;
                 threw) VF_HINT="aigateway (127.0.0.1:8080) is unreachable; expect an aigateway-canary page too. Check: docker ps | grep dev-gateway" ;;
@@ -5586,7 +5573,7 @@ EOF
               VF_TEXT=$(cat <<EOF
 cfp's Vertex leg failed $VF_DELTA time(s) since the last page ($VF_N today). Last: reason=$VF_REASON status=$VF_STATUS.
 
-cfp retries those requests on enterprise, then Max. If neither serves, the client gets the error. Right now: Max available=$VF_MAX, enterprise usable=$VF_ENT. Requests served off Vertex today: $VF_SERVED. Fallback costs a cold prompt-cache write, and enterprise is billed.
+cfp retries those requests on Max. If Max does not serve, the client gets the error. Right now: Max available=$VF_MAX. Requests served off Vertex today: $VF_SERVED. Fallback costs a cold prompt-cache write.
 
 $VF_HINT
 
