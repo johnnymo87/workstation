@@ -6297,7 +6297,7 @@ EOF
   #
   # Found that day, during a review prompted by an unrelated SCC
   # EXTERNALLY_EXPOSED_VM_INSTANCE finding: the aigateway dev compose stack
-  # (wonder/data/aigateway/dev/docker-compose.yml in mono, started by the
+  # (the dev/docker-compose.yml in mono's aigateway package, started by the
   # aigateway unit above) published 0.0.0.0:5432, 0.0.0.0:6379 and
   # 0.0.0.0:8080. The Redis was redis:7-alpine with an empty requirepass, i.e.
   # unauthenticated, and reachable by anything that could route here. Those
