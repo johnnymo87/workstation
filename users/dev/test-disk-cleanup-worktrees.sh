@@ -345,6 +345,10 @@ for arg in "$@"; do
     has_q=true
   fi
 done
+# A canned `pr view` answer (state and headRefOid) wins when one exists.
+for arg in "$@"; do
+  if [ -n "${FAKE_GH_DIR:-}" ] && [ -f "$FAKE_GH_DIR/view.$arg" ]; then cat "$FAKE_GH_DIR/view.$arg"; exit 0; fi
+done
 emit_state() {
   local state="$1"
   if [ "$has_q" = "true" ]; then
@@ -537,11 +541,14 @@ make_pushed_branch() {
 pr_list() {  # pr_list <branch> <state> <sha>
   printf '[{"number":7,"state":"%s","headRefOid":"%s"}]\n' "$2" "$3" > "$fake_gh_dir/list.$1"
 }
-for b in sq-merged sq-closed sq-open sq-ahead sq-fresh sq-nopr sq-mixed; do make_pushed_branch "$b"; done
+for b in sq-merged sq-closed sq-closed-recent sq-open sq-ahead sq-fresh sq-nopr sq-mixed develop; do make_pushed_branch "$b"; done
 for b in sq-merged sq-closed sq-ahead sq-fresh; do
   pr_list "$b" MERGED "$(git -C "$sq_repo/.worktrees/$b" rev-parse HEAD)"
 done
 pr_list sq-closed CLOSED "$(git -C "$sq_repo/.worktrees/sq-closed" rev-parse HEAD)"
+pr_list sq-closed-recent CLOSED "$(git -C "$sq_repo/.worktrees/sq-closed-recent" rev-parse HEAD)"
+# A long-lived branch name: a release PR from it merged, HEAD inside it.
+pr_list develop MERGED "$(git -C "$sq_repo/.worktrees/develop" rev-parse HEAD)"
 pr_list sq-open OPEN "$(git -C "$sq_repo/.worktrees/sq-open" rev-parse HEAD)"
 # A later PR from the same branch is still open: not done.
 printf '[{"number":7,"state":"MERGED","headRefOid":"%s"},{"number":9,"state":"OPEN","headRefOid":"%s"}]\n' \
@@ -551,9 +558,12 @@ printf '[{"number":7,"state":"MERGED","headRefOid":"%s"},{"number":9,"state":"OP
 echo more > "$sq_repo/.worktrees/sq-ahead/more.txt"
 git -C "$sq_repo/.worktrees/sq-ahead" add more.txt
 git -C "$sq_repo/.worktrees/sq-ahead" commit -m "unpushed follow-up" >/dev/null
-for b in sq-merged sq-closed sq-open sq-ahead sq-nopr sq-mixed; do
+for b in sq-merged sq-closed sq-open sq-ahead sq-nopr sq-mixed develop; do
   find "$sq_repo/.worktrees/$b" -exec touch -d '20 days ago' {} +
 done
+# Closed unmerged and idle 5 days: past the 2-day floor, inside the 14-day
+# window a PR that may be reopened gets.
+find "$sq_repo/.worktrees/sq-closed-recent" -exec touch -d '5 days ago' {} +
 # sq-fresh stays fresh: merged per GitHub, but the minimum-age floor applies.
 
 # A repo whose default branch is master, with a worktree fast-forward merged
@@ -579,8 +589,25 @@ lc_repo="$sq_home/.local/state/lane-clones/example__lanerepo"
 mkdir -p "$(dirname "$lc_repo")"
 git clone -q "$origin" "$lc_repo"
 mkdir -p "$lc_repo/.worktrees"
+git -C "$lc_repo" config user.email test@example.com
+git -C "$lc_repo" config user.name 'Disk Cleanup Test'
 git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-301" origin/main >/dev/null
-find "$lc_repo/.worktrees/pr-301" -exec touch -d '20 days ago' {} +
+printf '{"state":"MERGED","headRefOid":"%s"}\n' "$(git -C "$lc_repo/.worktrees/pr-301" rev-parse HEAD)" > "$fake_gh_dir/view.301"
+# Merged, but the lane committed past the PR's head and never pushed it.
+git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-303" origin/main >/dev/null
+printf '{"state":"MERGED","headRefOid":"%s"}\n' "$(git -C "$lc_repo/.worktrees/pr-303" rev-parse HEAD)" > "$fake_gh_dir/view.303"
+echo repin > "$lc_repo/.worktrees/pr-303/repin.txt"
+git -C "$lc_repo/.worktrees/pr-303" add repin.txt
+git -C "$lc_repo/.worktrees/pr-303" commit -m "repin nobody pushed" >/dev/null
+# OPEN, with an ancient head and an idle tree: the abandoned shape, which
+# must never apply in a lane clone.
+git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-302" origin/main >/dev/null
+printf '{"state":"OPEN","headRefOid":"0000000000000000000000000000000000000000"}\n' > "$fake_gh_dir/view.302"
+echo half > "$lc_repo/.worktrees/pr-302/half.txt"
+git -C "$lc_repo/.worktrees/pr-302" add half.txt
+GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+  git -C "$lc_repo/.worktrees/pr-302" commit -m "old renovate head" >/dev/null
+for n in 301 302 303; do find "$lc_repo/.worktrees/pr-$n" -exec touch -d '20 days ago' {} +; done
 
 : > "$remove_log"
 set +e
@@ -609,6 +636,14 @@ assert_remove_logged "$(cd "$ms_repo/.worktrees/ms-merged" && pwd -P)" \
   "worktree merged into a master default branch is selected for removal"
 assert_remove_logged "$(cd "$lc_repo/.worktrees/pr-301" && pwd -P)" \
   "the lane clone's pr-N worktree whose PR merged is selected for removal"
+assert_remove_not_logged "$(cd "$lc_repo/.worktrees/pr-303" && pwd -P)" \
+  "a lane clone's merged pr-N worktree with a commit past the PR head is not selected for removal"
+assert_remove_not_logged "$(cd "$lc_repo/.worktrees/pr-302" && pwd -P)" \
+  "a lane clone's open-PR worktree with an ancient head is not selected (no abandoned rule there)"
+assert_remove_not_logged "$(sqwt sq-closed-recent)" \
+  "closed-unmerged PR worktree idle 5 days is not selected for removal (14-day window)"
+assert_remove_not_logged "$(sqwt develop)" \
+  "a worktree on a long-lived branch name is never matched by the PR rule"
 grep -q "PR-merged worktree (#7 MERGED)" "$tmpdir/harness-sq.err" \
   && pass "a PR-merged removal names the PR and its state" \
   || fail "a PR-merged removal must name the PR" "stderr: $(cat "$tmpdir/harness-sq.err")"
