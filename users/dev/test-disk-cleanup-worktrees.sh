@@ -330,12 +330,24 @@ chmod +x "$fakebin/git"
 printf '#!%s\n' "$(command -v bash)" > "$fakebin/gh"
 cat >> "$fakebin/gh" <<'SH'
 set -euo pipefail
+# `gh pr list --head <branch> --state all --json ...`: the canned answer in
+# $FAKE_GH_DIR/list.<branch>, else no PR at all.
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  head=""; prev=""
+  for arg in "$@"; do [ "$prev" = "--head" ] && head="$arg"; prev="$arg"; done
+  if [ -n "${FAKE_GH_DIR:-}" ] && [ -f "$FAKE_GH_DIR/list.$head" ]; then cat "$FAKE_GH_DIR/list.$head"; else echo '[]'; fi
+  exit 0
+fi
 [ "$1" = "pr" ] && [ "$2" = "view" ] || { echo "fake gh: unexpected $*" >&2; exit 2; }
 has_q=false
 for arg in "$@"; do
   if [ "$arg" = "-q" ]; then
     has_q=true
   fi
+done
+# A canned `pr view` answer (state and headRefOid) wins when one exists.
+for arg in "$@"; do
+  if [ -n "${FAKE_GH_DIR:-}" ] && [ -f "$FAKE_GH_DIR/view.$arg" ]; then cat "$FAKE_GH_DIR/view.$arg"; exit 0; fi
 done
 emit_state() {
   local state="$1"
@@ -347,7 +359,7 @@ emit_state() {
 }
 case "$3" in
   202) emit_state OPEN ;;
-  201|203|204) emit_state MERGED ;;
+  201|203|204|301) emit_state MERGED ;;
   *)       echo "fake gh: HTTP 502" >&2; exit 1 ;;
 esac
 SH
@@ -496,6 +508,145 @@ assert_remove_logged "$lane_pr_203_wt" \
   "lane pr-N worktree whose PR is MERGED is still selected for removal (unchanged)"
 assert_remove_not_logged "$dirty_lgtm_pr_wt" \
   "dirty lgtm-pr worktree whose PR is MERGED is not selected for removal"
+
+# --- Squash-merged PRs whose branch is kept, default branches other than
+# main, and the dependency lane's own clones ---
+#
+# Measured on cloudbox 2026-11-09: one repo squash-merges and keeps its
+# branches, so a merged worktree's HEAD is never an ancestor of main AND its
+# remote branch still exists -- neither rule above fires, and 30 merged
+# worktrees there were never going to be reaped. Two others default to
+# master, so the ancestor test against a hard-coded origin/main could never
+# fire there either (a merged, 208-day-old worktree was still on disk). And
+# the lane's clones under ~/.local/state/lane-clones were not scanned at all.
+sq_home="$tmpdir/sq_home"
+sq_repo="$sq_home/projects/sqrepo"
+fake_gh_dir="$tmpdir/fake-gh"
+mkdir -p "$sq_home/projects" "$fake_gh_dir"
+git clone "$origin" "$sq_repo" >/dev/null
+git -C "$sq_repo" config user.email test@example.com
+git -C "$sq_repo" config user.name 'Disk Cleanup Test'
+mkdir -p "$sq_repo/.worktrees"
+
+# make_pushed_branch <name>: a worktree on branch <name> with one commit that
+# is pushed (the remote branch is KEPT, as after a squash merge here).
+make_pushed_branch() {
+  local name="$1" wt="$sq_repo/.worktrees/$1"
+  git -C "$sq_repo" worktree add -b "$name" "$wt" origin/main >/dev/null
+  echo "$name" > "$wt/$name.txt"
+  git -C "$wt" add "$name.txt"
+  git -C "$wt" commit -m "$name" >/dev/null
+  git -C "$wt" push -q origin "$name" >/dev/null 2>&1
+}
+pr_list() {  # pr_list <branch> <state> <sha>
+  printf '[{"number":7,"state":"%s","headRefOid":"%s"}]\n' "$2" "$3" > "$fake_gh_dir/list.$1"
+}
+for b in sq-merged sq-closed sq-closed-recent sq-open sq-ahead sq-fresh sq-nopr sq-mixed develop; do make_pushed_branch "$b"; done
+for b in sq-merged sq-closed sq-ahead sq-fresh; do
+  pr_list "$b" MERGED "$(git -C "$sq_repo/.worktrees/$b" rev-parse HEAD)"
+done
+pr_list sq-closed CLOSED "$(git -C "$sq_repo/.worktrees/sq-closed" rev-parse HEAD)"
+pr_list sq-closed-recent CLOSED "$(git -C "$sq_repo/.worktrees/sq-closed-recent" rev-parse HEAD)"
+# A long-lived branch name: a release PR from it merged, HEAD inside it.
+pr_list develop MERGED "$(git -C "$sq_repo/.worktrees/develop" rev-parse HEAD)"
+pr_list sq-open OPEN "$(git -C "$sq_repo/.worktrees/sq-open" rev-parse HEAD)"
+# A later PR from the same branch is still open: not done.
+printf '[{"number":7,"state":"MERGED","headRefOid":"%s"},{"number":9,"state":"OPEN","headRefOid":"%s"}]\n' \
+  "$(git -C "$sq_repo/.worktrees/sq-mixed" rev-parse HEAD)" "$(git -C "$sq_repo/.worktrees/sq-mixed" rev-parse HEAD)" \
+  > "$fake_gh_dir/list.sq-mixed"
+# Committed after the PR's last head, never pushed: that commit is work.
+echo more > "$sq_repo/.worktrees/sq-ahead/more.txt"
+git -C "$sq_repo/.worktrees/sq-ahead" add more.txt
+git -C "$sq_repo/.worktrees/sq-ahead" commit -m "unpushed follow-up" >/dev/null
+for b in sq-merged sq-closed sq-open sq-ahead sq-nopr sq-mixed develop; do
+  find "$sq_repo/.worktrees/$b" -exec touch -d '20 days ago' {} +
+done
+# Closed unmerged and idle 5 days: past the 2-day floor, inside the 14-day
+# window a PR that may be reopened gets.
+find "$sq_repo/.worktrees/sq-closed-recent" -exec touch -d '5 days ago' {} +
+# sq-fresh stays fresh: merged per GitHub, but the minimum-age floor applies.
+
+# A repo whose default branch is master, with a worktree fast-forward merged
+# into it (its HEAD IS an ancestor of origin/master).
+origin_master="$tmpdir/origin-master.git"
+git clone -q --bare "$origin" "$origin_master"
+git -C "$origin_master" branch -m main master
+git -C "$origin_master" symbolic-ref HEAD refs/heads/master
+ms_repo="$sq_home/projects/msrepo"
+git clone -q "$origin_master" "$ms_repo"
+git -C "$ms_repo" config user.email test@example.com
+git -C "$ms_repo" config user.name 'Disk Cleanup Test'
+mkdir -p "$ms_repo/.worktrees"
+git -C "$ms_repo" worktree add -b ms-merged "$ms_repo/.worktrees/ms-merged" origin/master >/dev/null
+echo x > "$ms_repo/.worktrees/ms-merged/x.txt"
+git -C "$ms_repo/.worktrees/ms-merged" add x.txt
+git -C "$ms_repo/.worktrees/ms-merged" commit -m x >/dev/null
+git -C "$ms_repo/.worktrees/ms-merged" push -q origin HEAD:master >/dev/null 2>&1
+find "$ms_repo/.worktrees/ms-merged" -exec touch -d '20 days ago' {} +
+
+# The lane's own clone of a repo, with a pr-N worktree whose PR merged.
+lc_repo="$sq_home/.local/state/lane-clones/example__lanerepo"
+mkdir -p "$(dirname "$lc_repo")"
+git clone -q "$origin" "$lc_repo"
+mkdir -p "$lc_repo/.worktrees"
+git -C "$lc_repo" config user.email test@example.com
+git -C "$lc_repo" config user.name 'Disk Cleanup Test'
+git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-301" origin/main >/dev/null
+printf '{"state":"MERGED","headRefOid":"%s"}\n' "$(git -C "$lc_repo/.worktrees/pr-301" rev-parse HEAD)" > "$fake_gh_dir/view.301"
+# Merged, but the lane committed past the PR's head and never pushed it.
+git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-303" origin/main >/dev/null
+printf '{"state":"MERGED","headRefOid":"%s"}\n' "$(git -C "$lc_repo/.worktrees/pr-303" rev-parse HEAD)" > "$fake_gh_dir/view.303"
+echo repin > "$lc_repo/.worktrees/pr-303/repin.txt"
+git -C "$lc_repo/.worktrees/pr-303" add repin.txt
+git -C "$lc_repo/.worktrees/pr-303" commit -m "repin nobody pushed" >/dev/null
+# OPEN, with an ancient head and an idle tree: the abandoned shape, which
+# must never apply in a lane clone.
+git -C "$lc_repo" worktree add --detach "$lc_repo/.worktrees/pr-302" origin/main >/dev/null
+printf '{"state":"OPEN","headRefOid":"0000000000000000000000000000000000000000"}\n' > "$fake_gh_dir/view.302"
+echo half > "$lc_repo/.worktrees/pr-302/half.txt"
+git -C "$lc_repo/.worktrees/pr-302" add half.txt
+GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
+  git -C "$lc_repo/.worktrees/pr-302" commit -m "old renovate head" >/dev/null
+for n in 301 302 303; do find "$lc_repo/.worktrees/pr-$n" -exec touch -d '20 days ago' {} +; done
+
+: > "$remove_log"
+set +e
+HOME="$sq_home" PATH="$fakebin:$PATH" REAL_GIT="$real_git" GIT_REMOVE_LOG="$remove_log" \
+  FAKE_GITHUB_ORIGIN="https://github.com/example/sqrepo.git" FAKE_GH_DIR="$fake_gh_dir" "$harness" \
+  > "$tmpdir/harness-sq.out" 2> "$tmpdir/harness-sq.err"
+harness_sq_rc=$?
+set -e
+[ "$harness_sq_rc" -eq 0 ] || fail "cleanup_worktrees harness (squash) exited $harness_sq_rc" \
+  "stderr: $(tr '\n' ' ' < "$tmpdir/harness-sq.err")"
+sqwt() { (cd "$sq_repo/.worktrees/$1" && pwd -P); }
+assert_remove_logged "$(sqwt sq-merged)" \
+  "squash-merged worktree whose branch is kept on origin is selected for removal"
+assert_remove_logged "$(sqwt sq-closed)" \
+  "worktree whose only PR was closed unmerged, HEAD at the PR head, is selected for removal"
+assert_remove_not_logged "$(sqwt sq-open)" "worktree whose PR is OPEN is not selected for removal"
+assert_remove_not_logged "$(sqwt sq-mixed)" \
+  "worktree whose branch has a merged PR AND an open one is not selected for removal"
+assert_remove_not_logged "$(sqwt sq-ahead)" \
+  "merged-PR worktree with a local commit past the PR head is not selected for removal"
+assert_remove_not_logged "$(sqwt sq-fresh)" \
+  "merged-PR worktree touched within the floor is not selected for removal"
+assert_remove_not_logged "$(sqwt sq-nopr)" \
+  "pushed branch with no PR and a remote branch is not selected for removal"
+assert_remove_logged "$(cd "$ms_repo/.worktrees/ms-merged" && pwd -P)" \
+  "worktree merged into a master default branch is selected for removal"
+assert_remove_logged "$(cd "$lc_repo/.worktrees/pr-301" && pwd -P)" \
+  "the lane clone's pr-N worktree whose PR merged is selected for removal"
+assert_remove_not_logged "$(cd "$lc_repo/.worktrees/pr-303" && pwd -P)" \
+  "a lane clone's merged pr-N worktree with a commit past the PR head is not selected for removal"
+assert_remove_not_logged "$(cd "$lc_repo/.worktrees/pr-302" && pwd -P)" \
+  "a lane clone's open-PR worktree with an ancient head is not selected (no abandoned rule there)"
+assert_remove_not_logged "$(sqwt sq-closed-recent)" \
+  "closed-unmerged PR worktree idle 5 days is not selected for removal (14-day window)"
+assert_remove_not_logged "$(sqwt develop)" \
+  "a worktree on a long-lived branch name is never matched by the PR rule"
+grep -q "PR-merged worktree (#7 MERGED)" "$tmpdir/harness-sq.err" \
+  && pass "a PR-merged removal names the PR and its state" \
+  || fail "a PR-merged removal must name the PR" "stderr: $(cat "$tmpdir/harness-sq.err")"
 
 # Fail-safe: when the liveness probe cannot run at all, NOTHING is removed.
 # An empty answer from a probe that never ran is indistinguishable from

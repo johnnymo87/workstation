@@ -1732,12 +1732,66 @@ lib.mkMerge [
       }
 
       # --- 2. Worktree cleanup (all repos) ---
+      # A branch worktree whose work GitHub says is finished: every PR from its
+      # branch is MERGED or CLOSED, and HEAD is at or behind the newest of
+      # those PRs' heads (so nothing committed here is missing from GitHub).
+      # 0 = finished (sets PR_DONE_LABEL), 1 = not finished or cannot tell.
+      #
+      # Why it exists (measured on cloudbox 2026-11-09): the two generic rules
+      # below both miss a SQUASH-merged branch that the repo keeps. Its HEAD is
+      # not an ancestor of the default branch, and its remote branch still
+      # exists, so it is neither "merged" nor "abandoned". One of the busiest
+      # repos here works exactly that way: 30 of its worktrees were merged PRs
+      # that nothing would ever reclaim.
+      #
+      # Fail-safe like the guards: gh failing, an unreadable answer, no PR, an
+      # OPEN PR, or a PR head this clone does not have all answer 1. A match
+      # still goes through remove_merged_worktree and every guard in it.
+      # PR_DONE_STATE is the matched PR's state: a CLOSED (never merged) PR
+      # may be reopened, so the caller gives those the longer window.
+      worktree_pr_done() {
+        local wt_dir="$1" branch="$2" slug="$3" pr_json head_sha pr_num pr_state pr_head
+        PR_DONE_LABEL=""
+        PR_DONE_STATE=""
+        [ -n "$slug" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ] || return 1
+        pr_json=$(timeout "''${DISK_CLEANUP_GH_TIMEOUT:-30}" gh pr list --repo "$slug" --head "$branch" \
+          --state all --limit 50 --json number,state,headRefOid 2>/dev/null) || return 1
+        jq -e 'type == "array" and length > 0 and all(.[]; .state == "MERGED" or .state == "CLOSED")' \
+          <<<"$pr_json" >/dev/null 2>&1 || return 1
+        head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || return 1
+        # Any of the branch's PR heads that contains HEAD will do; newest first.
+        while IFS=' ' read -r pr_num pr_state pr_head; do
+          [ -n "$pr_head" ] || continue
+          if [ "$head_sha" = "$pr_head" ] \
+             || git -C "$wt_dir" merge-base --is-ancestor "$head_sha" "$pr_head" 2>/dev/null; then
+            PR_DONE_LABEL="PR-merged worktree (#$pr_num $pr_state)"
+            PR_DONE_STATE="$pr_state"
+            return 0
+          fi
+        done < <(jq -r 'sort_by(-.number)[] | "\(.number) \(.state) \(.headRefOid // "")"' <<<"$pr_json" 2>/dev/null)
+        return 1
+      }
+
       cleanup_worktrees() {
         log "Scanning for stale worktrees..."
 
-        for repo_dir in "$PROJECTS"/*/; do
+        # The dependency lane's own clones (its lane-clone.sh) live outside
+        # ~/projects and carry the same .worktrees/pr-<N> trees. The lane
+        # reaps its own at episode start, but only for repos it writes to;
+        # this is the backstop. It is STRICTER there than in ~/projects, never
+        # looser than the lane's own prune: the session guard cannot see the
+        # lane (its agent runs from its own home directory, not the worktree),
+        # so a tree is removed only when its PR is closed and HEAD is at or
+        # behind the PR's head, and the age-only "abandoned" rule, which has
+        # no dirty check, never applies (an open Renovate PR's head is often
+        # weeks old).
+        local lane_clones="''${LANE_CLONES_DIR:-$HOME/.local/state/lane-clones}"
+        local in_lane_clone
+        for repo_dir in "$PROJECTS"/*/ "$lane_clones"/*/; do
           [ -d "$repo_dir/.worktrees" ] || continue
           repo_name=$(basename "$repo_dir")
+          in_lane_clone=0
+          case "$repo_dir" in "$lane_clones"/*) in_lane_clone=1 ;; esac
 
           # Resolve org/repo slug from origin URL once per repo, for `gh` calls
           # used by the lgtm pr-N pruning step below. Falls back to "" so the
@@ -1757,11 +1811,26 @@ lib.mkMerge [
           # Fetch and prune remote refs. Capture stderr so we can include the
           # first error line in the WARN; otherwise auth/network failures are
           # invisible in the journal.
-          fetch_err=$(git -C "$repo_dir" fetch --prune origin 2>&1 >/dev/null) || {
-            first_err=$(printf '%s\n' "$fetch_err" | head -1)
-            log "WARN: fetch failed for $repo_name, skipping: $first_err"
-            continue
-          }
+          #
+          # NOT in the lane's clones: the lane fetches them itself, every rule
+          # applied there asks GitHub rather than local refs, and a concurrent
+          # `fetch --prune` could fail the lane's own fetch and cost an episode.
+          if [ "$in_lane_clone" = 0 ]; then
+            fetch_err=$(git -C "$repo_dir" fetch --prune origin 2>&1 >/dev/null) || {
+              first_err=$(printf '%s\n' "$fetch_err" | head -1)
+              log "WARN: fetch failed for $repo_name, skipping: $first_err"
+              continue
+            }
+          fi
+
+          # The default branch, as origin says. Empty when it cannot be
+          # resolved to a commit (no origin/HEAD and no origin/main, or a
+          # dangling origin/HEAD after a rename): then neither the ancestor
+          # rule nor the PR rule runs for this repo, because both need to know
+          # which branch is the trunk.
+          default_ref=$(git -C "$repo_dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)
+          [ -n "$default_ref" ] || default_ref=origin/main
+          git -C "$repo_dir" rev-parse --verify -q "$default_ref^{commit}" >/dev/null 2>&1 || default_ref=""
 
           for wt_dir in "$repo_dir"/.worktrees/*/; do
             [ -d "$wt_dir" ] || continue
@@ -1785,8 +1854,19 @@ lib.mkMerge [
             if [[ "$wt_name" =~ ^(lgtm-)?pr-([0-9]+)$ ]] && [ -n "$repo_slug" ]; then
               pr_num="''${BASH_REMATCH[2]}"
               gh_timeout="''${DISK_CLEANUP_GH_TIMEOUT:-30}"
-              pr_state=$(timeout "$gh_timeout" gh pr view "$pr_num" --json state --repo "$repo_slug" 2>/dev/null \
-                | jq -r '.state // empty' 2>/dev/null || echo "")
+              pr_view=$(timeout "$gh_timeout" gh pr view "$pr_num" --json state,headRefOid --repo "$repo_slug" 2>/dev/null || echo "")
+              pr_state=$(jq -r '.state // empty' <<<"$pr_view" 2>/dev/null || echo "")
+              if [ "$in_lane_clone" = 1 ] && { [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; }; then
+                # As the lane's own prune does: a commit made here after the PR's
+                # last head was never pushed, and is the lane's work.
+                pr_head=$(jq -r '.headRefOid // empty' <<<"$pr_view" 2>/dev/null || echo "")
+                wt_head=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null || echo "")
+                if [ -z "$pr_head" ] || [ -z "$wt_head" ] || { [ "$wt_head" != "$pr_head" ] \
+                     && ! git -C "$wt_dir" merge-base --is-ancestor "$wt_head" "$pr_head" 2>/dev/null; }; then
+                  log "WARN: keeping lane worktree, HEAD is not at or behind PR #$pr_num's head: $repo_name/$wt_name"
+                  continue
+                fi
+              fi
               if [ "$pr_state" = "MERGED" ] || [ "$pr_state" = "CLOSED" ]; then
                 remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "lgtm pr-$pr_num worktree ($pr_state)"
                 continue
@@ -1794,15 +1874,45 @@ lib.mkMerge [
               # OPEN / unknown -> leave alone, fall through to generic checks
             fi
 
-            # Check if merged into origin/main
+            # Check if merged into the default branch. origin/HEAD, not a
+            # hard-coded origin/main: two of the work repos default to master,
+            # where this could never fire.
             head_sha=$(git -C "$wt_dir" rev-parse HEAD 2>/dev/null) || continue
-            if git -C "$repo_dir" merge-base --is-ancestor "$head_sha" origin/main 2>/dev/null; then
+            if [ -n "$default_ref" ] \
+               && git -C "$repo_dir" merge-base --is-ancestor "$head_sha" "$default_ref" 2>/dev/null; then
               remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "merged worktree"
               continue
             fi
 
-            # Check age + remote status for abandoned worktrees
             branch=$(git -C "$wt_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+
+            # Squash-merged (or closed) per GitHub, branch possibly kept.
+            # Never for the default branch itself, nor for the usual long-lived
+            # branch names: a checkout of main is not a PR's branch, whatever
+            # a release PR or a fork's PR from its own main happens to be
+            # called.
+            case "$branch" in main|master|develop|"''${default_ref#origin/}") pr_rule=0 ;; *) pr_rule=1 ;; esac
+            [ -n "$default_ref" ] || pr_rule=0
+            if [ "$pr_rule" = 1 ] && worktree_pr_done "$wt_dir" "$branch" "$repo_slug"; then
+              if [ "$PR_DONE_STATE" != "MERGED" ]; then
+                # Closed, never merged: may yet be reopened. The long window.
+                touched_rc=0
+                tree_touched_since "$wt_dir" "$WORKTREE_MAX_AGE_DAYS" || touched_rc=$?
+                if [ "$touched_rc" != 1 ]; then
+                  log "WARN: keeping $PR_DONE_LABEL (closed unmerged, touched within ''${WORKTREE_MAX_AGE_DAYS}d or unknown): $repo_name/$wt_name"
+                  continue
+                fi
+              fi
+              remove_merged_worktree "$repo_dir" "$wt_dir" "$repo_name" "$wt_name" "$PR_DONE_LABEL"
+              continue
+            fi
+
+            # Never the age-only rule in the lane's clones; see lane_clones.
+            if [ "$in_lane_clone" = 1 ]; then
+              continue
+            fi
+
+            # Check age + remote status for abandoned worktrees
             last_commit_epoch=$(git -C "$wt_dir" log -1 --format="%ct" 2>/dev/null) || continue
             now_epoch=$(date +%s)
             age_days=$(( (now_epoch - last_commit_epoch) / 86400 ))
