@@ -1134,6 +1134,30 @@
       # The suite drives the sweeper at fixture trees through VENV_SWEEP_ROOTS,
       # at a fixture database through VENV_SWEEP_SESSION_DB, and never touches
       # the real ~/projects or the real opencode.db.
+      # installPackages without the window in which ~/.nix-profile has no
+      # home-manager packages (users/dev/hm-atomic-profile.{nix,sh}). nix and
+      # nix-env are stubs inside the suite; it never touches a real profile.
+      # Count pinned like the suites around it.
+      hm-atomic-profile-tests = devboxPkgs.runCommand "hm-atomic-profile-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.jq devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash users/dev/test-hm-atomic-profile.sh 2>&1 | tee "$TMPDIR/hap.txt"
+        grep -q '^all hm-atomic-profile tests passed' "$TMPDIR/hap.txt" || {
+          echo "GATE FAILURE: hm-atomic-profile suite did not reach its final banner." >&2
+          exit 1
+        }
+        [ "$(grep -c '^PASS  ' "$TMPDIR/hap.txt")" = 17 ] || {
+          echo "GATE FAILURE: expected 17 'PASS' lines, got" \
+               "$(grep -c '^PASS  ' "$TMPDIR/hap.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       venv-sweep-tests = devboxPkgs.runCommand "venv-sweep-tests" {
         nativeBuildInputs = [
           devboxPkgs.bash devboxPkgs.git devboxPkgs.python3
