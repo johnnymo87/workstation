@@ -432,6 +432,14 @@ in
         group = "dev";
         mode = "0400";
       };
+      # LGTM Slack app bot token (app A0CH0AN8QFN, bot @lgtm2/"lgtm",
+      # chat:write only; IT ETSD-35832). lgtm posts its alerts to #lgtm
+      # (C0CGT0TDDPY) with it. Plan: johnnymo87/lgtm docs/plans/2026-11-10-lgtm-offbox-design.md.
+      lgtm_slack_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Figma MCP (Framelink) personal access token, `file_content:read` only.
       # Figma caps PATs at 90 days: see the figma-mcp-setup skill for rotation.
       figma_access_token = {
