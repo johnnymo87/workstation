@@ -1150,8 +1150,8 @@
           echo "GATE FAILURE: hm-atomic-profile suite did not reach its final banner." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/hap.txt")" = 17 ] || {
-          echo "GATE FAILURE: expected 17 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/hap.txt")" = 21 ] || {
+          echo "GATE FAILURE: expected 21 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/hap.txt")." >&2
           exit 1
         }

@@ -26,6 +26,7 @@ oops() { printf 'FAIL  %s\n' "$1" >&2; exit 1; }
 ROOT="$(mktemp -d)"
 trap 'rm -rf -- "$ROOT"' EXIT
 export TMPDIR="$ROOT/tmp"; mkdir -p "$TMPDIR"
+export HM_ATOMIC_STAGE_DIR="$ROOT/state/hm-atomic-profile"
 STUB="$ROOT/stub"; mkdir -p "$STUB"
 # No /usr/bin/env in the flake-check sandbox: stubs get an absolute interpreter.
 BASH_BIN="$(command -v bash)"
@@ -105,9 +106,9 @@ jq -e '.elements.sops' "$(readlink -f "$LIVE")/list.json" >/dev/null && ok "unre
   && ok "the live profile is written exactly once, by nix-env --set" || oops "live writes: $(cat "$STUB_LOG")"
 [[ "$(tail -1 "$STUB_LOG")" == "nix-env --profile $LIVE --set "* ]] && ok "the live switch is the LAST call" \
   || oops "order: $(cat "$STUB_LOG")"
-grep -q "^nix profile remove --profile $TMPDIR/hm-atomic-profile\..*/profile /nix/store/old-home-manager-path$" "$STUB_LOG" \
+grep -q "^nix profile remove --profile $HM_ATOMIC_STAGE_DIR/profile /nix/store/old-home-manager-path$" "$STUB_LOG" \
   && ok "the old home-manager-path is removed from the STAGING profile, by store path" || oops "remove: $(cat "$STUB_LOG")"
-[[ -z "$(ls -A "$TMPDIR")" ]] && ok "staging dir cleaned up" || oops "staging left: $(ls "$TMPDIR")"
+[[ ! -e "$HM_ATOMIC_STAGE_DIR" ]] && ok "staging dir cleaned up" || oops "staging left"
 
 # --- the window property, observed from outside --------------------------------
 # Watch the live profile after every stub call: it must never lack home-manager-path.
@@ -143,11 +144,49 @@ STUB_FAIL_INSTALL=1 hmAtomicReplaceProfile "$LIVE" /nix/store/new-home-manager-p
 [[ "$(readlink "$LIVE")" == "$before" && "$(hm_of "$LIVE")" == /nix/store/old-home-manager-path ]] \
   && ok "install failure: non-zero, live profile untouched" || oops "install failure changed live"
 ! grep -q '^nix-env' "$STUB_LOG" && ok "install failure: nix-env --set never called" || oops "set called after failure"
-[[ -z "$(ls -A "$TMPDIR")" ]] && ok "install failure: staging dir cleaned up" || oops "staging left after failure"
+[[ ! -e "$HM_ATOMIC_STAGE_DIR" ]] && ok "install failure: staging dir cleaned up" || oops "staging left after failure"
 
 setup e
+before="$(readlink "$LIVE")"
 STUB_FAIL_SET=1 hmAtomicReplaceProfile "$LIVE" /nix/store/new-home-manager-path >/dev/null 2>&1 \
-  && oops "set failure returned 0" || ok "nix-env --set failure is reported"
+  && oops "set failure returned 0" || true
+[[ "$(readlink "$LIVE")" == "$before" && ! -e "$HM_ATOMIC_STAGE_DIR" ]] \
+  && ok "nix-env --set failure: non-zero, live untouched, stage cleaned" || oops "set failure state"
+
+# --- a leftover stage from an interrupted run is replaced, not reused ---------------
+setup g
+mkdir -p "$HM_ATOMIC_STAGE_DIR"; ln -s /nonexistent "$HM_ATOMIC_STAGE_DIR/profile"; touch "$HM_ATOMIC_STAGE_DIR/junk"
+hmAtomicReplaceProfile "$LIVE" /nix/store/new-home-manager-path >/dev/null 2>&1 \
+  && [[ "$(hm_of "$LIVE")" == /nix/store/new-home-manager-path && ! -e "$HM_ATOMIC_STAGE_DIR" ]] \
+  && ok "a stale stage from an interrupted run is cleared first" || oops "stale stage: $(cat "$STUB_LOG")"
+HM_ATOMIC_STAGE_DIR="$ROOT/state/elsewhere" hmAtomicReplaceProfile "$LIVE" /nix/store/x >/dev/null 2>&1 \
+  && oops "accepted a stage dir not named hm-atomic-profile" || ok "refuses a stage dir it did not name"
+
+# --- jq failure stops before any write ------------------------------------------------
+setup h
+printf '#!%s\nexit 3\n' "$BASH_BIN" > "$STUB/jq"; chmod +x "$STUB/jq"
+before="$(readlink "$LIVE")"
+PATH="$STUB:$PATH" hmAtomicReplaceProfile "$LIVE" /nix/store/new-home-manager-path >/dev/null 2>&1 \
+  && oops "jq failure returned 0" || true
+rm -f "$STUB/jq"
+[[ "$(readlink "$LIVE")" == "$before" ]] && ! grep -q 'profile install\|^nix-env' "$STUB_LOG" \
+  && ok "jq failure: non-zero, nothing installed, live untouched" || oops "jq failure: $(cat "$STUB_LOG")"
+
+# --- a concurrent writer to the live profile is not silently reverted -------------------
+setup i
+# The stub's install also moves the LIVE link, as another process would mid-staging.
+cat > "$STUB/nixc" <<EOF
+#!$BASH_BIN
+"$STUB/nix" "\$@"; rc=\$?
+if [[ "\$2" == install ]]; then mkdir -p "$ROOT/wi/store/other"; cp "$ROOT/wi/store/gen0/list.json" "$ROOT/wi/store/other/"
+  ln -s "$ROOT/wi/store/other" "$ROOT/wi/profiles/profile-9-link"; ln -sfn profile-9-link "$ROOT/wi/profiles/profile"; fi
+exit \$rc
+EOF
+chmod +x "$STUB/nixc"
+HM_ATOMIC_NIX="$STUB/nixc" hmAtomicReplaceProfile "$LIVE" /nix/store/new-home-manager-path >/dev/null 2>&1 \
+  && oops "concurrent write returned 0" || true
+[[ "$(readlink "$LIVE")" == profile-9-link ]] && ! grep -q '^nix-env' "$STUB_LOG" \
+  && ok "a concurrent write to the live profile is kept, and we fail loudly" || oops "concurrent: $(cat "$STUB_LOG")"
 
 # --- dry run ----------------------------------------------------------------------
 setup f
