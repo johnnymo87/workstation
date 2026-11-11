@@ -12,6 +12,7 @@
     ./em-drift-detector.nix
     ./em-skill-curator.nix
     ./hm-deploy-gate.nix
+    ./hm-atomic-profile.nix
     ./opencode-llm-audit.nix
     ./home.darwin.nix
     ./codex-lb.nix

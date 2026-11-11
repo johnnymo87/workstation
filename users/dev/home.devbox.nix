@@ -682,9 +682,10 @@ lib.mkIf isDevbox {
   # `nix-collect-garbage`, which deletes no generations at all -- and the
   # system nix.gc runs as root, so it never touches this user's
   # ~/.local/state/nix/profiles/profile either. Every home-manager activation
-  # adds TWO generations to that profile (HM's installPackages does
+  # used to add TWO generations to that profile (HM's installPackages did
   # `nix profile remove home-manager-path` then `nix profile install`, even
-  # when nothing changed), pull-workstation activates every 4h, and nothing
+  # when nothing changed; since hm-atomic-profile.nix it adds one, or none when
+  # nothing changed), pull-workstation activates every 4h, and nothing
   # ever expired them: 845 generations had accumulated by 2026-10-01, pinning
   # every past home-manager-path. Expiring them freed 7.6G. Steady-state cost
   # of retention is ~130 MB/day, so 7d (~0.9G) keeps a useful rollback window
