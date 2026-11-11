@@ -413,6 +413,13 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Deps lane's own Slack bot token (xoxb), used instead of the xoxp above
+      # for the lane's posts when present.
+      deps_lane_slack_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # PagerDuty MCP User API token
       pagerduty_user_api_key = {
         owner = "dev";
