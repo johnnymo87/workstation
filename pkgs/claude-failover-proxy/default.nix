@@ -77,13 +77,13 @@
 }:
 
 let
-  version = "0.13.0";
+  version = "0.13.1";
 
   sources = {
     "aarch64-linux" = fetchurl {
       name = "claude-failover-proxy-${version}-linux-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350382";
-      hash = "sha256-9+zrxp5GxtD+yv3egxifhajUf6nbcrO4KUwpnl6jtdI=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/741127933";
+      hash = "sha256-/swJilMJV7rBjQnDiXm/CDrpQbM5zhqbIcReYqADaT4=";
       # Stream the raw asset bytes rather than the JSON metadata.
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       # Forward $GITHUB_TOKEN from the (nix-daemon) environment into the sandbox
@@ -96,8 +96,8 @@ let
 
     "aarch64-darwin" = fetchurl {
       name = "claude-failover-proxy-${version}-darwin-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350399";
-      hash = "sha256-ZT6eS/8Vx6n9GTI7qEq65bjV0nsBZqOAFe++OUK3cZE=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/741127930";
+      hash = "sha256-llw5NtnQXEyz0dKhAx9jk9aRU7dPzULYIslmG1WUb1U=";
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       netrcImpureEnvVars = [ "GITHUB_TOKEN" ];
       netrcPhase = ''
@@ -109,8 +109,8 @@ let
   shaperSources = {
     "aarch64-linux" = fetchurl {
       name = "cfp-shaper-${version}-linux-arm64";
-      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/710350381";
-      hash = "sha256-j9IuQ7Q1rcQ5ciw8ZwCQJk1KAYmNAxWnhukMNWvruc8=";
+      url = "https://api.github.com/repos/johnnymo87/claude-failover-proxy/releases/assets/741127932";
+      hash = "sha256-nVdvjTwSuupg43XCiyv+j3LQaB8ohkFlJORlkt3Q3f8=";
       curlOptsList = [ "-H" "Accept: application/octet-stream" ];
       netrcImpureEnvVars = [ "GITHUB_TOKEN" ];
       netrcPhase = ''
