@@ -26,9 +26,11 @@ Continues the table in `~/.agents/AGENTS.md`; ours wins there too.
 
 | Host | Oracle | Adversarial reviewer | If unavailable | Opt-in only when asked |
 |---|---|---|---|---|
-| devbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra` |
+| devbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra`, `-fable` |
 | cloudbox | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-astra`, `-fable` |
-| macOS | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | — |
+| macOS | `oracle-opus` | `adversarial-reviewer-opus` | stop and report | `-fable` |
+
+`-astra` is gpt-6-astra (codex-lb); `-fable` is claude-fable-5-2.
 
 A dead `-opus` does not authorize an opt-in twin. When the human asked for
 astra and it is unavailable (not listed, `astra-probe` says DOWN, or the
@@ -55,24 +57,24 @@ minutes (in 30 days of astra children the largest within-turn gap was under
 5), or its status *stays* `retry` across several attempts. Whoever notices that (the human, or a
 watcher) aborts the child, and the parent then falls back as for an error.
 
-**`-fable` means one of two things, and the list tells you which.** It was
-the name of the default slot until 2026-09-28, when that slot was renamed
-`-opus` (same prompt, model moved from fable-5-1 to opus-5-5). A serve loads its
-agent list once at startup, so one started before a `home-manager switch` may
-still list the old names. On cloudbox, `-fable` is also deployed as an opt-in
-fable-5-1 twin.
+**`-fable` is an opt-in twin, never the default.** `oracle-fable` and
+`adversarial-reviewer-fable` run claude-fable-5-2 with the same prompt as
+`-opus`. Dispatch them only when a human asks for fable, either directly or
+in their own words relayed by a program coordinator. Many older plan docs and
+bead notes say `adversarial-reviewer-fable` or `oracle-fable`: until
+2026-09-28 that was the *default* slot's name (it was renamed `-opus` when
+the model moved to opus-5-5). Those mentions are role references, so dispatch
+`-opus` for them (see the next paragraph).
 
-- **`-opus` is listed:** any `-fable` alongside it is the opt-in twin (cloudbox).
-  Dispatch it only when the human asks for fable.
-- **`-opus` is not listed but `-fable` is:** the serve predates the rename and
-  `-fable` *is* the default slot. Dispatch it wherever the docs say `-opus`.
-  fable-5-1 is still configured on every host, so it works; it just runs the
-  older model.
+A serve loads its agent list once at startup, so a serve started before the
+switch that deployed the fable-5-2 twins (2026-11) lists no `-fable` on
+devbox or macOS. If a human asked for fable and `-fable` is not listed, say so
+rather than silently substituting another model; the serve needs a restart
+(the nightly reset, or `reset-workspace`). If a `-fable` dispatch errors or
+returns empty, the `-opus` fallback rule above applies, said in one clause.
 
 An "Unknown agent type" for a handle in the default slot is a naming mismatch,
-not a reason to stop. A human asking for *fable* is a model choice, which is a
-different case. On cloudbox, dispatch `-fable`. On devbox and macOS there is no
-fable twin: say so rather than silently substituting another model.
+not a reason to stop.
 
 **A handle named in a request is a role.** Humans, older prompts and your own
 resumption prompt may name a suffixed handle out of habit — including

@@ -290,26 +290,47 @@ let
       modelTag = "gpt-6-astra";
     } // lib.optionalAttrs (caution != null) { inherit caution; });
 
-  # The fable twin: claude-fable-5-1, the previous base model of oracle and
-  # adversarial-reviewer (the `-opus` handles were `-fable` until 2026-09-28).
-  # CLOUDBOX ONLY, and always opt-in: it carries the default CAUTION so the
-  # orchestrator reaches for it only when the user names fable. The pin is the
-  # first-party `anthropic/` id on purpose; patchAgent's afterFable branch
-  # rewrites it to `google-vertex-anthropic/claude-fable-5-1@default`, whose
-  # provider entry carries its own high `effort` (opencode.base.json), so the
-  # source's dropped `variant: high` loses nothing.
+  # The fable twin: claude-fable-5-2 (released 2026-11-09). Always opt-in: it
+  # carries the default CAUTION so the orchestrator reaches for it only when
+  # the user names fable. Deployed on every host (see the call sites).
+  # The pin is the first-party `anthropic/` id on purpose: devbox uses it as-is
+  # (teamclaude, which needs claudeCodeVersionOverride below), and on cloudbox
+  # and macOS patchAgent's afterFable branch rewrites it to
+  # `google-vertex-anthropic/claude-fable-5-2@default`. Both provider entries
+  # carry their own high `effort` (opencode.base.json), so the source's dropped
+  # `variant: high` loses nothing.
   #
-  # Re-deploying a `-fable` handle overlaps with a stale serve's pre-rename
-  # `-fable` (the old DEFAULT, no CAUTION). assets/opencode/AGENTS.opencode.md tells
-  # callers how to tell them apart: `-opus` listed means `-fable` is this
-  # opt-in twin; `-opus` absent means the serve predates the rename.
+  # (The `-opus` handles were named `-fable` until 2026-09-28, when the default
+  # moved from fable-5-1 to opus-5-5. Every serve has restarted nightly many
+  # times since, so no live serve still lists that old default under `-fable`.)
   mkFableVariant = base:
     mkAgentVariant {
       inherit base;
       slug = "fable";
-      modelPin = "anthropic/claude-fable-5-1";
-      modelTag = "fable-5-1";
+      modelPin = "anthropic/claude-fable-5-2";
+      modelTag = "fable-5-2";
     };
+
+  # Claude Code version the anthropic-auth plugin REPORTS to Anthropic, which
+  # gates model access on it server-side (see opencodePluginPins). The pinned
+  # plugin bundles 2.1.280; claude-fable-5-2 demands 2.1.290 and 400s below it
+  # ("Claude Code 2.1.280 does not support this model; version 2.1.290 or newer
+  # is required"), surfacing as an empty assistant turn. No published plugin
+  # reports >= 2.1.290 yet (1.8.6 = 2.1.284, 2.0.0-next.7 = 2.1.280; checked
+  # 2026-11-12), so we use the plugin's own supported override,
+  # ANTHROPIC_CLAUDE_CODE_VERSION (config.js resolveClaudeCodeVersion, present
+  # since 1.8.5). Verified on devbox 2026-11-12: with 2.1.290, fable-5-2 answers
+  # (including multi-turn tool use) and opus-5-5 still answers.
+  #
+  # Only devbox needs it: it is the one host whose `anthropic/` provider is live
+  # (teamclaude). cloudbox has no `anthropic` auth and macOS disables the
+  # provider, so there the plugin never shapes a request. Exported to the
+  # devbox serve units (home.devbox.nix) and to interactive shells
+  # (home.sessionVariables below, for standalone `opencode run`).
+  #
+  # REMOVE when a plugin pin reports >= this itself: the activation check below
+  # compares the bundled constant against claudeCodeVersionFloor and says so.
+  claudeCodeVersionOverride = "2.1.290";
 
   # Every host's astra twins carry the opt-in CAUTION: the `-opus` twin is the
   # default oracle and adversarial reviewer everywhere. From 2026-09-19
@@ -1069,11 +1090,18 @@ in
    # because it also adds sol/terra/luna to the macOS picker and nothing on this
    # box can test it.
    #
+   #   @<base>-fable  -> claude-fable-5-2 (mkFableVariant), opt-in CAUTION like
+   #                     astra. EVERY host. devbox reaches it directly through
+   #                     teamclaude (with claudeCodeVersionOverride). cloudbox
+   #                     and macOS reach it as google-vertex-anthropic through
+   #                     cfp, which routes the fable family Vertex-first; cfp's
+   #                     Max fallback leg needs its own reported Claude Code
+   #                     version >= 2.1.290 and its price table needs a
+   #                     claude-fable-5-2 row (else its spend is not metered
+   #                     against CFP_BUDGET_DOLLARS) — both are cfp-side.
+   #
    # The deployed FILE carries a model suffix while the SOURCE does not: the
-   # source is named for the agent because it feeds two pins. home-manager
-   # removes the old `-fable` files on switch where nothing declares them
-   # (devbox, macOS). Cloudbox re-declares `-fable` as an opt-in fable-5-1 twin
-   # (mkFableVariant above).
+   # source is named for the agent because it feeds several pins.
    xdg.configFile."opencode/agents/adversarial-reviewer-opus.md".source =
      patchAgent "adversarial-reviewer-opus" "${assetsPath}/opencode/agents/adversarial-reviewer.md";
    xdg.configFile."opencode/agents/adversarial-reviewer-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
@@ -1082,13 +1110,16 @@ in
           "adversarial-reviewer"
          "${assetsPath}/opencode/agents/adversarial-reviewer.md");
    };
-   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md" = lib.mkIf isCloudbox {
-     source = patchAgent "adversarial-reviewer-fable" (
+   xdg.configFile."opencode/agents/adversarial-reviewer-fable.md".source =
+     patchAgent "adversarial-reviewer-fable" (
        mkFableVariant "adversarial-reviewer" "${assetsPath}/opencode/agents/adversarial-reviewer.md");
-   };
-   xdg.configFile."opencode/agents/oracle-fable.md" = lib.mkIf isCloudbox {
-     source = patchAgent "oracle-fable" (
+   xdg.configFile."opencode/agents/oracle-fable.md".source =
+     patchAgent "oracle-fable" (
        mkFableVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
+   # The serve units read this through config.home.sessionVariables
+   # (home.devbox.nix), so it has one source; see claudeCodeVersionOverride.
+   home.sessionVariables = lib.mkIf isDevbox {
+     ANTHROPIC_CLAUDE_CODE_VERSION = claudeCodeVersionOverride;
    };
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
@@ -1403,7 +1434,12 @@ in
     # The floor moves on Anthropic's schedule, not ours: it is whatever the
     # newest model we pin an agent to demands. 2.1.280 is claude-opus-5-5's
     # (the primary model on every host); 2.1.251 was claude-fable-5-1's.
+    # claude-fable-5-2 needs 2.1.290, which no plugin release bundles yet;
+    # devbox supplies it through the env override (claudeCodeVersionOverride),
+    # so it is NOT this floor: raising it would warn on every switch on hosts
+    # whose `anthropic/` provider is not live at all.
     cc_floor='${claudeCodeVersionFloor}'
+    cc_override='${lib.optionalString isDevbox claudeCodeVersionOverride}'
     auth_pkg="@ex-machina/opencode-anthropic-auth"
 
     shopt -s nullglob
@@ -1438,6 +1474,18 @@ in
           echo "installOpencodePlugins: bump the pin in opencode-config.nix to a release reporting >= $cc_floor."
           echo "installOpencodePlugins: offending copy: $constants"
         } >&2
+      fi
+
+      # The floor above is the bundled constant's job on every host. Where
+      # ANTHROPIC_CLAUDE_CODE_VERSION overrides it (devbox; see
+      # claudeCodeVersionOverride), say so once the bundled constant has caught
+      # up, so the override is retired instead of silently pinning a version
+      # that will one day be older than the plugin's own.
+      if [ -n "$cc_override" ]; then
+        oldest="$(printf '%s\n%s\n' "$reported" "$cc_override" | sort -V | head -1)"
+        if [ "$oldest" = "$cc_override" ]; then
+          echo "installOpencodePlugins: NOTE — $auth_pkg now reports Claude Code $reported >= the ANTHROPIC_CLAUDE_CODE_VERSION override ($cc_override); remove claudeCodeVersionOverride from opencode-config.nix." >&2
+        fi
       fi
     done
     shopt -u nullglob
