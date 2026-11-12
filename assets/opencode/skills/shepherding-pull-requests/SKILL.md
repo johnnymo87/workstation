@@ -226,7 +226,7 @@ Cloudbox's pre-commit hook refuses the first kind at commit time (`--no-verify` 
 
 Dispatch `adversarial-reviewer-opus` on the diff before `gh pr create`. This is a standing default like the post-PR ones: the user should never have to ask for it, and "the change looks straightforward to me" is not a reason to skip — that judgement is exactly what the review exists to check.
 
-**The opus twin is the reviewer on every host.** The `-astra` twin (devbox, cloudbox) is opt-in: dispatch it only when the user asks for astra. What is banned is substituting the other twin because you prefer it. (On a serve started before the 2026-09-28 rename, `adversarial-reviewer-opus` may be listed as `adversarial-reviewer-fable`; that is the same slot.)
+**The opus twin is the reviewer on every host.** The `-astra` twin (devbox, cloudbox) and the `-fable` twin (every host, claude-fable-5-2) are opt-in: dispatch one only when the user asks for that model. What is banned is substituting another twin because you prefer it.
 
 **If the reviewer is unavailable, stop and report.** Say the reviewer is unavailable and the diff is unreviewed, and let the user decide whether to wait, fix it, or waive it. There is no silent fallback to astra. If the user asked for astra and it fails, falling back to opus is fine, but say so in one clause (unless they asked for both twins — then report it, since two opus reviews are not a second opinion). The astra twin can be present-but-dead: it is only reachable while `codex-lb.service` is up, its upstream model-catalog refresh is healthy, *and* a pooled account still has 5h-window quota left, and it fails at **request** time rather than at build time.
 

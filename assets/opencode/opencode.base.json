@@ -56,6 +56,15 @@
             "effort": "high"
           }
         },
+        "claude-fable-5-2": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "high"
+          }
+        },
         "claude-haiku-5-5": {
           "options": {
             "thinking": {
@@ -110,6 +119,15 @@
           }
         },
         "claude-fable-5-1@default": {
+          "options": {
+            "thinking": {
+              "type": "adaptive",
+              "display": "summarized"
+            },
+            "effort": "high"
+          }
+        },
+        "claude-fable-5-2@default": {
           "options": {
             "thinking": {
               "type": "adaptive",
