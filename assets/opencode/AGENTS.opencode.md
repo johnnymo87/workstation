@@ -59,19 +59,31 @@ watcher) aborts the child, and the parent then falls back as for an error.
 
 **`-fable` is an opt-in twin, never the default.** `oracle-fable` and
 `adversarial-reviewer-fable` run claude-fable-5-2 with the same prompt as
-`-opus`. Dispatch them only when a human asks for fable, either directly or
-in their own words relayed by a program coordinator. Many older plan docs and
-bead notes say `adversarial-reviewer-fable` or `oracle-fable`: until
-2026-09-28 that was the *default* slot's name (it was renamed `-opus` when
-the model moved to opus-5-5). Those mentions are role references, so dispatch
-`-opus` for them (see the next paragraph).
+`-opus`. Dispatch one only when a human has asked for fable. These count as
+asking:
 
-A serve loads its agent list once at startup, so a serve started before the
-switch that deployed the fable-5-2 twins (2026-11) lists no `-fable` on
-devbox or macOS. If a human asked for fable and `-fable` is not listed, say so
-rather than silently substituting another model; the serve needs a restart
-(the nightly reset, or `reset-workspace`). If a `-fable` dispatch errors or
-returns empty, the `-opus` fallback rule above applies, said in one clause.
+- the human names fable or a `-fable` handle, in this conversation or in
+  their own words quoted to you by anyone (a program coordinator, a parent
+  session, a launch prompt);
+- an artifact dated 2026-11-12 or later names the model beside the handle,
+  e.g. "`adversarial-reviewer-fable` (claude-fable-5-2, Jonathan's ask)". That
+  is how an agent records a human's fable choice so it survives handoffs and
+  compaction. Write it that way, never a bare handle.
+
+A bare `-fable` handle in an artifact is not a choice, whatever its date. Until 2026-09-28
+`-fable` was the name of the *default* slot (renamed `-opus` when the model
+moved to opus-5-5), and many plan docs and bead notes from before then say
+`adversarial-reviewer-fable` or `oracle-fable` meaning "the reviewer". Dispatch
+`-opus` for those.
+
+The `-fable` handles were added to devbox and macOS on 2026-11-12 (cloudbox
+had a fable-5-1 twin before). A serve that has not restarted since the switch
+that deployed them may list them in some directories and not others, and on
+devbox a listed `-fable` fails there until the restart, because the serve's
+process env lacks the Claude Code version override fable-5-2 needs. If a human
+asked for fable and the handle is missing or fails, say so in one clause and
+name the fix (the nightly reset, or `reset-workspace`); falling back to `-opus`
+is fine, as for astra above.
 
 An "Unknown agent type" for a handle in the default slot is a naming mismatch,
 not a reason to stop.
@@ -81,12 +93,13 @@ resumption prompt may name a suffixed handle out of habit — including
 `oracle-astra` / `adversarial-reviewer-astra`, which were devbox's defaults
 until 2026-11-02. Dispatch the host's default handle for that role, as above.
 A handle written into an agent-authored artifact (plan doc, bead note, queued
-wake) is always a role reference, not a model choice.
+wake) is a role reference, not a model choice, unless it names the model as
+described for `-fable` above.
 The exceptions, honored on every host: the human deliberately picked the model
-("use astra"), or asked for both twins (independent opinions). Then dispatch
-exactly what they named. Never write a suffixed handle into a
+("use astra", "use fable"), or asked for both twins (independent opinions).
+Then dispatch exactly what they named. Never write a suffixed handle into a
 resumption prompt from memory. Write the role, or the handle the Task tool
-actually lists.
+actually lists, with the model beside it when a human chose it.
 
 ## Bash Tool Scoping on cloudbox
 

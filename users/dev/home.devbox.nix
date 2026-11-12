@@ -852,9 +852,9 @@ lib.mkIf isDevbox {
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=65536"
         # Claude Code version the anthropic-auth plugin reports; without it
         # claude-fable-5-2 (oracle-fable, adversarial-reviewer-fable) 400s and
-        # shows as an empty turn. Single source: claudeCodeVersionOverride in
-        # opencode-config.nix, which sets the sessionVariables entry read here.
-        "ANTHROPIC_CLAUDE_CODE_VERSION=${config.home.sessionVariables.ANTHROPIC_CLAUDE_CODE_VERSION}"
+        # shows as an empty turn. See the file for why, and why it is tied to
+        # one plugin pin. Process env, so a serve picks it up only on restart.
+        "ANTHROPIC_CLAUDE_CODE_VERSION=${(import ./claude-code-version-override.nix).version}"
         # mn9r M2: pin opencode.db to one absolute file (see home.base.nix
         # sessionVariables for full rationale). Required by the K-serve pool —
         # every serve must share one DB. A user service does not source

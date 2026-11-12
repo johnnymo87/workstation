@@ -294,7 +294,7 @@ let
   # carries the default CAUTION so the orchestrator reaches for it only when
   # the user names fable. Deployed on every host (see the call sites).
   # The pin is the first-party `anthropic/` id on purpose: devbox uses it as-is
-  # (teamclaude, which needs claudeCodeVersionOverride below), and on cloudbox
+  # (teamclaude, which needs ccOverride below), and on cloudbox
   # and macOS patchAgent's afterFable branch rewrites it to
   # `google-vertex-anthropic/claude-fable-5-2@default`. Both provider entries
   # carry their own high `effort` (opencode.base.json), so the source's dropped
@@ -311,26 +311,10 @@ let
       modelTag = "fable-5-2";
     };
 
-  # Claude Code version the anthropic-auth plugin REPORTS to Anthropic, which
-  # gates model access on it server-side (see opencodePluginPins). The pinned
-  # plugin bundles 2.1.280; claude-fable-5-2 demands 2.1.290 and 400s below it
-  # ("Claude Code 2.1.280 does not support this model; version 2.1.290 or newer
-  # is required"), surfacing as an empty assistant turn. No published plugin
-  # reports >= 2.1.290 yet (1.8.6 = 2.1.284, 2.0.0-next.7 = 2.1.280; checked
-  # 2026-11-12), so we use the plugin's own supported override,
-  # ANTHROPIC_CLAUDE_CODE_VERSION (config.js resolveClaudeCodeVersion, present
-  # since 1.8.5). Verified on devbox 2026-11-12: with 2.1.290, fable-5-2 answers
-  # (including multi-turn tool use) and opus-5-5 still answers.
-  #
-  # Only devbox needs it: it is the one host whose `anthropic/` provider is live
-  # (teamclaude). cloudbox has no `anthropic` auth and macOS disables the
-  # provider, so there the plugin never shapes a request. Exported to the
-  # devbox serve units (home.devbox.nix) and to interactive shells
-  # (home.sessionVariables below, for standalone `opencode run`).
-  #
-  # REMOVE when a plugin pin reports >= this itself: the activation check below
-  # compares the bundled constant against claudeCodeVersionFloor and says so.
-  claudeCodeVersionOverride = "2.1.290";
+  # devbox's ANTHROPIC_CLAUDE_CODE_VERSION override, which fable-5-2 needs on
+  # the teamclaude path. Shared with the serve unit in home.devbox.nix; the
+  # file explains why it exists and why it is tied to one plugin pin.
+  ccOverride = import ./claude-code-version-override.nix;
 
   # Every host's astra twins carry the opt-in CAUTION: the `-opus` twin is the
   # default oracle and adversarial reviewer everywhere. From 2026-09-19
@@ -636,7 +620,17 @@ let
   # would never match a pin key anyway).
   # deepSeq, not seq: the list is already in weak head normal form, so `seq`
   # would never force the elements and the throwIf would never fire.
-  pluginSpecs = lib.deepSeq _assertExactPins (map
+  # devbox's ANTHROPIC_CLAUDE_CODE_VERSION override is only safe for the plugin
+  # version it was measured against: a newer plugin may bundle a HIGHER version,
+  # and the plugin honours an older override, silently downgrading the reported
+  # version and 400ing every devbox turn. So a pin bump must revisit it.
+  _assertCcOverridePin =
+    let pinned = opencodePluginPins."@ex-machina/opencode-anthropic-auth"; in
+    lib.throwIf (pinned != ccOverride.forPluginPin)
+      ''@ex-machina/opencode-anthropic-auth is pinned to ${pinned} but users/dev/claude-code-version-override.nix was measured against ${ccOverride.forPluginPin}. Read that file: delete the override if the new plugin bundles a Claude Code version >= ${ccOverride.version}, otherwise update forPluginPin.''
+      null;
+
+  pluginSpecs = lib.deepSeq [ _assertExactPins _assertCcOverridePin ] (map
     (p: if opencodePluginPins ? ${p} then "${p}@${opencodePluginPins.${p}}" else p)
     (opencodeBase.plugin or []));
 
@@ -1092,7 +1086,7 @@ in
    #
    #   @<base>-fable  -> claude-fable-5-2 (mkFableVariant), opt-in CAUTION like
    #                     astra. EVERY host. devbox reaches it directly through
-   #                     teamclaude (with claudeCodeVersionOverride). cloudbox
+   #                     teamclaude (with ccOverride). cloudbox
    #                     and macOS reach it as google-vertex-anthropic through
    #                     cfp, which routes the fable family Vertex-first; cfp's
    #                     Max fallback leg needs its own reported Claude Code
@@ -1116,11 +1110,6 @@ in
    xdg.configFile."opencode/agents/oracle-fable.md".source =
      patchAgent "oracle-fable" (
        mkFableVariant "oracle" "${assetsPath}/opencode/agents/oracle.md");
-   # The serve units read this through config.home.sessionVariables
-   # (home.devbox.nix), so it has one source; see claudeCodeVersionOverride.
-   home.sessionVariables = lib.mkIf isDevbox {
-     ANTHROPIC_CLAUDE_CODE_VERSION = claudeCodeVersionOverride;
-   };
    xdg.configFile."opencode/agents/oracle-opus.md".source =
      patchAgent "oracle-opus" "${assetsPath}/opencode/agents/oracle.md";
    xdg.configFile."opencode/agents/oracle-astra.md" = lib.mkIf (isDevbox || isCloudbox) {
@@ -1435,11 +1424,11 @@ in
     # newest model we pin an agent to demands. 2.1.280 is claude-opus-5-5's
     # (the primary model on every host); 2.1.251 was claude-fable-5-1's.
     # claude-fable-5-2 needs 2.1.290, which no plugin release bundles yet;
-    # devbox supplies it through the env override (claudeCodeVersionOverride),
+    # devbox supplies it through the env override (ccOverride),
     # so it is NOT this floor: raising it would warn on every switch on hosts
     # whose `anthropic/` provider is not live at all.
     cc_floor='${claudeCodeVersionFloor}'
-    cc_override='${lib.optionalString isDevbox claudeCodeVersionOverride}'
+    cc_override='${lib.optionalString isDevbox ccOverride.version}'
     auth_pkg="@ex-machina/opencode-anthropic-auth"
 
     shopt -s nullglob
@@ -1478,13 +1467,21 @@ in
 
       # The floor above is the bundled constant's job on every host. Where
       # ANTHROPIC_CLAUDE_CODE_VERSION overrides it (devbox; see
-      # claudeCodeVersionOverride), say so once the bundled constant has caught
-      # up, so the override is retired instead of silently pinning a version
-      # that will one day be older than the plugin's own.
+      # users/dev/claude-code-version-override.nix), the override WINS, even
+      # when it is older than the bundled constant, which would be a silent
+      # downgrade. The eval-time pin assertion should make that unreachable;
+      # this is the runtime backstop, and it also says when the override has
+      # become redundant.
       if [ -n "$cc_override" ]; then
         oldest="$(printf '%s\n%s\n' "$reported" "$cc_override" | sort -V | head -1)"
-        if [ "$oldest" = "$cc_override" ]; then
-          echo "installOpencodePlugins: NOTE — $auth_pkg now reports Claude Code $reported >= the ANTHROPIC_CLAUDE_CODE_VERSION override ($cc_override); remove claudeCodeVersionOverride from opencode-config.nix." >&2
+        if [ "$reported" = "$cc_override" ]; then
+          echo "installOpencodePlugins: NOTE — $auth_pkg now bundles Claude Code $reported, equal to the ANTHROPIC_CLAUDE_CODE_VERSION override; delete users/dev/claude-code-version-override.nix and its consumers." >&2
+        elif [ "$oldest" = "$cc_override" ]; then
+          {
+            echo "installOpencodePlugins: WARNING — ANTHROPIC_CLAUDE_CODE_VERSION override ($cc_override) is OLDER than the Claude Code $reported that $auth_pkg bundles."
+            echo "installOpencodePlugins: the override wins, so devbox reports a DOWNGRADED version and newer gated models return EMPTY turns."
+            echo "installOpencodePlugins: delete users/dev/claude-code-version-override.nix and its consumers (home.devbox.nix serve env, this check)."
+          } >&2
         fi
       fi
     done
