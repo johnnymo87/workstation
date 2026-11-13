@@ -806,13 +806,13 @@ in
         # Kill switch, as on cloudbox. Flipping this (or enableLgtmShepherd)
         # off is the whole rollback story.
         "LGTM_ENABLE_SHEPHERD=1"
-        # Wake the authoring session about review threads waiting on it,
-        # instead of texting the human. Bounded in lgtm src/agentRouting.ts.
+        # Wake the authoring session about review threads waiting on it, red
+        # CI, merge conflicts and a moved base, instead of texting the human.
+        # Bounded in lgtm src/agentRouting.ts.
         "LGTM_ENABLE_AGENT_ROUTING=1"
         # Tell the authoring session its PR merged. With rollout off, lgtm
         # writes the pending markers itself (lgtm-5ksr.3.1), so this works
-        # without LGTM_ENABLE_ROLLOUT -- unlike the cloudbox comment's warning,
-        # which predates that change.
+        # without LGTM_ENABLE_ROLLOUT.
         "LGTM_ENABLE_MERGE_NOTICE=1"
         # LGTM_ENABLE_ROLLOUT deliberately unset: no Kubernetes on devbox.
       ];
@@ -877,7 +877,7 @@ in
           "devbox LGTM shepherd sweep FAILED (Result=''$RESULT).
 
 While it is failing, nobody is told about PRs in devbox-owned repos
-(eternal-machinery, my-podcasts, yt-to-lichess): no needs_reply wakes and no
+(eternal-machinery, my-podcasts, yt-to-lichess): no author wakes and no
 merge notices. Cloudbox does not cover these repos.
 
 Result=timeout means the sweep hit TimeoutStartSec=1500 (likely the opencode.db

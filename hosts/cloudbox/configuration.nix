@@ -1414,9 +1414,11 @@ in
     };
   };
 
-  # Author-side PR shepherd (lgtm-afm). Watches MY open PRs and sends one
-  # Telegram line when one needs attention: merge conflicts, ready-to-merge, or
-  # gone quiet. It replaces the agent-side watchdog that workstation#398
+  # Author-side PR shepherd (lgtm-afm). Watches MY open PRs. Review threads
+  # waiting, red CI, merge conflicts and a moved base wake the session that
+  # wrote the PR (LGTM_ENABLE_AGENT_ROUTING below); ready-to-merge, gone quiet,
+  # and anything it cannot route to a session go to the human as one Telegram
+  # line. It replaces the agent-side watchdog that workstation#398
   # disabled, where the authoring agent woke ITSELF on a backoff schedule all
   # night — a cold LLM turn per check, almost always to learn nothing had
   # changed. Doing the same watching in a program costs nothing, so the model
@@ -1426,8 +1428,10 @@ in
   # it: a bug in the author-side lane must not stop work PRs being reviewed.
   # It shares the lgtm checkout only as a library.
   #
-  # Sends no session wakes and merges nothing — Stage 0 routes everything to
-  # the human. See lgtm's docs/plans/2026-08-21-author-side-shepherd-design.md.
+  # Merges nothing. Each kind of session wake has its own switch in
+  # Environment below. Agent routing off sends those signals to the human
+  # instead; rollout or merge notice off turns that feature off outright. See
+  # lgtm's docs/plans/2026-08-21-author-side-shepherd-design.md.
   systemd.services.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     description = "LGTM author-side PR shepherd sweep";
     onFailure = [ "lgtm-shepherd-failure.service" ];
@@ -1447,7 +1451,7 @@ in
       Type = "oneshot";
       # See lgtm-run above for why Type=oneshot needs this at all. The shepherd
       # is the worse case to leave unbounded: a hang stops rollout watching,
-      # merge notices AND every needs_reply author wake simultaneously.
+      # merge notices AND every author wake simultaneously.
       #
       # 1500s, anchored on the max over the FULL 12-day journal: 690s
       # (2026-08-31 16:20, n=1175, median 35s / p90 127s / p99 219s). An earlier
@@ -1486,21 +1490,24 @@ in
         # The kill switch. Flipping this (or enableLgtmShepherd) off is the
         # whole rollback story: nothing else reads shepherd state.
         "LGTM_ENABLE_SHEPHERD=1"
-        # Wakes the session that WROTE a PR when review threads are waiting on
-        # a reply, instead of texting the human to go chase that session. This
-        # is the only signal that talks to an agent; everything else still goes
-        # to Telegram.
+        # Wakes the session that WROTE a PR, instead of texting the human to go
+        # chase that session, for four signals: review threads waiting on a
+        # reply (needs_reply), red CI (ci_red), merge conflicts (conflicted) and
+        # a moved base (base_merged). landable and idle still go to Telegram.
         #
         # Its own switch, separate from the one above, because the failure modes
         # differ in kind: the shepherd going wrong costs a noisy Telegram, this
         # going wrong costs tokens. Turning it off leaves the shepherd running
-        # and every needs_reply signal falls back to the human, which is simply
+        # and those four signals fall back to the human, which is simply
         # the behaviour of the previous release.
         #
-        # Bounded by design (lgtm src/agentRouting.ts): 3 wakes per PR for its
-        # lifetime, 2 per sweep, one per session per sweep, a 4h floor between
-        # wakes, never while lgtm is mid-review, never a session that is busy or
-        # more than 72h stale.
+        # Bounded by design (lgtm src/agentRouting.ts; read the numbers there,
+        # they move): per PR, 12 wakes per signal and 18 in total for its
+        # lifetime, with a few slots earned back by wakes that shrink the
+        # conversation and a hard ceiling of 23; 2 per sweep; one per session
+        # per sweep; 10 minutes between wakes for one PR; never while lgtm is
+        # mid-review, never a session that is busy or whose worktree is gone,
+        # and a rebase never on a branch with commits by another GitHub login.
         "LGTM_ENABLE_AGENT_ROUTING=1"
         # Post-merge rollout watching: after a merge, ask Kubernetes what the
         # merge actually did, and wake an agent once with a self-contained
@@ -1514,12 +1521,9 @@ in
         # state files it wrote are inert. Note the shepherd's own kill switch
         # above does NOT need touching to disable just this.
         #
-        # It does NOT disable *only* this, though, despite the switch below
-        # having its own name. The merge notice's pending markers are written
-        # inside the rollout sweep, so unsetting this also stops any new merge
-        # being marked, and the notice loop then finds nothing forever. To turn
-        # rollout watching off while keeping notices, that coupling has to be
-        # removed in lgtm first -- see the comment on the notice loop in
+        # Unsetting it keeps merge notices working: with rollout off, lgtm
+        # writes the notice's pending markers itself (lgtm-5ksr.3.1; devbox
+        # runs this way). See the comment on the notice loop in
         # src/shepherdRun.ts.
         "LGTM_ENABLE_ROLLOUT=1"
         # Tell the AUTHORING session that its PR merged, for every repo in
@@ -1539,10 +1543,11 @@ in
         # markers already written to state files are inert, because nothing
         # else reads them.
         #
-        # But the two switches are NOT independent, in one direction: this one
-        # only governs DELIVERY. The markers it delivers are created inside the
-        # rollout sweep, so LGTM_ENABLE_ROLLOUT=0 silently disables notices too.
-        # Turning THIS off while leaving rollout on behaves as expected.
+        # The two switches are independent. With rollout on, the markers come
+        # from the rollout sweep; with it off, lgtm writes them itself. One
+        # catch: rollout ON but broken (config fails to load, sweep throws)
+        # writes no markers, so a notice is missed rather than a merge wrongly
+        # marked unwatched.
         "LGTM_ENABLE_MERGE_NOTICE=1"
         # The watched targets: cluster contexts, namespaces and deployment
         # names. Deliberately a path to a file OUTSIDE this repository, which
@@ -1592,9 +1597,9 @@ in
   };
 
   # Every 10 minutes, around the clock. Evaluation is free and must keep
-  # running overnight so a state change is observed when it happens; the
-  # 09:00–21:00 America/New_York quiet window lives in the code and gates
-  # DELIVERY only.
+  # running overnight so a state change is observed when it happens. There is
+  # no quiet window: lgtm removed its 21:00–09:00 America/New_York delivery
+  # gate (src/shepherdRun.ts), so quiet hours are the phone's job.
   #
   # Persistent=false on purpose, unlike lgtm-run: a sweep missed while the host
   # was down is worthless, because the next tick re-derives everything from
@@ -1854,7 +1859,7 @@ outcome file in ~/.lgtm -- that is the double-dispatch window (bead lgtm-4wq)." 
         ${driftAlert} /var/lib/lgtm-failure/alert-shepherd "lgtm-shepherd:''$RESULT" \
           "LGTM shepherd sweep FAILED (Result=''$RESULT).
 
-While it is failing, NOBODY is woken about their own PRs: no needs_reply wakes,
+While it is failing, NOBODY is woken about their own PRs: no author wakes,
 no rollout watching, and no merge notices. This fails quietly by nature -- the
 symptom is an author who is simply never told, so it will not self-report.
 

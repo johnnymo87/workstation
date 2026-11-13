@@ -2,7 +2,7 @@
 
 **This describes a mechanism that no longer exists. Do not schedule wakes for a PR.**
 `lgtm-shepherd` replaced it: a systemd timer that sweeps open PRs every 10 minutes and either
-wakes the authoring session (`needs_reply` / `ci_red` / `conflicted`) or Telegrams the human
+wakes the authoring session (`needs_reply` / `ci_red` / `conflicted` / `base_merged`) or Telegrams the human
 (`landable` / `idle`). Its design and rationale live in the lgtm repo:
 `docs/plans/2026-08-21-author-side-shepherd-design.md`.
 

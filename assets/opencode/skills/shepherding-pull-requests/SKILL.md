@@ -19,6 +19,7 @@ description: Covers a pull request you author from pre-PR checks to merge -- tit
 > | Signal | Where it goes |
 > |---|---|
 > | `needs_reply`, `ci_red`, `conflicted` | **an agent wake, preferentially the session that authored the PR** |
+> | `base_merged` (the PR's base changed: a stacked parent merged, or someone retargeted it) | **an agent wake** asking for a rebase onto the new base; goes to the human instead if the branch has commits by another GitHub login, or authorship can't be read. Not an ownership check: other agents and bots commit as the same login, so look before you force-push |
 > | `landable`, `idle` | one Telegram line to the human |
 >
 > Verify rather than trust this table: `LGTM_ENABLE_AGENT_ROUTING=1` on the service is the master
@@ -31,13 +32,15 @@ description: Covers a pull request you author from pre-PR checks to merge -- tit
 > problem, and it is not the end of the PR's supervision either.
 >
 > **Be accurate about what happens next.** A quiet PR merely awaiting a reviewer gets the *human* a
-> Telegram and wakes nobody. Threads, red CI, or a conflict wake **you** — same session, same
+> Telegram and wakes nobody. Threads, red CI, a conflict, or a moved base wake **you** — same session, same
 > worktree, with a payload describing what it saw. Say which you expect. Do not tell the user a
 > daemon will finish the work; it will either notify them or hand the work back to you.
 >
-> - **The wake budget is finite and never resets.** 8 agent wakes per signal per PR (12 across all
->   signals, 15 hard ceiling), refundable only by a wake that *shrinks* the conversation. When it
->   runs out the PR becomes human-relay for the rest of its life, and the only trace is one
+> - **The wake budget is finite and never resets.** 12 agent wakes per signal per PR, 18 across all
+>   signals. A wake that *shrinks* the conversation (a new head commit carrying the
+>   `X-Shepherd-Wake` trailer the wake payload asks for, and fewer threads waiting than it found)
+>   earns one slot back, at most 5 per signal; earned slots raise both limits, but no PR ever gets
+>   more than 23 wakes. When it runs out the PR becomes human-relay for the rest of its life, and the only trace is one
 >   `[wake-budget-exhausted]` log line. A PR that goes *quiet early* is the symptom.
 > - **Do not do the shepherd's job for it.** No self-scheduled wakes, and no re-requesting a
 >   reviewer that the daemon already re-reviews on its own (§"Re-requesting review" says when that
@@ -97,7 +100,7 @@ digraph pr_lifecycle {
     "Anyone pending on it?" [shape=diamond];
     "Report: nobody is gating this" [shape=box, style=filled, fillcolor=lightyellow];
     "Report state + END TURN" [shape=box, style=filled, fillcolor=lightblue];
-    "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted)" [shape=box, style=filled, fillcolor=lightblue];
+    "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted/\nbase_merged)" [shape=box, style=filled, fillcolor=lightblue];
     "shepherd Telegrams the human\n(landable/idle)" [shape=box, style=filled, fillcolor=lightgrey];
     "Human merges" [shape=box, style=filled, fillcolor=lightgrey];
     "Done" [shape=doublecircle];
@@ -132,9 +135,9 @@ digraph pr_lifecycle {
     "Report: nobody is gating this" -> "Report state + END TURN";
     "Anyone pending on it?" -> "Sleep 60s" [label="yes, but CI still running\nor work to do"];
     "Anyone pending on it?" -> "Report state + END TURN" [label="yes (CI green, nothing\nto fix, reviewer pending)"];
-    "Report state + END TURN" -> "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted)";
+    "Report state + END TURN" -> "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted/\nbase_merged)";
     "Report state + END TURN" -> "shepherd Telegrams the human\n(landable/idle)";
-    "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted)" -> "Check CI + fetch reviews + comments";
+    "shepherd wakes THIS session\n(needs_reply/ci_red/conflicted/\nbase_merged)" -> "Check CI + fetch reviews + comments";
 }
 ```
 
