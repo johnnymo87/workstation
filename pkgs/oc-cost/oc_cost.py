@@ -47,7 +47,7 @@ GEMINI_4_ARGON_PHASES: list[dict] = [
 # and Vertex *global*. Flat rate (no >200K tier) and no introductory promo.
 # Implicit caching only, so cache_write is 0. Vertex lists a cache-write rate of
 # $1.875/1M effective 2027-01-12, but usageMetadata currently reports no
-# cache-write tokens, so cache-write is not modelled (tracked in a follow-up bead).
+# cache-write tokens, so cache-write is not modelled (bead workstation-2rii).
 # Sources: https://cloud.google.com/vertex-ai/generative-ai/pricing ,
 # https://ai.google.dev/gemini-api/docs/pricing , and
 # https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/

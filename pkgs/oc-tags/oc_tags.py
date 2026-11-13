@@ -432,7 +432,7 @@ GEMINI_4_ARGON_PHASES: list[dict[str, float | str]] = [
     {"from": "2026-12-01", "input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 0.0},
 ]
 # Gemini 4 Hydrogen (released 2026-11-12). Flat rate (no promo). Implicit caching
-# only; cache-write of $1.875 effective 2027-01-12 is not modelled (follow-up bead).
+# only; cache-write of $1.875 effective 2027-01-12 is not modelled (bead workstation-2rii).
 GEMINI_4_HYDROGEN_PHASES: list[dict[str, float | str]] = [
     {"from": "0001-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 0.0},
 ]

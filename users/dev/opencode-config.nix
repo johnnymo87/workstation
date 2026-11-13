@@ -124,8 +124,8 @@ let
     };
     limit = {
       context = 1048576;
-      # 65,536 is the default synchronous cap; the 1M "long decode" mode is
-      # opt-in and not something opencode requests.
+      # Assumed to match Argon's 65,536 synchronous cap; Google advertises up
+      # to 1M output via opt-in "long decode", which opencode does not request.
       output = 65536;
     };
     modalities = {
@@ -150,20 +150,20 @@ let
   #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
   #      `anthropic/claude-opus-*` reaches an unusable provider and the model
   #      loop dies with an EMPTY response — the exact silent-failure the oracle
-  #      subagent was hitting historically. devbox keeps the direct
-  #      `anthropic/claude-opus-*` pin (it is the working primary there via
-  #      TeamClaude).
-  #
-  #      macOS JOINED THIS BRANCH when cfp landed there. It used to be exempt
-  #      ("its primary is Gemini and opus agents are rare"), but the Mac now
-  #      hides the `anthropic` provider entirely (disabled_providers below), so
-  #      an agent left pinned to `anthropic/claude-opus-*` would reach a
-  #      provider that is not in the registry — the same empty-response
-  #      silent failure this rewrite exists to prevent. The Max pool is still
-  #      reached, just through cfp behind google-vertex-anthropic rather than
-  #      through a second, fallback-less lane. This
-  #      mirrors the primary `model =` below
-  #      (`vertexOpusModel`). The Vertex
+   #      subagent was hitting historically. devbox keeps the direct
+   #      `anthropic/claude-opus-*` pin (it is the working primary there via
+   #      TeamClaude).
+   #
+   #      macOS JOINED THIS BRANCH when cfp landed there. It used to be exempt
+   #      ("its primary is Gemini and opus agents are rare"), but the Mac now
+   #      hides the `anthropic` provider entirely (disabled_providers below), so
+   #      an agent left pinned to `anthropic/claude-opus-*` would reach a
+   #      provider that is not in the registry — the same empty-response
+   #      silent failure this rewrite exists to prevent. The Max pool is still
+   #      reached, just through cfp behind google-vertex-anthropic rather than
+   #      through a second, fallback-less lane. This
+   #      mirrors the primary `model =` below
+   #      (`vertexOpusModel`). The Vertex
   #      opus-5-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7,
   #      opus-4-8 and opus-5 have no provider-level model entry anymore, and no
@@ -1164,9 +1164,9 @@ in
         "oracle"
         "${assetsPath}/opencode/agents/oracle.md");
    };
-    xdg.configFile."opencode/agents/implementer.md".source = patchSddAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
-    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchSddAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
-    xdg.configFile."opencode/agents/code-reviewer.md".source = patchSddAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
+   xdg.configFile."opencode/agents/implementer.md".source = patchSddAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
+   xdg.configFile."opencode/agents/spec-reviewer.md".source = patchSddAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
+   xdg.configFile."opencode/agents/code-reviewer.md".source = patchSddAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
    # vision-qa is API-key-only by design (no Vertex): its base pin is
    # google/gemini-3.8-flash (Google Generative AI API, authed via
    # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY from sops). Deploy it only
