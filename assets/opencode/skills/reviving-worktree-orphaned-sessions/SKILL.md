@@ -9,7 +9,7 @@ A session whose `directory` no longer exists goes through two stages. The fix is
 
 | Stage | What you see | Seen |
 |---|---|---|
-| **Half-alive** (the serve still has an instance loaded for the deleted path) | Human prompts via Telegram still get normal answers. Every *automated* route refuses the session: pigeon's swarm arbiter will not send (`working directory missing`), and lgtm-shepherd sends the session's PR alerts (`ci_red`, `conflicted`, `needs_reply`) to the human instead (`human: worktree-gone`). | devbox 2026-11-02 |
+| **Half-alive** (the serve still has an instance loaded for the deleted path) | Human prompts via Telegram still get normal answers. Every *automated* route refuses the session: pigeon's swarm arbiter will not send (`working directory missing`), and lgtm-shepherd sends the session's PR alerts (`ci_red`, `conflicted`, `needs_reply`, `base_merged`) to the human instead (`human: worktree-gone`). | devbox 2026-11-02 |
 | **Zombie** (the instance has to boot from the missing path, most likely after a serve restart) | Every turn finishes in under a second with zero parts. Human and swarm prompts alike get silence. Serve log: `prompt_async failed ... realPath ... ENOENT`. | cloudbox 2026-08-31 |
 
 That half-alive turns into a zombie at the next serve restart (nightly, ~03:00) is inferred from how the serve caches instances per directory; nobody has watched it happen. Fix a half-alive session now, not later. It looks healthy because it answers when you ask it something, but it has already stopped receiving swarm messages and shepherd wakes.

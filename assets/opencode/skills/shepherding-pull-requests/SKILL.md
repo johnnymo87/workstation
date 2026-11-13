@@ -19,7 +19,7 @@ description: Covers a pull request you author from pre-PR checks to merge -- tit
 > | Signal | Where it goes |
 > |---|---|
 > | `needs_reply`, `ci_red`, `conflicted` | **an agent wake, preferentially the session that authored the PR** |
-> | `base_merged` (the PR's base changed: a stacked parent merged, or someone retargeted it) | **an agent wake** asking for a rebase onto the new base; goes to the human instead if the branch carries anyone else's commits |
+> | `base_merged` (the PR's base changed: a stacked parent merged, or someone retargeted it) | **an agent wake** asking for a rebase onto the new base; goes to the human instead if the branch has commits by another GitHub login, or authorship can't be read. Not an ownership check: other agents and bots commit as the same login, so look before you force-push |
 > | `landable`, `idle` | one Telegram line to the human |
 >
 > Verify rather than trust this table: `LGTM_ENABLE_AGENT_ROUTING=1` on the service is the master
