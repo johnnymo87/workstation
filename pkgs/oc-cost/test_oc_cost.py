@@ -569,6 +569,23 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         self.assertAlmostEqual(cost, 2 + 10, places=6)
         self.assertEqual(tier, "base")
 
+    def test_gemini_4_hydrogen_rates_on_both_routes(self):
+        # Flat 1.5 / 7.5 / cache 0.075 (no promo). Same per-1M price on Vertex
+        # global and Developer API, so both routes share one definition.
+        for provider in ("google-vertex", "google"):
+            rate = oc_cost.rate_for(provider, "gemini-4-hydrogen", "2026-11-12")
+            self.assertEqual(
+                (rate["input"], rate["output"], rate["cache_read"]),
+                (1.5, 7.5, 0.075), provider)
+
+    def test_gemini_4_hydrogen_is_priced_not_unpriced(self):
+        toks = {"input": 1_000_000, "output": 1_000_000, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}}
+        cost, tier = oc_cost.cost_for_message(
+            "google-vertex", "gemini-4-hydrogen", toks, "2026-11-12")
+        self.assertAlmostEqual(cost, 1.5 + 7.5, places=6)
+        self.assertEqual(tier, "base")
+
     def test_gemini_flash_last_intro_day_is_still_intro(self):
         e = oc_cost.rate_for("google-vertex", "gemini-3.8-flash", "2026-12-31")
         self.assertEqual(e["input"], 0.75)

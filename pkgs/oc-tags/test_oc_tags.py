@@ -2406,6 +2406,13 @@ class TestGoosePricingAndRates(unittest.TestCase):
             (standard["input"], standard["output"], standard["cache_read"]),
             (4.0, 20.0, 0.20))
 
+    def test_dated_gemini_4_hydrogen_rates(self):
+        # Flat 1.50 / 7.50 / 0.075 (no promo).
+        rate = oc_tags.goose_rate_for("gemini-4-hydrogen", day="2026-11-12")
+        self.assertEqual(
+            (rate["input"], rate["output"], rate["cache_read"]),
+            (1.5, 7.5, 0.075))
+
 
 class TestGooseRateDrift(unittest.TestCase):
     """Assert GOOSE_MODEL_RATES stays in sync with pkgs/oc-cost/oc_cost.py."""

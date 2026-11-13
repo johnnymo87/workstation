@@ -431,6 +431,11 @@ GEMINI_4_ARGON_PHASES: list[dict[str, float | str]] = [
     {"from": "0001-01-01", "input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 0.0},
     {"from": "2026-12-01", "input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 0.0},
 ]
+# Gemini 4 Hydrogen (released 2026-11-12). Flat rate (no promo). Implicit caching
+# only; cache-write of $1.875 effective 2027-01-12 is not modelled (follow-up bead).
+GEMINI_4_HYDROGEN_PHASES: list[dict[str, float | str]] = [
+    {"from": "0001-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 0.0},
+]
 
 GOOSE_MODEL_RATES: dict[str, object] = {
     # Anthropic Claude
@@ -449,6 +454,7 @@ GOOSE_MODEL_RATES: dict[str, object] = {
     "gemini-3.7-flash":  GEMINI_FLASH_PHASES,
     "gemini-3.8-flash":  GEMINI_FLASH_PHASES,
     "gemini-4-argon":    GEMINI_4_ARGON_PHASES,
+    "gemini-4-hydrogen": GEMINI_4_HYDROGEN_PHASES,
 }
 
 

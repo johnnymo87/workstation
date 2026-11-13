@@ -24,6 +24,11 @@ let
   vertexOpusModel = "google-vertex-anthropic/claude-opus-5-5@default";
   geminiModel = "google-vertex/gemini-3.8-flash";
   geminiVariant = "high";
+  # Plan-execution subagents (implementer, spec-reviewer, code-reviewer) use
+  # sddModel so they can move to gemini-4-hydrogen without also moving
+  # compaction and librarian, which stay on geminiModel; bead workstation-rof8.
+  sddModel = geminiModel;
+  sddVariant = geminiVariant;
   gemini38FlashModel = {
     id = "gemini-3.8-flash";
     name = "Gemini 3.8 Flash";
@@ -95,45 +100,82 @@ let
       output = [ "text" ];
     };
   };
+  # Gemini 4 Hydrogen (released 2026-11-12).
+  # Catalogued so it is selectable and costed; NOT a default or agent pin —
+  # workloads stay on 3.8 Flash. Thinking levels: low / medium / high (default) / xhigh.
+  # List price, no promo, so unlike Flash/Argon this static entry needs no dated
+  # hand edit.
+  # Sources: https://cloud.google.com/vertex-ai/generative-ai/pricing ,
+  # https://ai.google.dev/gemini-api/docs/pricing , and
+  # https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/
+  geminiHydrogenModel = {
+    id = "gemini-4-hydrogen";
+    name = "Gemini 4 Hydrogen";
+    family = "gemini";
+    release_date = "2026-11-12";
+    attachment = true;
+    reasoning = true;
+    temperature = true;
+    tool_call = true;
+    cost = {
+      input = 1.50;
+      output = 7.50;
+      cache_read = 0.075;
+    };
+    limit = {
+      context = 1048576;
+      # 65,536 is the default synchronous cap; the 1M "long decode" mode is
+      # opt-in and not something opencode requests.
+      output = 65536;
+    };
+    modalities = {
+      input = [ "text" "image" "video" "audio" "pdf" ];
+      output = [ "text" ];
+    };
+  };
 
   # Patch agent model pins so each host resolves to a model it can actually
   # reach. Two independent, order-independent rewrites:
   #
-  #   1. sonnet-N -> Gemini 3.8 Flash on the Gemini-for-agents hosts (macOS +
+  #   1. sonnet-N -> Gemini on the Gemini-for-agents hosts (macOS +
   #      cloudbox). These are the cheap plan-execution / research subagents;
   #      Gemini uses Gemini-native thinking levels, so add `variant: high`.
+  #      The plan-execution SDD subagents (implementer, spec-reviewer, code-reviewer)
+  #      use patchSddAgent (`sddModel`), while librarian and other agents use
+  #      patchAgent (`geminiModel`), so SDD agents can move models independently
+  #      (bead workstation-rof8).
   #
   #   2. opus-N -> Vertex Anthropic (`google-vertex-anthropic/claude-opus-N@default`)
   #      on cloudbox ONLY. Cloudbox has no first-party `anthropic/` auth (it
   #      routes Anthropic through Vertex/ADC), so an opus agent left pinned to
   #      `anthropic/claude-opus-*` reaches an unusable provider and the model
   #      loop dies with an EMPTY response — the exact silent-failure the oracle
-   #      subagent was hitting historically. devbox keeps the direct
-   #      `anthropic/claude-opus-*` pin (it is the working primary there via
-   #      TeamClaude).
-   #
-   #      macOS JOINED THIS BRANCH when cfp landed there. It used to be exempt
-   #      ("its primary is Gemini and opus agents are rare"), but the Mac now
-   #      hides the `anthropic` provider entirely (disabled_providers below), so
-   #      an agent left pinned to `anthropic/claude-opus-*` would reach a
-   #      provider that is not in the registry — the same empty-response
-   #      silent failure this rewrite exists to prevent. The Max pool is still
-   #      reached, just through cfp behind google-vertex-anthropic rather than
-   #      through a second, fallback-less lane. This
-   #      mirrors the primary `model =` below
-   #      (`vertexOpusModel`). The Vertex
+  #      subagent was hitting historically. devbox keeps the direct
+  #      `anthropic/claude-opus-*` pin (it is the working primary there via
+  #      TeamClaude).
+  #
+  #      macOS JOINED THIS BRANCH when cfp landed there. It used to be exempt
+  #      ("its primary is Gemini and opus agents are rare"), but the Mac now
+  #      hides the `anthropic` provider entirely (disabled_providers below), so
+  #      an agent left pinned to `anthropic/claude-opus-*` would reach a
+  #      provider that is not in the registry — the same empty-response
+  #      silent failure this rewrite exists to prevent. The Max pool is still
+  #      reached, just through cfp behind google-vertex-anthropic rather than
+  #      through a second, fallback-less lane. This
+  #      mirrors the primary `model =` below
+  #      (`vertexOpusModel`). The Vertex
   #      opus-5-5 model already carries its own `effort` setting from
   #      opencode.base.json, so no variant override is added here. (opus-4-7,
   #      opus-4-8 and opus-5 have no provider-level model entry anymore, and no
   #      agent is pinned to any of them as of 2026-09-22.) This is the branch
   #      that fires for oracle-opus and adversarial-reviewer-opus; their own
   #      `variant: high` line passes through untouched.
-  patchAgent = name: src:
+  patchAgentWith = { model, variant }: name: src:
     let
       afterSonnet =
         if useGeminiForAgents then
           pkgs.runCommand "${name}-gemini.md" {} ''
-            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-[0-9]+(?:-[0-9]+)*|model: ${geminiModel}\nvariant: ${geminiVariant}|' ${src} > $out
+            ${pkgs.perl}/bin/perl -0pe 's|model: anthropic/claude-sonnet-[0-9]+(?:-[0-9]+)*|model: ${model}\nvariant: ${variant}|' ${src} > $out
           ''
         else
           src;
@@ -167,6 +209,9 @@ let
           afterOpus;
     in
       afterFable;
+
+  patchAgent = patchAgentWith { model = geminiModel; variant = geminiVariant; };
+  patchSddAgent = patchAgentWith { model = sddModel; variant = sddVariant; };
 
   # mkAgentVariant: build a model-pinned twin of an agent from the SAME source
   # body at build time, so a shared prompt has one source of truth and no
@@ -913,6 +958,7 @@ let
           models = ((opencodeBase.provider.google or {}).models or {}) // {
             "gemini-3.8-flash" = gemini38FlashModel;
             "gemini-4-argon" = geminiArgonModel;
+            "gemini-4-hydrogen" = geminiHydrogenModel;
           };
         };
       } // lib.optionalAttrs isDevbox {
@@ -989,6 +1035,7 @@ let
           models = ((opencodeBase.provider."google-vertex" or {}).models or {}) // {
             "gemini-3.8-flash" = gemini38FlashModel;
             "gemini-4-argon" = geminiArgonModel;
+            "gemini-4-hydrogen" = geminiHydrogenModel;
           };
         };
       } // lib.optionalAttrs isCloudbox {
@@ -1117,9 +1164,9 @@ in
         "oracle"
         "${assetsPath}/opencode/agents/oracle.md");
    };
-   xdg.configFile."opencode/agents/implementer.md".source = patchAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
-   xdg.configFile."opencode/agents/spec-reviewer.md".source = patchAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
-   xdg.configFile."opencode/agents/code-reviewer.md".source = patchAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
+    xdg.configFile."opencode/agents/implementer.md".source = patchSddAgent "implementer" "${assetsPath}/opencode/agents/implementer.md";
+    xdg.configFile."opencode/agents/spec-reviewer.md".source = patchSddAgent "spec-reviewer" "${assetsPath}/opencode/agents/spec-reviewer.md";
+    xdg.configFile."opencode/agents/code-reviewer.md".source = patchSddAgent "code-reviewer" "${assetsPath}/opencode/agents/code-reviewer.md";
    # vision-qa is API-key-only by design (no Vertex): its base pin is
    # google/gemini-3.8-flash (Google Generative AI API, authed via
    # GOOGLE_GENERATIVE_AI_API_KEY / GEMINI_API_KEY from sops). Deploy it only
