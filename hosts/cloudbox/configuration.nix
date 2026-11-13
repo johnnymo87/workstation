@@ -1414,9 +1414,11 @@ in
     };
   };
 
-  # Author-side PR shepherd (lgtm-afm). Watches MY open PRs and sends one
-  # Telegram line when one needs attention: merge conflicts, ready-to-merge, or
-  # gone quiet. It replaces the agent-side watchdog that workstation#398
+  # Author-side PR shepherd (lgtm-afm). Watches MY open PRs. Review threads
+  # waiting, red CI, merge conflicts and a moved base wake the session that
+  # wrote the PR (LGTM_ENABLE_AGENT_ROUTING below); ready-to-merge, gone quiet,
+  # and anything it cannot route to a session go to the human as one Telegram
+  # line. It replaces the agent-side watchdog that workstation#398
   # disabled, where the authoring agent woke ITSELF on a backoff schedule all
   # night — a cold LLM turn per check, almost always to learn nothing had
   # changed. Doing the same watching in a program costs nothing, so the model
@@ -1426,8 +1428,10 @@ in
   # it: a bug in the author-side lane must not stop work PRs being reviewed.
   # It shares the lgtm checkout only as a library.
   #
-  # Sends no session wakes and merges nothing — Stage 0 routes everything to
-  # the human. See lgtm's docs/plans/2026-08-21-author-side-shepherd-design.md.
+  # Merges nothing. Every kind of session wake has its own switch in
+  # Environment below (agent routing, rollout, merge notice); with all three
+  # off, everything goes to the human. See lgtm's
+  # docs/plans/2026-08-21-author-side-shepherd-design.md.
   systemd.services.lgtm-shepherd = lib.mkIf enableLgtmShepherd {
     description = "LGTM author-side PR shepherd sweep";
     onFailure = [ "lgtm-shepherd-failure.service" ];
@@ -1486,21 +1490,24 @@ in
         # The kill switch. Flipping this (or enableLgtmShepherd) off is the
         # whole rollback story: nothing else reads shepherd state.
         "LGTM_ENABLE_SHEPHERD=1"
-        # Wakes the session that WROTE a PR when review threads are waiting on
-        # a reply, instead of texting the human to go chase that session. This
-        # is the only signal that talks to an agent; everything else still goes
-        # to Telegram.
+        # Wakes the session that WROTE a PR, instead of texting the human to go
+        # chase that session, for four signals: review threads waiting on a
+        # reply (needs_reply), red CI (ci_red), merge conflicts (conflicted) and
+        # a moved base (base_merged). landable and idle still go to Telegram.
         #
         # Its own switch, separate from the one above, because the failure modes
         # differ in kind: the shepherd going wrong costs a noisy Telegram, this
         # going wrong costs tokens. Turning it off leaves the shepherd running
-        # and every needs_reply signal falls back to the human, which is simply
+        # and those four signals fall back to the human, which is simply
         # the behaviour of the previous release.
         #
-        # Bounded by design (lgtm src/agentRouting.ts): 3 wakes per PR for its
-        # lifetime, 2 per sweep, one per session per sweep, a 4h floor between
-        # wakes, never while lgtm is mid-review, never a session that is busy or
-        # more than 72h stale.
+        # Bounded by design (lgtm src/agentRouting.ts; read the numbers there,
+        # they move): per PR, 12 wakes per signal and 18 in total for its
+        # lifetime, with a few slots earned back by wakes that shrink the
+        # conversation and a hard ceiling of 23; 2 per sweep; one per session
+        # per sweep; 10 minutes between wakes for one PR; never while lgtm is
+        # mid-review, never a session that is busy or whose worktree is gone,
+        # and a rebase never on a branch carrying someone else's commits.
         "LGTM_ENABLE_AGENT_ROUTING=1"
         # Post-merge rollout watching: after a merge, ask Kubernetes what the
         # merge actually did, and wake an agent once with a self-contained
@@ -1592,9 +1599,9 @@ in
   };
 
   # Every 10 minutes, around the clock. Evaluation is free and must keep
-  # running overnight so a state change is observed when it happens; the
-  # 09:00–21:00 America/New_York quiet window lives in the code and gates
-  # DELIVERY only.
+  # running overnight so a state change is observed when it happens. There is
+  # no quiet window: lgtm removed its 21:00–09:00 America/New_York delivery
+  # gate (src/shepherdRun.ts), so quiet hours are the phone's job.
   #
   # Persistent=false on purpose, unlike lgtm-run: a sweep missed while the host
   # was down is worthless, because the next tick re-derives everything from
