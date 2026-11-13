@@ -102,7 +102,10 @@ let
   };
   # Gemini 4 Hydrogen (released 2026-11-12).
   # Catalogued so it is selectable and costed; NOT a default or agent pin —
-  # workloads stay on 3.8 Flash. Thinking levels: low / medium / high (default) / xhigh.
+  # workloads stay on 3.8 Flash. Model thinking levels: low / medium / high
+  # (default) / xhigh, but opencode-patched 1.18.18.5's variant table
+  # (provider/transform.ts) only knows gemini-3* ids, so it offers just
+  # low / high here; `variant: high` maps to thinkingLevel "high".
   # List price, no promo, so unlike Flash/Argon this static entry needs no dated
   # hand edit.
   # Sources: https://cloud.google.com/vertex-ai/generative-ai/pricing ,
