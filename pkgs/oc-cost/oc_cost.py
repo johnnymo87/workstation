@@ -43,6 +43,17 @@ GEMINI_4_ARGON_PHASES: list[dict] = [
     {"from": "0001-01-01", "input": 2, "output": 10, "cache_read": 0.10, "cache_write": 0},
     {"from": "2026-12-01", "input": 4, "output": 20, "cache_read": 0.20, "cache_write": 0},
 ]
+# Gemini 4 Hydrogen (released 2026-11-12). Identical per-1M on the Developer API
+# and Vertex *global*. Flat rate (no >200K tier) and no introductory promo.
+# Implicit caching only, so cache_write is 0. Vertex lists a cache-write rate of
+# $1.875/1M effective 2027-01-12, but usageMetadata currently reports no
+# cache-write tokens, so cache-write is not modelled (bead workstation-2rii).
+# Sources: https://cloud.google.com/vertex-ai/generative-ai/pricing ,
+# https://ai.google.dev/gemini-api/docs/pricing , and
+# https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/
+GEMINI_4_HYDROGEN_PHASES: list[dict] = [
+    {"from": "0001-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 0},
+]
 # Shared 3.5 Flash rate (undated: no introductory phase).
 GEMINI_35_FLASH: dict = {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5}
 
@@ -128,6 +139,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google-vertex", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
+    ("google-vertex", "gemini-4-hydrogen"): GEMINI_4_HYDROGEN_PHASES,
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {
@@ -153,6 +165,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google", "gemini-3.7-flash"): GEMINI_FLASH_PHASES,
     ("google", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     ("google", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
+    ("google", "gemini-4-hydrogen"): GEMINI_4_HYDROGEN_PHASES,
     # --- OpenAI ---
     ("openai", "gpt-5.5"): {
         "input": 5, "output": 30, "cache_read": 0.50, "cache_write": 0,

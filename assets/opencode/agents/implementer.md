@@ -6,7 +6,7 @@ model: anthropic/claude-sonnet-5-5
 # request (HTTP 400) if any tool's JSON schema is non-conforming. Two shipped
 # MCP servers trip it: datadog_* (anyOf with sibling keys) and pagerduty_*
 # (a parameter with no type). On cloudbox this agent's model is rewritten to
-# google-vertex/gemini-3.8-flash (users/dev/opencode-config.nix, patchAgent),
+# sddModel (currently gemini-3.8-flash) via patchSddAgent (users/dev/opencode-config.nix),
 # so ANY session with either MCP connected made every dispatch of this agent
 # fail — reported by opencode as a completed task with an empty result. See
 # mono-2l1rq and .agents/skills/opencode-agents/SKILL.md. This agent needs
