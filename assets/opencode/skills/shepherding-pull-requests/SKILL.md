@@ -5,12 +5,18 @@ description: Covers a pull request you author from pre-PR checks to merge -- tit
 
 # Shepherding Pull Requests
 
-> ## ⛔ DO NOT SCHEDULE WAKES FOR A PR — A DAEMON WATCHES NOW
+> ## ⛔ DO NOT SCHEDULE WAKES FOR YOUR PR — A DAEMON WATCHES NOW
 >
-> **Do not call `swarm_schedule` for a PR. Not once, not with a long delay, not "just one to be
-> safe."** Self-scheduled wakes are gone for good, not pending redesign — see
-> [reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md) for the cost model
-> that killed them, which is still worth knowing.
+> **Do not call `swarm_schedule` for your own PR, and do not register an `agent-wait --until` on
+> it. Not once, not with a long delay, not "just one to be safe."** Its CI, review threads,
+> conflicts, a moved base, its approval and its merge each reach you or the human already. The
+> only `agent-wait` for your own PR is `--watch` (below). Self-scheduled wakes are gone for good,
+> not pending redesign — see [reference/retired-wake-scheduling.md](reference/retired-wake-scheduling.md)
+> for the cost model that killed them, which is still worth knowing.
+>
+> **Waiting on something outside your PR** (another PR merging that yours is not stacked on, a
+> reply in a Slack thread, a date) is yours to register, with `agent-wait add` rather than a timed
+> wake: see `scheduling-wakes`.
 >
 > **What watches instead:** `lgtm-shepherd`, a systemd timer that sweeps open PRs every **10
 > minutes**. It costs nothing when nothing is happening. **It wakes THIS SESSION, not only the
@@ -57,6 +63,7 @@ A PR being open is not the end of the work — it's the middle of it. Opening th
 
 From that moment, without being asked:
 
+- **Record that the PR is yours**, right after `gh pr create` returns: `agent-wait add --pr <owner>/<repo>#<n> --watch`. It never fires: it records which session owns the PR (the shepherd is to route by it; today the daily coverage line counts our PRs without one). Run it only for a PR you opened or have taken over: every session shares one GitHub identity, so a `--watch` from any session silently takes the PR from its owner. Before taking over a PR you did not open, run `agent-wait owner <owner>/<repo>#<n> --json`: if it names a live owner (`"waiter_state": "live"`), leave it unless the human asked you to take it. cloudbox only; elsewhere it exits 2, so skip it there.
 - **Hold the PR.** Stay in the loop until it lands, or until there is a genuine human decision only the user can make. → §"Post-PR Monitoring"
 - **When a review lands, reply to every inline comment in its own thread, and mark each thread resolved.** Both, every thread, bot and human alike. → §"Loop body" step 4
 - **Act on the substance with judgment** — accept, push back, or escalate. Nothing gets silently dropped. → `receiving-code-review`
@@ -460,7 +467,8 @@ An approved, green, mergeable PR is a *report*, not a cue to act: say it is read
 
 Exit conditions unmet, CI green, nothing to fix, no reviewer yet → **report the state in plain text
 and end the turn.** Do not keep the 60-second loop running for hours, and do not schedule a wake.
-`lgtm-shepherd` takes it from there.
+`lgtm-shepherd` takes it from there. If the PR is also waiting on something outside it (another
+PR merging first, an answer in Slack), register that with `agent-wait add` before you stop.
 
 The tight loop is the right instrument only while something is actually changing — CI running, a
 push settling. The break-even against a cold wake is around twelve minutes, which is why a wait

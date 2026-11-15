@@ -1,6 +1,6 @@
 ---
 name: scheduling-wakes
-description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong.
+description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong. Also use when you are waiting on something checkable (another PR merging, a reply in a Slack thread, a date): on cloudbox that is registered with `agent-wait add`, not polled with timed wakes.
 ---
 
 # Scheduling Wakes
@@ -33,6 +33,51 @@ polled, so it survives daemon restarts, the nightly 03:00 reset, and reboots.
 Measured, not hoped for: a wake scheduled at 21:30 was delivered at 09:00 the
 next morning, 119ms late, by a daemon process that had been restarted at 03:00
 — a different process than the one that accepted it.
+
+## Waiting on a condition? Register it with `agent-wait` (cloudbox)
+
+A timed wake that checks "has #6630 merged yet?" pays a cold turn per check to
+learn, almost always, that nothing changed. If the thing you wait on can be
+checked, register it instead. A 5-minute timer checks it without an LLM, and
+you get one wake carrying your note and what it saw:
+
+```bash
+agent-wait add --pr acme/infra#6630 --note "rebase #6551 onto main, undraft it"   # --until merged (default) | closed | approved | feedback
+agent-wait add --slack <permalink of your own question> --keep --note "apply the reviewer's choice of fix"
+agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the variant check"
+```
+
+- **The note is the wake payload.** Write it for a reader with amnesia, as below.
+- **Quote the printed id** (`w…`) in your final message. `agent-wait cancel <id>`
+  when the wait stops mattering; `list --mine` and `show <id>` read them back.
+- **Your own PR is the shepherd's, not a wait:** its CI, threads, conflicts, a
+  moved base, its approval and its merge all reach you or the human already
+  (`shepherding-pull-requests`). Another PR merging, even one of ours, is a
+  wait, unless your PR is stacked on it: the shepherd's `base_merged` wake
+  covers that rebase.
+- **Slack:** register right after posting, with the permalink of *your own
+  question*, so a reply that lands first still fires. `--from <user id>` limits
+  it to the person you asked. Pass `--keep` for a conversation (without it the
+  first reply closes the wait, and a later `reopen` misses replies posted in
+  between), and cancel it once you have your answer: it never closes by
+  itself, and past 5 wakes it sends the human a line a day.
+- **Not for Jonathan.** Agents post as him, so his replies never fire a wait. A
+  wait on him is not a registry wait: end the turn saying what you need from him.
+- **Who gets the wake.** A worker registers without `--program`: the wake goes
+  to its root session, or, if that session is gone, to its program's
+  coordinator, then Telegram. A program coordinator registers with
+  `--program <tag>`. A worker does not pass `--program` to hand a wait to its
+  coordinator; if the coordinator should own it, tell the coordinator.
+- No deadline by default. `--deadline +3d` sends the human a Telegram line when
+  it passes and leaves the wait open.
+- **cloudbox only.** On devbox and macOS `agent-wait` exits 2; use
+  `swarm_schedule` there.
+
+A wait on a person with no thread to watch has no checker: that is still a
+timed wake, or a word to whoever tracks it. When only the date matters, either
+tool works; `--at` survives a deleted worktree (the wake reroutes) and has no
+30-day limit. A goose worker (pull mode) cannot receive `swarm_schedule` wakes,
+so on cloudbox its timed wake is `agent-wait add --at`.
 
 ## Arguments worth knowing
 
