@@ -76,8 +76,8 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
 A wait on a person with no thread to watch has no checker: that is still a
 timed wake, or a word to whoever tracks it. When only the date matters, either
 tool works; `--at` survives a deleted worktree (the wake reroutes) and has no
-30-day limit. A goose session cannot receive `swarm_schedule` wakes at all, so
-on cloudbox its timed wake is `agent-wait add --at`.
+30-day limit. A goose worker (pull mode) cannot receive `swarm_schedule` wakes,
+so on cloudbox its timed wake is `agent-wait add --at`.
 
 ## Arguments worth knowing
 
