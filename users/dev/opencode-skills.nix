@@ -122,9 +122,12 @@ let
   # swarm_schedule" on any host. Without the wrapper the same agent would get
   # 127, which a skill cannot tell apart from a typo.
   #
-  # The registry's timer is NOT installed here: agent-wait.{service,timer} are
-  # imperative user units from that repo's systemd/ (its lanes/install-units.sh).
-  # Their dead-man watcher is in home.cloudbox.nix (lane-deadman-watch-agent-wait).
+  # The registry's timers are NOT installed here: agent-wait*.{service,timer}
+  # are imperative user units from that repo's systemd/, restored by hand with
+  # the command under "Restoring the units" in the design doc above (not
+  # lanes/install-units.sh, which is the maven-renovate lane's installer).
+  # The tick's dead-man watcher is in home.cloudbox.nix
+  # (lane-deadman-watch-agent-wait); agent-wait-coverage.timer has none.
   agentWaitScript =
     "${config.home.homeDirectory}/${if isDarwin then "Code" else "projects"}/eng-agent-platform/agentwait/agent-wait.sh";
   agentWaitCmd = pkgs.writeShellScriptBin "agent-wait" ''

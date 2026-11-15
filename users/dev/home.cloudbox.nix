@@ -1570,7 +1570,14 @@ lib.mkIf isCloudbox {
       "LANE_LABEL=agent-wait"
       "LANE_STALE_SECONDS=1800"
       "LANE_CADENCE_UNIT=agent-wait.timer"
-      "\"LANE_HINT=Check: systemctl --user status agent-wait.timer && journalctl --user -u agent-wait.service -n 100. If the units are gone: install -m 0644 ~/projects/eng-agent-platform/systemd/agent-wait.{service,timer} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now agent-wait.timer\""
+      # The restore recipe lives in ONE place, the registry's design doc: it installs and enables
+      # both timers (the tick and agent-wait-coverage.timer, which nothing watches), and an inline
+      # copy here already drifted once to restoring the tick alone (lgtm-0q1b.25). The hint pulls the
+      # root checkout first, on purpose: nothing auto-pulls it, so it can predate the section, and
+      # the recipe installs unit files from that same working tree, so reading the doc anywhere
+      # else (origin/main) could pair a new recipe with old files. `;` not `&&` after status: it
+      # exits non-zero for exactly the dead or missing timer this alarm is about.
+      "\"LANE_HINT=Check: systemctl --user status agent-wait.timer agent-wait-coverage.timer; journalctl --user -u agent-wait.service -n 100. If the units are gone, update the checkout and run the command this prints (it restores both timers): git -C ~/projects/eng-agent-platform pull --ff-only && sed -n '/^### Restoring the units/,/^## /p' ~/projects/eng-agent-platform/docs/plans/2026-11-13-wait-registry-design.md\""
       "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
     ];
   };
