@@ -1570,7 +1570,7 @@ lib.mkIf isCloudbox {
       "LANE_LABEL=agent-wait"
       "LANE_STALE_SECONDS=1800"
       "LANE_CADENCE_UNIT=agent-wait.timer"
-      "\"LANE_HINT=Check: systemctl --user status agent-wait.timer && journalctl --user -u agent-wait.service -n 100 (units: ~/projects/eng-agent-platform/systemd, installed by lanes/install-units.sh)\""
+      "\"LANE_HINT=Check: systemctl --user status agent-wait.timer && journalctl --user -u agent-wait.service -n 100. If the units are gone: install -m 0644 ~/projects/eng-agent-platform/systemd/agent-wait.{service,timer} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now agent-wait.timer\""
       "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
     ];
   };

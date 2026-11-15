@@ -130,12 +130,23 @@ let
   agentWaitCmd = pkgs.writeShellScriptBin "agent-wait" ''
     script="${agentWaitScript}"
     if [ ! -f "$script" ]; then
+      ${if isCloudbox then ''
+      echo "agent-wait: the wait registry's checkout is MISSING on cloudbox (no $script), so no wait can be registered or fire. Tell the human; use swarm_schedule meanwhile." >&2
+      '' else ''
       echo "agent-wait: no wait registry on THIS host (no $script). It runs on cloudbox only; use swarm_schedule here." >&2
+      ''}
       exit 2
     fi
     # Pinned for the reasons `coordinator` pins them: agentwait imports
     # stallwatch (python >= 3.11), and agent-wait.sh needs GNU `readlink -f`.
     export PATH="${pkgs.python3}/bin:${pkgs.coreutils}/bin:$PATH"
+    # `python -m` puts the CWD first on sys.path, so a caller sitting in an
+    # eng-agent-platform worktree (exactly the sessions developing agentwait)
+    # would run ITS agentwait/stallwatch against the live store, migrations
+    # included. PYTHONSAFEPATH drops the cwd entry; the unsets keep a caller's
+    # venv or path out too. agent-wait.sh sets PYTHONPATH to the root itself.
+    export PYTHONSAFEPATH=1
+    unset PYTHONHOME VIRTUAL_ENV PYTHONPATH
     exec ${pkgs.bash}/bin/bash "$script" "$@"
   '';
 
