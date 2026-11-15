@@ -89,6 +89,12 @@ let
   # lane-deadman-watch-stall-watch (far below), which stays completely silent while this is false.
   # This only enables WATCHING, it is not an arming flag, and like the other it is declarative on purpose.
   stallWatchExpected = true;
+  # Does this host EXPECT the wait registry (eng-agent-platform agentwait/, agent-wait.timer) to be
+  # alive? Consumed ONLY by lane-deadman-watch-agent-wait. Watching only, like the two above. Set
+  # true 2026-11-15 (lgtm-0q1b.10) after agent-wait.timer was enabled and a real pass had written
+  # ~/.local/state/agent-wait/last-success (2026-11-15T17:43:56Z) -- before that it would page
+  # about a registry that had simply not run yet.
+  agentWaitExpected = true;
 
   deadmanService = { description, env }: {
     Unit = {
@@ -1499,6 +1505,14 @@ lib.mkIf isCloudbox {
     '';
   };
 
+  home.file.".config/lanes/expect-agent-wait" = lib.mkIf agentWaitExpected {
+    text = ''
+      The wait registry (agent-wait) is expected to be alive on this host.
+      Managed by home-manager (users/dev/home.cloudbox.nix, agentWaitExpected).
+      Consumed by lane-deadman-watch. This is NOT the lane's arming flag.
+    '';
+  };
+
   systemd.user.services.lane-deadman-watch = deadmanService {
     description = "Alarm if a scheduled autonomous lane has quietly stopped running";
     env = [
@@ -1541,6 +1555,26 @@ lib.mkIf isCloudbox {
     ];
   };
 
+  # The wait registry's tick (agent-wait.timer, every 5 min, all week; units in eng-agent-platform
+  # systemd/). A dead registry is silent by construction: every wait it holds just never fires, and
+  # the agents that registered them have stopped watching. 30 min is six missed ticks (a pass is
+  # capped at 6 min), per the registry's design doc.
+  systemd.user.services.lane-deadman-watch-agent-wait = deadmanService {
+    description = "Alarm if the agent-wait registry has quietly stopped running";
+    env = [
+      "HOME=%h"
+      "LANE_DEADMAN_FILE=%h/.local/state/agent-wait/last-success"
+      "LANE_EXPECT_FILE=%h/.config/lanes/expect-agent-wait"
+      "LANE_ALERT_STATE=%h/.local/state/lane-deadman-watch-agent-wait.alert"
+      "LANE_ALERT_CMD=${driftAlert}"
+      "LANE_LABEL=agent-wait"
+      "LANE_STALE_SECONDS=1800"
+      "LANE_CADENCE_UNIT=agent-wait.timer"
+      "\"LANE_HINT=Check: systemctl --user status agent-wait.timer && journalctl --user -u agent-wait.service -n 100. If the units are gone: install -m 0644 ~/projects/eng-agent-platform/systemd/agent-wait.{service,timer} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now agent-wait.timer\""
+      "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+    ];
+  };
+
   # 09:00 on weekdays, deliberately OUTSIDE the watched lane's 16:00 window and the timeout that
   # follows it. A check running while a run is still in flight would count that day's slot as
   # missed and fire a full slot early, every time a run took a while.
@@ -1566,6 +1600,22 @@ lib.mkIf isCloudbox {
       OnCalendar = "hourly";
       Persistent = true;
       RandomizedDelaySec = "5min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # Every 15 min: the registry ticks every 5, so an hourly check would let a dead registry sit
+  # silent for up to 90 min while waits that should have fired do not.
+  systemd.user.timers.lane-deadman-watch-agent-wait = {
+    Unit = {
+      Description = "Timer for the agent-wait dead-man staleness check";
+    };
+    Timer = {
+      OnCalendar = "*:0/15";
+      Persistent = true;
+      RandomizedDelaySec = "1min";
     };
     Install = {
       WantedBy = [ "timers.target" ];
