@@ -1,6 +1,6 @@
 ---
 name: scheduling-wakes
-description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong. Also use when you are waiting on something checkable (another PR merging, a reply in a Slack thread, a date): on cloudbox that is registered with `agent-wait add`, not polled with timed wakes.
+description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong. Also use when you are waiting on something checkable (another PR merging, a reply in a Slack thread or on a Jira issue, a PR someone will open, a date): on cloudbox that is registered with `agent-wait add`, not polled with timed wakes.
 ---
 
 # Scheduling Wakes
@@ -44,6 +44,8 @@ you get one wake carrying your note and what it saw:
 ```bash
 agent-wait add --pr acme/infra#6630 --note "rebase #6551 onto main, undraft it"   # --until merged (default) | closed | approved | feedback
 agent-wait add --slack <permalink of your own question> --keep --note "apply the reviewer's choice of fix"
+agent-wait add --jira <link to your own comment> --note "apply the answer to the spec"   # --until comment (default) | status:<name>
+agent-wait add --new-pr acme/infra --author some-login --path 'deploy/**' --note "review the follow-up"   # a PR not opened yet
 agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the variant check"
 ```
 
@@ -61,6 +63,17 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
   first reply closes the wait, and a later `reopen` misses replies posted in
   between), and cancel it once you have your answer: it never closes by
   itself, and past 5 wakes it sends the human a line a day.
+- **Jira** works the same way: link your own comment (`…/browse/KEY?focusedCommentId=N`)
+  so a reply posted first still counts; without one the baseline is
+  registration time. `--from` takes the person's Jira accountId (not a name: a
+  wrong id never fires). Comments by automation never count. `--until
+  status:<name>` (comma-combinable with `comment`) closes the wait when reached,
+  even with `--keep`.
+- **A PR that does not exist yet** (someone promised a follow-up): `--new-pr
+  <owner/repo>`, narrowed by `--author <login>` and `--path <glob>`
+  (repeatable). It fires on the first match opened after you register. An
+  already-open PR never fires it: `add` lists matches on stderr, and if one is
+  yours, `cancel` this wait and use `--pr`.
 - **Not for Jonathan.** Agents post as him, so his replies never fire a wait. A
   wait on him is not a registry wait: end the turn saying what you need from him.
 - **Who gets the wake.** A worker registers without `--program`: the wake goes
