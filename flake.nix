@@ -2412,6 +2412,16 @@
         touch $out
       '';
 
+      # reading-jsm-portal-requests helper: GET-only, token on stdin, comments
+      # paged oldest-first to the end. Hermetic (fake curl on PATH).
+      jsm-request = devboxPkgs.runCommand "jsm-request-guard" {
+        nativeBuildInputs = with devboxPkgs; [ bash coreutils gnugrep gnused jq ];
+      } ''
+        cd ${self}
+        bash users/dev/test-jsm-request.sh
+        touch $out
+      '';
+
       monitor-pr-once = devboxPkgs.runCommand "monitor-pr-once-guard" {
         nativeBuildInputs = with devboxPkgs; [ bash python3 coreutils gnugrep ];
       } ''

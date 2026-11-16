@@ -74,6 +74,7 @@ let
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
+    "reading-jsm-portal-requests"
     "rollbar-mcp-setup"
     "slack-mcp-setup"
     "using-atlassian"
@@ -173,6 +174,17 @@ let
       source = "${assetsPath}/opencode/skills/using-atlassian/confluence-to-md.sh";
       executable = true;
     };
+  };
+
+  # reading-jsm-portal-requests' SKILL.md runs its helper by its deployed path.
+  # Deployed as a wrapper that puts curl and jq on PATH: the Mac's home profile
+  # does not install jq, and the helper should not depend on /usr/bin/jq.
+  jsmExtras = {
+    "${skillsDir}/reading-jsm-portal-requests/jsm-request.sh".source =
+      pkgs.writeShellScript "jsm-request.sh" ''
+        export PATH=${lib.makeBinPath [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ]}:$PATH
+        exec ${pkgs.bash}/bin/bash ${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-request.sh "$@"
+      '';
   };
 
   # shepherding-pull-requests has an executable monitoring python script plus
@@ -413,6 +425,7 @@ in
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianExtras
+      // jsmExtras
       // monitoringDeploymentsExtras
     );
 
