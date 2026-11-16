@@ -2422,6 +2422,16 @@
         touch $out
       '';
 
+      # reading-jsm-portal-requests writer: dry run unless --send, token on
+      # stdin, fields shaped from the type's own list, duplicate-summary guard.
+      jsm-write = devboxPkgs.runCommand "jsm-write-guard" {
+        nativeBuildInputs = with devboxPkgs; [ bash coreutils gnugrep gnused jq ];
+      } ''
+        cd ${self}
+        bash users/dev/test-jsm-write.sh
+        touch $out
+      '';
+
       monitor-pr-once = devboxPkgs.runCommand "monitor-pr-once-guard" {
         nativeBuildInputs = with devboxPkgs; [ bash python3 coreutils gnugrep ];
       } ''
