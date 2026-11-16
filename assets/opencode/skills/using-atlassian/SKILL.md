@@ -22,6 +22,7 @@ Two complementary tools. **Read this whole file before choosing one** — pickin
 | Add a comment | **MCP** `addCommentToJiraIssue` |
 | JQL search ("my open tickets in epic X") | **MCP** `searchJiraIssuesUsingJql` |
 | Read non-default Jira fields (custom fields, labels, story points, sprint, fix version, parent epic) | **MCP** `getJiraIssue` |
+| Read a service-desk request the human raised through a customer portal (the MCP and nvim answer 404) | `reading-jsm-portal-requests` skill |
 | Confluence page **body only**, no images/comments | Either; `confluence-to-md.sh` is lightest |
 | Confluence with comments or attachments | **nvim** (only option) |
 | Create / edit Confluence pages or comments | **MCP** `createConfluencePage` / `updateConfluencePage` |
@@ -46,8 +47,9 @@ an agent posted and then edited a Jira comment over REST, which the human did no
 transitions, or Confluence pages. Waiting for the human costs less than an unsanctioned
 write under their name.
 
-Reads stay on their sanctioned path: nvim `:FetchJiraTicket` / `:FetchConfluencePage` and
-`confluence-to-md.sh` do not depend on the MCP and are fine to use while it is down.
+Reads stay on their sanctioned path: nvim `:FetchJiraTicket` / `:FetchConfluencePage`,
+`confluence-to-md.sh` and the `reading-jsm-portal-requests` helper do not depend on the MCP
+and are fine to use while it is down.
 
 ## Quick Start
 

@@ -74,6 +74,7 @@ let
     "monitoring-deployments"
     "pagerduty-mcp-setup"
     "reading-jenkins-builds"
+    "reading-jsm-portal-requests"
     "rollbar-mcp-setup"
     "slack-mcp-setup"
     "using-atlassian"
@@ -171,6 +172,14 @@ let
       "${assetsPath}/opencode/skills/using-atlassian/REFERENCE.md";
     "${skillsDir}/using-atlassian/confluence-to-md.sh" = {
       source = "${assetsPath}/opencode/skills/using-atlassian/confluence-to-md.sh";
+      executable = true;
+    };
+  };
+
+  # reading-jsm-portal-requests' SKILL.md runs its helper by its deployed path.
+  jsmExtras = {
+    "${skillsDir}/reading-jsm-portal-requests/jsm-request.sh" = {
+      source = "${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-request.sh";
       executable = true;
     };
   };
@@ -413,6 +422,7 @@ in
     // lib.optionalAttrs (isDarwin || isCloudbox) (
       mkSkills workOnlySkills
       // atlassianExtras
+      // jsmExtras
       // monitoringDeploymentsExtras
     );
 
