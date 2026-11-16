@@ -60,9 +60,9 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
 - **Slack:** register right after posting, with the permalink of *your own
   question*, so a reply that lands first still fires. `--from <user id>` limits
   it to the person you asked. Pass `--keep` for a conversation (without it the
-  first reply closes the wait, and a later `reopen` misses replies posted in
-  between), and cancel it once you have your answer: it never closes by
-  itself, and past 5 wakes it sends the human a line a day.
+  first reply's wake closes the wait; a `reopen` then reports any reply posted
+  since, but never one already delivered), and cancel it once you have your
+  answer: it never closes by itself, and past 5 wakes it sends the human a line a day.
 - **Jira** works the same way: link your own comment (`…/browse/KEY?focusedCommentId=N`)
   so a reply posted first still counts; without one the baseline is
   registration time. `--from` takes the person's Jira accountId (not a name: a
