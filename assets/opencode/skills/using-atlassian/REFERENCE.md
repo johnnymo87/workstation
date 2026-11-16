@@ -102,8 +102,10 @@ with threading + attachments rendered, use **nvim**.)
 `watchJiraIssue`, `listJiraProjects`, `listJiraProjectIssueTypesMetadata`,
 `getJiraIssueTypeMetaWithFieldsSchema`, `getJiraBoardSprintData`,
 `downloadJiraIssueAttachment`, and more. Deletes (`deleteJiraIssue`,
-`deleteJiraComment`) go through `executeDestructive` and are disabled unless an
-org admin enabled them — do not delete without the human's explicit ask.
+`deleteJiraComment`) would go through `executeDestructive`; Atlassian ships them
+disabled, and `discover` "delete a jira issue" returned no delete operation for
+our site on 2026-11-16. Do not delete anything without the human's explicit
+ask.
 
 ### Example: Create a Bug Ticket
 

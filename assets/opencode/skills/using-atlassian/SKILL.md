@@ -76,7 +76,7 @@ To use one:
 **Never guess an operation name** — a name that isn't in your tool list or a
 `discover` result will fail. An operation missing from your tool list does not
 mean the MCP can't do it; `discover` before concluding that. Do not flip the
-server to `?tools=all` to avoid this step: that loads ~200 tool schemas into
+server to `?tools=all` to avoid this step: that loads hundreds of tool schemas into
 every turn's context.
 
 `cloudId` is required by nearly every tool. Use `$ATLASSIAN_CLOUD_ID`, the

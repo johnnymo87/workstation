@@ -382,7 +382,7 @@ let
   # URL is part of mcp-remote's token-cache key, so changing it requires a
   # one-time re-auth (atlassian-multi-instance skill). The default v2 tool
   # surface is a set of primary tools plus discover/executeRead/executeWrite/
-  # executeDestructive for the rest; `?tools=all` would flatten ~200 tools
+  # executeDestructive for the rest; `?tools=all` would flatten hundreds of tools
   # into every turn's context instead.
   # ---------------------------------------------------------------------------
   mkAtlassianMcp = { name, port, keychainService, sopsSecret }: pkgs.writeShellApplication {
