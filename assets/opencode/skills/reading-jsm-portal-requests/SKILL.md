@@ -56,8 +56,9 @@ $W create 292 1375 --summary "..." --description-file body.txt --field customfie
 $W comment KEY-123 --body-file reply.txt
 ```
 
-Nothing is sent without `--send`; first run it without and check the printed
-JSON. `create` prints `KEY<TAB>portal link`, then register a watch (below).
+Nothing is sent without `--send`. Run it without first, and show the human the
+summary and text before sending, unless they already approved or delegated the
+wording. `create` prints `KEY<TAB>portal link`, then register a watch (below).
 To match an earlier request, read it with `jsm-request.sh` and reuse its
 request type and fields. Exit codes, the duplicate guard and measured API
 facts are in [WRITING.md](WRITING.md).

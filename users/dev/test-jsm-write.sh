@@ -135,6 +135,8 @@ run create 5 11 --summary "Already: filed (here)" --send
 grep -qF 'ABC-2' <<<"$err" || oops "duplicate names the existing key"
 nowrites "duplicate"
 if grep -q 'searchTerm' "$work/fx/argv.log"; then oops "duplicate check does not rely on searchTerm"; fi
+run create 5 11 --summary "  Already: filed (here) " --send
+[ "$rc" -eq 6 ] || oops "summary is trimmed before the duplicate check (got $rc)"
 ok "duplicate open request blocks create, found by exact summary across pages"
 
 # 5. bad input is refused before any write
@@ -144,6 +146,8 @@ run create 5 11 --summary "X" --field customfield_9=Nope --send
 [ "$rc" -eq 2 ] && grep -q 'Nope is not an option' <<<"$err" || oops "unknown option refused"
 run create 5 11 --summary "X" --field customfield_7=2026-01-01 --send
 [ "$rc" -eq 2 ] && grep -q 'does not shape' <<<"$err" || oops "unshaped type refused"
+run create 5 11 --summary "X" --field customfield_9=GitHub --field customfield_9=AppOne --send
+[ "$rc" -eq 2 ] && grep -q 'given twice' <<<"$err" || oops "repeated --field refused"
 run create 5 11 --summary "   " --send
 [ "$rc" -eq 2 ] || oops "blank summary refused"
 run create 5 11 --summary "X" --description-file missing.txt --send

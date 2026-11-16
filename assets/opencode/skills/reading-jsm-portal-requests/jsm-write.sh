@@ -85,17 +85,24 @@ create)
       --summary) [ $# -ge 2 ] || usage; summary="$2"; shift 2 ;;
       --description-file) [ $# -ge 2 ] || usage; descf="$2"; shift 2 ;;
       --field) [ $# -ge 2 ] && [[ "$2" == ?*=* ]] || usage
-        jq --arg k "${2%%=*}" --arg v "${2#*=}" '.[$k] = $v' "$tmp/given.json" > "$tmp/g2" && mv "$tmp/g2" "$tmp/given.json"
+        [ "$(jq --arg k "${2%%=*}" 'has($k)' "$tmp/given.json")" = false ] || die 2 "--field ${2%%=*} given twice"
+        jq --arg k "${2%%=*}" --arg v "${2#*=}" '.[$k] = $v' "$tmp/given.json" > "$tmp/g2" || die 5 "could not record --field $2"
+        mv "$tmp/g2" "$tmp/given.json"
         shift 2 ;;
       --send) send=1; shift ;;
       *) usage ;;
     esac
   done
-  [ -n "${summary//[[:space:]]/}" ] || die 2 "--summary is required"
-  jq --arg s "$summary" '.summary = $s' "$tmp/given.json" > "$tmp/g2" && mv "$tmp/g2" "$tmp/given.json"
+  # Trimmed, as Jira stores it, so the duplicate guard compares like with like.
+  summary="${summary#"${summary%%[![:space:]]*}"}"; summary="${summary%"${summary##*[![:space:]]}"}"
+  [ -n "$summary" ] || die 2 "--summary is required"
+  jq --arg s "$summary" '.summary = $s' "$tmp/given.json" > "$tmp/g2" || die 5 "could not record --summary"
+  mv "$tmp/g2" "$tmp/given.json"
   if [ -n "$descf" ]; then
     checkfile "$descf"
-    jq --rawfile d "$descf" '.description = $d' "$tmp/given.json" > "$tmp/g2" && mv "$tmp/g2" "$tmp/given.json"
+    [ "$(jq 'has("description")' "$tmp/given.json")" = false ] || die 2 "description given twice"
+    jq --rawfile d "$descf" '.description = $d' "$tmp/given.json" > "$tmp/g2" || die 2 "could not read $descf"
+    mv "$tmp/g2" "$tmp/given.json"
   fi
 
   # Shape each value by the type's own field list; refuse anything it does not know.
@@ -153,7 +160,7 @@ comment)
   done
   [ -n "$bodyf" ] || die 2 "--body-file is required"
   checkfile "$bodyf"
-  jq -n --rawfile b "$bodyf" '{body: $b, public: true}' > "$tmp/payload.json"
+  jq -n --rawfile b "$bodyf" '{body: $b, public: true}' > "$tmp/payload.json" || die 2 "could not read $bodyf"
   # Confirms the request exists and is yours to see before anything is sent.
   call GET "$API/request/$key" "$tmp/r.json" || exit $?
   if [ "$send" -eq 0 ]; then
@@ -161,7 +168,9 @@ comment)
     echo "jsm-write: dry run; nothing sent to $key. Add --send to post it." >&2
     exit 0
   fi
-  call POST "$API/request/$key/comment" "$tmp/c.json" "$tmp/payload.json" || exit $?
+  rc=0; call POST "$API/request/$key/comment" "$tmp/c.json" "$tmp/payload.json" || rc=$?
+  [ "$rc" -ne 5 ] || echo "jsm-write: the comment may still have been posted; read $key with jsm-request.sh before retrying (a retry is NOT refused)" >&2
+  [ "$rc" -eq 0 ] || exit "$rc"
   jq -r --arg w "$(jq -r '._links.web' "$tmp/r.json")" '"comment \(.id) on \($w)"' "$tmp/c.json"
   ;;
 

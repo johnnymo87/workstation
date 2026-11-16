@@ -16,7 +16,7 @@ Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 | 2 | Bad arguments, or a field the request type does not have, an option it does not offer, or a field type the helper does not shape (anything but text and options). Nothing was sent. |
 | 3 | `ATLASSIAN_*` unset. |
 | 4 | Token refused (HTTP 401). |
-| 5 | Transport error, an unexpected HTTP status, or non-JSON. **After `--send` this does not prove nothing was raised:** run `jsm-request.sh --list` before retrying. A retry of `create` is refused anyway if the first one landed (exit 6). |
+| 5 | Transport error, an unexpected HTTP status, or non-JSON. **After `--send` this does not prove nothing was sent.** Before retrying `create`, run `jsm-request.sh --list` (the duplicate guard may not see a request raised seconds ago); before retrying `comment`, read the request: nothing stops a second identical comment. |
 | 6 | One of the human's open requests on this desk already has exactly this summary. It prints the key; comment there instead. |
 | 7 | HTTP 404: no such desk, request type or request. |
 | 8 | HTTP 400: the desk rejected the fields; its message is printed. |
@@ -33,7 +33,9 @@ Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 3. Only then, and only with `--send`, POSTs `/rest/servicedeskapi/request`.
 
 `comment` reads the request first (so a typo is a 404 before anything is sent),
-then POSTs `{"body": ..., "public": true}` to `/request/KEY/comment`.
+then POSTs `{"body": ..., "public": true}` to `/request/KEY/comment`. On many
+desks a customer comment on a resolved request reopens it; say so to the human
+before commenting on one.
 
 Bodies are Jira wiki markup, read verbatim from a file: write the text with
 the file-writing tool, not an inline shell string.
