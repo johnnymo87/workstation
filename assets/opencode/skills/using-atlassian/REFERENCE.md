@@ -5,7 +5,7 @@ Full details for both tools. SKILL.md has the decision matrix and quick-start; t
 ## Contents
 
 - Environment & Auth (required variables, required tools)
-- Part 1: Atlassian MCP — Jira CRUD (create, read, update/transition, JQL search, comments, example bug ticket, best practices)
+- Part 1: Atlassian MCP — Jira CRUD (primary vs deferred tools, create, read, update/transition, JQL search, comments, example bug ticket, best practices)
 - Part 1b: Atlassian MCP — Confluence authoring
 - Part 2: nvim — Fetch Atlassian Content as Markdown (Jira ticket, Confluence page, batch fetch, plugin source, known limitations)
 - Part 3: `confluence-to-md.sh` (bundled helper)
@@ -36,35 +36,48 @@ The MCP authenticates over OAuth (not the `ATLASSIAN_API_TOKEN`); nvim and `conf
 
 ## Part 1: Atlassian MCP — Jira CRUD
 
-All operations below are tool calls against the `atlassian` MCP server. Every
-tool takes a `cloudId` (the MCP resolves the accessible cloud id; if it asks,
-it's the `getAccessibleAtlassianResources` / `atlassianUserInfo` result). Keys
-like `PROJ-1234` and project `PROJ` are examples.
+All operations below are tool calls against the `atlassian` MCP server
+(Atlassian MCP v2, `https://mcp.atlassian.com/v2/mcp`). Nearly every tool
+requires `cloudId`: `$ATLASSIAN_CLOUD_ID`, or the `getAccessibleAtlassianResources`
+result. Keys like `PROJ-1234` and project `PROJ` are examples.
+
+### Primary vs deferred tools
+
+Tools marked *(deferred)* below are not in your tool list. Reach them with
+`discover` (natural-language `query`; returns the exact operation `name` and its
+inputs), then call `executeRead` / `executeWrite` / `executeDestructive` with
+`cloudId`, `name`, and a flat `inputs` object. Never invent an operation name;
+`discover` first. Responses from `execute*` can be trimmed with
+`responseFields` (e.g. `["key","fields.summary","fields.status.name"]`).
 
 ### Create — `createJiraIssue`
 
-Params: `projectKey` (`PROJ`), `issueTypeName` (`Task`, `Bug`, `Story`, `Epic`, …),
-`summary`, Markdown `description`, and `assignee_account_id`
-(`$ATLASSIAN_ASSIGNEE_ID`). Returns the new key, e.g. `PROJ-1234`
+Params: `projectKey` (`PROJ`), `issueType` (`Task`, `Bug`, `Story`, `Epic`, …),
+`summary`, Markdown `description` (`contentFormat` defaults to `markdown`),
+`assignee` (account ID, `$ATLASSIAN_ASSIGNEE_ID`), optional `parent` (epic or
+parent key), `labels`, `priority`, and `additional_fields` for custom fields. A
+rejected create returns a `repairHint` naming the bad field. Returns the new key, e.g. `PROJ-1234`
 (browse: `https://$ATLASSIAN_SITE/browse/PROJ-1234`).
 
 ### Read — `getJiraIssue`
 
-Params: `issueIdOrKey` (`PROJ-1234`), optional `fields`. Returns the full field
-set including custom fields (e.g. `customfield_10001`), labels, story points,
-sprint, fix version, parent epic.
+Params: `issueIdOrKey` (`PROJ-1234`), optional `fields`,
+`responseContentFormat`. Returns the full field set including custom fields
+(e.g. `customfield_10001`), labels, story points, sprint, fix version, parent
+epic.
 
-Note: the description comes back as ADF (Atlassian Document Format), not
-Markdown. For rendered Markdown of a ticket's description + comments +
+Note: the description is not rendered Markdown with attachments. For rendered Markdown of a ticket's description + comments +
 attachments, use **nvim** instead.
 
 ### Update — `editJiraIssue` / `transitionJiraIssue`
 
 - `editJiraIssue` — params `issueIdOrKey` plus the `fields` to change (`summary`,
   Markdown `description`, `assignee`, etc.).
-- `transitionJiraIssue` — moves a ticket's status. First call
-  `getTransitionsForJiraIssue` to get the valid transition id for the target
-  status ("In Review"), then pass that `transitionId`.
+- `transitionJiraIssue` — moves a ticket's status (and/or into a sprint or the
+  backlog). Get the transition from `listJiraIssueTransitions` *(deferred:
+  `discover` → `executeRead`)*, then pass `transitionId`, or `transitionName`
+  — the transition's own name, which often differs from the target status.
+  The response reports the status the issue landed in.
 
 ### Search (JQL) — `searchJiraIssuesUsingJql`
 
@@ -75,18 +88,32 @@ project=PROJ AND assignee="<accountId>" AND statusCategory!=Done
 project=PROJ AND "Epic Link"=PROJ-5678 AND status!="Done"
 ```
 
-### Comments — `addCommentToJiraIssue`
+### Comments — `addOrEditJiraIssueComment` / `listJiraIssueComments`
 
-Params: `issueIdOrKey`, Markdown `commentBody`. (To read existing comments with
-threading + attachments rendered, use **nvim**.)
+Params: `issueIdOrKey`, Markdown `commentBody`. Omit `commentId` to add a
+comment; pass one from `listJiraIssueComments` to edit it. **An edit replaces
+the whole body**, so fetch the current text first. (To read existing comments
+with threading + attachments rendered, use **nvim**.)
+
+### Other Jira operations (deferred)
+
+`discover` → `execute*` for: `lookupJiraAccountId`, `listJiraIssueAssignableUsers`,
+`listJiraIssueTransitions`, `createJiraIssueLink`, `addOrEditJiraIssueWorklog`,
+`watchJiraIssue`, `listJiraProjects`, `listJiraProjectIssueTypesMetadata`,
+`getJiraIssueTypeMetaWithFieldsSchema`, `getJiraBoardSprintData`,
+`downloadJiraIssueAttachment`, and more. Deletes (`deleteJiraIssue`,
+`deleteJiraComment`) would go through `executeDestructive`; Atlassian ships them
+disabled, and `discover` "delete a jira issue" returned no delete operation for
+our site on 2026-11-16. Do not delete anything without the human's explicit
+ask.
 
 ### Example: Create a Bug Ticket
 
 Call `createJiraIssue` with:
 - `projectKey`: `PROJ`
-- `issueTypeName`: `Bug`
+- `issueType`: `Bug`
 - `summary`: "Fix authentication timeout on order submission"
-- `assignee_account_id`: `$ATLASSIAN_ASSIGNEE_ID`
+- `assignee`: `$ATLASSIAN_ASSIGNEE_ID`
 - `description` (Markdown):
 
   > Users experience authentication timeouts when submitting orders during peak
@@ -102,7 +129,7 @@ The response contains the new key, e.g. `PROJ-1234`
 
 1. Lead with impact in the description
 2. Verify epic assignment for Active Epic work → `PROJ-5678`
-3. Use `accountId` for the assignee (more reliable than email); look it up with `lookupJiraAccountId` if needed
+3. Use `accountId` for the assignee (more reliable than email); look it up with `listJiraIssueAssignableUsers` or `lookupJiraAccountId` (both deferred) if needed
 4. Confirm you're on the right instance before mutating (see Troubleshooting → Wrong instance)
 
 ---
@@ -111,10 +138,22 @@ The response contains the new key, e.g. `PROJ-1234`
 
 Confluence write and search tools:
 
-- `createConfluencePage` — params `spaceId`, `title`, Markdown `body`, optional `parentId`.
-- `updateConfluencePage` — params `pageId`, `title`, Markdown `body` (and the current `version` if the tool requires it).
-- `createConfluenceFooterComment` / `createConfluenceInlineComment` — add comments.
-- `searchConfluenceUsingCql` — CQL search across spaces.
+- `createConfluenceContent` — params `parent` (`{"spaceId": "<id>"}`, or with
+  `"parentContentId"` to nest), `contentType` (`page`, `live_doc`, `blogpost`,
+  `whiteboard`, `database`, `folder`, …), `title`, `body`.
+- `updateConfluenceContent` — params `contentId` (or `contentUrl`),
+  `snapshotToken` from the latest `getConfluenceContent` /
+  `updateConfluenceContent` response, then either a full `body` or granular
+  `edits`; `dryRun` previews.
+- `getConfluenceContent` — read by `content_id` or `content_url`.
+- `searchConfluence` — CQL search (`cql`).
+- Comments are deferred: `discover` → `createConfluenceComment` /
+  `updateConfluenceComment` via `executeWrite`.
+
+Both write tools tell you to read the format guide first (`executeRead` with
+`name=getContentFormatGuide`, `inputs={"toolName": "createConfluencePage"}`) and
+to apply the space's instructions (`getConfluenceSpace`, deferred). Follow the
+tool descriptions; they are the current contract.
 
 For *reading* a page with threaded comments and diagrams rendered to Markdown, still prefer **nvim** `:FetchConfluencePage` (Part 2) or the lighter `confluence-to-md.sh` (Part 3).
 
@@ -294,8 +333,10 @@ cat /run/secrets/atlassian_api_token
 
 ### Atlassian MCP not authenticated / tools missing
 
-The `atlassian` MCP authenticates over OAuth, not the API token. If its tools
-are missing or the server shows "Failed", see the `atlassian-multi-instance`
+The `atlassian` MCP authenticates over OAuth, not the API token. If an
+operation you need is merely absent from your tool list, that is v2's deferred
+tool surface, not a failure: `discover` it. If the server's tools are missing
+entirely or the server shows "Failed", see the `atlassian-multi-instance`
 skill → "Troubleshooting MCP Failed Status" and "Re-authenticating OAuth". In
 short: verify the site secret exists, check `ls ~/.mcp-auth/mcp-remote-*/` for
 cached tokens, and re-run the wrapper manually to complete the OAuth consent

@@ -376,6 +376,14 @@ let
   # ---------------------------------------------------------------------------
   # Atlassian MCP wrapper: reads site URL from credentials at runtime
   # so org-identifying URLs stay out of version control.
+  #
+  # Endpoint is Atlassian MCP v2 (v1 and v1/mcp/authv2 stop working
+  # 2027-03-01). v2 is a separate OAuth resource with its own scopes, and the
+  # URL is part of mcp-remote's token-cache key, so changing it requires a
+  # one-time re-auth (atlassian-multi-instance skill). The default v2 tool
+  # surface is a set of primary tools plus discover/executeRead/executeWrite/
+  # executeDestructive for the rest; `?tools=all` would flatten hundreds of tools
+  # into every turn's context instead.
   # ---------------------------------------------------------------------------
   mkAtlassianMcp = { name, port, keychainService, sopsSecret }: pkgs.writeShellApplication {
     inherit name;
@@ -391,7 +399,7 @@ let
           echo "${name}: could not read atlassian site" >&2
           exit 1
         fi
-        exec npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp/authv2 ${toString port} --resource "https://''${SITE}/"
+        exec npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v2/mcp ${toString port} --resource "https://''${SITE}/"
       '';
   };
 

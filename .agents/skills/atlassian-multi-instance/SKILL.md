@@ -75,11 +75,19 @@ This keeps org-identifying URLs out of the generated `opencode.managed.json`. Th
 **Arg ordering matters:** `mcp-remote` parses positional args as `<url> [port] [flags...]`. The callback port MUST come before `--resource`:
 ```bash
 # Correct: port as args[1]
-npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v1/mcp/authv2 3334 --resource "https://${SITE}/"
+npx -y mcp-remote@0.1.38 https://mcp.atlassian.com/v2/mcp 3334 --resource "https://${SITE}/"
 
 # Wrong: --resource as args[1], port is never parsed
-npx -y mcp-remote https://mcp.atlassian.com/v1/mcp/authv2 --resource "https://${SITE}/" 3334
+npx -y mcp-remote https://mcp.atlassian.com/v2/mcp --resource "https://${SITE}/" 3334
 ```
+
+## Endpoint: Atlassian MCP v2
+
+The wrapper targets `https://mcp.atlassian.com/v2/mcp`. The v1 endpoints (`/v1/mcp`, `/v1/mcp/authv2`) stop working on 2027-03-01 ([upgrade guide](https://support.atlassian.com/atlassian-ai-gateway/docs/how-to-upgrade-from-atlassian-mcp-v1-to-atlassian-mcp-v2/)).
+
+- **v2 is a separate OAuth resource** (new `*:agent-interface` scopes), and the server URL is part of mcp-remote's cache key, so v1 tokens do not carry over: a URL change means a one-time re-auth (below).
+- **Tool surface:** v2 exposes a set of *primary* tools directly (`getJiraIssue`, `createJiraIssue`, `editJiraIssue`, `transitionJiraIssue`, `addOrEditJiraIssueComment`, `searchJiraIssuesUsingJql`, `getConfluenceContent`, `createConfluenceContent`, `updateConfluenceContent`, `searchConfluence`, ...) plus `discover` and `executeRead` / `executeWrite` / `executeDestructive` for everything else. We deliberately do **not** use `?tools=all`, which flattens hundreds of tool schemas into every turn's context.
+- `--resource "https://${SITE}/"` is still passed; it pins the OAuth grant to our site.
 
 ## OAuth Token Cache
 
