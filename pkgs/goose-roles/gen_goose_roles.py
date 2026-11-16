@@ -35,6 +35,13 @@ You are a delegated goose subagent. You cannot ask the caller questions mid-task
 If the task is ambiguous or blocked, stop and report what you need instead of guessing.
 Your final message is your whole report to the caller."""
 
+# settings.max_turns outranks GOOSE_SUBAGENT_MAX_TURNS (summon.rs build_task_config;
+# only the delegate call's own max_turns beats it). goose's built-in default is 25,
+# and all 48 real SDD subagent runs on 2026-11-16 needed more (workstation-e0vz).
+# Bounded on purpose: a runaway delegate should stop, not run to 1000.
+IMPLEMENTER_MAX_TURNS = 250
+READ_ONLY_MAX_TURNS = 80
+
 
 class GenError(Exception):
     pass
@@ -115,7 +122,8 @@ def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model):
         "instructions": body.strip() + (READ_ONLY_NOTE if ro else IMPLEMENTER_NOTE),
         "extensions": exts,
         "settings": {"goose_provider": provider,
-                     "goose_model": map_model(fm.get("model"), opus_model, sonnet_model)},
+                     "goose_model": map_model(fm.get("model"), opus_model, sonnet_model),
+                     "max_turns": READ_ONLY_MAX_TURNS if ro else IMPLEMENTER_MAX_TURNS},
     }
 
 
