@@ -185,6 +185,13 @@ let
         export PATH=${lib.makeBinPath [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ]}:$PATH
         exec ${pkgs.bash}/bin/bash ${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-request.sh "$@"
       '';
+    "${skillsDir}/reading-jsm-portal-requests/jsm-write.sh".source =
+      pkgs.writeShellScript "jsm-write.sh" ''
+        export PATH=${lib.makeBinPath [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ]}:$PATH
+        exec ${pkgs.bash}/bin/bash ${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-write.sh "$@"
+      '';
+    "${skillsDir}/reading-jsm-portal-requests/WRITING.md".source =
+      "${assetsPath}/opencode/skills/reading-jsm-portal-requests/WRITING.md";
   };
 
   # shepherding-pull-requests has an executable monitoring python script plus

@@ -23,6 +23,7 @@ Two complementary tools. **Read this whole file before choosing one** — pickin
 | JQL search ("my open tickets in epic X") | **MCP** `searchJiraIssuesUsingJql` |
 | Read non-default Jira fields (custom fields, labels, story points, sprint, fix version, parent epic) | **MCP** `getJiraIssue` |
 | Read a service-desk request the human raised through a customer portal (the MCP and nvim answer 404) | `reading-jsm-portal-requests` skill |
+| Raise a service-desk (portal) request, or reply on one, when the human asked you to | `reading-jsm-portal-requests` skill (`jsm-write.sh`) |
 | Confluence page **body only**, no images/comments | Either; `confluence-to-md.sh` is lightest |
 | Confluence with comments or attachments | **nvim** (only option) |
 | Create / edit Confluence pages | **MCP** `createConfluenceContent` / `updateConfluenceContent` |
@@ -52,6 +53,10 @@ write under their name.
 Reads stay on their sanctioned path: nvim `:FetchJiraTicket` / `:FetchConfluencePage`,
 `confluence-to-md.sh` and the `reading-jsm-portal-requests` helper do not depend on the MCP
 and are fine to use while it is down.
+
+The one REST write path is `reading-jsm-portal-requests`' `jsm-write.sh`, and it is for
+portal requests only: the MCP cannot raise or comment on a request in a desk where the human
+is just a customer. It is not a fallback for ordinary issues.
 
 ## Tools not in your list: `discover` first
 
