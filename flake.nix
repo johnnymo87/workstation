@@ -488,6 +488,24 @@
         touch $out
       '';
 
+      # ---- pkgs/aigateway-cache-miss-watch (bead workstation-ke9f.2) --------
+      aigateway-cache-miss-watch-tests = devboxPkgs.runCommand "aigateway-cache-miss-watch-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+        ACM_WATCH_BIN = "${devboxPkgs.callPackage ./pkgs/aigateway-cache-miss-watch { }}/bin/aigateway-cache-miss-watch";
+      } ''
+        cd ${self}
+        python3 pkgs/aigateway-cache-miss-watch/test_aigateway_cache_miss_watch.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^OK' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: aigateway-cache-miss-watch suite did not pass." >&2
+          exit 1
+        }
+        grep -q '^Ran 11 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 11 tests; a suite that stops asserting still prints OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # ---- pkgs/oc-attach-reap (bead workstation-o5s1.14) ------------------
       #
       # This tool SENDS SIGTERM, so its suite is about the ways it could kill

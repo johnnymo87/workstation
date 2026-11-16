@@ -59,6 +59,7 @@ let
   # escalation, POST to pigeon's /alert). Same package the cloudbox canaries and
   # devbox's frontdoor canary use -- do not fork it.
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
+  aigatewayCacheMissWatch = pkgs.callPackage ../../pkgs/aigateway-cache-miss-watch { };
   # Does this host EXPECT a scheduled autonomous lane to be alive? Consumed ONLY by
   # lane-deadman-watch (far below), which stays completely silent while this is false.
   #
@@ -1465,6 +1466,48 @@ lib.mkIf isCloudbox {
       OnCalendar = "*:0/30";
       Persistent = true;
       RandomizedDelaySec = "3min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # ---- aigateway-cache-miss-watch: Gemini stuck-miss alert + prefix verdict --
+  #
+  # Complements the opencode `cache-miss-breaker` plugin (workstation-ke9f.1):
+  # alerts when any Gemini session in aigateway's ledger hits >=10 consecutive
+  # HTTP-200 steps at >=50K context with cache_read_tokens = 0, covering
+  # top-level opencode sessions and non-opencode clients (goose), and reporting
+  # whether `request_prefix_hash` stayed constant (Vertex-side) or changed
+  # between steps (client-side prefix churn). Exits 0 cleanly until the
+  # fingerprint columns from mono#5865 (workstation-ke9f.2) are migrated.
+  systemd.user.services.aigateway-cache-miss-watch = {
+    Unit = {
+      Description = "Alert on Gemini sessions stuck at zero prompt-cache reads in aigateway's ledger";
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${aigatewayCacheMissWatch}/bin/aigateway-cache-miss-watch";
+      StandardOutput = "journal";
+      StandardError = "journal";
+      TimeoutStartSec = "2min";
+      Environment = [
+        "HOME=%h"
+        "ACM_ALERT_CMD=${driftAlert}"
+        "ACM_DOCKER_BIN=${pkgs.docker}/bin/docker"
+        "PATH=${pkgs.coreutils}/bin:/run/current-system/sw/bin:/run/wrappers/bin"
+      ];
+    };
+  };
+
+  systemd.user.timers.aigateway-cache-miss-watch = {
+    Unit = {
+      Description = "Timer for aigateway Gemini cache-miss watch";
+    };
+    Timer = {
+      OnCalendar = "*:0/10";
+      Persistent = true;
+      RandomizedDelaySec = "1min";
     };
     Install = {
       WantedBy = [ "timers.target" ];
