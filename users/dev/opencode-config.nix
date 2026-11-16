@@ -1200,6 +1200,10 @@ in
     # astra pre-check fails open where astra-probe is absent (macOS).
     # See docs/plans/2026-10-01-reviewer-fail-fast-design.md.
     xdg.configFile."opencode/plugins/subagent-failure.ts".source = "${assetsPath}/opencode/plugins/subagent-failure.ts";
+    # cache-miss-breaker: aborts a Gemini SUBAGENT after 10 consecutive steps
+    # >=50K context with zero prompt-cache reads (a Vertex-side stuck session),
+    # and tells the parent to re-dispatch once. workstation-ke9f.1.
+    xdg.configFile."opencode/plugins/cache-miss-breaker.ts".source = "${assetsPath}/opencode/plugins/cache-miss-breaker.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
