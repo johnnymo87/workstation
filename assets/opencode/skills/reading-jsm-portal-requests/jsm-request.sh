@@ -5,17 +5,19 @@
 #
 # Usage:
 #   jsm-request.sh <KEY | portal link | browse link> [--attachments DIR]
-#   jsm-request.sh --list [open|closed|all]      # requests you raised
+#   jsm-request.sh --list [open|closed|all] [--participated]
 #
 # Prints Markdown: status, request fields, every PUBLIC comment oldest first
-# (the latest reply is LAST), and the attachment list. Read-only: every call is
-# a GET. Credentials go to curl on stdin (--config -), never on argv.
+# (the latest reply is LAST), and the attachment list. Nothing is printed
+# unless every page was read. Read-only: every call is a GET. Credentials go
+# to curl on stdin (--config -), never on argv.
 #
-# Requires: curl, jq. Environment: ATLASSIAN_SITE, ATLASSIAN_EMAIL,
-# ATLASSIAN_API_TOKEN (exported on cloudbox and macOS by home-manager).
+# Requires: curl, jq (the deployed copy is wrapped with both on PATH).
+# Environment: ATLASSIAN_SITE, ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN.
 #
 # Exit: 0 ok; 2 usage or link not on $ATLASSIAN_SITE; 3 env missing;
-#       4 HTTP 401/403; 5 other HTTP, transport or bad JSON; 7 HTTP 404.
+#       4 HTTP 401 (token refused); 5 other HTTP, transport, bad JSON or an
+#       incomplete listing; 7 HTTP 404; 9 HTTP 403 (no permission).
 set -o errexit -o nounset -o pipefail
 
 usage() { sed -n '6,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -31,17 +33,19 @@ API="$BASE/rest/servicedeskapi"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# get <url> <outfile>: GET with auth from stdin; returns per the exit table.
+# get <url> <outfile> [accept]: GET with auth from stdin; returns per the exit
+# table. curl does not resend `user` credentials to another host on a redirect.
 get() {
   local code esc
   esc="$ATLASSIAN_EMAIL:$ATLASSIAN_API_TOKEN"
   esc="${esc//\\/\\\\}"; esc="${esc//\"/\\\"}"
   code="$(printf 'user = "%s"\n' "$esc" |
-    curl -sS --config - -L -H 'Accept: application/json' -o "$2" -w '%{http_code}' "$1")" ||
+    curl -sS --config - -L -H "Accept: ${3:-application/json}" -o "$2" -w '%{http_code}' "$1")" ||
     { echo "jsm-request: transport error on $1" >&2; return 5; }
   case "$code" in
     2??) return 0 ;;
-    401|403) echo "jsm-request: HTTP $code on $1 (token invalid, or no portal access)" >&2; return 4 ;;
+    401) echo "jsm-request: HTTP 401 on $1: the token was refused (expired or revoked)" >&2; return 4 ;;
+    403) return 9 ;;
     404) return 7 ;;
     *) echo "jsm-request: HTTP $code on $1" >&2; return 5 ;;
   esac
@@ -54,18 +58,28 @@ getjson() {
 }
 
 if [ "$1" = "--list" ]; then
-  case "${2:-open}" in
-    open) st=OPEN_REQUESTS ;; closed) st=CLOSED_REQUESTS ;; all) st=ALL_REQUESTS ;; *) usage ;;
-  esac
-  start=0
-  while :; do
-    getjson "$API/request?requestOwnership=OWNED_REQUESTS&requestStatus=$st&start=$start&limit=50" "$tmp/l.json" ||
-      exit $?
-    jq -r '.values[] | "- \(.issueKey) [\(.currentStatus.status)] \(.createdDate.iso8601[0:10]) \(.summary)\n  \(._links.web)"' "$tmp/l.json"
-    [ "$(jq -r '.isLastPage' "$tmp/l.json")" = true ] && break
-    start=$((start + $(jq '.size' "$tmp/l.json")))
-    [ "$start" -lt 5000 ] || { echo "jsm-request: stopped at 5000 requests" >&2; break; }
+  shift
+  st=OPEN_REQUESTS; own=OWNED_REQUESTS
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      open) st=OPEN_REQUESTS ;; closed) st=CLOSED_REQUESTS ;; all) st=ALL_REQUESTS ;;
+      --participated) own=PARTICIPATED_REQUESTS ;;
+      *) usage ;;
+    esac
+    shift
   done
+  start=0; : > "$tmp/out"
+  while :; do
+    rc=0; getjson "$API/request?requestOwnership=$own&requestStatus=$st&start=$start&limit=50" "$tmp/l.json" || rc=$?
+    [ "$rc" -eq 0 ] || { [ "$rc" -eq 9 ] || [ "$rc" -eq 7 ] && echo "jsm-request: listing refused (HTTP 403/404)" >&2; exit "$rc"; }
+    jq -r '.values[] | "- \(.issueKey) [\(.currentStatus.status)] \(.createdDate.iso8601[0:10]) \(.summary)\n  \(._links.web)"' "$tmp/l.json" >> "$tmp/out"
+    [ "$(jq -r '.isLastPage' "$tmp/l.json")" = true ] && break
+    size="$(jq '.size' "$tmp/l.json")"
+    [ "$size" -gt 0 ] || { echo "jsm-request: empty page before the last; listing incomplete" >&2; exit 5; }
+    start=$((start + size))
+    [ "$start" -lt 5000 ] || { echo "jsm-request: more than 5000 requests; listing incomplete" >&2; exit 5; }
+  done
+  [ -s "$tmp/out" ] && cat "$tmp/out" || echo "(none)"
   exit 0
 fi
 
@@ -86,18 +100,29 @@ case "$arg" in
       echo "jsm-request: link is on $host, but the token is for $SITE; it cannot read that site" >&2; exit 2; }
     path="${arg#https://"$host"}"; path="${path%%[?#]*}"
     key="${path##*/}"
+    [[ "$key" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]] ||
+      { echo "jsm-request: '$arg' does not end in a request key (a portal home link names none)" >&2; exit 2; }
     ;;
   *) key="$arg" ;;
 esac
+# A bare number is accepted as the request's issue id.
 [[ "$key" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ || "$key" =~ ^[0-9]+$ ]] ||
   { echo "jsm-request: '$arg' does not name a request key" >&2; exit 2; }
 
 rc=0; getjson "$API/request/$key?expand=requestType" "$tmp/r.json" || rc=$?
 if [ "$rc" -eq 7 ]; then
-  echo "jsm-request: $key is not a portal request you can see (HTTP 404). It may be an ordinary Jira issue (use the Atlassian MCP), a request raised by someone else who did not add you as a participant, or a typo." >&2
+  echo "jsm-request: $key is not a service-desk request (HTTP 404): an ordinary Jira issue (the Atlassian MCP reads those, if you can see it) or a typo." >&2
   exit 7
 fi
+if [ "$rc" -eq 9 ]; then
+  echo "jsm-request: $key is a request you have no permission to view (HTTP 403): someone else raised it and you are not a participant." >&2
+  exit 9
+fi
 [ "$rc" -eq 0 ] || exit "$rc"
+
+# Everything goes to $tmp/out and is printed only once every page has been
+# read, so a failure part-way never leaves a partial list that looks complete.
+exec 3>&1 1>"$tmp/out"
 
 jq -r '
   "# \(.issueKey): \(.summary)",
@@ -122,9 +147,9 @@ while :; do
     "### \(.author.displayName // "?") at \(.created.iso8601) (comment \(.id))\n\n\(.body)\n"' "$tmp/c.json"
   size="$(jq '.size' "$tmp/c.json")"; n=$((n + size))
   [ "$(jq -r '.isLastPage' "$tmp/c.json")" = true ] && break
-  [ "$size" -gt 0 ] || { echo "jsm-request: empty comment page before the last; stopping" >&2; exit 5; }
+  [ "$size" -gt 0 ] || { echo "jsm-request: empty comment page before the last" >&2; exit 5; }
   start=$((start + size))
-  [ "$start" -lt 10000 ] || { echo "jsm-request: stopped at 10000 comments" >&2; exit 5; }
+  [ "$start" -lt 10000 ] || { echo "jsm-request: more than 10000 comments" >&2; exit 5; }
 done
 [ "$n" -gt 0 ] || echo "(none)"
 echo
@@ -137,21 +162,31 @@ while :; do
   jq -r '.values[] | [.filename, .mimeType, (.size|tostring), ._links.content] | @tsv' "$tmp/a.json" >> "$tmp/att.tsv"
   [ "$(jq -r '.isLastPage' "$tmp/a.json")" = true ] && break
   size="$(jq '.size' "$tmp/a.json")"
-  [ "$size" -gt 0 ] || break
+  [ "$size" -gt 0 ] || { echo "jsm-request: empty attachment page before the last" >&2; exit 5; }
   start=$((start + size))
-  [ "$start" -lt 2000 ] || break
+  [ "$start" -lt 2000 ] || { echo "jsm-request: more than 2000 attachments" >&2; exit 5; }
 done
-if [ ! -s "$tmp/att.tsv" ]; then echo "(none)"; exit 0; fi
-while IFS=$'\t' read -r name mime size url; do
-  echo "- $name ($mime, $size bytes)"
-done < "$tmp/att.tsv"
+if [ ! -s "$tmp/att.tsv" ]; then
+  echo "(none)"
+else
+  while IFS=$'\t' read -r name mime size url; do
+    echo "- $name ($mime, $size bytes)"
+  done < "$tmp/att.tsv"
+fi
 
-[ -n "$dl" ] || exit 0
+exec 1>&3 3>&-
+cat "$tmp/out"
+
+[ -n "$dl" ] && [ -s "$tmp/att.tsv" ] || exit 0
 mkdir -p "$dl"
+n=0
 while IFS=$'\t' read -r name mime size url; do
+  n=$((n + 1))
   case "$url" in "$BASE"/*) ;; *) echo "jsm-request: skipping $name: content link is off-site" >&2; continue ;; esac
   safe="$(basename -- "$name")"; safe="${safe//[^A-Za-z0-9._-]/_}"
   case "$safe" in ""|.|..) safe="attachment" ;; esac
-  get "$url" "$dl/$safe" || exit $?
-  echo "saved $dl/$safe" >&2
+  # Numbered, so two attachments with one name (or a reused DIR) never collide.
+  dest="$dl/$n-$safe"
+  get "$url" "$dest" '*/*' || { echo "jsm-request: download of $name failed" >&2; exit 5; }
+  echo "saved $dest" >&2
 done < "$tmp/att.tsv"

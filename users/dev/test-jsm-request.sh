@@ -79,6 +79,14 @@ fx "$B/rest/servicedeskapi/request/ABC-7/attachment?start=0&limit=100" 200 \
 fx "$B/rest/servicedeskapi/request/1001/attachment/77" 200 'PNGDATA'
 fx "$B/rest/servicedeskapi/request/NOPE-1?expand=requestType" 404 '{"errorMessage":"sd.portal.error.issue.not.found"}'
 fx "$B/rest/servicedeskapi/request/BAD-1?expand=requestType" 401 '{"message":"Client must be authenticated"}'
+fx "$B/rest/servicedeskapi/request/OTHER-1?expand=requestType" 403 '{"errorMessage":"You do not have permission to view this request."}'
+# PART-1: comment page 2 fails, so nothing may be printed.
+fx "$B/rest/servicedeskapi/request/PART-1?expand=requestType" 200 "${REQ//ABC-7/PART-1}"
+fx "$B/rest/servicedeskapi/request/PART-1/comment?public=true&internal=false&start=0&limit=100" 200 \
+  '{"size":1,"start":0,"limit":100,"isLastPage":false,"values":[{"id":"11","public":true,"created":{"iso8601":"x"},"author":{"displayName":"A"},"body":"PAGE ONE"}]}'
+fx "$B/rest/servicedeskapi/request/PART-1/comment?public=true&internal=false&start=1&limit=100" 502 'bad gateway'
+fx "$B/rest/servicedeskapi/request?requestOwnership=PARTICIPATED_REQUESTS&requestStatus=ALL_REQUESTS&start=0&limit=50" 200 \
+  '{"size":0,"isLastPage":true,"values":[]}'
 fx "$B/rest/servicedeskapi/request?requestOwnership=OWNED_REQUESTS&requestStatus=OPEN_REQUESTS&start=0&limit=50" 200 \
   '{"size":1,"isLastPage":true,"values":[{"issueKey":"ABC-7","summary":"Need access to the thing","currentStatus":{"status":"Waiting for Customer"},"createdDate":{"iso8601":"2026-01-01T09:00:00-0500"},"_links":{"web":"https://example.atlassian.net/servicedesk/customer/portal/5/ABC-7"}}]}'
 
@@ -125,6 +133,11 @@ run "https://$SITE/browse/ABC-7?focusedCommentId=12"
 [ "$rc" -eq 0 ] && has "# ABC-7:" || oops "browse link accepted"
 ok "portal and browse links resolve to the key"
 
+# 3b. a portal home link names no request
+run "https://$SITE/servicedesk/customer/portal/5"
+[ "$rc" -eq 2 ] || oops "portal home link exits 2 (got $rc)"
+ok "portal home link refused"
+
 # 4. link on another site is refused before any call
 run "https://other.atlassian.net/servicedesk/customer/portal/5/ABC-7"
 [ "$rc" -eq 2 ] || oops "foreign site exits 2 (got $rc)"
@@ -134,23 +147,35 @@ ok "link on another site refused without a call"
 # 5. not found / bad credentials
 run NOPE-1
 [ "$rc" -eq 7 ] || oops "404 exits 7 (got $rc)"
-grep -qi 'not a portal request you can see' <<<"$err" || oops "404 explains itself"
+grep -qi 'not a service-desk request' <<<"$err" || oops "404 explains itself"
 run BAD-1
 [ "$rc" -eq 4 ] || oops "401 exits 4 (got $rc)"
-ok "404 -> 7 with hint; 401 -> 4"
+run OTHER-1
+[ "$rc" -eq 9 ] || oops "403 exits 9 (got $rc)"
+grep -qi 'no permission' <<<"$err" || oops "403 explains itself"
+ok "404 -> 7, 403 -> 9, 401 -> 4, each with its own hint"
 
 # 6. attachments download into DIR with a sanitized name
 dl="$work/dl"
 run ABC-7 --attachments "$dl"
 [ "$rc" -eq 0 ] || oops "--attachments exits 0 (got $rc)"
-[ "$(cat "$dl/shot.png" 2>/dev/null)" = PNGDATA ] || oops "attachment saved as basename in DIR"
+[ "$(cat "$dl/1-shot.png" 2>/dev/null)" = PNGDATA ] || oops "attachment saved as numbered basename in DIR"
 [ ! -e "$work/evil" ] || oops "no path traversal"
-ok "--attachments saves basenames into DIR"
+grep -qE 'Accept: \*/\*.*attachment/77' "$work/fx/argv.log" || oops "download does not ask for JSON"
+ok "--attachments saves numbered basenames into DIR, without a JSON Accept header"
+
+# 6b. a failure on a later page prints nothing (no partial list that looks complete)
+run PART-1
+[ "$rc" -eq 5 ] || oops "later-page failure exits 5 (got $rc)"
+[ -z "$out" ] || oops "later-page failure prints nothing on stdout"
+ok "failure part-way prints nothing"
 
 # 7. --list: requests you raised
 run --list
 [ "$rc" -eq 0 ] && has "ABC-7" && has "Waiting for Customer" || oops "--list shows owned open requests"
-ok "--list shows your open requests"
+run --list all --participated
+[ "$rc" -eq 0 ] && has "(none)" || oops "--list all --participated lists participated requests"
+ok "--list shows your open requests; --participated and status filters"
 
 # 8. usage and missing env
 run

@@ -177,11 +177,14 @@ let
   };
 
   # reading-jsm-portal-requests' SKILL.md runs its helper by its deployed path.
+  # Deployed as a wrapper that puts curl and jq on PATH: the Mac's home profile
+  # does not install jq, and the helper should not depend on /usr/bin/jq.
   jsmExtras = {
-    "${skillsDir}/reading-jsm-portal-requests/jsm-request.sh" = {
-      source = "${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-request.sh";
-      executable = true;
-    };
+    "${skillsDir}/reading-jsm-portal-requests/jsm-request.sh".source =
+      pkgs.writeShellScript "jsm-request.sh" ''
+        export PATH=${lib.makeBinPath [ pkgs.curl pkgs.jq pkgs.coreutils pkgs.gnused ]}:$PATH
+        exec ${pkgs.bash}/bin/bash ${assetsPath}/opencode/skills/reading-jsm-portal-requests/jsm-request.sh "$@"
+      '';
   };
 
   # shepherding-pull-requests has an executable monitoring python script plus
