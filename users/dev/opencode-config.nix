@@ -17,8 +17,8 @@ let
   # per-token cost. Cheaper/faster than Opus for one-shot summarization while
   # staying off the Vertex path.
   sonnetModel = "anthropic/claude-sonnet-5-5";
-  # Cloudbox and macOS default: Opus over Vertex (macOS routes via cfp to Max pool
-  # with fallback to Vertex; cloudbox routes via Vertex directly). Carries its own
+  # Cloudbox and macOS default: Opus over Vertex (both route via cfp: Vertex up
+  # to the daily budget, then the Max pool). Carries its own
   # medium thinking effort from opencode.base.json's google-vertex-anthropic model
   # options, so no variant override is needed.
   vertexOpusModel = "google-vertex-anthropic/claude-opus-5-5@default";
@@ -708,7 +708,7 @@ let
   # That argument is about BILLING, and opencode's `cost` field is not a billing
   # figure — it is what oc-tags charts as "per-tag LLM list-price consumption".
   # Claude Opus 5 settles the question by precedent: it is also served by a
-  # subscription (claude-failover-proxy sends it to Max first), yet it records
+  # subscription (claude-failover-proxy sends it to Max past the Vertex budget), yet it records
   # full list price. It IS declared (opencode.base.json:39) — but with `options`
   # only and no `cost`, so it inherits models.dev. The zero here was therefore
   # not a default we were stuck with; it was an explicit override of a catalog
@@ -2816,8 +2816,8 @@ in
     '');
 
   # Point opencode's `google-vertex-anthropic` provider at the local cfp router
-  # (:8789) on macOS, so Claude traffic goes Max-first with a Vertex fallback
-  # instead of straight to work-billed Vertex.
+  # (:8789) on macOS, so Claude traffic is budget-gated (Vertex up to the daily
+  # budget, then the Max pool) instead of going straight to work-billed Vertex.
   #
   # WHY THIS EXISTS SEPARATELY FROM THE TEAMCLAUDE BLOCK ABOVE. Those two blocks
   # aim at different providers and only one of them is now reachable: `anthropic`
