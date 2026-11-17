@@ -743,6 +743,22 @@ in
         # them. Bead workstation-tzzk.
         "GCP_VERTEX_SESSION_HEADER=x-opencode-session,x-session-id"
         "GCP_VERTEX_PARENT_SESSION_HEADER=x-parent-session-id"
+        # Thinking parity with opencode's SDD agents (variant high: Gemini
+        # thinkingConfig {thinkingLevel: high, includeThoughts: true}). Unset,
+        # goose sends Gemini 3 no thinkingConfig, and Vertex's default for
+        # gemini-3.8-flash measured about medium (bead workstation-6w7i.18).
+        # Recipes have no per-role effort field, so this is serve-wide. For
+        # claude-opus-5-5 (always-on adaptive) it changes nothing: goose already
+        # maps an unset effort to adaptive `high`. It WOULD turn thinking on for
+        # adaptive-mode or non-adaptive Claude models (opus-5, sonnet, haiku-4-5),
+        # which is why it is set here and not in config.yaml: the CLI and honk's
+        # test sandbox (haiku-4-5) keep their old behaviour. Not `medium`: that
+        # would lower every Opus lead here, stall-watch's coordinators included,
+        # and delegates inherit the lead's effort (goose-provider-types model.rs
+        # INHERITED_SESSION_PARAM_KEYS). Each session persists the effort it
+        # started with, so removing this affects new sessions only. Live at the
+        # next goose-serve restart (restartIfChanged = false).
+        "GOOSE_THINKING_EFFORT=high"
         # GCP_VERTEX_GEMINI_HOST (Gemini-only host override) is set in ExecStart
         # from the aigateway intent flag, like opencode's gemini baseURL.
         # cfp's Vertex leg goes through a gateway that attributes each request by the

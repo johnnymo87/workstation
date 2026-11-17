@@ -69,16 +69,10 @@ let
     GCP_VERTEX_GEMINI_HOST = "http://127.0.0.1:8080";
     GCP_VERTEX_SESSION_HEADER = "x-opencode-session,x-session-id";
     GCP_VERTEX_PARENT_SESSION_HEADER = "x-parent-session-id";
-    # Thinking parity with opencode's SDD agents (variant high, which sends
-    # Gemini thinkingConfig {thinkingLevel: high, includeThoughts: true}).
-    # Unset, goose sends Gemini 3 no thinkingConfig at all, and Vertex's default
-    # for gemini-3.8-flash measured about medium (bead workstation-6w7i.18).
-    # Recipes have no per-role effort field, so this is global; for Opus it
-    # changes nothing, because goose already maps an unset effort to adaptive
-    # `high` there. Keep it high: `medium` would also lower every Opus lead,
-    # including stall-watch's coordinators, and delegates inherit the lead's
-    # effort (goose-provider-types model.rs INHERITED_SESSION_PARAM_KEYS).
-    GOOSE_THINKING_EFFORT = "high";
+    # GOOSE_THINKING_EFFORT is deliberately NOT here: it is set only in
+    # goose-serve's env (hosts/cloudbox), because in this file it would also turn
+    # thinking on for the CLI and honk's haiku test sandbox. Bead
+    # workstation-6w7i.18.
   };
 
   gooseExtensionPolicy =

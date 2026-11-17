@@ -125,7 +125,8 @@ it names a role; use your harness's handle for it.
 
 The superpowers plan-execution templates say "Task tool (general-purpose)" and
 "superpowers:code-reviewer". Don't dispatch a generic subagent for those; use
-the named role, which runs on the cheaper execution model:
+the named role, which carries the role's instructions and (where the host has
+one) a cheaper execution model:
 
 | Template says | opencode (Task tool) | goose (`delegate`) |
 |---|---|---|
