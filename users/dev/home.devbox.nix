@@ -861,6 +861,10 @@ lib.mkIf isDevbox {
         # ~/.profile, so the sessionVariables copy doesn't reach it.
         "OPENCODE_DB=${config.home.homeDirectory}/.local/share/opencode/opencode.db"
         "OPENCODE_DISABLE_CHANNEL_DB=1"
+        # eternal-machinery's tests use the test-only Postgres (em-test-postgres.nix),
+        # not the live stack's :5434. A user service does not source ~/.profile,
+        # so the sessionVariables copy doesn't reach the bash tool's shells.
+        "EM_TEST_PGPORT=5444"
         # mn9r M5/M4 activation: each serve runs the per-session lease CAS against
         # pigeon's routing DB (the SAME file as pigeon's PIGEON_DAEMON_DB_PATH,
         # DM5-1). Until this var was set the M4 serve-lease code in the binary
