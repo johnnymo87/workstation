@@ -89,6 +89,12 @@
 #      (cfp) while Gemini goes to aigateway; GCP_VERTEX_SESSION_HEADER takes a
 #      comma-separated list; GCP_VERTEX_PARENT_SESSION_HEADER sends a delegated
 #      subagent's parent session id. Used by goose-serve in hosts/cloudbox.
+#  20. The system prompt stays fixed after session start. A subdirectory
+#      AGENTS.md found mid-session (by reading a file under it) is delivered
+#      once as an assistant-audience message in the conversation, not by
+#      rewriting the system prompt, which invalidated the provider's prompt
+#      cache from the first token on every later turn. Delivered hints are
+#      re-queued if compaction or another history replacement drops them.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -116,6 +122,8 @@
 # (johnnymo87/goose#10); no schema change. patched-1.54.0.12 (2026-11-16)
 # adds patch 18 (johnnymo87/goose#11); no schema change. patched-1.54.0.13
 # (2026-11-16) adds patch 19 (johnnymo87/goose#12); no schema change.
+# patched-1.54.0.14 (2026-11-17) adds patch 20 (johnnymo87/goose#13); no
+# schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -128,8 +136,8 @@
 }:
 
 let
-  version = "1.54.0-patched.13";
-  tag = "patched-1.54.0.13";
+  version = "1.54.0-patched.14";
+  tag = "patched-1.54.0.14";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -141,11 +149,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-aORKnLzFRL/RJAxz/vwbMRJaAVDou8+KveaNtm8wvuA=";
+      hash = "sha256-svYKd0Kg8Dyc6jyXCorDe3YzxedeaUuh5KApsAgbrFQ=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-casjVWGmqEjj9grXEWCpYo956rPWWAKi4nwNLvvIZYY=";
+      hash = "sha256-eVeDa/rYcgjY2N7RhVsLZNwkYs6AteFpxCWX6X6HcK0=";
     };
   };
 
