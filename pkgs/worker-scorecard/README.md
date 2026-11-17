@@ -31,7 +31,8 @@ A candidate is a worker when its first user message (the brief) either
 - carries an arm line (below).
 
 Everything else (a session Jonathan started by hand, a benchmark, a worker's
-own sub-worker) is listed under "Excluded" with the reason. A bare mention of
+own sub-worker) is listed under "Excluded" with the reason, its $ and its PR
+count, so what was left out stays visible. A bare mention of
 "stall-watch coordinators" does not count: sub-worker briefs mention them.
 `--include` / `--exclude` override per id.
 
@@ -54,7 +55,10 @@ Over the whole session tree: the root and every descendant (opencode
   leaves no ledger row and the ledger alone silently drops Claude calls.
   opencode: `message.data.tokens` (input is already uncached). goose:
   `usage_ledger`, where `input_tokens` includes cache read and write, so uncached
-  is `input - cache_read - cache_write`. Rows without a model
+  is `input - cache_read - cache_write`; a goose session whose
+  `model_config_json.request_params.cache_ttl` is `1h` has its cache writes
+  priced at the gateway's 1-hour rate, 8 $/M (opencode writes only 5-minute
+  entries: the gateway has no 1-hour writes from it). Rows without a model
   (`carried_forward`) are skipped with a warning. Non-Opus Claude models are
   priced at the same card and listed in the warnings.
 - **Gemini**: `gateway_request_log` rows whose `client_session_id` is in the
@@ -63,7 +67,10 @@ Over the whole session tree: the root and every descendant (opencode
   are priced from the harness's tokens at the gateway's own gemini-3.8-flash card
   (0.75 / 3.75 / 0.075 $/M); the worker table shows `(ledger calls / card
   calls)`. On 2026-11-17 the card and the ledger agreed within 1% on four
-  subagent sessions. A model with no price on either side (gemini-4-carbon has
+  subagent sessions. A ledger row is used only inside its session's own
+  lifetime (first message - 5 s to last message + 60 s): goose ids
+  (`YYYYMMDD_N`) are a per-store counter, and test goose stores send the same
+  ids to the same gateway. A model with no price on either side (gemini-4-carbon has
   NULL dollars in the ledger) counts as $0 and is listed in the warnings.
 - If psql fails, every Gemini call is priced from the card and the report says
   so.
@@ -77,7 +84,9 @@ of it.
 PR discovery is lgtm's: its attribution cache
 (`~/.local/state/lgtm/shepherd/attribution-cache.json`, written by
 `src/prAttribution.ts` and `src/gooseAttribution.ts` from both stores). For each
-PR any worker has evidence for, the scorecard applies a port of lgtm's
+PR any worker has evidence for (a branch-only candidate whose create named no
+`--repo` is found by searching GitHub for my PRs from that head), the scorecard
+applies a port of lgtm's
 `selectAttribution` / `resolveAttribution` against GitHub's `createdAt` and
 `headRefName`, so a PR counts for a worker exactly when lgtm would route that
 PR's wakes to it. Keep the port in step with lgtm.
@@ -97,9 +106,16 @@ Per PR, from GitHub:
 
 - **J msgs**: the root session's user messages that are not the brief, not
   synthetic (hook output), not a `<swarm_message>`, and not the agent-written
-  resume prompt that follows a compaction. In goose, also not `turnContext` or
-  hidden messages, and not tool responses (which goose stores as role user).
-- **sw msgs**: `<swarm_message from="stall-watch">` deliveries into the root.
+  resume prompt that follows a compaction. In goose: `turnContext` rows are
+  hooks, a `userVisible: false` row is the compaction summary (the resume
+  steer after it is skipped), tool responses (stored as role user) are
+  ignored, and `agentVisible` is not used, because compaction flips every
+  earlier message, the brief included, to `agentVisible: false`. Mid-turn
+  steers Jonathan types count.
+- **sw msgs**: swarm messages from stall-watch: `from="stall-watch"` (how it
+  reaches opencode workers), or a payload opening "From stall-watch's
+  coordinator" / "stall-watch here" (it reaches goose workers from the
+  coordinator's own `gse_` id).
 
 ## Tests
 

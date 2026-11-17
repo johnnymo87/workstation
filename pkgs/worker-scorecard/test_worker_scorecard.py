@@ -65,7 +65,8 @@ class OcBuilder:
 def make_goose_db(path: str) -> sqlite3.Connection:
     con = sqlite3.connect(path)
     con.executescript("""
-        CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT, created_at TIMESTAMP, parent_session_id TEXT);
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, working_dir TEXT, created_at TIMESTAMP, parent_session_id TEXT,
+                               model_config_json TEXT);
         CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content_json TEXT,
                                created_timestamp INTEGER, metadata_json TEXT);
         CREATE TABLE usage_ledger (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, created_timestamp INTEGER, model TEXT,
@@ -108,6 +109,9 @@ class FakeGitHub(ws.GitHub):
 
     def prs_for_head(self, repo, branch):
         return self.heads.get((repo, branch), [])
+
+    def search_heads(self, branch):
+        return []
 
     def search_prs(self, query):
         self.queries.append(query)
@@ -308,7 +312,7 @@ class TestAttribution(unittest.TestCase):
                                             {"repo": None, "branch": "b", "rootSessionId": "ses_x", "createdAt": 1}]}}
         keys, heads = ws.candidate_prs(cache, {"goose:20261117_4", "ses_x"})
         self.assertEqual(keys, {("o/r", 3)})
-        self.assertEqual(heads, {("o/r", "b")})
+        self.assertEqual(heads, {("o/r", "b"), (None, "b")})
 
 
 # --------------------------------------------------------------------------
@@ -417,9 +421,9 @@ class TestGooseLoader(TempDir):
     def test_inclusive_input_and_messages(self):
         path = os.path.join(self.dir, "g.db")
         con = make_goose_db(path)
-        con.execute("INSERT INTO sessions VALUES ('20261117_4','w','/w','2026-11-17 02:15:50',NULL)")
-        con.execute("INSERT INTO sessions VALUES ('20261117_5','d','/w','2026-11-17 02:16:00','20261117_4')")
-        con.execute("INSERT INTO sessions VALUES ('20261117_9','x','/w','2026-11-17 02:16:00',NULL)")
+        con.execute("INSERT INTO sessions VALUES ('20261117_4','w','/w','2026-11-17 02:15:50',NULL,NULL)")
+        con.execute("INSERT INTO sessions VALUES ('20261117_5','d','/w','2026-11-17 02:16:00','20261117_4',NULL)")
+        con.execute("INSERT INTO sessions VALUES ('20261117_9','x','/w','2026-11-17 02:16:00',NULL,NULL)")
         L = "INSERT INTO usage_ledger (session_id,created_timestamp,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) VALUES (?,?,?,?,?,?,?)"
         con.execute(L, ("20261117_4", 1_794_900_000, "claude-opus-5-5", 1000, 10, 700, 200))
         con.execute(L, ("20261117_5", 1_794_900_010, "gemini-3.8-flash", 500, 5, 400, None))
@@ -449,6 +453,74 @@ class TestGooseLoader(TempDir):
         self.assertEqual(ws.count_step_ins(s.user_msgs), (1, 0))
         self.assertEqual(s.last_ms - s.first_ms, 3_600_000)
         self.assertEqual(s.created_ms, int(dt.datetime(2026, 11, 17, 2, 15, 50, tzinfo=dt.timezone.utc).timestamp() * 1000))
+
+
+class TestGooseCompaction(TempDir):
+    """Real goose shape (sessions.db, 2026-10): compaction flips every earlier
+    message to agentVisible false, writes a userVisible-false summary row, and
+    queues the resume prompt as a steer."""
+
+    def test_brief_and_replies_survive_compaction(self):
+        path = os.path.join(self.dir, "g.db")
+        con = make_goose_db(path)
+        cfg = json.dumps({"model_name": "claude-opus-5-5", "request_params": {"cache_ttl": "1h"}})
+        con.execute("INSERT INTO sessions VALUES ('20261120_7','w','/w','2026-11-20 00:00:00',NULL,?)", (cfg,))
+        M = "INSERT INTO messages (session_id,role,content_json,created_timestamp,metadata_json) VALUES (?,?,?,?,?)"
+        old = json.dumps({"userVisible": True, "agentVisible": False})
+        rows = [
+            (BRIEF + "\nStage-1 arm: goose", old),
+            ("<turn-context>x", json.dumps({"userVisible": False, "agentVisible": False, "turnContext": True})),
+            ("green light", old),
+            ('<swarm_message v="1" kind="chat" from="gse_abc" to="20261120_7">From stall-watch\'s coordinator for goose, working for Jonathan.', old),
+            ('<swarm_message v="1" kind="chat" from="gse_abc" to="20261120_7">honk coordinator here', old),
+            ("# Conversation Summary\n...", json.dumps({"userVisible": False, "agentVisible": True})),
+            ("You are goose session 20261120_7, resuming after a self-compaction", json.dumps({"userVisible": True, "agentVisible": True, "steer": True})),
+            ("*skip", json.dumps({"userVisible": True, "agentVisible": True, "steer": True})),
+            ("merged, please deploy", json.dumps({"userVisible": True, "agentVisible": True})),
+        ]
+        for i, (t, meta) in enumerate(rows):
+            con.execute(M, ("20261120_7", "user", json.dumps([text(t)]), 1_795_000_000 + i, meta))
+        L = "INSERT INTO usage_ledger (session_id,created_timestamp,model,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) VALUES (?,?,?,?,?,?,?)"
+        con.execute(L, ("20261120_7", 1_795_000_001, "claude-opus-5-5", 1_000_000, 0, 0, 1_000_000))
+        con.commit()
+        s = ws.load_goose_session(ws._ro(path), "goose:20261120_7", [])
+        self.assertTrue(ws.is_worker_brief(s.brief))
+        self.assertEqual(ws.parse_arm(s.brief), "goose")
+        # green light, *skip, merged please deploy; the resume steer is not Jonathan
+        self.assertEqual(ws.count_step_ins(s.user_msgs), (3, 1))
+        # 1h cache writes at 8 $/M, not 5
+        self.assertAlmostEqual(ws.claude_cost(s.claude_calls, []), 8.0)
+
+
+class TestReviewFixes(unittest.TestCase):
+    def test_ledger_rows_bounded_by_session_lifetime(self):
+        # Another goose store reuses the id 20261117_1 at the same gateway.
+        sess = ws.Session("goose:20261117_1", "goose", "20261117_1", created_ms=0)
+        sess.tree = ["20261117_1"]
+        sess.spans = {"20261117_1": (100_000, 200_000)}
+        sess.gemini_calls = []
+        led = [{"client_session_id": "20261117_1", "ts_ms": 150_000, "model": "gemini-3.8-flash", "dollars": 1.0},
+               {"client_session_id": "20261117_1", "ts_ms": 9_000_000, "model": "gemini-3.8-flash", "dollars": 50.0},
+               {"client_session_id": "20261117_1", "ts_ms": 90_000, "model": "gemini-3.8-flash", "dollars": 50.0}]
+        r = ws.build_row(sess, led, [], [])
+        self.assertAlmostEqual(r.gemini_usd, 1.0)
+
+    def test_null_repo_branch_found_by_search(self):
+        class GH(FakeGitHub):
+            def search_heads(self, branch):
+                return [("o/r", 7)] if branch == "feat" else []
+        cache = {"candidates": {}, "branchCandidates": {"feat": [
+            {"repo": None, "branch": "feat", "rootSessionId": "W", "originSessionId": "W", "parentage": "main",
+             "createdAt": 9_000, "endedAt": 11_000}]}}
+        gh = GH(prs={("o/r", 7): pr_node(7, iso(10_000), merged=iso(20_000), head="feat")})
+        out = ws.attribute_prs(cache, {"W"}, gh, [])
+        self.assertEqual([p["number"] for p in out["W"]], [7])
+
+    def test_stallwatch_payload_from_coordinator_id(self):
+        self.assertEqual(ws.classify_user_text(
+            '<swarm_message v="1" from="gse_x" to="y">stall-watch here, checking in'), "swarm:stall-watch")
+        self.assertEqual(ws.classify_user_text(
+            '<swarm_message v="1" from="gse_x" to="y">honk coordinator re: x'), "swarm:gse_x")
 
 
 # --------------------------------------------------------------------------
@@ -551,7 +623,7 @@ class TestMain(TempDir):
         self.assertIn("2.75 (1/1)", text_out)
         self.assertIn("| goose | 1 | 0 | 20.00 |", text_out)
         self.assertIn("ses_w2 | goose (MISMATCH)", text_out)
-        self.assertIn("ses_human (brief is not a coordinator launch)", text_out)
+        self.assertIn("ses_human (brief is not a coordinator launch; $20.00, 0 PR(s))", text_out)
         self.assertNotIn("ses_old", text_out)
 
     def test_json_include_exclude(self):
@@ -562,7 +634,7 @@ class TestMain(TempDir):
         d = json.loads(out.getvalue())
         ids = sorted(w["worker_id"] for w in d["workers"])
         self.assertEqual(ids, ["ses_human", "ses_w1"])
-        self.assertEqual(d["excluded"], [["ses_w2", "--exclude"]])
+        self.assertEqual(d["excluded"], [["ses_w2", "--exclude; $20.00, 0 PR(s)"]])
         base = d["summary"][0]
         self.assertEqual(base["merged"], 1)
         self.assertAlmostEqual(base["usd_per_merged_pr"], 42.75)

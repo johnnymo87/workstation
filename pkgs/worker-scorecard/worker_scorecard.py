@@ -31,12 +31,12 @@ from typing import Callable, Iterable
 # gateway_request_log (dollars / tokens per column, both context tiers).
 # Claude is priced from the harness DBs, never the ledger: cfp's Max overflow
 # leaves no ledger row, so the ledger alone silently drops Claude calls.
-CLAUDE_CARD = {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5.0}
+CLAUDE_CARD = {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5.0, "cache_write_1h": 8.0}
 
 # The gateway's own gemini-3.8-flash card (same derivation, flat across tiers).
 # Used ONLY for Gemini calls that have no ledger row with a session id: the
 # gateway started recording session ids at 2026-11-16 23:55Z.
-GEMINI_CARD = {"gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0}}
+GEMINI_CARD = {"gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0, "cache_write_1h": 0.0}}
 
 CLAUDE_CARD_MODEL = "claude-opus"
 
@@ -81,7 +81,11 @@ def is_worker_brief(brief: str) -> bool:
 # Message classification (step-ins)
 # --------------------------------------------------------------------------
 
-_SWARM_FROM_RE = re.compile(r'^\s*<swarm_message\b[^>]*\bfrom="([^"]*)"')
+_SWARM_FROM_RE = re.compile(r'^\s*<swarm_message\b[^>]*\bfrom="([^"]*)"[^>]*>\s*(.*)', re.S)
+# stall-watch sends to an opencode worker as from="stall-watch", but to a goose
+# worker from the coordinator's own gse_ id (stallwatch/messages.py), so the
+# payload's opening words are what identify it on both harnesses.
+_SW_PAYLOAD_RE = re.compile(r"^(?:From )?stall-watch(?:'s coordinator\b| here\b)", re.I)
 
 
 def classify_user_text(text: str) -> str:
@@ -89,6 +93,8 @@ def classify_user_text(text: str) -> str:
     t = (text or "").lstrip()
     m = _SWARM_FROM_RE.match(t)
     if m:
+        if m.group(1) == "stall-watch" or _SW_PAYLOAD_RE.match(m.group(2)):
+            return "swarm:stall-watch"
         return "swarm:" + m.group(1)
     if t.startswith("<swarm_message"):
         return "swarm:"
@@ -138,14 +144,16 @@ class Tokens:
     input: int = 0  # UNCACHED input
     output: int = 0  # output + reasoning
     cache_read: int = 0
-    cache_write: int = 0
+    cache_write: int = 0  # 5-minute TTL
     calls: int = 0
+    cache_write_1h: int = 0  # goose sessions run with request_params.cache_ttl = "1h"
 
     def add(self, other: "Tokens") -> None:
         self.input += other.input
         self.output += other.output
         self.cache_read += other.cache_read
         self.cache_write += other.cache_write
+        self.cache_write_1h += other.cache_write_1h
         self.calls += other.calls
 
 
@@ -155,6 +163,7 @@ def price(t: Tokens, card: dict) -> float:
         + t.output * card["output"]
         + t.cache_read * card["cache_read"]
         + t.cache_write * card["cache_write"]
+        + t.cache_write_1h * card["cache_write_1h"]
     ) / 1e6
 
 
@@ -255,6 +264,8 @@ class Session:
     gemini_calls: list[Call] = field(default_factory=list)
     other_calls: int = 0
     tree: list[str] = field(default_factory=list)
+    # per tree session: (first, last) message ms, to bound its ledger rows
+    spans: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def _ro(path: str) -> sqlite3.Connection:
@@ -263,9 +274,12 @@ def _ro(path: str) -> sqlite3.Connection:
     return con
 
 
-def _bump(s: Session, ts: int | None) -> None:
+def _bump(s: Session, ts: int | None, sid: str | None = None) -> None:
     if ts is None:
         return
+    if sid is not None:
+        a, b = s.spans.get(sid, (ts, ts))
+        s.spans[sid] = (min(a, ts), max(b, ts))
     s.first_ms = ts if s.first_ms is None else min(s.first_ms, ts)
     s.last_ms = ts if s.last_ms is None else max(s.last_ms, ts)
 
@@ -291,7 +305,7 @@ def load_oc_session(con: sqlite3.Connection, worker_id: str) -> Session | None:
         f"SELECT id, session_id, time_created, data FROM message WHERE session_id IN ({qmarks}) ORDER BY time_created, id",
         s.tree,
     ):
-        _bump(s, m["time_created"])
+        _bump(s, m["time_created"], m["session_id"])
         d = json.loads(m["data"])
         role = d.get("role")
         if role == "assistant":
@@ -351,6 +365,14 @@ def load_goose_session(con: sqlite3.Connection, worker_id: str, warnings: list[s
     s = Session(worker_id, "goose", native, row["name"] or "", row["working_dir"] or "", _goose_ts(row["created_at"]))
     s.tree = goose_tree(con, native)
     qmarks = ",".join("?" * len(s.tree))
+    one_hour: set[str] = set()
+    for r in con.execute(f"SELECT id, model_config_json FROM sessions WHERE id IN ({qmarks})", s.tree):
+        try:
+            cfg = json.loads(r["model_config_json"] or "{}") or {}
+        except ValueError:
+            cfg = {}
+        if ((cfg.get("request_params") or {}).get("cache_ttl")) == "1h":
+            one_hour.add(r["id"])
     skipped = 0
     for u in con.execute(
         f"""SELECT session_id, created_timestamp, model, input_tokens, output_tokens,
@@ -367,6 +389,8 @@ def load_goose_session(con: sqlite3.Connection, worker_id: str, warnings: list[s
         # goose's input_tokens INCLUDES cache read and write (checked against
         # the gateway's own split), so uncached is the remainder.
         tok = Tokens(max(0, int(u["input_tokens"] or 0) - cr - cw), int(u["output_tokens"] or 0), cr, cw, 1)
+        if u["session_id"] in one_hour:
+            tok.cache_write, tok.cache_write_1h = 0, cw
         call = Call(u["session_id"], int(u["created_timestamp"]) * 1000, model, tok)
         if is_claude(model):
             s.claude_calls.append(call)
@@ -381,7 +405,7 @@ def load_goose_session(con: sqlite3.Connection, worker_id: str, warnings: list[s
             FROM messages WHERE session_id IN ({qmarks}) ORDER BY created_timestamp, id""",
         s.tree,
     ):
-        _bump(s, int(m["created_timestamp"]) * 1000)
+        _bump(s, int(m["created_timestamp"]) * 1000, m["session_id"])
         if m["role"] != "user" or m["session_id"] != native:
             continue
         meta = json.loads(m["metadata_json"] or "{}")
@@ -392,9 +416,16 @@ def load_goose_session(con: sqlite3.Connection, worker_id: str, warnings: list[s
         if any(c.get("type") != "text" for c in content):
             continue  # tool responses ride on role=user in goose
         text = "\n".join(c.get("text", "") for c in content)
-        hidden = meta.get("userVisible") is False or meta.get("agentVisible") is False or meta.get("turnContext")
-        s.user_msgs.append({"text": text, "synthetic": bool(hidden), "compaction": False})
-    firsts = [m for m in s.user_msgs if not m["synthetic"]]
+        # agentVisible is NOT a signal: goose's compaction flips every earlier
+        # message (the brief and Jonathan's replies included) to agentVisible
+        # false. The compaction itself is the summary row the user never saw.
+        if meta.get("turnContext"):
+            s.user_msgs.append({"text": text, "synthetic": True, "compaction": False})
+        elif meta.get("userVisible") is False:
+            s.user_msgs.append({"text": text, "synthetic": False, "compaction": True})
+        else:
+            s.user_msgs.append({"text": text, "synthetic": False, "compaction": False})
+    firsts = [m for m in s.user_msgs if not m["synthetic"] and not m["compaction"]]
     s.brief = firsts[0]["text"] if firsts else ""
     if firsts and s.user_msgs[0] is not firsts[0]:
         s.user_msgs = [firsts[0]] + [m for m in s.user_msgs if m is not firsts[0]]
@@ -521,18 +552,19 @@ def cache_root_id(c: dict) -> str:
     return GOOSE_PREFIX + rid if c.get("harness") == "goose" and not rid.startswith(GOOSE_PREFIX) else rid
 
 
-def candidate_prs(cache: dict, workers: set[str]) -> tuple[set[tuple[str, int]], set[tuple[str, str]]]:
+def candidate_prs(cache: dict, workers: set[str]) -> tuple[set[tuple[str, int]], set[tuple[str | None, str]]]:
     """PR keys and (repo, branch) heads any worker has evidence for."""
     keys: set[tuple[str, int]] = set()
     for k, cands in (cache.get("candidates") or {}).items():
         if any(cache_root_id(c) in workers for c in cands):
             repo, _, n = k.rpartition("#")
             keys.add((repo, int(n)))
-    heads: set[tuple[str, str]] = set()
+    heads: set[tuple[str | None, str]] = set()
     for branch, bs in (cache.get("branchCandidates") or {}).items():
         for b in bs:
-            if cache_root_id(b) in workers and b.get("repo"):
-                heads.add((b["repo"], branch))
+            if cache_root_id(b) in workers:
+                # repo None: the create named no --repo; GitHub is searched by head.
+                heads.add((b.get("repo"), branch))
     return keys, heads
 
 
@@ -568,6 +600,13 @@ class GitHub:
         q = (f"query($o:String!,$n:String!,$b:String!){{repository(owner:$o,name:$n){{"
              f"pullRequests(headRefName:$b,first:10){{nodes{{{_PR_FIELDS}}}}}}}}}")
         return ((self._graphql(q, o=owner, n=name, b=branch).get("repository") or {}).get("pullRequests") or {}).get("nodes") or []
+
+    def search_heads(self, branch: str) -> list[tuple[str, int]]:
+        """(repo, number) of PRs I authored from this head branch, any repo."""
+        q = ("query($q:String!){search(query:$q,type:ISSUE,first:20){nodes{... on PullRequest"
+             "{number repository{nameWithOwner}}}}}")
+        nodes = self._graphql(q, q=f"is:pr author:@me head:{branch}")["search"]["nodes"]
+        return [(n["repository"]["nameWithOwner"], n["number"]) for n in nodes if n]
 
     def search_prs(self, query: str) -> list[dict]:
         q = "query($q:String!){search(query:$q,type:ISSUE,first:30){nodes{... on PullRequest{number title body createdAt}}}}"
@@ -624,12 +663,17 @@ def attribute_prs(cache: dict, workers: set[str], gh: GitHub, warnings: list[str
             continue
         if node:
             nodes[(repo, n)] = node
-    for repo, branch in sorted(heads):
+    for repo, branch in sorted(heads, key=lambda h: (h[0] or "", h[1])):
         try:
-            for node in gh.prs_for_head(repo, branch):
-                nodes.setdefault((repo, node["number"]), node)
+            if repo:
+                for node in gh.prs_for_head(repo, branch):
+                    nodes.setdefault((repo, node["number"]), node)
+            else:
+                for r, n in gh.search_heads(branch):
+                    if (r, n) not in nodes and (node := gh.pr(r, n)):
+                        nodes[(r, n)] = node
         except Exception as e:  # noqa: BLE001
-            warnings.append(f"{repo} head {branch}: GitHub lookup failed ({e})")
+            warnings.append(f"{repo or '*'} head {branch}: GitHub lookup failed ({e})")
     out: dict[str, list[dict]] = {}
     for (repo, n), node in sorted(nodes.items()):
         pick, _ = resolve_attribution(cache, repo, n, node.get("createdAt"), node.get("headRefName"))
@@ -682,8 +726,14 @@ class Row:
 def build_row(s: Session, ledger: list[dict] | None, prs: list[dict], warnings: list[str]) -> Row:
     w: list[str] = []
     claude = claude_cost(s.claude_calls, w)
-    tree = set(s.tree)
-    rows = [r for r in (ledger or []) if r["client_session_id"] in tree]
+    rows = []
+    for r in ledger or []:
+        span = s.spans.get(r["client_session_id"])
+        # goose ids (YYYYMMDD_N) are a per-store counter, and other goose stores
+        # (test instances) send the same ids to the same gateway: keep only rows
+        # inside the session's own lifetime.
+        if span and span[0] - 5_000 <= r["ts_ms"] <= span[1] + 60_000:
+            rows.append(r)
     gem, nl, nc = gemini_cost(s.gemini_calls, rows, w)
     if s.other_calls:
         w.append(f"{s.other_calls} call(s) on other providers not priced")
@@ -815,6 +865,7 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, gh: GitHub | None
     oc = _ro(a.db) if os.path.exists(a.db) else None
     gs = _ro(a.goose_db) if os.path.exists(a.goose_db) else None
     sessions: list[Session] = []
+    loaded: list[Session] = []
     excluded: list[tuple[str, str]] = []
     for i in ids:
         if i.startswith(GOOSE_PREFIX):
@@ -825,13 +876,16 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, gh: GitHub | None
             continue  # not in a local store (another machine, or deleted)
         if not (start <= s.created_ms < end):
             continue
+        loaded.append(s)
         if i in a.exclude:
             excluded.append((i, "--exclude"))
         elif i in a.include or is_worker_brief(s.brief):
             sessions.append(s)
         else:
             excluded.append((i, "brief is not a coordinator launch"))
-    tree_ids = [t for s in sessions for t in s.tree]
+    excluded_sessions = {s.worker_id: s for s in loaded if s.worker_id in dict(excluded)}
+    everyone = sessions + list(excluded_sessions.values())
+    tree_ids = [t for s in everyone for t in s.tree]
     ledger = fetch_gemini_ledger(tree_ids, a.psql, run)
     if ledger is None:
         warnings.append("gateway ledger unavailable: all Gemini priced from the card")
@@ -841,8 +895,12 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, gh: GitHub | None
             cache = json.load(f)
     else:
         warnings.append(f"no lgtm attribution cache at {a.lgtm_cache}: PRs not counted")
-    prs = attribute_prs(cache, {s.worker_id for s in sessions}, gh or GitHub(run), warnings) if cache else {}
+    prs = attribute_prs(cache, {s.worker_id for s in everyone}, gh or GitHub(run), warnings) if cache else {}
     rows = [build_row(s, ledger, prs.get(s.worker_id, []), warnings) for s in sessions]
+    # Shown, not counted: what was left out, so a reviewer can see its weight.
+    ex_rows = {i: build_row(s, ledger, prs.get(i, []), []) for i, s in excluded_sessions.items()}
+    excluded = [(i, f"{why}; ${ex_rows[i].total_usd:.2f}, {len(ex_rows[i].prs)} PR(s)" if i in ex_rows else why)
+                for i, why in excluded]
     summary = summarize(rows)
     if a.json:
         json.dump({
