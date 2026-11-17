@@ -35,13 +35,14 @@ let
   pg = pkgs.postgresql_16.withPackages (ps: [ ps.pgvector ]);
   dataDir = "${config.home.homeDirectory}/.local/share/eternal-machinery/test-pg";
 
-  # initdb once. A directory without PG_VERSION is either new or a failed
+  # initdb once. A user unit's PATH has no coreutils, so every tool is named
+  # by store path. A directory without PG_VERSION is either new or a failed
   # initdb, so it is cleared and made again (it never holds data then).
   initScript = pkgs.writeShellScript "em-test-postgres-init" ''
     set -eu
     if [ ! -s "${dataDir}/PG_VERSION" ]; then
-      rm -rf "${dataDir}"
-      mkdir -p "${dataDir}"
+      ${pkgs.coreutils}/bin/rm -rf "${dataDir}"
+      ${pkgs.coreutils}/bin/mkdir -p "${dataDir}"
       ${pg}/bin/initdb -D "${dataDir}" -U postgres --auth=trust \
         --encoding=UTF8 --locale=C --no-sync
     fi
