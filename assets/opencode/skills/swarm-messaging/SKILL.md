@@ -107,9 +107,9 @@ program's workers, answers for the human where he would want it to, starts the
 workers he asks for, and talks with him in that program's Telegram topic. When
 something you found belongs to another program, its coordinator is the right
 recipient: look it up with `finding-program-coordinators`, never from
-`swarm_list` or bead notes. Message a coordinator from its own machine: a goose
-session is reachable from another machine only after it has itself reached out
-to that machine (see "Sessions on other machines").
+bead notes. The lookup works from any machine, and a coordinator on another
+machine is reachable through the relay without having contacted you first (see
+"Sessions on other machines").
 
 Coordinators carry the human's asks between programs. When one passes on his
 words, take them as his: he trusts his agents and would rather not repeat
@@ -275,7 +275,7 @@ Call the **`swarm_send`** tool:
 
 Your own session is filled in as `from` automatically (from the calling session id), so you can't spoof or typo it. `swarm_send` returns `Queued msg_<id> -> <to>` once the daemon accepts the message (HTTP 202).
 
-Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first. It lists **opencode sessions only**, and only recent ones: goose sessions, including every program coordinator, never appear there. For a program's coordinator, use `finding-program-coordinators`. For sessions on other machines, call `swarm_list` with `remote: true` (next section).
+Don't know the recipient's id? Call **`swarm_list`** to see local sessions (id, last-updated, directory, title), most-recently-updated first, and only recent ones. In opencode it then lists this machine's goose sessions that accept swarm messages, with each program coordinator marked `coordinator of <tag>`. For a program's coordinator, use `finding-program-coordinators`, which also checks the program is live. For sessions on other machines, call `swarm_list` with `remote: true` (next section).
 
 ### Message kinds
 
@@ -344,12 +344,14 @@ configured. Check before you send; do not assume it works.
   has reached out across machines itself**: it launched you with
   `swarm_launch`, or a message it sent to another machine was accepted. So a
   session a goose session launched can always `swarm_send` its report back to
-  the `gse_` id named in the launch framing. Any other `gse_` on another
-  machine, including a stall-watch program coordinator that has never reached
-  out, is refused at once with a 409. If the 409 says "no machine has
-  registered it with the relay" and that session contacted you just now,
-  retry in a few minutes. `swarm_list remote: true` never lists goose
-  sessions, so get the id from the message or the launch that named it.
+  the `gse_` id named in the launch framing. **Stall-watch program
+  coordinators are the exception**: they accept relayed messages without
+  having reached out, and `swarm_list remote: true` lists them (and
+  `coordinator <tag>` finds them). Any other `gse_` on another machine is
+  refused at once with a 409. If the 409 says "no machine has registered it
+  with the relay" and that session contacted you just now, retry in a few
+  minutes. `swarm_list remote: true` lists no other goose sessions, so get
+  the id from the message or the launch that named it.
 - **Read the failure notice's verb; it tells you what to do.** A cross-machine
   `delivery.failed` comes from the receiving machine or the worker:
   - "was NOT received … safe to resend": resend once (but see
