@@ -935,8 +935,8 @@ lib.mkIf isDarwin {
           # Opus goes to Max ahead of Vertex while TeamClaude's next target is
           # an account in its final 24h before weekly reset. INERT unless
           # ~/.config/teamclaude.json sets `finalWindowHours` (24, as on
-          # cloudbox; it hot-reloads, and any value above 24 silently disables
-          # this) -- cfp reads the per-account `finalWindow` flag from
+          # cloudbox; it hot-reloads, and a value above 24 disables this with
+          # only a teamclaude log warning) -- cfp reads the per-account `finalWindow` flag from
           # teamclaude's status, which is always false at the default of 0.
           # Off = remove the line.
           CFP_OPUS_MAX_FINAL_WINDOW = "true";
