@@ -136,6 +136,8 @@ let
   # it so goose's tool shells see what opencode's bash tool sees. The table is
   # asserted equal to shell-env.ts's by pkgs/agent-secret-env-sh/test.sh.
   agent-secret-env-sh = pkgs.callPackage ../../pkgs/agent-secret-env-sh { };
+  # GOOSE_SHELL for goose-serve's tool shells (workstation-pp9r.4).
+  goose-tool-shell = pkgs.callPackage ../../pkgs/goose-tool-shell { };
 
   # Store-path reduction for the serve-canary's staleness comparison. Extracted
   # 2026-08-01 (workstation-jj5x) so the comparison is unit-testable: the logic
@@ -779,6 +781,15 @@ in
         # tooling, dd-cli).
         "GOOGLE_CLOUD_LOCATION=global"
         "DD_SITE=us3.datadoghq.com"
+
+        # Run the shell tool through a bash that raises its own oom_score_adj
+        # to 500, so at MemoryMax the OOM killer takes a tool command (or one of
+        # its workers) rather than goose and every turn it hosts. Unit-level
+        # OOMScoreAdjust cannot do this: the shells would inherit it. Keep any
+        # future OOMScoreAdjust here BELOW 500, or the raise-only wrapper no-ops
+        # and goose ties with its shells. pkgs/goose-tool-shell; bead
+        # workstation-pp9r.4.
+        "GOOSE_SHELL=${goose-tool-shell}/bin/bash"
       ];
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
@@ -887,10 +898,18 @@ in
       # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
       # cgroup, and with `stop` ANY oom kill in it would end every goose turn on
       # the host, the coordinators' included. With `continue`, a killed child
-      # fails one tool call. The cgroup OOM killer picks the single largest
-      # process, so a single fat build is the victim; a many-worker job whose
-      # workers are each smaller than goose can still get goose killed, which
-      # exits the unit and Restart=always brings it back (same as `stop`).
+      # fails one tool call. The cgroup OOM killer picks the highest badness
+      # (roughly RSS + oom_score_adj * cap / 1000). Tool shells run at adj 500
+      # (GOOSE_SHELL above), so any process a tool command starts outranks goose
+      # at 0, even a many-worker job whose workers are each smaller than goose.
+      # NOT covered: goose's stdio MCP extensions, which run at goose's value,
+      # and a descendant that lowers its own adj again. The flip side: when
+      # goose's own heap is what fills the cap, in-flight tool commands are
+      # killed one by one before goose is. Were goose killed anyway, the unit
+      # exits and Restart=always brings it back (same as `stop`).
+      #
+      # GOOSE_SHELL, unlike the cgroup limits, is NOT live at switch: it is
+      # environment, read when goose starts (next restart, nightly at latest).
       #
       # LIVE AT SWITCH, despite restartIfChanged=false: the switch's
       # daemon-reload re-realizes cgroup limits on the running unit. Check
