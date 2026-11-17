@@ -147,6 +147,7 @@
         inherit ro-shell goose;
       };
       goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
+      goose-tool-shell = p.callPackage ./pkgs/goose-tool-shell { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -1982,6 +1983,15 @@
         fi
 
         echo "ALL PASS (lgtm-review slice wiring: capped at MemoryMax, keep-old, no MemoryHigh stall band)"
+        touch $out
+      '';
+
+      # GOOSE_SHELL for goose-serve on both hosts (workstation-pp9r.4).
+      goose-tool-shell = devboxPkgs.runCommand "goose-tool-shell-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnused devboxPkgs.gnugrep ];
+        SHELL_BIN = "${(localPkgsFor devboxSystem).goose-tool-shell}/bin/bash";
+      } ''
+        bash ${self}/pkgs/goose-tool-shell/test.sh
         touch $out
       '';
 
