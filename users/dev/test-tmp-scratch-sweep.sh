@@ -270,6 +270,60 @@ TMP_SCRATCH_SESSION_DB="$corrupt_db" \
 assert_kept "$root/db-unreadable" "an unreadable session database keeps everything"
 assert_log 'session probe failed' "the failed session probe says so" "$corrupt_log"
 
+# A goose worker's directory is a row too, in a DIFFERENT database
+# (~/.local/share/goose/sessions/sessions.db, `sessions.working_dir`). Same
+# shape as above: trees identical to every other guard, separated only by
+# what sessions.db says. Liveness is `updated_at` (UTC text) OR any message
+# whose created_timestamp (epoch seconds) is inside the window; a subagent
+# session is its own row with its own working_dir.
+goose_db="$tmpdir/goose-sessions.db"
+for d in goose-live goose-msg-only goose-sub/clone goose-stale; do big "$root/$d"; done
+age "$root/goose-live"; age "$root/goose-msg-only"; age "$root/goose-sub"; age "$root/goose-stale"
+python3 - "$goose_db" "$root" <<'PYEOF'
+import sqlite3, sys, time
+db, root = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+con.execute("create table sessions (id text primary key, session_type text, working_dir text,"
+            " updated_at timestamp, parent_session_id text)")
+con.execute("create table messages (id integer primary key, session_id text, created_timestamp integer)")
+fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+now, old = time.time(), time.time() - 30 * 86400
+con.executemany("insert into sessions values (?, ?, ?, ?, ?)", [
+    ("g-live", "user", root + "/goose-live", fmt(now), None),
+    # updated_at lags, but a message landed inside the window.
+    ("g-msg", "user", root + "/goose-msg-only", fmt(old), None),
+    # A subagent whose parent sits elsewhere and is long idle.
+    ("g-parent", "user", "/elsewhere", fmt(old), None),
+    ("g-sub", "sub_agent", root + "/goose-sub/clone", fmt(now), "g-parent"),
+    ("g-stale", "user", root + "/goose-stale", fmt(old), None),
+])
+con.executemany("insert into messages (session_id, created_timestamp) values (?, ?)", [
+    ("g-msg", int(now)), ("g-stale", int(old)),
+])
+con.commit()
+PYEOF
+goose_log="$tmpdir/goose.log"
+TMP_SCRATCH_ROOTS="$root" \
+TMP_SCRATCH_AGE_DAYS=7 \
+TMP_SCRATCH_MIN_MB=1 \
+TMP_SCRATCH_GOOSE_DB="$goose_db" \
+  "$script_src" > "$goose_log" 2>&1 || fail "goose-aware sweep exited non-zero"
+assert_kept "$root/goose-live"     "tree named by a RECENT goose session is kept"
+assert_kept "$root/goose-msg-only" "tree of a goose session with only a recent MESSAGE is kept"
+assert_kept "$root/goose-sub"      "tree CONTAINING a recent goose subagent's working_dir is kept"
+assert_gone "$root/goose-stale"    "tree named only by a long-idle goose session is removed"
+assert_log 'keep .*goose-live .*recent agent session' "the goose keep says why" "$goose_log"
+
+goose_corrupt_log="$tmpdir/goose-corrupt.log"
+big "$root/goose-unreadable"; age "$root/goose-unreadable"
+TMP_SCRATCH_ROOTS="$root" \
+TMP_SCRATCH_AGE_DAYS=7 \
+TMP_SCRATCH_MIN_MB=1 \
+TMP_SCRATCH_GOOSE_DB="$corrupt_db" \
+  "$script_src" > "$goose_corrupt_log" 2>&1 || fail "corrupt-goose-db sweep exited non-zero"
+assert_kept "$root/goose-unreadable" "an unreadable goose session database keeps everything"
+assert_log 'session probe failed' "the failed goose probe says so" "$goose_corrupt_log"
+
 # Commits on a DETACHED HEAD are on no branch, so `git log --branches` cannot
 # see them -- and AGENTS.md's own throwaway-worktree recipe is
 # `git worktree add --detach "$(mktemp -d)"`, i.e. detached, in /tmp. Removing

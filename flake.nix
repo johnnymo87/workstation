@@ -1041,15 +1041,15 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
-        grep -q '^=== 60 passed, 0 failed ===' "$TMPDIR/br.txt" || {
-          echo "GATE FAILURE: bazel-reap suite did not reach its 60/0 tally." >&2
+        grep -q '^=== 64 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 64/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as its neighbours: the tally is printed by the
         # suite, so a suite gutted to three assertions still prints a truthful
         # "3 passed, 0 failed". The count is what makes deletion visible.
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 60 ] || {
-          echo "GATE FAILURE: expected 60 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 64 ] || {
+          echo "GATE FAILURE: expected 64 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
           exit 1
         }
@@ -1066,12 +1066,12 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-cargo-reaper.sh 2>&1 | tee "$TMPDIR/cr.txt"
-        grep -q '^=== 52 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
-          echo "GATE FAILURE: cargo-reap suite did not reach its 52/0 tally." >&2
+        grep -q '^=== 56 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
+          echo "GATE FAILURE: cargo-reap suite did not reach its 56/0 tally." >&2
           exit 1
         }
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 52 ] || {
-          echo "GATE FAILURE: expected 52 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 56 ] || {
+          echo "GATE FAILURE: expected 56 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")." >&2
           exit 1
         }
@@ -1134,8 +1134,8 @@
           echo "GATE FAILURE: tmp-scratch-sweep suite did not reach its final banner." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")" = 27 ] || {
-          echo "GATE FAILURE: expected 27 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")" = 34 ] || {
+          echo "GATE FAILURE: expected 34 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/tss.txt")." >&2
           exit 1
         }
@@ -1193,8 +1193,8 @@
           echo "GATE FAILURE: venv-sweep suite did not reach its final banner." >&2
           exit 1
         }
-        [ "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")" = 74 ] || {
-          echo "GATE FAILURE: expected 74 'PASS' lines, got" \
+        [ "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")" = 80 ] || {
+          echo "GATE FAILURE: expected 80 'PASS' lines, got" \
                "$(grep -c '^PASS  ' "$TMPDIR/vs.txt")." >&2
           exit 1
         }

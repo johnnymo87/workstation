@@ -215,6 +215,7 @@ run_sweep() {
   env VENV_SWEEP_ROOTS="$sweep_roots" \
       VENV_SWEEP_MIN_MB=1 \
       VENV_SWEEP_SESSION_DB="$empty_db" \
+      VENV_SWEEP_GOOSE_DB="$tmpdir/no-such-goose.db" \
       "$@" \
       "$script_src" > "$log" 2>&1 || fail "sweeper exited non-zero ($log)" "log: $(cat "$log")"
 }
@@ -464,7 +465,7 @@ assert_kept "$root3/repo/.worktrees/sess-live/.devenv/state/venv" "worktree name
 assert_kept "$root3/repo/.worktrees/sess-sub/.devenv/state/venv"  "worktree CONTAINING a recent session's directory keeps its venv"
 assert_gone "$root3/repo/.worktrees/sess-stale/.devenv/state/venv" "worktree named only by a long-idle session loses its venv"
 assert_gone "$root3/repo/.worktrees/sess-none/.devenv/state/venv"  "worktree no session names loses its venv (the DB read works)"
-assert_log  'keep .*sess-live.* \(recent opencode session' "the session keep says why" "$sess_log"
+assert_log  'keep .*sess-live.* \(recent agent session' "the session keep says why" "$sess_log"
 
 # An unreadable database is not the same as "no sessions". Fail safe.
 corrupt_db="$tmpdir/corrupt.db"
@@ -478,6 +479,53 @@ corrupt_log="$tmpdir/corrupt.log"
 run_sweep "$corrupt_log" VENV_SWEEP_SESSION_DB="$corrupt_db"
 assert_kept "$root4/repo/.worktrees/db-bad/.devenv/state/venv" "an unreadable session database keeps the venv"
 assert_log  'keep .*db-bad.* \(session probe failed' "the failed session probe says so" "$corrupt_log"
+
+# --- scenario 3b: the goose session table -----------------------------------
+#
+# A goose worker's directory is a row in a SECOND database
+# (~/.local/share/goose/sessions/sessions.db, `sessions.working_dir`). Live is
+# `updated_at` (UTC text) or a message inside the window; a subagent is its own
+# row with its own working_dir. A missing goose database means no goose on the
+# host, unlike the opencode one (scenario 5): the default seam in run_sweep is
+# a path that does not exist, and every other scenario passes with it.
+root3b="$tmpdir/proj-goose"
+mkdir -p "$root3b"
+mkrepo "$root3b/repo" yes
+for n in goose-live goose-sub goose-stale; do mkwt "$root3b/repo" "$n"; done
+goose_db="$tmpdir/goose-sessions.db"
+python3 - "$goose_db" "$root3b/repo/.worktrees" <<'PYEOF'
+import sqlite3, sys, time
+db, base = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db)
+con.execute("create table sessions (id text primary key, session_type text, working_dir text,"
+            " updated_at timestamp, parent_session_id text)")
+con.execute("create table messages (id integer primary key, session_id text, created_timestamp integer)")
+fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+now, old = time.time(), time.time() - 30 * 86400
+con.executemany("insert into sessions values (?, ?, ?, ?, ?)", [
+    ("g-live", "user", base + "/goose-live", fmt(now), None),
+    ("g-parent", "user", "/elsewhere", fmt(old), None),
+    # A subagent in a SUBDIRECTORY of the worktree, its parent long idle.
+    ("g-sub", "sub_agent", base + "/goose-sub/src", fmt(old), "g-parent"),
+    ("g-stale", "user", base + "/goose-stale", fmt(old), None),
+])
+# The subagent's liveness is a recent MESSAGE, not its updated_at.
+con.execute("insert into messages (session_id, created_timestamp) values ('g-sub', ?)", (int(now),))
+con.commit()
+PYEOF
+sweep_roots="$root3b"
+goose_log="$tmpdir/goose.log"
+run_sweep "$goose_log" VENV_SWEEP_GOOSE_DB="$goose_db"
+assert_kept "$root3b/repo/.worktrees/goose-live/.devenv/state/venv" "worktree named by a RECENT goose session keeps its venv"
+assert_kept "$root3b/repo/.worktrees/goose-sub/.devenv/state/venv"  "worktree containing a goose subagent with a recent message keeps its venv"
+assert_gone "$root3b/repo/.worktrees/goose-stale/.devenv/state/venv" "worktree named only by a long-idle goose session loses its venv"
+assert_log  'keep .*goose-live.* \(recent agent session' "the goose session keep says why" "$goose_log"
+
+mkwt "$root3b/repo" goose-bad
+goose_corrupt_log="$tmpdir/goose-corrupt.log"
+run_sweep "$goose_corrupt_log" VENV_SWEEP_GOOSE_DB="$corrupt_db"
+assert_kept "$root3b/repo/.worktrees/goose-bad/.devenv/state/venv" "an unreadable goose session database keeps the venv"
+assert_log  'keep .*goose-bad.* \(session probe failed' "the failed goose probe says so" "$goose_corrupt_log"
 
 # --- scenario 4: /proc cannot be read ----------------------------------------
 #

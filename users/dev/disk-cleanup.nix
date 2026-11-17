@@ -89,7 +89,7 @@ let
         return inuse
   '';
 
-  # ONE implementation of "does a recent opencode session live in this
+  # ONE implementation of "does a recent opencode (or goose) session live in this
   # directory", shared by tmp-scratch-sweep and venv-sweep rather than written
   # twice and allowed to drift (it was inline in tmpScratchSweepPy until
   # venv-sweep needed the same answer). Interpolated into each sweeper's python
@@ -123,16 +123,66 @@ let
   # opencode IS installed, so a missing db there means the path is wrong or the
   # data directory moved -- and the guard would silently go inert on exactly the
   # sessions it exists to protect.
+  #
+  # GOOSE sessions are consulted too (bd workstation-6w7i.2). A goose worker's
+  # directory is likewise a row and not a handle -- `sessions.working_dir` in
+  # ~/.local/share/goose/sessions/sessions.db -- so the same blind spot applies,
+  # and it is the same check GUARD 1b (cleanup_worktrees) and git-work
+  # --prune-merged already make. The two verdicts combine as
+  # session > unknown > free: either database naming a live session keeps the
+  # tree, either probe failing keeps it. A MISSING goose db is always "free"
+  # (goose is not installed), whatever `missing` says about opencode's, as in
+  # GUARD 1b.
   sessionOwnsPy = ''
     SESSION_ACTIVE_DAYS = 7
+    GOOSE_SESSION_DB_DEFAULT = os.path.expanduser(
+        "~/.local/share/goose/sessions/sessions.db")
 
-    def session_owns(p, db_path, missing="free", active_seconds=None):
+    def _path_matches(directory, candidates):
+        directory = directory.rstrip("/") or "/"
+        return any(directory == c or directory.startswith(c + "/") for c in candidates)
+
+    def goose_session_owns(candidates, goose_db_path, cutoff_s):
+        """'session' | 'free' | 'unknown' for goose's sessions.db.
+
+        Every row counts, whatever its session_type (user, acp, hidden,
+        sub_agent): a subagent is a row of its own with its OWN working_dir,
+        which need not be its parent's, so it is matched on its own row rather
+        than through parent_session_id. A row is live when `updated_at` (UTC
+        text, "YYYY-MM-DD HH:MM:SS") is inside the window OR any of its
+        messages' created_timestamp (epoch seconds) is. The union is the
+        fail-safe direction: either clock alone saying "recent" keeps the tree.
+        """
+        if not goose_db_path or not os.path.isfile(goose_db_path):
+            return "free"
+        cutoff_text = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(cutoff_s))
+        try:
+            # Read-only: a live goose-serve or honkd is writing this database.
+            con = sqlite3.connect("file:%s?mode=ro" % goose_db_path, uri=True, timeout=10)
+            try:
+                rows = con.execute(
+                    "select s.working_dir from sessions s "
+                    "where s.updated_at >= ? "
+                    "or exists (select 1 from messages m "
+                    "           where m.session_id = s.id and m.created_timestamp >= ?)",
+                    (cutoff_text, int(cutoff_s)),
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception:
+            return "unknown"
+        for (working_dir,) in rows:
+            if working_dir and _path_matches(working_dir, candidates):
+                return "session"
+        return "free"
+
+    def session_owns(p, db_path, missing="free", active_seconds=None,
+                     goose_db_path=GOOSE_SESSION_DB_DEFAULT):
         """'session' | 'free' | 'unknown'. Only 'free' permits removal.
 
-        `missing` is what a db file that does not exist counts as.
+        Consults opencode's db at `db_path` and goose's at `goose_db_path`.
+        `missing` is what an opencode db file that does not exist counts as.
         """
-        if not os.path.isfile(db_path):
-            return missing
         candidates = {p.rstrip("/") or "/"}
         try:
             candidates.add(os.path.realpath(p))
@@ -140,7 +190,20 @@ let
             pass
         if active_seconds is None:
             active_seconds = SESSION_ACTIVE_DAYS * 86400
-        cutoff_ms = int((time.time() - active_seconds) * 1000)
+        cutoff_s = time.time() - active_seconds
+        verdicts = (
+            opencode_session_owns(candidates, db_path, missing, cutoff_s),
+            goose_session_owns(candidates, goose_db_path, cutoff_s),
+        )
+        for v in ("session", "unknown"):
+            if v in verdicts:
+                return v
+        return "free"
+
+    def opencode_session_owns(candidates, db_path, missing, cutoff_s):
+        if not os.path.isfile(db_path):
+            return missing
+        cutoff_ms = int(cutoff_s * 1000)
         try:
             # Read-only URI: a concurrent serve is writing this database and
             # must never be disturbed by a cleanup probe.
@@ -161,12 +224,8 @@ let
         except Exception:
             return "unknown"
         for _id, directory in rows:
-            if not directory:
-                continue
-            directory = directory.rstrip("/") or "/"
-            for c in candidates:
-                if directory == c or directory.startswith(c + "/"):
-                    return "session"
+            if directory and _path_matches(directory, candidates):
+                return "session"
         return "free"
   '';
 
@@ -190,7 +249,9 @@ let
     ws = sys.argv[1]
     db = sys.argv[2]
     active_sec = float(sys.argv[3])
-    print(session_owns(ws, db, missing="free", active_seconds=active_sec))
+    goose_db = sys.argv[4] if len(sys.argv) > 4 else GOOSE_SESSION_DB_DEFAULT
+    print(session_owns(ws, db, missing="free", active_seconds=active_sec,
+                       goose_db_path=goose_db))
   '';
 
   bazelReapInUsePy = pkgs.writeText "bazel-reap-in-use.py" ''
@@ -237,12 +298,14 @@ let
     # step.
     dry_run = bool(os.environ.get("TMP_SCRATCH_DRY_RUN"))
 
-    # GUARD 4: the opencode session table. Shared with venv-sweep, see
+    # GUARD 4: the opencode and goose session tables. Shared with venv-sweep, see
     # sessionOwnsPy for why it exists and how it fails. MISSING db is not an
     # error -- no opencode, no sessions -- so this stays inert on a host that
     # never runs it. Unreadable or locked IS an error and keeps the tree.
     SESSION_DB = os.environ.get("TMP_SCRATCH_SESSION_DB") or os.path.expanduser(
         "~/.local/share/opencode/opencode.db")
+    # ... and goose's, for the same reason (see sessionOwnsPy). Test seam.
+    GOOSE_DB = os.environ.get("TMP_SCRATCH_GOOSE_DB") or GOOSE_SESSION_DB_DEFAULT
 
     def measure(p):
         """(megabytes, newest mtime anywhere in the tree).
@@ -325,9 +388,9 @@ let
     for mb, p in sorted(cands, reverse=True):
         if p in inuse:
             print(f"  keep {mb}M {p} (open by a live process)"); continue
-        owner = session_owns(p, SESSION_DB)
+        owner = session_owns(p, SESSION_DB, goose_db_path=GOOSE_DB)
         if owner != "free":
-            print(f"  keep {mb}M {p} (recent opencode session)" if owner == "session"
+            print(f"  keep {mb}M {p} (recent agent session)" if owner == "session"
                   else f"  keep {mb}M {p} (session probe failed)")
             continue
         state = classify(p)
@@ -405,6 +468,7 @@ let
     shell_age_days = int(os.environ["VENV_SWEEP_SHELL_AGE_DAYS"])
     roots = [r.rstrip("/") or "/" for r in os.environ["VENV_SWEEP_ROOTS"].split()]
     SESSION_DB = os.environ["VENV_SWEEP_SESSION_DB"]
+    GOOSE_DB = os.environ.get("VENV_SWEEP_GOOSE_DB") or GOOSE_SESSION_DB_DEFAULT
     # Test seam only; see paths_in_use.
     proc_dir = os.environ.get("VENV_SWEEP_PROC") or "/proc"
     # Rehearsal mode: decide exactly as a real sweep would, delete nothing, and
@@ -731,7 +795,8 @@ let
     #      the path is probed too: a worktree reached through a symlinked
     #      parent would otherwise never match.
     #   2. env_in_use: see below.
-    #   3. session_owns: an opencode session's directory is a row, not a handle.
+    #   3. session_owns: an opencode or goose session's directory is a row, not
+    #      a handle.
     #
     # VENV_SWEEP_PRE_REMOVE_HOOK is a TEST SEAM and nothing shipped sets it: an
     # executable run with the venv path just before the probe, which is the only
@@ -758,9 +823,9 @@ let
                 warned_proc.append(1)
                 print("  WARN: cannot read %s (%s); keeping every venv this run" % (proc_dir, exc))
             return "liveness probe failed"
-        owner = session_owns(wt, SESSION_DB, missing="unknown")
+        owner = session_owns(wt, SESSION_DB, missing="unknown", goose_db_path=GOOSE_DB)
         if owner == "session":
-            return "recent opencode session"
+            return "recent agent session"
         if owner != "free":
             return ("session db missing" if not os.path.isfile(SESSION_DB)
                     else "session probe failed")
@@ -884,7 +949,7 @@ let
   # cargoReapPy: daytime reaping of idle cargo target/ directories.
   # Reuses pathsInUsePy for /proc process in-use checks, and adds /proc/<pid>/maps
   # scanning for memory-mapped files (rust-analyzer proc-macro server dlopens).
-  # Reuses sessionOwnsPy for opencode session activity checks under pressure.
+  # Reuses sessionOwnsPy for opencode/goose session activity checks under pressure.
   # ==========================================================================
   cargoReapPy = ''
     import fnmatch, math, os, re, shutil, sqlite3, stat, sys, time
@@ -1101,6 +1166,7 @@ let
         trash_dir = os.environ.get("CARGO_REAP_TRASH") or os.path.expanduser("~/.cache/cargo-reap/trash")
         proc_dir = os.environ.get("CARGO_REAP_PROC") or "/proc"
         session_db = os.environ.get("CARGO_REAP_SESSION_DB") or os.path.expanduser("~/.local/share/opencode/opencode.db")
+        goose_db = os.environ.get("CARGO_REAP_GOOSE_DB") or GOOSE_SESSION_DB_DEFAULT
         dry_run = bool(os.environ.get("CARGO_REAP_DRY_RUN"))
 
         # Phase 0: purge leftovers in trash
@@ -1139,9 +1205,10 @@ let
             elif under_pressure and idle_h >= pressure_idle_h_threshold:
                 ws = os.path.dirname(target)
                 active_sec = pressure_idle_h_threshold * 3600
-                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec,
+                                       goose_db_path=goose_db)
                 if verdict in ("session", "unknown"):
-                    log(f"keep {target} (opencode session active in {ws} within {int(pressure_idle_h_threshold)}h)")
+                    log(f"keep {target} (agent session active in {ws} within {int(pressure_idle_h_threshold)}h)")
                     continue
                 reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%"))
             else:
@@ -1181,9 +1248,10 @@ let
             if "under pressure" in reason:
                 ws = os.path.dirname(target)
                 active_sec = pressure_idle_h_threshold * 3600
-                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec)
+                verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec,
+                                       goose_db_path=goose_db)
                 if verdict in ("session", "unknown"):
-                    log(f"keep {target} (opencode session became active before action: {ws})")
+                    log(f"keep {target} (agent session became active before action: {ws})")
                     continue
 
             if dry_run:
@@ -2626,7 +2694,7 @@ lib.mkMerge [
   # protects it. Bazel servers idle out after 300s, so an agent actively editing
   # code or planning a next step in a worktree often has no running bazel server.
   # To avoid destroying the output base under an active session, the pressure tier
-  # explicitly checks opencode's session table (sessionOwnsPy) to protect any
+  # explicitly checks the opencode and goose session tables (sessionOwnsPy) to protect any
   # workspace updated within the idle window (3h, or 30m for lgtm-pr-*), and
   # runs pathsInUsePy (/proc probe) immediately before renaming to protect any
   # in-flight compiler or build processes inside the base.
@@ -2812,9 +2880,10 @@ lib.mkMerge [
             continue
           fi
 
-          # Session guard: keep if opencode session updated workspace within window
+          # Session guard: keep if an opencode or goose session updated workspace within window
           session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-          session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))")
+          goose_db="''${BAZEL_REAP_GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+          session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" "$goose_db")
           case "$session_verdict" in
             free) ;;
             session)
@@ -2823,7 +2892,7 @@ lib.mkMerge [
               else
                 window_desc="''${req_idle_min}m"
               fi
-              log "keep $name (opencode session active in $workspace within $window_desc)"
+              log "keep $name (agent session active in $workspace within $window_desc)"
               continue
               ;;
             # unknown, or empty because the probe crashed (its stderr is in
@@ -2953,11 +3022,12 @@ lib.mkMerge [
 
         # Session guard re-check before action
         session_db="''${BAZEL_REAP_SESSION_DB:-$HOME/.local/share/opencode/opencode.db}"
-        session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))")
+        goose_db="''${BAZEL_REAP_GOOSE_DB:-$HOME/.local/share/goose/sessions/sessions.db}"
+        session_verdict=$(${pkgs.python3}/bin/python3 ${bazelReapSessionPy} "$workspace" "$session_db" "$((req_idle_min * 60))" "$goose_db")
         case "$session_verdict" in
           free) ;;
           session)
-            log "keep $name (opencode session became active before action: $workspace)"
+            log "keep $name (agent session became active before action: $workspace)"
             continue
             ;;
           *)
@@ -3108,6 +3178,7 @@ lib.mkMerge [
       export CARGO_REAP_TRASH="''${CARGO_REAP_TRASH:-$HOME/.cache/cargo-reap/trash}"
       export CARGO_REAP_PROC="''${CARGO_REAP_PROC:-/proc}"
       export CARGO_REAP_SESSION_DB="''${CARGO_REAP_SESSION_DB:-}"
+      export CARGO_REAP_GOOSE_DB="''${CARGO_REAP_GOOSE_DB:-}"
       export CARGO_REAP_DRY_RUN="''${CARGO_REAP_DRY_RUN:-}"
       export CARGO_REAP_USED_PCT="''${CARGO_REAP_USED_PCT:-}"
 
