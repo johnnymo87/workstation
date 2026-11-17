@@ -83,14 +83,16 @@ not by the text.**
 |---|---|---|
 | 0 | `<tag>  to=gse_…  heartbeat=on\|off`, or for another machine's program `<tag>  to=gse_…  machine=<m>  relay=available  heartbeat=…` | Verified. `swarm_send` to the `to=` id; pigeon relays it if it is on another machine. `relay=offline (held …)` means that machine is asleep: the message is held up to 24h and delivered when it wakes. `heartbeat` does not affect delivery (see "Before you send"). |
 | 1 | `<tag>: no bound coordinator`, `<tag>: no such program in programs.toml`, a line ending `not a live coordinator, do not send` (the program is paused, disabled, or gone from `programs.toml`), or a line saying pigeon can't route to it | Don't send, even though pigeon would still wake a paused program's coordinator. See "No coordinator found". |
-| 2 | `program <tag>'s coordinator is gse_… on <machine>, but a swarm_send from this host would be refused: <reason>…`, `no stall-watch on THIS host…`, or `no eng-agent-platform checkout on THIS host…` | The coordinator exists (or may) but this host cannot deliver to it or look it up: the relay is off or refused for that machine, the program belongs to this host and stall-watch does not run here, or the command has no checkout to run (then try `swarm_list remote: true`). See "No coordinator found". |
-| 3 | An `error:` or `warning:` on stderr, with or without a `to=` line | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
+| 2 | `program <tag>'s coordinator is gse_… on <machine>, but a swarm_send from this host would be refused: <reason>…`, `no stall-watch on THIS host…`, `no eng-agent-platform checkout on THIS host…`, or (a host whose checkout predates 2026-11-17) `program <tag>'s coordinator runs on <machine>; this host cannot reach it…` | The coordinator exists (or may) but this host cannot deliver to it or look it up: the relay is off or refused for that machine, the program belongs to this host and stall-watch does not run here, or the command has no checkout to run, or is too old to look across machines (then try `swarm_list remote: true`). See "No coordinator found". |
+| 3 | An `error:` or `warning:` on stderr, with or without a `to=` line, or a `to=` line saying `relay unverified` | The lookup failed, or a cross-check was skipped. A `to=` line may still be right, but it is unverified. **Do not conclude there is no coordinator.** Retry once. If it exits 3 again, tell the human what it printed. |
 | 127 | `coordinator: command not found` | The install is broken (workstation installs it on every host). Treat it as exit 3, and include `hostname` and `ls -l ~/.nix-profile/bin/coordinator` in what you tell the human. |
 
 A Python traceback counts as exit 3, whatever the exit code says.
 
-`--all` prints one line per bound program. It exits 0, or 3 when a cross-check
-was skipped and it still printed a `to=` line.
+`--all` prints one line per bound program, this host's first, then other
+machines' (with `machine=`). It exits 0, or 3 when a cross-check was skipped
+and it still printed a `to=` line, or when other machines' coordinators could
+not be listed (a stderr warning says so; the lines printed are still good).
 
 What it checks for this host's programs: the registry is stall-watch's
 `~/.local/state/stall-watch/state.db`, table `program`, column `pigeon_session`.
