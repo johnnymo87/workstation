@@ -121,6 +121,24 @@ harnesses, generated from the same agent definitions
 Wherever a skill says "dispatch `adversarial-reviewer-opus`" (or the oracle),
 it names a role; use your harness's handle for it.
 
+### Executing a plan (subagent-driven-development)
+
+The superpowers plan-execution templates say "Task tool (general-purpose)" and
+"superpowers:code-reviewer". Don't dispatch a generic subagent for those; use
+the named role, which carries the role's instructions and (where the host has
+one) a cheaper execution model:
+
+| Template says | opencode (Task tool) | goose (`delegate`) |
+|---|---|---|
+| `Task tool (general-purpose)` to implement a task | `subagent_type: "implementer"` | `source: "implementer"` |
+| `Task tool (general-purpose)` to review spec compliance | `subagent_type: "spec-reviewer"` | `source: "spec-reviewer"` |
+| `Task tool (superpowers:code-reviewer)` | `subagent_type: "code-reviewer"` | `source: "code-reviewer"` |
+
+Put the template's prompt in goose's `instructions`. You (the lead) stay on the
+planning model and coordinate. On goose, always name the `source`: a
+`delegate` without one gets the read-only unscoped recipe, so an implementer
+dispatched that way cannot write a file.
+
 
 ## Reporting to Humans
 
