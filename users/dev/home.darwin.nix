@@ -847,15 +847,14 @@ lib.mkIf isDarwin {
     # claude-failover-proxy (cfp) -- darwin/launchd flavor of the cloudbox
     # systemd unit in hosts/cloudbox/configuration.nix.
     #
-    # WHAT IT BUYS ON THIS MAC, specifically: measured over 30 days, every
-    # single day's Opus traffic here went out as
-    # `google-vertex-anthropic/claude-opus-5@default` -- 76-136 messages/day
-    # straight to work-billed Vertex. cfp puts the personal Max pool in front of
-    # that lane (CFP_OPUS_MAX_FIRST) while leaving Fable on Vertex, which is the
-    # cheaper tenant for each. Fable volume here is ~3 days in 14, far below the
-    # $100 gate, so the budget/enterprise machinery below essentially never
-    # fires on this host -- it is carried for parity with cloudbox, not because
-    # it binds.
+    # WHAT IT BUYS ON THIS MAC: the same budget-gated chain as cloudbox. Claude
+    # goes to work-billed Vertex up to $100/day (this Mac's own ledger,
+    # separate from cloudbox's), then to the personal Max pool, and to Max
+    # first for an account in its final 24h before weekly reset. Mac volume
+    # has historically been far below $100/day, so in practice the gate rarely
+    # binds here and Max is mainly the final-window sink and the Vertex
+    # fallback. (Until 2026-11-17 this host ran CFP_OPUS_MAX_FIRST, i.e. Opus
+    # Max-first; see the routing comment below.)
     #
     # VERTEX LEG IS DIRECT, not via an aigateway. cloudbox points
     # CFP_AIGATEWAY_URL at a loopback cost-capture proxy; a laptop has none, and
@@ -923,14 +922,24 @@ lib.mkIf isDarwin {
           # opencode's own ADC credentials do the authenticating.
           CFP_AIGATEWAY_URL = "https://aiplatform.googleapis.com";
 
-          # Family-aware inversion: Opus to Max ahead of Vertex, leaving the
-          # paid budget for Fable. Fable costs 2.0x Opus per dollar on Vertex
-          # but drains the Max 5h bucket ~4.5x faster per weighted token.
-          # ONLY the literal string "true" enables it (cfp warns and stays off
-          # for anything else -- note CFP_DISABLE_BILLING_HEADER in the same
-          # codebase uses "1", so the convention is not uniform). Roll back by
-          # setting this to "false" and rebuilding.
-          CFP_OPUS_MAX_FIRST = "true";
+          # Routing matches cloudbox (hosts/cloudbox/configuration.nix, the
+          # claude-failover-proxy unit): Opus to Vertex up to CFP_BUDGET_DOLLARS
+          # a day, then to the Max pool. CFP_OPUS_MAX_FIRST is deliberately
+          # UNSET (unset is off, with no startup warning). It was "true" here
+          # until 2026-11-17; cloudbox turned it off on 2026-10-20 because,
+          # with Fable unused since Opus 5.5, it put all Claude load on Max and
+          # left the Vertex budget idle. Re-enable both hosts together if a new
+          # Fable model makes the family split real again.
+          #
+          # Use-it-or-lose-it (cfp >= v0.11.0, bead claude-failover-proxy-fs1):
+          # Opus goes to Max ahead of Vertex while TeamClaude's next target is
+          # an account in its final 24h before weekly reset. INERT unless
+          # ~/.config/teamclaude.json sets `finalWindowHours` (24, as on
+          # cloudbox; it hot-reloads, and a value above 24 disables this with
+          # only a teamclaude log warning) -- cfp reads the per-account `finalWindow` flag from
+          # teamclaude's status, which is always false at the default of 0.
+          # Off = remove the line.
+          CFP_OPUS_MAX_FINAL_WINDOW = "true";
 
           CFP_BUDGET_DOLLARS = "100";
           CFP_IDLE_MIGRATE_SECONDS = "300";
@@ -944,10 +953,9 @@ lib.mkIf isDarwin {
 
           CFP_STATE_PATH = "${config.home.homeDirectory}/.local/state/claude-failover-proxy/spend.json";
 
-          # CFP_ENTERPRISE_API_KEY is deliberately UNSET: the enterprise leg is
-          # only reached once Vertex is over budget, which at this host's
-          # measured volume never happens. cfp logs "enterprise tier: off" and
-          # degrades cleanly. Revisit if /stats ever shows overBudget: true.
+          # CFP_ENTERPRISE_API_KEY is deliberately UNSET, as on cloudbox since
+          # workstation #820: no enterprise API-key tier, so the chain is
+          # Vertex -> Max. cfp logs "enterprise tier: off".
         };
         RunAtLoad = true;
         KeepAlive = { SuccessfulExit = false; };
