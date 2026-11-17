@@ -41,10 +41,13 @@ let
       REAL_BASH="${bash}/bin/bash"
       OOM_SCORE_ADJ_FLOOR="${toString oomScoreAdjFloor}"
 
-      # RAISE ONLY, never lower: an unprivileged process may always raise its
-      # own value but not lower it, and a caller that already asked to be
-      # killed first should stay that way. Never fatal and never noisy: any
-      # output here would be prepended to every tool call's output.
+      # RAISE ONLY, never lower: a caller that already asked to be killed
+      # first should stay that way. Never fatal and never noisy: any output
+      # here would be prepended to every tool call's output.
+      #
+      # Not a guarantee: an unprivileged descendant may lower its own value
+      # again, down to oom_score_adj_min (0 for goose-serve), and then it
+      # competes with goose on size alone, as before this wrapper.
       #
       # Consequence: if goose-serve is ever given OOMScoreAdjust >= the floor,
       # this no-ops and goose ties with its shells again. Keep the unit below it.

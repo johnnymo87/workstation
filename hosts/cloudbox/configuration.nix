@@ -902,9 +902,14 @@ in
       # (roughly RSS + oom_score_adj * cap / 1000). Tool shells run at adj 500
       # (GOOSE_SHELL above), so any process a tool command starts outranks goose
       # at 0, even a many-worker job whose workers are each smaller than goose.
-      # NOT covered: goose's stdio MCP extensions, which run at goose's value.
-      # Were goose killed anyway, the unit exits and Restart=always brings it
-      # back (same as `stop`).
+      # NOT covered: goose's stdio MCP extensions, which run at goose's value,
+      # and a descendant that lowers its own adj again. The flip side: when
+      # goose's own heap is what fills the cap, in-flight tool commands are
+      # killed one by one before goose is. Were goose killed anyway, the unit
+      # exits and Restart=always brings it back (same as `stop`).
+      #
+      # GOOSE_SHELL, unlike the cgroup limits, is NOT live at switch: it is
+      # environment, read when goose starts (next restart, nightly at latest).
       #
       # LIVE AT SWITCH, despite restartIfChanged=false: the switch's
       # daemon-reload re-realizes cgroup limits on the running unit. Check
