@@ -1207,8 +1207,11 @@ let
                 active_sec = pressure_idle_h_threshold * 3600
                 verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec,
                                        goose_db_path=goose_db)
-                if verdict in ("session", "unknown"):
+                if verdict == "session":
                     log(f"keep {target} (agent session active in {ws} within {int(pressure_idle_h_threshold)}h)")
+                    continue
+                if verdict != "free":
+                    log(f"keep {target} (session probe failed for {ws})")
                     continue
                 reapable.append((target, idle_sec, idle_h, f"idle {idle_h:.1f}h >= {pressure_idle_h_threshold:.0f}h under pressure {used_pct}%"))
             else:
@@ -1250,8 +1253,11 @@ let
                 active_sec = pressure_idle_h_threshold * 3600
                 verdict = session_owns(ws, session_db, missing="free", active_seconds=active_sec,
                                        goose_db_path=goose_db)
-                if verdict in ("session", "unknown"):
+                if verdict == "session":
                     log(f"keep {target} (agent session became active before action: {ws})")
+                    continue
+                if verdict != "free":
+                    log(f"keep {target} (session probe failed before action: {ws})")
                     continue
 
             if dry_run:

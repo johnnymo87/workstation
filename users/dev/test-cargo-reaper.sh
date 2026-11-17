@@ -557,6 +557,8 @@ test_goose_db_unreadable_keeps_under_pressure() {
   out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_GOOSE_DB="$db")"
   check "target kept when goose db unreadable" \
     "$([ -d "$target" ] && echo yes || echo no)"
+  check "reports the failed probe, not an active session" \
+    "$(grep -q 'keep .*proj/target.*session probe failed' <<<"$out" && echo yes || echo no)"
 }
 
 test_script_is_directly_executable() {

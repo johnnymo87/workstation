@@ -1066,12 +1066,12 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-cargo-reaper.sh 2>&1 | tee "$TMPDIR/cr.txt"
-        grep -q '^=== 56 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
-          echo "GATE FAILURE: cargo-reap suite did not reach its 56/0 tally." >&2
+        grep -q '^=== 57 passed, 0 failed ===' "$TMPDIR/cr.txt" || {
+          echo "GATE FAILURE: cargo-reap suite did not reach its 57/0 tally." >&2
           exit 1
         }
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 56 ] || {
-          echo "GATE FAILURE: expected 56 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")" = 57 ] || {
+          echo "GATE FAILURE: expected 57 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/cr.txt")." >&2
           exit 1
         }
