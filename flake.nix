@@ -1560,7 +1560,7 @@
         cd ${self}
         python3 pkgs/goose-roles/test_gen_goose_roles.py 2>&1 | tee "$TMPDIR/gr.txt"
         grep -q '^OK' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: goose-roles suite did not pass." >&2; exit 1; }
-        grep -q '^Ran 12 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 12 tests." >&2; exit 1; }
+        grep -q '^Ran 15 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 15 tests." >&2; exit 1; }
         grep -q 'skipped' "$TMPDIR/gr.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
         touch $out
       '';

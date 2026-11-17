@@ -84,6 +84,11 @@
 #      and reqwest's 600s read_timeout then failed the rest of an already-sent
 #      response: any tool call of 10+ minutes ended in "Network error: Stream
 #      decode error ... Please resend your message to try again."
+#  19. gcp_vertex_ai: GCP_VERTEX_GEMINI_HOST overrides the host for Gemini
+#      (Google-published) models only, so Claude can stay on GCP_VERTEX_HOST
+#      (cfp) while Gemini goes to aigateway; GCP_VERTEX_SESSION_HEADER takes a
+#      comma-separated list; GCP_VERTEX_PARENT_SESSION_HEADER sends a delegated
+#      subagent's parent session id. Used by goose-serve in hosts/cloudbox.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -109,7 +114,8 @@
 # change. patched-1.54.0.10 (2026-10-21) adds patch 16 (johnnymo87/goose#9);
 # no schema change. patched-1.54.0.11 (2026-11-05) adds patch 17
 # (johnnymo87/goose#10); no schema change. patched-1.54.0.12 (2026-11-16)
-# adds patch 18 (johnnymo87/goose#11); no schema change.
+# adds patch 18 (johnnymo87/goose#11); no schema change. patched-1.54.0.13
+# (2026-11-16) adds patch 19 (johnnymo87/goose#12); no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -122,8 +128,8 @@
 }:
 
 let
-  version = "1.54.0-patched.12";
-  tag = "patched-1.54.0.12";
+  version = "1.54.0-patched.13";
+  tag = "patched-1.54.0.13";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -135,11 +141,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-zvj69EO19On/0WS3O7U4mDYHotrEgWrvKh6Yh3axKWg=";
+      hash = "sha256-aORKnLzFRL/RJAxz/vwbMRJaAVDou8+KveaNtm8wvuA=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-aRMimKn3eDl0A+TXzhqARwSxw3DTL0E+zoJWzQV/qdA=";
+      hash = "sha256-casjVWGmqEjj9grXEWCpYo956rPWWAKi4nwNLvvIZYY=";
     };
   };
 
