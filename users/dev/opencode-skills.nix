@@ -94,13 +94,14 @@ let
   # login shells' PATH but not on the opencode serves' or goose's, so agents --
   # the callers the skill is for -- got `command not found` (2026-11-05, devbox).
   # Installed on every host so the skill's exit codes hold everywhere: with no
-  # checkout it exits 2, like coordinator.sh on a host with no stall-watch.
+  # checkout it exits 2 and points at `swarm_list remote: true`, which lists
+  # other machines' coordinators without the checkout.
   coordinatorScript =
     "${config.home.homeDirectory}/${if isDarwin then "Code" else "projects"}/eng-agent-platform/stallwatch/coordinator.sh";
   coordinatorCmd = pkgs.writeShellScriptBin "coordinator" ''
     script="${coordinatorScript}"
     if [ ! -f "$script" ]; then
-      echo "no stall-watch on THIS host (no $script). Each machine with stall-watch runs its own coordinators for its own programs; this host cannot look them up. Ask the human to forward the finding."
+      echo "no eng-agent-platform checkout on THIS host (no $script), so this command cannot look coordinators up here. swarm_list with remote: true lists other machines' program coordinators (gse_ ids, reachable through pigeon's relay); if none is listed for the program, ask the human to forward the finding."
       exit 2
     fi
     # stallwatch needs python >= 3.11 (tomllib). Pin it rather than take the
