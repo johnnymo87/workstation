@@ -98,6 +98,35 @@ make_target() {
   fi
 }
 
+# mk_goose_db <db> <working_dir> <updated_age_s> <msg_age_s|-> [session_type]:
+# a goose sessions.db fixture with ONE session (plus a stale parent when the
+# type is sub_agent). Liveness in goose is `updated_at` (UTC text) or any
+# message's created_timestamp (epoch seconds); "-" means no message.
+mk_goose_db() {
+  python3 - "$@" <<'PYEOF'
+import sqlite3, sys, time
+db, wd, upd_age = sys.argv[1], sys.argv[2], float(sys.argv[3])
+msg_age = sys.argv[4]
+stype = sys.argv[5] if len(sys.argv) > 5 else "user"
+con = sqlite3.connect(db)
+con.execute("create table sessions (id text primary key, session_type text, working_dir text,"
+            " updated_at timestamp, parent_session_id text)")
+con.execute("create table messages (id integer primary key, session_id text, created_timestamp integer)")
+fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+now = time.time()
+parent = None
+if stype == "sub_agent":
+    parent = "g-parent"
+    con.execute("insert into sessions values ('g-parent', 'user', '/elsewhere', ?, null)",
+                (fmt(now - 30 * 86400),))
+con.execute("insert into sessions values ('g1', ?, ?, ?, ?)", (stype, wd, fmt(now - upd_age), parent))
+if msg_age != "-":
+    con.execute("insert into messages (session_id, created_timestamp) values ('g1', ?)",
+                (int(now - float(msg_age)),))
+con.commit()
+PYEOF
+}
+
 run_reaper() {
   local roots="$1"; shift
   local trash="${CARGO_REAP_TRASH:-$tmpdir/trash}"
@@ -470,7 +499,7 @@ test_session_active_in_workspace_kept_under_pressure() {
   check "target kept when session active in workspace" \
     "$([ -d "$target" ] && echo yes || echo no)"
   check "reports session active in log" \
-    "$(grep -q 'keep .*proj/target.*opencode session active in .*proj within 3h' <<<"$out" && echo yes || echo no)"
+    "$(grep -q 'keep .*proj/target.*agent session active in .*proj within 3h' <<<"$out" && echo yes || echo no)"
 }
 
 test_session_stale_in_workspace_reaped_under_pressure() {
@@ -486,6 +515,50 @@ test_session_stale_in_workspace_reaped_under_pressure() {
     "$([ ! -d "$target" ] && echo yes || echo no)"
   check "reports reaped in log" \
     "$(grep -q 'reaped .*proj/target' <<<"$out" && echo yes || echo no)"
+}
+
+test_goose_subagent_active_in_workspace_kept_under_pressure() {
+  echo "TEST: goose subagent with a recent message in workspace keeps target under pressure"
+  local root out target db
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 4
+  db="$tmpdir/goose-active.db"
+  # updated_at is stale; only the message is inside the 3h window.
+  mk_goose_db "$db" "$root/proj" $((5 * 3600)) 60 sub_agent
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_GOOSE_DB="$db")"
+  check "target kept when goose subagent active in workspace" \
+    "$([ -d "$target" ] && echo yes || echo no)"
+  check "reports goose session active in log" \
+    "$(grep -q 'keep .*proj/target.*agent session active in .*proj within 3h' <<<"$out" && echo yes || echo no)"
+}
+
+test_goose_stale_in_workspace_reaped_under_pressure() {
+  echo "TEST: stale goose session in workspace allows reap under pressure"
+  local root out target db
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 4
+  db="$tmpdir/goose-stale.db"
+  mk_goose_db "$db" "$root/proj" $((5 * 3600)) $((5 * 3600))
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_GOOSE_DB="$db")"
+  check "target reaped when goose session is older than window" \
+    "$([ ! -d "$target" ] && echo yes || echo no)"
+}
+
+test_goose_db_unreadable_keeps_under_pressure() {
+  echo "TEST: unreadable goose db keeps target under pressure"
+  local root out target db
+  root="$(new_root)"
+  target="$root/proj/target"
+  make_target "$target" 4
+  db="$tmpdir/goose-corrupt.db"
+  echo 'this is not a database' > "$db"
+  out="$(run_reaper "$root" CARGO_REAP_USED_PCT=85 CARGO_REAP_GOOSE_DB="$db")"
+  check "target kept when goose db unreadable" \
+    "$([ -d "$target" ] && echo yes || echo no)"
+  check "reports the failed probe, not an active session" \
+    "$(grep -q 'keep .*proj/target.*session probe failed' <<<"$out" && echo yes || echo no)"
 }
 
 test_script_is_directly_executable() {
@@ -524,6 +597,9 @@ test_finds_target_under_worktrees
 test_missing_root_does_not_crash
 test_session_active_in_workspace_kept_under_pressure
 test_session_stale_in_workspace_reaped_under_pressure
+test_goose_subagent_active_in_workspace_kept_under_pressure
+test_goose_stale_in_workspace_reaped_under_pressure
+test_goose_db_unreadable_keeps_under_pressure
 
 echo
 echo "=== $pass_count passed, $fail_count failed ==="

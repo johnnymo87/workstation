@@ -121,6 +121,35 @@ new_root() {
   printf '%s' "$r"
 }
 
+# mk_goose_db <db> <working_dir> <updated_age_s> <msg_age_s|-> [session_type]:
+# a goose sessions.db fixture with ONE session (plus a stale parent when the
+# type is sub_agent). Liveness in goose is `updated_at` (UTC text) or any
+# message's created_timestamp (epoch seconds); "-" means no message.
+mk_goose_db() {
+  python3 - "$@" <<'PYEOF'
+import sqlite3, sys, time
+db, wd, upd_age = sys.argv[1], sys.argv[2], float(sys.argv[3])
+msg_age = sys.argv[4]
+stype = sys.argv[5] if len(sys.argv) > 5 else "user"
+con = sqlite3.connect(db)
+con.execute("create table sessions (id text primary key, session_type text, working_dir text,"
+            " updated_at timestamp, parent_session_id text)")
+con.execute("create table messages (id integer primary key, session_id text, created_timestamp integer)")
+fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t))
+now = time.time()
+parent = None
+if stype == "sub_agent":
+    parent = "g-parent"
+    con.execute("insert into sessions values ('g-parent', 'user', '/elsewhere', ?, null)",
+                (fmt(now - 30 * 86400),))
+con.execute("insert into sessions values ('g1', ?, ?, ?, ?)", (stype, wd, fmt(now - upd_age), parent))
+if msg_age != "-":
+    con.execute("insert into messages (session_id, created_timestamp) values ('g1', ?)",
+                (int(now - float(msg_age)),))
+con.commit()
+PYEOF
+}
+
 run_reaper() {
   local root="$1"; shift
   env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" "$script" 2>&1
@@ -511,7 +540,7 @@ test_session_active_in_workspace_keeps_base_under_pressure() {
   out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_SESSION_DB="$db")"
   check "base survived when session active in workspace" "$([ -d "$base" ] && echo yes || echo no)"
   check "logged session active" \
-    "$(grep -q 'keep 10000000.*opencode session active in .* within 3h' <<<"$out" && echo yes || echo no)"
+    "$(grep -q 'keep 10000000.*agent session active in .* within 3h' <<<"$out" && echo yes || echo no)"
 }
 
 test_session_stale_in_workspace_allows_reap_under_pressure() {
@@ -531,6 +560,53 @@ test_session_stale_in_workspace_allows_reap_under_pressure() {
   check "base reaped when session is stale" "$([ ! -d "$base" ] && echo yes || echo no)"
   check "logged reap under pressure" \
     "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+test_goose_session_active_in_workspace_keeps_base_under_pressure() {
+  echo "TEST: goose subagent with a recent message in workspace keeps base under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000022 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  db="$tmpdir/goose-bazel-active.db"
+  mk_goose_db "$db" "$wt" $((5 * 3600)) 60 sub_agent
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_GOOSE_DB="$db")"
+  check "base survived when goose session active in workspace" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged goose session active" \
+    "$(grep -q 'keep 10000000.*agent session active in .* within 3h' <<<"$out" && echo yes || echo no)"
+}
+
+test_goose_session_stale_in_workspace_allows_reap_under_pressure() {
+  echo "TEST: stale goose session in workspace allows reap under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000023 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  db="$tmpdir/goose-bazel-stale.db"
+  mk_goose_db "$db" "$wt" $((5 * 3600)) $((5 * 3600))
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_GOOSE_DB="$db")"
+  check "base reaped when goose session is stale" "$([ ! -d "$base" ] && echo yes || echo no)"
+}
+
+test_goose_db_unreadable_keeps_base_under_pressure() {
+  echo "TEST: unreadable goose db keeps base under pressure"
+  local root wt base out db
+  root="$(new_root)"
+  wt="$root/live-worktree"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000024 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "4 hours ago" "$base/command.log"
+  db="$tmpdir/goose-bazel-corrupt.db"
+  echo 'this is not a database' > "$db"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 BAZEL_REAP_GOOSE_DB="$db")"
+  check "base survived when goose db unreadable" "$([ -d "$base" ] && echo yes || echo no)"
 }
 
 test_proc_in_use_keeps_base_under_pressure() {
@@ -617,6 +693,9 @@ test_orphans_prioritized_over_pressure_under_rate_limit
 test_used_pct_trailing_percent_stripped
 test_session_active_in_workspace_keeps_base_under_pressure
 test_session_stale_in_workspace_allows_reap_under_pressure
+test_goose_session_active_in_workspace_keeps_base_under_pressure
+test_goose_session_stale_in_workspace_allows_reap_under_pressure
+test_goose_db_unreadable_keeps_base_under_pressure
 test_proc_in_use_keeps_base_under_pressure
 test_proc_error_keeps_base_under_pressure
 
