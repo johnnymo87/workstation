@@ -91,6 +91,17 @@ class GenTest(unittest.TestCase):
         with self.assertRaises(g.GenError):
             g.build_role("x", RO.replace("anthropic/claude-opus-5-5", "openai/gpt-6-astra"), **KW)
 
+    def test_gemini_worker_model(self):
+        # cloudbox: sonnet-tier roles run Gemini on gcp_vertex_ai, like opencode's sddModel.
+        kw = dict(KW, sonnet_model="gemini-3.8-flash")
+        self.assertEqual(g.build_role("implementer", RW, **kw)["settings"]["goose_model"], "gemini-3.8-flash")
+        self.assertEqual(g.build_role("oracle", RO, **kw)["settings"]["goose_model"], "claude-opus-5-5")
+
+    def test_gemini_needs_vertex_provider(self):
+        # The anthropic provider (devbox) cannot serve Gemini; the role would fail every delegate.
+        with self.assertRaises(g.GenError):
+            g.build_role("implementer", RW, **dict(KW, provider="anthropic", sonnet_model="gemini-3.8-flash"))
+
     def test_unscoped_recipe_is_read_only_set(self):
         u = g.build_unscoped(KW["ro_shell_cmd"])
         self.assertEqual(sorted(e["name"] for e in u["extensions"]), ["analyze", "developer", "ro-shell", "skills"])
@@ -121,6 +132,20 @@ class GenTest(unittest.TestCase):
                 g.main()
         finally:
             sys.argv = argv
+
+    def test_deployed_roles_model_per_host(self):
+        # cloudbox: sonnet-tier roles on Gemini via the gateway; devbox: Opus everywhere.
+        missing = [k for k in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX") if not os.environ.get(k)]
+        if missing:
+            self.skipTest(f"set {', '.join(missing)}")
+        gemini_roles = {"implementer", "code-reviewer", "spec-reviewer"}
+        for var in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX"):
+            for role in g.ROLES:
+                with self.subTest(host=var, role=role):
+                    with open(os.path.join(os.environ[var], "roles", f"{role}.yaml")) as fh:
+                        model = yaml.safe_load(fh)["settings"]["goose_model"]
+                    gem = var == "DEPLOYED_ROLES_CLOUDBOX" and role in gemini_roles
+                    self.assertEqual(model, "gemini-3.8-flash" if gem else "claude-opus-5-5")
 
     def test_deployed_roles_provider_per_host(self):
         # What home-manager actually deploys on each host (flake check wiring):

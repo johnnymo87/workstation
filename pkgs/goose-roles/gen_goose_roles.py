@@ -56,12 +56,20 @@ def split_frontmatter(text):
     return yaml.safe_load(text[4:end]) or {}, text[end + 5:]
 
 
-def map_model(model, opus_model, sonnet_model):
+def map_model(model, opus_model, sonnet_model, provider):
     if re.fullmatch(r"anthropic/claude-opus-\d+(?:-\d+)*", model or ""):
-        return opus_model
-    if re.fullmatch(r"anthropic/claude-sonnet-\d+(?:-\d+)*", model or ""):
-        return sonnet_model
-    raise GenError(f"unmapped model {model!r}")
+        target = opus_model
+    elif re.fullmatch(r"anthropic/claude-sonnet-\d+(?:-\d+)*", model or ""):
+        target = sonnet_model
+    else:
+        raise GenError(f"unmapped model {model!r}")
+    # Gemini is reachable only through Vertex (gcp_vertex_ai); a Gemini role on the
+    # anthropic provider would fail every delegate, with no fallback.
+    if target.startswith("gemini-") and provider != "gcp_vertex_ai":
+        raise GenError(f"{target} needs provider gcp_vertex_ai, not {provider}")
+    if not re.fullmatch(r"(?:claude|gemini)-[a-z0-9.-]+", target):
+        raise GenError(f"unexpected target model {target!r}")
+    return target
 
 
 def is_read_only(fm):
@@ -122,7 +130,7 @@ def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model):
         "instructions": body.strip() + (READ_ONLY_NOTE if ro else IMPLEMENTER_NOTE),
         "extensions": exts,
         "settings": {"goose_provider": provider,
-                     "goose_model": map_model(fm.get("model"), opus_model, sonnet_model),
+                     "goose_model": map_model(fm.get("model"), opus_model, sonnet_model, provider),
                      "max_turns": READ_ONLY_MAX_TURNS if ro else IMPLEMENTER_MAX_TURNS},
     }
 

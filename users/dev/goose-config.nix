@@ -57,6 +57,18 @@ let
   gooseConfigSettings = {
     GOOSE_SUBAGENT_ROLES_DIR = "${config.home.homeDirectory}/${gooseRolesDeployPath}/roles";
     GOOSE_SUBAGENT_DEFAULT_RECIPE = "${config.home.homeDirectory}/${gooseRolesDeployPath}/unscoped.yaml";
+  } // lib.optionalAttrs isCloudbox {
+    # Every goose here that is NOT goose-serve (the interactive CLI, honk's
+    # sandbox serve) reads these from config.yaml. Without the Gemini host the
+    # sonnet-tier roles (gemini-3.8-flash, pkgs/goose-roles) would follow
+    # GCP_VERTEX_HOST into cfp, which is Claude-only. goose-serve sets the same
+    # three by env (hosts/cloudbox, where env outranks this file), deriving the
+    # Gemini host from the aigateway intent flag; this file has no such gate, so
+    # with the gateway disabled a CLI Gemini delegate fails loudly rather than
+    # bypassing the ledger. Bead workstation-tzzk.
+    GCP_VERTEX_GEMINI_HOST = "http://127.0.0.1:8080";
+    GCP_VERTEX_SESSION_HEADER = "x-opencode-session,x-session-id";
+    GCP_VERTEX_PARENT_SESSION_HEADER = "x-parent-session-id";
   };
 
   gooseExtensionPolicy =
@@ -77,6 +89,11 @@ let
       "gooseExtensionsEnabled.summon requires non-empty string values for GOOSE_SUBAGENT_ROLES_DIR and GOOSE_SUBAGENT_DEFAULT_RECIPE in gooseConfigSettings (goose treats empty values as unset, which would cause delegates to inherit every parent tool)";
     assert lib.assertMsg (!gooseExtensionsEnabled.summon || gooseVersionOk)
       "gooseExtensionsEnabled.summon requires goose >= 1.54.0-patched.10 (current: ${gooseCli.version}); older goose ignores subagent policy keys and delegates would inherit every parent tool";
+    # The comma-separated session header list (goose-serve env in hosts/cloudbox
+    # and the settings above) makes an older goose fail every Vertex turn, Claude
+    # included. Pinning pkgs/goose back must fail evaluation, not production.
+    assert lib.assertMsg (!isCloudbox || lib.versionAtLeast gooseCli.version "1.54.0-patched.13")
+      "cloudbox goose settings (GCP_VERTEX_SESSION_HEADER list, GCP_VERTEX_GEMINI_HOST) require goose >= 1.54.0-patched.13 (current: ${gooseCli.version})";
     pkgs.writeText "goose-extension-policy.json"
       (builtins.toJSON {
         extensions = gooseExtensionsEnabled;

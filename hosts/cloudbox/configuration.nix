@@ -734,7 +734,17 @@ in
         # model request in flight, as it does for opencode; goose does not retry a
         # refused or cut connection. Accepted: same exposure as every other agent here.
         "GCP_VERTEX_HOST=http://127.0.0.1:8789"
-        "GCP_VERTEX_SESSION_HEADER=x-opencode-session"
+        # Comma-separated (goose >= patched-1.54.0.13; older goose rejects the list
+        # and fails every Vertex turn, so this ships with the pkgs/goose bump):
+        # x-opencode-session for cfp's stickiness, x-session-id for aigateway's
+        # ledger (cfp forwards request headers on its Vertex leg, so Claude rows
+        # carry it too). x-parent-session-id names a delegated subagent's parent.
+        # The gateway records both only from mono#5865 on; before that it ignores
+        # them. Bead workstation-tzzk.
+        "GCP_VERTEX_SESSION_HEADER=x-opencode-session,x-session-id"
+        "GCP_VERTEX_PARENT_SESSION_HEADER=x-parent-session-id"
+        # GCP_VERTEX_GEMINI_HOST (Gemini-only host override) is set in ExecStart
+        # from the aigateway intent flag, like opencode's gemini baseURL.
         # cfp's Vertex leg goes through a gateway that attributes each request by the
         # caller's identity, so goose's token must carry the email scope as gcloud's
         # does; with cloud-platform alone the gateway answers 503.
@@ -797,6 +807,20 @@ in
         GOOSE_SERVER__SECRET_KEY="$(read_secret /run/secrets/pigeon_goose_acp_token)"
         GCP_PROJECT_ID="$(read_secret /run/secrets/google_cloud_project)"
         export GOOSE_SERVER__SECRET_KEY GCP_PROJECT_ID
+
+        # Gemini (the sonnet-tier subagent roles, pkgs/goose-roles) must not follow
+        # GCP_VERTEX_HOST: cfp is Claude-only. With the aigateway intent flag set it
+        # goes to the gateway, which ledgers and prices it like opencode's Gemini
+        # (same rule as injectAigatewayBaseUrl: flag set but gateway down fails
+        # loud, and the canary restarts the gateway). Flag absent: straight to
+        # Vertex's global endpoint. Read at start only; the flag changing takes
+        # effect at the next goose-serve restart (nightly). Bead workstation-tzzk.
+        if [ -e ${aigatewayFlag} ]; then
+          GCP_VERTEX_GEMINI_HOST=http://127.0.0.1:8080
+        else
+          GCP_VERTEX_GEMINI_HOST=https://aiplatform.googleapis.com
+        fi
+        export GCP_VERTEX_GEMINI_HOST
 
         # CLI/tool credentials for goose's tool shells: the same table opencode's
         # shell-env plugin injects into every bash tool call (GH_TOKEN, Atlassian,
