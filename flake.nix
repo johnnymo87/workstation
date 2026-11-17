@@ -164,6 +164,7 @@
       oc-revive = p.callPackage ./pkgs/oc-revive { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       oc-tags = p.callPackage ./pkgs/oc-tags { };
+      worker-scorecard = p.callPackage ./pkgs/worker-scorecard { };
       oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
@@ -1483,6 +1484,27 @@
           exit 1
         }
 
+        touch $out
+      '';
+
+      # worker-scorecard (bead workstation-6w7i.4): hermetic sqlite fixtures,
+      # fake session-tags/psql/GitHub. Count PINNED like checks.oc-cost-tests.
+      worker-scorecard-tests = devboxPkgs.runCommand "worker-scorecard-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/worker-scorecard/test_worker_scorecard.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 49 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 49 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: worker-scorecard suite did not report OK." >&2
+          exit 1
+        }
         touch $out
       '';
 

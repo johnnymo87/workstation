@@ -604,6 +604,9 @@ in
     localPkgs.oc-cost
     localPkgs.oc-tags
 
+    # Per-worker cost / merged-PR scorecard (goose rollout, workstation-6w7i.4)
+    localPkgs.worker-scorecard
+
     # Revive a read-only session whose git worktree was deleted
     localPkgs.oc-revive
 
