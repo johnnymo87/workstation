@@ -1,4 +1,4 @@
-# Raising and commenting on portal requests
+# Raising, commenting on and closing portal requests
 
 Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 
@@ -6,6 +6,7 @@ Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 
 - Exit codes
 - What `create` checks before it writes
+- Closing or cancelling a request
 - Measured API facts
 
 ## Exit codes
@@ -21,6 +22,8 @@ Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 | 7 | HTTP 404: no such desk, request type or request. |
 | 8 | HTTP 400: the desk rejected the fields; its message is printed. |
 | 9 | HTTP 403: the human cannot raise this type on this desk, or comment on this request. |
+| 10 | `transition`: the request's reporter is not the token's owner. Nothing was sent. |
+| 11 | `transition`: the desk does not offer that move to the human; the moves it does offer are printed (often "none"). Nothing was sent. |
 
 ## What `create` checks before it writes
 
@@ -40,6 +43,30 @@ before commenting on one.
 Bodies are Jira wiki markup, read verbatim from a file: write the text with
 the file-writing tool, not an inline shell string.
 
+## Closing or cancelling a request
+
+Only a request the human raised, and only when they asked to close it.
+
+1. Read it with `jsm-request.sh`. Already in a done status (`DONE` category):
+   stop and report it; a comment could reopen it. A help-desk reply that
+   changes the picture: report it instead of closing.
+2. `$W transitions KEY` lists the moves offered to the human. Pick the one
+   that matches the ask ("Cancel request" if nobody acted, "Resolve" if it was
+   handled). Never pick "Escalate" or similar to close.
+3. `$W transition KEY --to NAME --comment-file why.txt` (dry run), then with
+   `--send`. The comment rides along as the transition's public comment, so
+   do not also post it with `comment`. On success it prints
+   `KEY<TAB>status now<TAB>portal link`; report that status.
+
+`transition` checks, before anything is sent, that the request's reporter is
+the token's owner (`/rest/api/3/myself`), exit 10 otherwise, and that the move
+is in the offered list, exit 11 otherwise. It never sets a status directly.
+
+**No transition offered (exit 11, "none"):** the desk lets only its agents
+close requests. Post a public `comment` asking them to close it, with the
+reason, once the human has approved that wording. Do not look for another API
+route to force it.
+
 ## Measured API facts
 
 From a live desk as a portal customer (2026-11-16):
@@ -53,6 +80,16 @@ From a live desk as a portal customer (2026-11-16):
 | The portal number in `/servicedesk/customer/portal/<N>` was the service desk id on the desk measured | Confirm with `GET /servicedesk` (id and project key) if a desk disagrees. |
 | A request's `requestTypeId` and `serviceDeskId` are on `GET /request/KEY` | To match an earlier request, copy them from it. |
 
-`comment --send` follows the same API and auth, but had not been run live when
-this was written; the first live use checks it (exit 8 or 9 means the desk
-refused it).
+Transitions, measured on the same site as a customer (2026-11-17):
+
+| Fact | Consequence |
+|---|---|
+| `GET /request/KEY/transition` returned an empty list on 5 of 6 of the human's requests, open and done, across three desks; one desk offered only "Escalate" | Expect exit 11 and the comment fallback more often than a close. |
+| `GET /request/KEY` carries `reporter.accountId`, which equals `/rest/api/3/myself` `.accountId` for the human's own request | The ownership check behind exit 10. |
+| A done request offers no transitions | Reading the status first saves a pointless call. |
+
+`comment --send` and `transition --send` follow the same API and auth, but
+neither had been run live when this was written (no desk measured offered a
+close). Per Atlassian's API reference, the transition POST answers 204 with
+no body and takes `{"id": ..., "additionalComment": {"body": ...}}`; the first
+live use checks it (exit 8 or 9 means the desk refused it).

@@ -12,6 +12,8 @@
 #   - an open request with the same summary blocks a second create (exit 6),
 #     matched exactly, without relying on searchTerm
 #   - comments are posted public, with the body file verbatim
+#   - a transition moves only a request the human raised, only along a
+#     transition the desk offers them, and only with --send
 #
 # Run: bash users/dev/test-jsm-write.sh
 set -o errexit -o nounset -o pipefail
@@ -178,7 +180,41 @@ run comment NOPE-1 --body-file desc.txt --send
 nowrites "comment on unknown request"
 ok "comment: dry run, then public POST with body verbatim; unknown request refused before writing"
 
-# 8. usage and env
+# 8. transitions / transition: own request only, offered transitions only, dry run first
+ME='{"accountId":"acc-me"}'
+fx GET "https://$SITE/rest/api/3/myself" 200 "$ME"
+MINE='{"issueKey":"ABC-9","reporter":{"accountId":"acc-me"},"currentStatus":{"status":"Waiting for support"},"_links":{"web":"https://example.atlassian.net/servicedesk/customer/portal/5/ABC-9"}}'
+fx GET "$A/request/ABC-9" 200 "$MINE"
+fx GET "$A/request/ABC-9/transition?limit=50" 200 \
+  '{"isLastPage":true,"values":[{"id":"921","name":"Escalate"},{"id":"931","name":"Cancel request"}]}'
+fx GET "$A/request/XYZ-4" 200 '{"issueKey":"XYZ-4","reporter":{"accountId":"acc-other"},"_links":{"web":"w"}}'
+fx GET "$A/request/XYZ-4/transition?limit=50" 200 '{"isLastPage":true,"values":[{"id":"931","name":"Cancel request"}]}'
+fx POST "$A/request/ABC-9/transition" 204 ''
+run transitions ABC-9
+[ "$rc" -eq 0 ] && has $'931\tCancel request' || oops "transitions lists ids and names"
+nowrites "transitions"
+printf 'Handled elsewhere; thanks.\n' > "$work/why.txt"
+run transition ABC-9 --to "cancel request" --comment-file why.txt
+[ "$rc" -eq 0 ] && [ "$(jq -r .id <<<"$out")" = 931 ] || oops "transition dry run resolves the name (case-insensitive) to its id"
+[ "$(jq -r .additionalComment.body <<<"$out")" = "$(cat "$work/why.txt")" ] || oops "comment file sent verbatim as additionalComment"
+nowrites "transition dry run"
+run transition ABC-9 --to Resolve --send
+[ "$rc" -eq 11 ] && grep -qF 'Cancel request' <<<"$err" || oops "a transition the desk does not offer exits 11 and lists the offered ones"
+nowrites "transition not offered"
+run transition XYZ-4 --to 931 --send
+[ "$rc" -eq 10 ] || oops "someone else's request exits 10 (got $rc)"
+nowrites "someone else's request"
+run transition ABC-9 --to 931 --send
+[ "$rc" -eq 0 ] || oops "transition --send exits 0 on HTTP 204 (got $rc)"
+[ "$(grep -c . "$work/fx/writes.log")" -eq 1 ] && grep -q "^POST $A/request/ABC-9/transition$" "$work/fx/writes.log" ||
+  oops "exactly one POST to /request/KEY/transition"
+[ "$(jq -r .id "$work/fx/body.json")" = 931 ] && [ "$(jq 'has("additionalComment")' "$work/fx/body.json")" = false ] ||
+  oops "payload is the id alone when no comment is given"
+has "ABC-9" && has "portal/5/ABC-9" || oops "prints the key, its status after the move, and the portal link"
+if grep -qF -- "$TOKEN" "$work/fx/argv.log"; then oops "token absent from argv (transition)"; fi
+ok "transition: own request only (10), offered transitions only (11), dry run, one POST on --send, 204 accepted"
+
+# 9. usage and env
 run
 [ "$rc" -eq 2 ] || oops "no args exits 2"
 run create 5 abc --summary X
