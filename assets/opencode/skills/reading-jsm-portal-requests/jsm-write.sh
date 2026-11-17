@@ -7,13 +7,18 @@
 #   jsm-write.sh fields  <desk> <type>                # a type's fields and options (GET)
 #   jsm-write.sh create  <desk> <type> --summary TEXT --description-file FILE [--field ID=VALUE]... [--send]
 #   jsm-write.sh comment <KEY> --body-file FILE [--send]
+#   jsm-write.sh transitions <KEY>                    # moves the desk offers you (GET)
+#   jsm-write.sh transition  <KEY> --to NAME|ID [--comment-file FILE] [--send]
 #
 # <desk> is the service desk id (the N in /servicedesk/customer/portal/N);
 # <type> is a request type id from `types`. Without --send nothing is
 # written: the JSON that would be sent is printed. `create` refuses when one
 # of your open requests on <desk> already has the same summary, so re-running
 # after a lost response does not raise a duplicate. --field VALUE for an
-# option field is its label (as `fields` prints it) or its id.
+# option field is its label (as `fields` prints it) or its id. `transition`
+# (e.g. "Cancel request", "Resolve") refuses a request someone else raised
+# any move the desk does not offer you, and any move whose name is not a
+# close (cancel, close, resolve, withdraw, done); it never forces a status.
 #
 # Requires: curl, jq (the deployed copy is wrapped with both on PATH).
 # Environment: ATLASSIAN_SITE, ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN.
@@ -21,10 +26,12 @@
 #
 # Exit: 0 ok (or dry run); 2 usage or bad field; 3 env missing; 4 HTTP 401;
 #       5 other HTTP, transport or bad JSON; 6 duplicate open request;
-#       7 HTTP 404; 8 HTTP 400 (the desk rejected the fields); 9 HTTP 403.
+#       7 HTTP 404; 8 HTTP 400 (the desk rejected the fields); 9 HTTP 403;
+#       10 not a request you raised; 11 that transition is not offered to you;
+#       12 that transition is not a close or cancel.
 set -o errexit -o nounset -o pipefail
 
-usage() { sed -n '6,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '6,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 die() { local rc="$1"; shift; echo "jsm-write: $*" >&2; exit "$rc"; }
 
 [ $# -ge 2 ] || usage
@@ -48,6 +55,7 @@ call() {
     curl -sS --config - -H 'Accept: application/json' "${extra[@]}" -o "$3" -w '%{http_code}' "$2")" ||
     { echo "jsm-write: transport error on $1 $2" >&2; return 5; }
   case "$code" in
+    204) [ "${ALLOW_204:-0}" = 1 ] || { echo "jsm-write: unexpected HTTP 204 (no body) on $2" >&2; return 5; }; return 0 ;;
     2??) jq -e . "$3" >/dev/null 2>&1 || { echo "jsm-write: non-JSON response from $2" >&2; return 5; }; return 0 ;;
     400) echo "jsm-write: HTTP 400 on $2: $(jq -r '.errorMessage // .' "$3" 2>/dev/null || cat "$3")" >&2; return 8 ;;
     401) echo "jsm-write: HTTP 401 on $2: the token was refused (expired or revoked)" >&2; return 4 ;;
@@ -172,6 +180,61 @@ comment)
   [ "$rc" -ne 5 ] || echo "jsm-write: the comment may still have been posted; read $key with jsm-request.sh before retrying (a retry is NOT refused)" >&2
   [ "$rc" -eq 0 ] || exit "$rc"
   jq -r --arg w "$(jq -r '._links.web' "$tmp/r.json")" '"comment \(.id) on \($w)"' "$tmp/c.json"
+  ;;
+
+transitions)
+  key="$1"; [ $# -eq 1 ] || usage
+  [[ "$key" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]] || die 2 "'$key' is not a request key"
+  call GET "$API/request/$key/transition?limit=50" "$tmp/t.json" || exit $?
+  [ "$(jq -r .isLastPage "$tmp/t.json")" = true ] || die 5 "more than 50 transitions; listing incomplete"
+  jq -r '.values[] | "\(.id)\t\(.name)"' "$tmp/t.json"
+  [ "$(jq '.values | length' "$tmp/t.json")" -gt 0 ] || echo "jsm-write: $key offers you no transitions" >&2
+  ;;
+
+transition)
+  key="$1"; shift; to=""; bodyf=""; send=0
+  [[ "$key" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]] || die 2 "'$key' is not a request key"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to) [ $# -ge 2 ] || usage; to="$2"; shift 2 ;;
+      --comment-file) [ $# -ge 2 ] || usage; bodyf="$2"; shift 2 ;;
+      --send) send=1; shift ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$to" ] || die 2 "--to is required (a name or id from 'transitions $key')"
+  [ -z "$bodyf" ] || checkfile "$bodyf"
+  # Only a request the human raised: its reporter must be the token's owner.
+  call GET "$API/request/$key" "$tmp/r.json" || exit $?
+  call GET "https://$ATLASSIAN_SITE/rest/api/3/myself" "$tmp/me.json" || exit $?
+  me="$(jq -r '.accountId // empty' "$tmp/me.json")"
+  [ -n "$me" ] && [ "$(jq -r '.reporter.accountId // empty' "$tmp/r.json")" = "$me" ] ||
+    die 10 "$key was not raised by you; this helper only moves your own requests"
+  call GET "$API/request/$key/transition?limit=50" "$tmp/t.json" || exit $?
+  id="$(jq -r --arg t "$to" '[.values[] | select(.id == $t or (.name | ascii_downcase) == ($t | ascii_downcase)) | .id][0] // empty' "$tmp/t.json")"
+  [ -n "$id" ] || die 11 "'$to' is not offered on $key; offered: $(jq -r '[.values[] | "\(.id) \(.name)"] | if length == 0 then "none" else join(", ") end' "$tmp/t.json")"
+  name="$(jq -r --arg id "$id" '.values[] | select(.id == $id) | .name' "$tmp/t.json")"
+  [[ "${name,,}" =~ cancel|close|resolve|withdraw|done ]] ||
+    die 12 "'$name' is not a close or cancel; this helper only closes requests"
+  if [ -n "$bodyf" ]; then
+    jq -n --arg id "$id" --rawfile b "$bodyf" '{id: $id, additionalComment: {body: $b}}' > "$tmp/payload.json" || die 2 "could not read $bodyf"
+  else
+    jq -n --arg id "$id" '{id: $id}' > "$tmp/payload.json"
+  fi
+  if [ "$send" -eq 0 ]; then
+    jq . "$tmp/payload.json"
+    echo "jsm-write: dry run; $key not moved (now: $(jq -r '.currentStatus.status // "?"' "$tmp/r.json")). Add --send to move it." >&2
+    exit 0
+  fi
+  rc=0; ALLOW_204=1 call POST "$API/request/$key/transition" "$tmp/x.json" "$tmp/payload.json" || rc=$?
+  [ "$rc" -ne 5 ] || echo "jsm-write: the request may still have moved; read $key with jsm-request.sh before retrying" >&2
+  [ "$rc" -eq 0 ] || exit "$rc"
+  status="?"; cat="?"
+  if call GET "$API/request/$key" "$tmp/r2.json"; then
+    status="$(jq -r '.currentStatus.status // "?"' "$tmp/r2.json")"; cat="$(jq -r '.currentStatus.statusCategory // "?"' "$tmp/r2.json")"
+  fi
+  [ "$cat" = DONE ] || echo "jsm-write: $key moved, but its status '$status' is not in the DONE category; it may still be open" >&2
+  printf '%s\t%s\t%s\n' "$key" "$status" "$(jq -r '._links.web' "$tmp/r.json")"
   ;;
 
 *) usage ;;
