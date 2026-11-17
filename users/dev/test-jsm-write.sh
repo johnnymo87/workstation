@@ -212,7 +212,15 @@ run transition ABC-9 --to 931 --send
   oops "payload is the id alone when no comment is given"
 has "ABC-9" && has "portal/5/ABC-9" || oops "prints the key, its status after the move, and the portal link"
 if grep -qF -- "$TOKEN" "$work/fx/argv.log"; then oops "token absent from argv (transition)"; fi
-ok "transition: own request only (10), offered transitions only (11), dry run, one POST on --send, 204 accepted"
+grep -q 'not in the DONE category' <<<"$err" || oops "warns when the status after the move is not DONE"
+run transition ABC-9 --to Escalate --send
+[ "$rc" -eq 12 ] || oops "an offered move that is not a close exits 12 (got $rc)"
+nowrites "escalate refused"
+fx POST "$A/request/ABC-9/comment" 204 ''
+run comment ABC-9 --body-file desc.txt --send
+[ "$rc" -eq 5 ] || oops "a 204 outside transition is exit 5, not success (got $rc)"
+fx POST "$A/request/ABC-9/comment" 201 '{"id":"555","public":true}'
+ok "transition: own request only (10), offered only (11), closes only (12), dry run, one POST, 204 only there, DONE check"
 
 # 9. usage and env
 run

@@ -17,7 +17,8 @@
 # after a lost response does not raise a duplicate. --field VALUE for an
 # option field is its label (as `fields` prints it) or its id. `transition`
 # (e.g. "Cancel request", "Resolve") refuses a request someone else raised
-# and any move the desk does not offer you; it never forces a status.
+# any move the desk does not offer you, and any move whose name is not a
+# close (cancel, close, resolve, withdraw, done); it never forces a status.
 #
 # Requires: curl, jq (the deployed copy is wrapped with both on PATH).
 # Environment: ATLASSIAN_SITE, ATLASSIAN_EMAIL, ATLASSIAN_API_TOKEN.
@@ -26,7 +27,8 @@
 # Exit: 0 ok (or dry run); 2 usage or bad field; 3 env missing; 4 HTTP 401;
 #       5 other HTTP, transport or bad JSON; 6 duplicate open request;
 #       7 HTTP 404; 8 HTTP 400 (the desk rejected the fields); 9 HTTP 403;
-#       10 not a request you raised; 11 that transition is not offered to you.
+#       10 not a request you raised; 11 that transition is not offered to you;
+#       12 that transition is not a close or cancel.
 set -o errexit -o nounset -o pipefail
 
 usage() { sed -n '6,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
@@ -53,7 +55,7 @@ call() {
     curl -sS --config - -H 'Accept: application/json' "${extra[@]}" -o "$3" -w '%{http_code}' "$2")" ||
     { echo "jsm-write: transport error on $1 $2" >&2; return 5; }
   case "$code" in
-    204) return 0 ;;
+    204) [ "${ALLOW_204:-0}" = 1 ] || { echo "jsm-write: unexpected HTTP 204 (no body) on $2" >&2; return 5; }; return 0 ;;
     2??) jq -e . "$3" >/dev/null 2>&1 || { echo "jsm-write: non-JSON response from $2" >&2; return 5; }; return 0 ;;
     400) echo "jsm-write: HTTP 400 on $2: $(jq -r '.errorMessage // .' "$3" 2>/dev/null || cat "$3")" >&2; return 8 ;;
     401) echo "jsm-write: HTTP 401 on $2: the token was refused (expired or revoked)" >&2; return 4 ;;
@@ -211,6 +213,9 @@ transition)
   call GET "$API/request/$key/transition?limit=50" "$tmp/t.json" || exit $?
   id="$(jq -r --arg t "$to" '[.values[] | select(.id == $t or (.name | ascii_downcase) == ($t | ascii_downcase)) | .id][0] // empty' "$tmp/t.json")"
   [ -n "$id" ] || die 11 "'$to' is not offered on $key; offered: $(jq -r '[.values[] | "\(.id) \(.name)"] | if length == 0 then "none" else join(", ") end' "$tmp/t.json")"
+  name="$(jq -r --arg id "$id" '.values[] | select(.id == $id) | .name' "$tmp/t.json")"
+  [[ "${name,,}" =~ cancel|close|resolve|withdraw|done ]] ||
+    die 12 "'$name' is not a close or cancel; this helper only closes requests"
   if [ -n "$bodyf" ]; then
     jq -n --arg id "$id" --rawfile b "$bodyf" '{id: $id, additionalComment: {body: $b}}' > "$tmp/payload.json" || die 2 "could not read $bodyf"
   else
@@ -221,11 +226,14 @@ transition)
     echo "jsm-write: dry run; $key not moved (now: $(jq -r '.currentStatus.status // "?"' "$tmp/r.json")). Add --send to move it." >&2
     exit 0
   fi
-  rc=0; call POST "$API/request/$key/transition" "$tmp/x.json" "$tmp/payload.json" || rc=$?
+  rc=0; ALLOW_204=1 call POST "$API/request/$key/transition" "$tmp/x.json" "$tmp/payload.json" || rc=$?
   [ "$rc" -ne 5 ] || echo "jsm-write: the request may still have moved; read $key with jsm-request.sh before retrying" >&2
   [ "$rc" -eq 0 ] || exit "$rc"
-  status="?"
-  call GET "$API/request/$key" "$tmp/r2.json" && status="$(jq -r '.currentStatus.status // "?"' "$tmp/r2.json")"
+  status="?"; cat="?"
+  if call GET "$API/request/$key" "$tmp/r2.json"; then
+    status="$(jq -r '.currentStatus.status // "?"' "$tmp/r2.json")"; cat="$(jq -r '.currentStatus.statusCategory // "?"' "$tmp/r2.json")"
+  fi
+  [ "$cat" = DONE ] || echo "jsm-write: $key moved, but its status '$status' is not in the DONE category; it may still be open" >&2
   printf '%s\t%s\t%s\n' "$key" "$status" "$(jq -r '._links.web' "$tmp/r.json")"
   ;;
 

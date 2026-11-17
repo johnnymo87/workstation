@@ -24,6 +24,7 @@ Details for `jsm-write.sh`. When to use it at all is in [SKILL.md](SKILL.md).
 | 9 | HTTP 403: the human cannot raise this type on this desk, or comment on this request. |
 | 10 | `transition`: the request's reporter is not the token's owner. Nothing was sent. |
 | 11 | `transition`: the desk does not offer that move to the human; the moves it does offer are printed (often "none"). Nothing was sent. |
+| 12 | `transition`: the move is offered but its name is not a close (cancel, close, resolve, withdraw, done), e.g. "Escalate". Nothing was sent. |
 
 ## What `create` checks before it writes
 
@@ -52,15 +53,20 @@ Only a request the human raised, and only when they asked to close it.
    changes the picture: report it instead of closing.
 2. `$W transitions KEY` lists the moves offered to the human. Pick the one
    that matches the ask ("Cancel request" if nobody acted, "Resolve" if it was
-   handled). Never pick "Escalate" or similar to close.
+   handled). The helper refuses any other move (exit 12): escalating or
+   reopening is not closing.
 3. `$W transition KEY --to NAME --comment-file why.txt` (dry run), then with
    `--send`. The comment rides along as the transition's public comment, so
    do not also post it with `comment`. On success it prints
-   `KEY<TAB>status now<TAB>portal link`; report that status.
+   `KEY<TAB>status now<TAB>portal link`, and warns if that status is not in
+   the DONE category (a "Resolve" can land in an approval step); report it.
+4. `agent-wait cancel` any `--jira` wait registered on it (`agent-wait list`), or expect the desk's
+   closing notice to fire it.
 
 `transition` checks, before anything is sent, that the request's reporter is
-the token's owner (`/rest/api/3/myself`), exit 10 otherwise, and that the move
-is in the offered list, exit 11 otherwise. It never sets a status directly.
+the token's owner (`/rest/api/3/myself`), exit 10 otherwise; that the move
+is in the offered list, exit 11 otherwise; and that its name is a close,
+exit 12 otherwise. It never sets a status directly.
 
 **No transition offered (exit 11, "none"):** the desk lets only its agents
 close requests. Post a public `comment` asking them to close it, with the
