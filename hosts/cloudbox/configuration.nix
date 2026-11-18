@@ -4294,27 +4294,17 @@ Check:
   # seeded accounts, and a config that has gone missing or empty is a genuine
   # fault rather than a state to pass over quietly.
   #
-  # BE HONEST ABOUT WHAT THAT BUYS, THOUGH — an earlier draft of this comment
-  # claimed a missing config would "go `failed`, loudly, and trip the
-  # teamclaude-pool canary", and BOTH halves of that are false:
+  # What that buys, precisely: a missing config never reaches `failed`
+  # (StartLimitIntervalUSec=10s with StartLimitBurst=5 and RestartUSec=10s is
+  # one attempt per 10s, never 5 within 10s), so the unit loops in
+  # `activating (auto-restart)` indefinitely. Until workstation-onjr that state
+  # paged nobody; the teamclaude-pool canary below now pages on it (and on
+  # active-but-not-answering, and on restart loops) after ~10 minutes.
   #
-  #   * It never reaches `failed`. StartLimitIntervalUSec=10s with
-  #     StartLimitBurst=5 and RestartUSec=10s means one start attempt per 10s,
-  #     which can never be 5 within 10s. The unit loops in
-  #     `activating (auto-restart)` indefinitely.
-  #   * The canary does not fire on it. Its probe does
-  #     `if HTTP_CODE != 200 -> "unknown; not alerting" -> exit 0` (below), so a
-  #     teamclaude that is not answering at all is SILENT to it, whatever the
-  #     unit state. Meanwhile cfp gets ECONNREFUSED on its `max` tier and
-  #     quietly pays Vertex instead.
-  #
-  # So the real reason not to add ExecCondition here is narrower than "it would
-  # hide an outage": it would swap one non-alerting state (`activating`) for
-  # another (`inactive`), while removing the retry that recovers if the config
-  # is restored. Neither state pages anyone today, which is its own bug --
-  # filed as workstation-onjr. If that lands and the canary starts treating
-  # not-answering as pageable, revisit this exclusion; the argument for it
-  # largely evaporates.
+  # That is exactly why ExecCondition must stay OFF here: it would turn a
+  # missing or emptied config into `inactive`, which the canary deliberately
+  # treats as an operator's stop and does NOT page on, and it would remove the
+  # retry that recovers once the config is restored.
   systemd.services.teamclaude = {
     description = "TeamClaude (personal Claude Max rotator for failover)";
     wantedBy = [ "multi-user.target" ];
@@ -4376,9 +4366,11 @@ Check:
   #    probe.accounts[].error field reports "HTTP 429: Rate limited" for
   #    AUTH-DEAD accounts — actively misleading, and it would send the operator
   #    chasing a quota problem instead of running `teamclaude login`.
-  #  - UNKNOWN MUST NEVER ALERT (same rule the frontdoor canary learned): a curl
-  #    failure, non-200, unparseable body, or zero-account roster logs a warning
-  #    and exits 0. Otherwise a transient blip pages forever on the TTL.
+  #  - UNKNOWN MUST NEVER ALERT about the POOL (same rule the frontdoor canary
+  #    learned): an unparseable body or zero-account roster logs a warning and
+  #    exits 0. A teamclaude that is not answering at all is NOT unknown,
+  #    though: since workstation-onjr it is the "TEAMCLAUDE ITSELF DOWN" page
+  #    below, after the same 2-pass dampening.
   #  - Dampened to 2 consecutive passes (~10 min) so one flaky probe can't page.
   systemd.services.teamclaude-pool-canary = {
     description = "TeamClaude Max pool health canary (alerts when accounts die)";
@@ -4425,20 +4417,181 @@ Check:
         MARK="$STATE/healthy-high-water"
         ACK="$STATE/expected-healthy-ack"
 
-        # Only police a unit that is supposed to be up (mirrors the frontdoor
-        # canary). An intentional stop must not page.
-        if [ "$(systemctl is-active teamclaude.service)" != "active" ]; then
-          rm -f "$PENDING" "$STATE/degraded-alerted" "$STATE/exhausted-pending"
+        # ---- TEAMCLAUDE ITSELF DOWN (workstation-onjr) ----------------------
+        #
+        # This canary used to exit 0 whenever the unit was not `active`, and
+        # again on any non-200 probe ("unknown; not alerting"). Together those
+        # made a dead teamclaude completely silent: the unit is Restart=always
+        # with RestartSec=10 against the default 5-in-10s start limit, so a
+        # broken teamclaude loops in `activating (auto-restart)` forever and
+        # never reaches `failed`; and a running one that refuses connections
+        # was "unknown". Meanwhile cfp's max probe fails, routing prefers
+        # Vertex, and past the $100/day budget its overshoot backstop keeps
+        # paying Vertex. Max absorbed $595-$800/day of notional Vertex spend
+        # on 2026-11-10..12 (cfp /history savedByFailover), which is roughly
+        # what a silent outage costs per day.
+        #
+        # What counts as DOWN, i.e. pageable after 2 consecutive passes:
+        #   - unit `activating` (the auto-restart loop) or `failed`
+        #   - unit `active` but /teamclaude/status refused, timed out, or not 200
+        # What stays SILENT:
+        #   - `inactive`: someone stopped it on purpose. With Restart=always a
+        #     crash never lands here; only a stop job does.
+        #   - `deactivating`/`reloading`: a job in flight. Neither counted nor
+        #     cleared, so a rebuild's stop/start cannot page or reset a streak.
+        # The 2-pass (~10 min) dampening absorbs a restart, a rebuild, and
+        # teamclaude's own startup.
+        #
+        # Restart=always and the absent ExecCondition both stay: the unit keeps
+        # healing itself, and THIS is what makes the loop loud. Same trade cfp
+        # made (#329).
+        DOWNFILE="$STATE/down-pending"
+        clear_pool_state() { rm -f "$PENDING" "$STATE/degraded-alerted" "$STATE/exhausted-pending"; }
+        teamclaude_down() {
+          # $1 = human-readable state, used in the log and the page text.
+          # Pool counts are unknowable while it is down, so drop their 2-pass
+          # streaks -- but NOT degraded-alerted, so one refused probe in the
+          # middle of a degraded episode does not restart that nag's backoff.
+          rm -f "$PENDING" "$STATE/exhausted-pending" "$STATE/down-clear"
+          local n
+          n=$(( $(cat "$DOWNFILE" 2>/dev/null || echo 0) + 1 ))
+          echo "$n" > "$DOWNFILE"
+          echo "WARNING: teamclaude is DOWN: $1 ($n/2 consecutive)"
+          [ "$n" -ge 2 ] || exit 0
+          DOWN_TEXT=$(cat <<EOF
+TeamClaude is DOWN on cloudbox: $1.
+
+cfp cannot reach its Max tier, so every Claude request is going to paid
+Vertex, including past the \$100/day budget. Max normally absorbs about
+\$600-800 a day of that spend.
+
+The unit is Restart=always and never settles in "failed", so it keeps retrying
+on its own; if this is still firing, it cannot start or cannot answer.
+
+Diagnose (on cloudbox):
+  systemctl status teamclaude
+  journalctl -u teamclaude -n 50 --no-pager
+  curl -sS -o /dev/null -w '%{http_code}\n' localhost:3456/teamclaude/status
+Usual suspects: ~/.config/teamclaude.json missing or emptied (re-seed and
+\`teamclaude login\`), or a bad teamclaude package bump.
+
+If you stopped it on purpose, \`sudo systemctl stop teamclaude\` leaves it
+"inactive", which does not page.
+EOF
+)
+          # One signature for every down shape: a crash loop flips between
+          # `activating` and refused, and a per-shape signature would re-page
+          # on each flip instead of backing off.
+          ${driftAlert} "$STATE/down-alerted" "down" "$DOWN_TEXT" 900 14400
           exit 0
-        fi
+        }
+
+        ACTIVE=$(systemctl is-active teamclaude.service 2>/dev/null || true)
+        case "$ACTIVE" in
+          active) ;;
+          inactive)
+            # Deliberate stop: quiet, and the next start begins a fresh episode.
+            clear_pool_state
+            rm -f "$DOWNFILE" "$STATE/down-alerted" "$STATE/loop-window" "$STATE/loop-hit" "$STATE/loop-alerted"
+            exit 0
+            ;;
+          deactivating|reloading)
+            echo "NOTE: teamclaude is $ACTIVE (job in flight); skipping this pass"
+            exit 0
+            ;;
+          "")
+            # systemctl/D-Bus itself failed: that says nothing about teamclaude.
+            echo "WARNING: systemctl is-active returned nothing (unknown; not alerting)"
+            exit 0
+            ;;
+          activating) teamclaude_down "the unit is stuck restarting (activating / auto-restart)" ;;
+          failed) teamclaude_down "the unit has failed" ;;
+          *) teamclaude_down "the unit is in state '$ACTIVE'" ;;
+        esac
 
         HTTP_CODE=$(curl -sS --max-time 10 --connect-timeout 3 -o "$BODY" -w "%{http_code}" \
           http://127.0.0.1:3456/teamclaude/status 2>/dev/null) || HTTP_CODE=000
 
         if [ "$HTTP_CODE" != "200" ]; then
-          echo "WARNING: teamclaude status probe returned HTTP $HTTP_CODE (unknown; not alerting)"
-          exit 0
+          if [ "$HTTP_CODE" = "000" ]; then
+            teamclaude_down "the unit is running but its status endpoint refused or timed out"
+          fi
+          teamclaude_down "the unit is running but its status endpoint returned HTTP $HTTP_CODE"
         fi
+        rm -f "$DOWNFILE"
+        # The episode (and its backoff) ends only after 3 consecutive healthy
+        # passes (~15 min). Clearing on the first one would make a flapper --
+        # down, down, up, down, down -- re-page as a fresh warning every cycle
+        # instead of backing off and escalating.
+        if [ -f "$STATE/down-alerted" ]; then
+          CLEAN_N=$(( $(cat "$STATE/down-clear" 2>/dev/null || echo 0) + 1 ))
+          if [ "$CLEAN_N" -ge 3 ]; then
+            rm -f "$STATE/down-alerted" "$STATE/down-clear"
+            echo "NOTE: teamclaude healthy for 3 passes; down episode closed"
+          else
+            echo "$CLEAN_N" > "$STATE/down-clear"
+          fi
+        fi
+
+        # ---- RESTART LOOP --------------------------------------------------
+        # A teamclaude that comes up, answers for a while and crashes can look
+        # healthy on every 5-minute sample; NRestarts still counts the crashes.
+        # Not a complete net: the window is tumbling, so fewer than 5 restarts
+        # per window (or 5 straddling a reseed) go unseen. Because the down
+        # branch exits before this one, the count may also include a crash
+        # loop that has since recovered, which the page text allows for. Same
+        # detector as claude-failover-proxy-canary: 5+ restarts inside a
+        # 15-minute window. Its signature is stable and its alert state is kept
+        # until a whole window passes clean, so an ongoing loop backs off
+        # (15m .. 4h) instead of re-paging every window.
+        LOOP_WINDOW="$STATE/loop-window"
+        NOW=$(date +%s)
+        NR=$(systemctl show teamclaude.service -p NRestarts --value 2>/dev/null || true)
+        case "$NR" in
+          ""|*[!0-9]*)
+            echo "WARNING: could not read NRestarts for teamclaude (unknown; not checking for a restart loop)"
+            ;;
+          *)
+            W_TS=""; W_NR=""; W_BOOT=""
+            if [ -f "$LOOP_WINDOW" ]; then
+              { read -r W_TS; read -r W_NR; read -r W_BOOT; } < "$LOOP_WINDOW" || true
+            fi
+            case "$W_TS" in ""|*[!0-9]*) W_TS="" ;; esac
+            case "$W_NR" in ""|*[!0-9]*) W_NR="" ;; esac
+            # Re-seed when missing, older than 15 minutes, when NRestarts went
+            # backwards (a manual restart zeroes it), or across a reboot (the
+            # boot id changes), so counts from two boots are never compared.
+            BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
+            if [ -z "$W_TS" ] || [ -z "$W_NR" ] || [ "$((NOW - W_TS))" -ge 900 ] || [ "$NR" -lt "$W_NR" ] || [ "$BOOT" != "$W_BOOT" ]; then
+              printf '%s\n%s\n%s\n' "$NOW" "$NR" "$BOOT" > "$LOOP_WINDOW"
+              # A window that closed without a loop ends the episode.
+              if [ -f "$STATE/loop-hit" ]; then
+                rm -f "$STATE/loop-hit"
+              else
+                rm -f "$STATE/loop-alerted"
+              fi
+            else
+              DELTA=$((NR - W_NR))
+              if [ "$DELTA" -ge 5 ]; then
+                touch "$STATE/loop-hit"
+                echo "WARNING: teamclaude restarted $DELTA times in the last $((NOW - W_TS))s"
+                LOOP_TEXT=$(cat <<EOF
+TeamClaude restarted $DELTA times in the last $((NOW - W_TS))s on cloudbox.
+
+It is answering right now, so it may be flapping (cfp's Max tier comes and
+goes, and requests fall through to paid Vertex in between) or it may have
+crash-looped for a few minutes and recovered. systemctl status shows which.
+
+Diagnose (on cloudbox):
+  journalctl -u teamclaude -n 100 --no-pager
+  systemctl status teamclaude
+EOF
+)
+                ${driftAlert} "$STATE/loop-alerted" "loop" "$LOOP_TEXT" 900 14400
+              fi
+            fi
+            ;;
+        esac
 
         TOTAL=$(jq -r '(.accounts // []) | length' "$BODY" 2>/dev/null || echo "")
         # HEALTHY counts accounts that do NOT need a human; SERVING counts the
