@@ -4449,8 +4449,10 @@ Check:
         clear_pool_state() { rm -f "$PENDING" "$STATE/degraded-alerted" "$STATE/exhausted-pending"; }
         teamclaude_down() {
           # $1 = human-readable state, used in the log and the page text.
-          # Pool counts are unknowable while it is down, so drop their streaks.
-          clear_pool_state
+          # Pool counts are unknowable while it is down, so drop their 2-pass
+          # streaks -- but NOT degraded-alerted, so one refused probe in the
+          # middle of a degraded episode does not restart that nag's backoff.
+          rm -f "$PENDING" "$STATE/exhausted-pending" "$STATE/down-clear"
           local n
           n=$(( $(cat "$DOWNFILE" 2>/dev/null || echo 0) + 1 ))
           echo "$n" > "$DOWNFILE"
@@ -4497,6 +4499,11 @@ EOF
             echo "NOTE: teamclaude is $ACTIVE (job in flight); skipping this pass"
             exit 0
             ;;
+          "")
+            # systemctl/D-Bus itself failed: that says nothing about teamclaude.
+            echo "WARNING: systemctl is-active returned nothing (unknown; not alerting)"
+            exit 0
+            ;;
           activating) teamclaude_down "the unit is stuck restarting (activating / auto-restart)" ;;
           failed) teamclaude_down "the unit has failed" ;;
           *) teamclaude_down "the unit is in state '$ACTIVE'" ;;
@@ -4511,11 +4518,28 @@ EOF
           fi
           teamclaude_down "the unit is running but its status endpoint returned HTTP $HTTP_CODE"
         fi
-        rm -f "$DOWNFILE" "$STATE/down-alerted"
+        rm -f "$DOWNFILE"
+        # The episode (and its backoff) ends only after 3 consecutive healthy
+        # passes (~15 min). Clearing on the first one would make a flapper --
+        # down, down, up, down, down -- re-page as a fresh warning every cycle
+        # instead of backing off and escalating.
+        if [ -f "$STATE/down-alerted" ]; then
+          CLEAN_N=$(( $(cat "$STATE/down-clear" 2>/dev/null || echo 0) + 1 ))
+          if [ "$CLEAN_N" -ge 3 ]; then
+            rm -f "$STATE/down-alerted" "$STATE/down-clear"
+            echo "NOTE: teamclaude healthy for 3 passes; down episode closed"
+          else
+            echo "$CLEAN_N" > "$STATE/down-clear"
+          fi
+        fi
 
         # ---- RESTART LOOP --------------------------------------------------
         # A teamclaude that comes up, answers for a while and crashes can look
-        # healthy on every 5-minute sample. NRestarts cannot lie about it. Same
+        # healthy on every 5-minute sample; NRestarts still counts the crashes.
+        # Not a complete net: the window is tumbling, so fewer than 5 restarts
+        # per window (or 5 straddling a reseed) go unseen. Because the down
+        # branch exits before this one, the count may also include a crash
+        # loop that has since recovered, which the page text allows for. Same
         # detector as claude-failover-proxy-canary: 5+ restarts inside a
         # 15-minute window. Its signature is stable and its alert state is kept
         # until a whole window passes clean, so an ongoing loop backs off
@@ -4528,16 +4552,18 @@ EOF
             echo "WARNING: could not read NRestarts for teamclaude (unknown; not checking for a restart loop)"
             ;;
           *)
-            W_TS=""; W_NR=""
+            W_TS=""; W_NR=""; W_BOOT=""
             if [ -f "$LOOP_WINDOW" ]; then
-              { read -r W_TS; read -r W_NR; } < "$LOOP_WINDOW" || true
+              { read -r W_TS; read -r W_NR; read -r W_BOOT; } < "$LOOP_WINDOW" || true
             fi
             case "$W_TS" in ""|*[!0-9]*) W_TS="" ;; esac
             case "$W_NR" in ""|*[!0-9]*) W_NR="" ;; esac
-            # Re-seed when missing, older than 15 minutes, or when NRestarts
-            # went backwards (a manual restart or a reboot zeroes it).
-            if [ -z "$W_TS" ] || [ -z "$W_NR" ] || [ "$((NOW - W_TS))" -ge 900 ] || [ "$NR" -lt "$W_NR" ]; then
-              printf '%s\n%s\n' "$NOW" "$NR" > "$LOOP_WINDOW"
+            # Re-seed when missing, older than 15 minutes, when NRestarts went
+            # backwards (a manual restart zeroes it), or across a reboot (the
+            # boot id changes), so counts from two boots are never compared.
+            BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo "")
+            if [ -z "$W_TS" ] || [ -z "$W_NR" ] || [ "$((NOW - W_TS))" -ge 900 ] || [ "$NR" -lt "$W_NR" ] || [ "$BOOT" != "$W_BOOT" ]; then
+              printf '%s\n%s\n%s\n' "$NOW" "$NR" "$BOOT" > "$LOOP_WINDOW"
               # A window that closed without a loop ends the episode.
               if [ -f "$STATE/loop-hit" ]; then
                 rm -f "$STATE/loop-hit"
@@ -4550,10 +4576,11 @@ EOF
                 touch "$STATE/loop-hit"
                 echo "WARNING: teamclaude restarted $DELTA times in the last $((NOW - W_TS))s"
                 LOOP_TEXT=$(cat <<EOF
-TeamClaude is restart-looping on cloudbox: $DELTA restarts in $((NOW - W_TS))s.
+TeamClaude restarted $DELTA times in the last $((NOW - W_TS))s on cloudbox.
 
-It answers between crashes, so cfp's Max tier is flapping and requests are
-falling through to paid Vertex in between.
+It is answering right now, so it may be flapping (cfp's Max tier comes and
+goes, and requests fall through to paid Vertex in between) or it may have
+crash-looped for a few minutes and recovered. systemctl status shows which.
 
 Diagnose (on cloudbox):
   journalctl -u teamclaude -n 100 --no-pager
