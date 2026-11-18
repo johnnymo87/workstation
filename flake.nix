@@ -637,8 +637,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-em-ci-failover.sh 2>&1 | tee "$TMPDIR/f.txt"
-        grep -q '^ALL PASS (26 assertions)' "$TMPDIR/f.txt" || {
-          echo "GATE FAILURE: em-ci-failover suite did not reach ALL PASS (26 assertions)." >&2
+        grep -q '^ALL PASS (40 assertions)' "$TMPDIR/f.txt" || {
+          echo "GATE FAILURE: em-ci-failover suite did not reach ALL PASS (40 assertions)." >&2
           exit 1
         }
         touch $out
