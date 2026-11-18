@@ -51,6 +51,13 @@ pause).
   CPU and RAM use behind the change is in `hosts/gamebox/em-ci.nix`
   (eternal-machinery bead `kdubj.5`).
 - **Fallback when gamebox is away:** devbox (not hosted).
+  **Amended 2026-11-18 (eternal-machinery bead `kdubj.102`): overflow.** devbox's
+  runners also carry `em-ci` while every online gamebox runner has been busy
+  for 2 passes, and lose it once gamebox has had a free runner for 3 passes.
+  On 2026-11-18 about 20 PR runs (each about 50 runner-minutes) queued for
+  hours on three busy gamebox runners while devbox's two sat idle. Overflow
+  leaves the failover state alone, sends no Telegram, and holds back while
+  devbox MemAvailable is under 14 GB.
 - **Gaming contention:** gamebox runners are paused while a Sunshine stream is
   active. In-flight jobs are cancelled ("runner received a shutdown signal");
   **nobody reruns them automatically** — the owner or an agent reruns. Graceful

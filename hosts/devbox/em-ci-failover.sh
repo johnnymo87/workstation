@@ -8,6 +8,13 @@
 # Labels gate assignment only, so removing one never touches an in-flight job.
 # Writes only on drift: a re-registration resets labels to the configured set,
 # so desired state is compared every pass, but DELETE of an absent label 404s.
+#
+# OVERFLOW (eternal-machinery bead kdubj.102): while every online gamebox runner
+# is busy for EM_CI_OVERFLOW_TICKS passes, devbox's runners carry the label too,
+# so a backlog drains on five runners instead of three. It ends once gamebox has
+# not been saturated for EM_CI_TICKS passes. A busy gamebox with nothing queued
+# costs nothing: a label only lets an idle runner take a job that is waiting.
+# Overflow never changes the failover state (`desired`) and sends no Telegram.
 
 cred() { cat "${CREDENTIALS_DIRECTORY:?}/$1"; }
 now=${EM_CI_NOW:-$(date +%s)}
@@ -37,6 +44,7 @@ desired=$(get desired present)
 on=$(get on 0); off=$(get off 0); errors=$(get errors 0)
 offline_since=$(get offline_since ""); offline_alerted=$(get offline_alerted 0)
 write_errors=$(get write_errors 0)
+overflow=$(get overflow 0); sat=$(get sat 0); unsat=$(get unsat 0)
 
 if ! runners=$(gh_api GET "/repos/$EM_CI_REPO/actions/runners?per_page=100") ||
    ! jq -e '.runners | type == "array"' >/dev/null <<<"$runners"; then
@@ -57,6 +65,21 @@ else
   off=$((off + 1)); on=0; [ -n "$offline_since" ] || offline_since=$now
 fi
 
+# Saturated = at least one primary runner is capacity (online, labelled) and
+# every such runner is busy.
+if jq -e --arg p "$EM_CI_PRIMARY_PREFIX" --arg l "$EM_CI_LABEL" \
+     '[.runners[] | select((.name | startswith($p)) and .status == "online" and ([.labels[].name] | index($l) != null))]
+      | length > 0 and all(.busy == true)' >/dev/null <<<"$runners"; then
+  sat=$((sat + 1)); unsat=0
+else
+  unsat=$((unsat + 1)); sat=0
+fi
+if [ "$overflow" = 0 ] && [ "$sat" -ge "$EM_CI_OVERFLOW_TICKS" ]; then
+  overflow=1; echo "em-ci overflow: every gamebox runner busy for $sat passes; devbox runners take em-ci jobs too."
+elif [ "$overflow" = 1 ] && [ "$unsat" -ge "$EM_CI_TICKS" ]; then
+  overflow=0; echo "em-ci overflow: over; gamebox has had a free runner for $unsat passes."
+fi
+
 if [ "$desired" = present ] && [ "$on" -ge "$EM_CI_TICKS" ]; then
   desired=absent
   tg_send "em-ci failover: gamebox runners online; devbox runners stop taking em-ci jobs (label removed, in-flight jobs finish)." || true
@@ -73,15 +96,27 @@ if [ -n "$offline_since" ] && [ "$offline_alerted" = 0 ] &&
     offline_alerted=1
 fi
 
+# Overflow must not starve devbox's own work (the opencode pool, test VMs, a live
+# stack): two runners can take 12 GB, so it holds back while MemAvailable is
+# under EM_CI_OVERFLOW_MIN_MEM_GB. Dropping the label never touches a running job.
+mem_kb=$(awk '/^MemAvailable:/ {print $2}' "${EM_CI_MEMINFO:-/proc/meminfo}" 2>/dev/null || true)
+mem_ok=0
+[ -n "$mem_kb" ] && [ "$mem_kb" -ge $((EM_CI_OVERFLOW_MIN_MEM_GB * 1024 * 1024)) ] && mem_ok=1
+
+want=$desired
+if [ "$overflow" = 1 ]; then
+  if [ "$mem_ok" = 1 ]; then want=present; else echo "em-ci overflow: held back, devbox MemAvailable ${mem_kb:-unknown} kB is under $EM_CI_OVERFLOW_MIN_MEM_GB GB."; fi
+fi
+
 write_failed=0
 for name in $EM_CI_FALLBACK_RUNNERS; do
   row=$(jq -c --arg n "$name" --arg l "$EM_CI_LABEL" \
     '[.runners[] | select(.name == $n) | {id, has: ([.labels[].name] | index($l) != null)}][0] // empty' <<<"$runners")
   [ -n "$row" ] || continue   # missing runner: em-ci-monitor reports it
   id=$(jq -r .id <<<"$row"); has=$(jq -r .has <<<"$row")
-  if [ "$desired" = present ] && [ "$has" = false ]; then
+  if [ "$want" = present ] && [ "$has" = false ]; then
     gh_api POST "/repos/$EM_CI_REPO/actions/runners/$id/labels" "{\"labels\":[\"$EM_CI_LABEL\"]}" >/dev/null || write_failed=1
-  elif [ "$desired" = absent ] && [ "$has" = true ]; then
+  elif [ "$want" = absent ] && [ "$has" = true ]; then
     gh_api DELETE "/repos/$EM_CI_REPO/actions/runners/$id/labels/$EM_CI_LABEL" >/dev/null || write_failed=1
   fi
 done
@@ -91,10 +126,11 @@ done
 if [ "$write_failed" = 1 ]; then
   write_errors=$((write_errors + 1))
   [ "$write_errors" -ne "$EM_CI_ERROR_ALERT" ] ||
-    tg_send "em-ci failover (devbox): label writes on devbox runners have failed for $write_errors passes; devbox labels do not match '$desired'." || true
+    tg_send "em-ci failover (devbox): label writes on devbox runners have failed for $write_errors passes; devbox labels do not match '$want'." || true
 else
   write_errors=0
 fi
 
 put desired "$desired"; put on "$on"; put off "$off"; put write_errors "$write_errors"
 put offline_since "$offline_since"; put offline_alerted "$offline_alerted"
+put overflow "$overflow"; put sat "$sat"; put unsat "$unsat"

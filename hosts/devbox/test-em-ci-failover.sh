@@ -18,7 +18,9 @@ setup() { # fresh sandbox per case
   mkdir -p "$STATE_DIRECTORY" "$CREDENTIALS_DIRECTORY"
   echo tok >"$CREDENTIALS_DIRECTORY/gh_token"; echo bot >"$CREDENTIALS_DIRECTORY/tg_bot_token"; echo 1 >"$CREDENTIALS_DIRECTORY/tg_chat_id"
   export EM_CI_REPO=o/r EM_CI_PRIMARY_PREFIX=gamebox- EM_CI_FALLBACK_RUNNERS="devbox-em-ci-1 devbox-em-ci-2" \
-         EM_CI_LABEL=em-ci EM_CI_TICKS=3 EM_CI_ERROR_ALERT=10 EM_CI_PRIMARY_OFFLINE_ALERT_H=6 EM_CI_NOW=1000000
+         EM_CI_LABEL=em-ci EM_CI_TICKS=3 EM_CI_ERROR_ALERT=10 EM_CI_PRIMARY_OFFLINE_ALERT_H=6 EM_CI_NOW=1000000 \
+         EM_CI_OVERFLOW_TICKS=2 EM_CI_OVERFLOW_MIN_MEM_GB=14 EM_CI_MEMINFO=$S/meminfo
+  echo "MemAvailable:   20000000 kB" >"$S/meminfo"
   # Stub: GET answers from $S/runners.json (or fails if $S/api_down exists);
   # writes are appended to $S/writes.
   cat >"$S/gh" <<EOF
@@ -31,9 +33,9 @@ EOF
   printf '#!%s\n[ -e "%s/tg_down" ] && exit 7\necho "$1" >>"%s/tg"\n' "$bash_bin" "$S" "$S" >"$S/tgs"
   chmod +x "$S/gh" "$S/tgs"; export EM_CI_GH_API_STUB=$S/gh EM_CI_TG_STUB=$S/tgs
 }
-runners() { # $1: gamebox status, $2: devbox labels json array (e.g. '["em-ci"]' or '[]')
-  jq -n --arg g "$1" --argjson d "$2" '{runners:[
-    {id:1,name:"gamebox-em-ci-1",status:$g,busy:false,labels:[{name:"em-ci"}]},
+runners() { # $1: gamebox status, $2: devbox labels json array (e.g. '["em-ci"]' or '[]'), [$3: gamebox busy]
+  jq -n --arg g "$1" --argjson d "$2" --argjson b "${3:-false}" '{runners:[
+    {id:1,name:"gamebox-em-ci-1",status:$g,busy:$b,labels:[{name:"em-ci"}]},
     {id:11,name:"devbox-em-ci-1",status:"online",busy:false,labels:($d|map({name:.}))},
     {id:12,name:"devbox-em-ci-2",status:"online",busy:false,labels:($d|map({name:.}))}]}' >"$S/runners.json"
 }
@@ -118,6 +120,50 @@ EM_CI_NOW=$((1000000 + 6*3600)) tick
 check "offline alert not latched when send fails" '[ "$(cat $STATE_DIRECTORY/offline_alerted)" = 0 ]'
 rm -f "$S/tg_down"; EM_CI_NOW=$((1000000 + 6*3600 + 60)) tick
 check "offline alert sent on retry" '[ "$(grep -c "offline for" "$S/tg")" -eq 1 ]'
+
+# 14. Overflow (kdubj.102): every gamebox runner busy for EM_CI_OVERFLOW_TICKS -> devbox
+#     takes em-ci jobs too; gamebox not saturated for EM_CI_TICKS -> stripped again.
+setup; runners online '["em-ci"]'; tick; tick; tick; : >"$S/writes"; : >"$S/tg"
+runners online '[]' true; tick
+check "overflow waits at 1 saturated tick" '[ -z "$(writes)" ]'
+tick
+check "overflow adds label on 11" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
+check "overflow adds label on 12" 'grep -q "POST /repos/o/r/actions/runners/12/labels" <<<"$(writes)"'
+check "failover state stays absent in overflow" '[ "$(cat $STATE_DIRECTORY/desired)" = absent ]'
+check "overflow sends no Telegram" '[ ! -s "$S/tg" ]'
+: >"$S/writes"; runners online '["em-ci"]' true; tick
+check "no writes while overflow holds" '[ -z "$(writes)" ]'
+runners online '["em-ci"]' false; tick; tick
+check "overflow holds through 2 unsaturated ticks" '[ -z "$(writes)" ]'
+tick
+check "overflow ends after 3 unsaturated ticks" 'grep -q "DELETE /repos/o/r/actions/runners/11/labels/em-ci" <<<"$(writes)"'
+
+# 15. Saturation streak resets on an unsaturated tick.
+setup; runners online '[]'; tick; tick; tick; : >"$S/writes"
+runners online '[]' true; tick; runners online '[]' false; tick; runners online '[]' true; tick
+check "saturation streak reset" '[ -z "$(writes)" ]'
+
+# 16. One busy and one idle gamebox runner is not saturation.
+setup; jq -n '{runners:[
+  {id:1,name:"gamebox-em-ci-1",status:"online",busy:true,labels:[{name:"em-ci"}]},
+  {id:2,name:"gamebox-em-ci-2",status:"online",busy:false,labels:[{name:"em-ci"}]},
+  {id:11,name:"devbox-em-ci-1",status:"online",busy:false,labels:[]}]}' >"$S/runners.json"
+tick; tick; tick; : >"$S/writes"; tick; tick; tick
+check "partly busy gamebox is not saturated" '[ -z "$(writes)" ]'
+
+# 17. Busy-but-offline primaries (all offline) are failover, not overflow: still present.
+setup; runners offline '["em-ci"]' true; tick; tick; tick
+check "offline busy primary stays failover present" '[ "$(cat $STATE_DIRECTORY/desired)" = present ] && [ -z "$(writes)" ]'
+
+# 18. Overflow holds back while devbox memory is short; failover is unaffected.
+setup; runners online '["em-ci"]'; tick; tick; tick; : >"$S/writes"
+echo "MemAvailable:   8000000 kB" >"$S/meminfo"
+runners online '[]' true; tick; tick; tick
+check "overflow held back on low memory" '[ -z "$(writes)" ] && [ "$(cat $STATE_DIRECTORY/overflow)" = 1 ]'
+echo "MemAvailable:   20000000 kB" >"$S/meminfo"; tick
+check "overflow resumes when memory is back" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
+setup; echo "MemAvailable:   8000000 kB" >"$S/meminfo"; runners offline '[]'; tick
+check "failover ignores the memory guard" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
 
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"

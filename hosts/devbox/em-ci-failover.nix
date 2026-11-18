@@ -1,13 +1,14 @@
 # Reconciler for devbox runner failover.
 # Removes the em-ci label from devbox runners while gamebox runners are online,
-# and restores it when gamebox runners are offline (with hysteresis).
+# and restores it when gamebox runners are offline (with hysteresis), or while
+# every gamebox runner is busy (overflow, eternal-machinery bead kdubj.102).
 # Design: docs/plans/2026-10-11-em-ci-gamebox-design.md, "Failover reconciler".
 { config, lib, pkgs, ... }:
 
 let
   failover = pkgs.writeShellApplication {
     name = "em-ci-failover";
-    runtimeInputs = with pkgs; [ coreutils curl jq ];
+    runtimeInputs = with pkgs; [ coreutils curl gawk jq ];
     text = builtins.readFile ./em-ci-failover.sh;
   };
 in
@@ -22,6 +23,8 @@ in
       EM_CI_FALLBACK_RUNNERS = "devbox-em-ci-1 devbox-em-ci-2";
       EM_CI_LABEL = "em-ci";
       EM_CI_TICKS = "3";
+      EM_CI_OVERFLOW_TICKS = "2";   # kdubj.102: every gamebox runner busy this many passes -> devbox helps
+      EM_CI_OVERFLOW_MIN_MEM_GB = "14";  # ...unless devbox MemAvailable is below this (2 runners can take 12 GB)
       EM_CI_ERROR_ALERT = "10";
       EM_CI_PRIMARY_OFFLINE_ALERT_H = "9";   # above the 8 h streaming-pause ceiling (RuntimeMaxSec)
     };
