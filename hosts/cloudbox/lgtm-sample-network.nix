@@ -18,14 +18,19 @@
 #      name. IPv6 is off on the network, and the same drop is installed for
 #      IPv6 anyway, because the bridge still gets a link-local address.
 #
-#   2. The GCE metadata server (169.254.169.254:80), which hands out tokens for
-#      the VM's default compute service account. This rule is for ALL forwarded
-#      container traffic, not just this network: `docker build` steps and
-#      testcontainers run on the default bridge and have the same reach. Port
-#      53 to the same address stays open, because it is also cloudbox's DNS
-#      resolver (/etc/resolv.conf), and containers on the default bridge use it
-#      directly. Containers on `--network host` are the host and are not
-#      covered; nothing here uses that for untrusted code.
+#   2. The GCE metadata server (169.254.169.254, HTTP on port 80), which hands
+#      out tokens for the VM's default compute service account. This rule is
+#      for ALL forwarded container traffic, not just this network: `docker
+#      build` steps and testcontainers run on the default bridge and have the
+#      same reach. Every port but 53 is refused (80 is the one that matters):
+#      53 stays open because the same address is also cloudbox's DNS resolver
+#      (/etc/resolv.conf), which containers use, directly on the default bridge
+#      and through docker's embedded resolver on user-defined networks (it
+#      forwards from the container's namespace, so it takes this path too).
+#      REJECT, not DROP: a client library probing for default credentials then
+#      fails at once instead of hanging for the connect timeout. Containers on
+#      `--network host` are the host and are not covered; nothing here uses
+#      that for untrusted code.
 #
 # Checked before this landed (2026-11-18): no container on cloudbox used the
 # metadata server. The aigateway forwards its caller's own Authorization header
@@ -49,6 +54,21 @@
 #     aigateway unit's comment for why PartOf alone misses that case), and
 #     `partOf` re-runs it on a plain `systemctl restart docker`. dockerd
 #     recreates DOCKER-USER on start, but does not promise to keep its rules.
+#
+# Known limits (state them in the preflight, too):
+#   - The host's dhcpcd listens on every veth with a raw packet socket, which
+#     sees frames before netfilter, so no rule here stops a container from
+#     answering its DHCP requests. Closing that needs dhcpcd to deny veth*,
+#     a dhcpcd change that is tracked separately (bead lgtm-oqw2.11.35 in johnnymo87/lgtm).
+#   - iptables rules do not survive a reboot, and dockerd starts containers
+#     with restart policies before this unit runs. Sample containers have no
+#     restart policy, and the per-run preflight gates them.
+#   - Containers on lgtm-sample can reach each other, and cannot publish a
+#     port (the host's replies on lgtm-sample0 hit the INPUT drop).
+#   - General egress includes cloudbox's own network position (the VPC and
+#     the routes it carries). That is no wider than the access PR-head code
+#     already has when lgtm runs `bazel query` on the host as dev, an accepted
+#     risk recorded in johnnymo87/lgtm's AGENTS.md.
 #
 # Verifying it by hand: food-truck/mono's live-sample preflight, run from a
 # container on lgtm-sample, must pass, and must FAIL after deleting any one of
@@ -92,7 +112,10 @@ let
       echo "DOCKER-USER chain missing; is dockerd running with iptables on?" >&2
       exit 1
     fi
-    ensure "$ipt" DOCKER-USER -d ${metadata}/32 -p tcp --dport 80 -j DROP
+    ensure "$ipt" DOCKER-USER -d ${metadata}/32 -p tcp ! --dport 53 \
+      -j REJECT --reject-with tcp-reset
+    ensure "$ipt" DOCKER-USER -d ${metadata}/32 -p udp ! --dport 53 \
+      -j REJECT --reject-with icmp-port-unreachable
 
     # 3. The network.
     if "$dk" network inspect ${network} >/dev/null 2>&1; then
@@ -123,6 +146,10 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      # A oneshot has no start timeout by default, and a wedged dockerd would
+      # hang `docker network inspect`, and with it multi-user.target and a
+      # nixos-rebuild switch.
+      TimeoutStartSec = "2min";
       ExecStart = script;
     };
   };
