@@ -65,10 +65,10 @@
 #     restart policy, and the per-run preflight gates them.
 #   - Containers on lgtm-sample can reach each other, and cannot publish a
 #     port (the host's replies on lgtm-sample0 hit the INPUT drop).
-#   - General egress includes cloudbox's own network position (the VPC and
-#     the routes it carries). That is no wider than the access PR-head code
-#     already has when lgtm runs `bazel query` on the host as dev, an accepted
-#     risk recorded in johnnymo87/lgtm's AGENTS.md.
+#   - Private and shared address space is refused from this network
+#     (rule 3 below), so cloudbox's position in the VPC and on the VPN routes
+#     it carries is not reachable from it either. Approved by Jonathan
+#     2026-11-18.
 #
 # Verifying it by hand: food-truck/mono's live-sample preflight, run from a
 # container on lgtm-sample, must pass, and must FAIL after deleting any one of
@@ -117,7 +117,17 @@ let
     ensure "$ipt" DOCKER-USER -d ${metadata}/32 -p udp ! --dport 53 \
       -j REJECT --reject-with icmp-port-unreachable
 
-    # 3. The network.
+    # 3. Private and shared ranges (the VPC, the VPN routes, other docker
+    #    networks), for traffic ENTERING from this network only: `-i` scopes
+    #    it to lgtm-sample, and `! -o` keeps traffic between two containers on
+    #    the same bridge alone (br_netfilter sends it through FORWARD too).
+    #    DNS is untouched: 169.254.169.254 is link-local, in none of these.
+    for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
+      ensure "$ipt" DOCKER-USER -i ${bridge} ! -o ${bridge} -d "$range" \
+        -j REJECT --reject-with icmp-port-unreachable
+    done
+
+    # 4. The network.
     if "$dk" network inspect ${network} >/dev/null 2>&1; then
       got_bridge=$("$dk" network inspect ${network} \
         --format '{{index .Options "com.docker.network.bridge.name"}}')
