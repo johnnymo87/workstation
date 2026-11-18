@@ -6599,7 +6599,11 @@ EOF
   # can stop it. That defeats the isolation of the lgtm-sample network
   # (lgtm-sample-network.nix), which runs untrusted PR-head code. Docker
   # configures these interfaces itself; dhcpcd has no business on them.
-  # Keep the /32 pin anyway: it is what DNS depends on.
+  # Keep the /32 pin anyway: it is what DNS depends on. Note that the first
+  # switch to this config deletes it: the old dhcpcd removes eth0's address on
+  # exit, which flushes every eth0 route, and network-addresses-eth0 does not
+  # re-run because it did not change. The deploy re-adds it by hand, and the
+  # next boot restores it.
   #
   # `persistent`: without it, stopping dhcpcd deconfigures eth0, so every
   # dhcpcd restart (a config change like this one restarts it on switch) drops
