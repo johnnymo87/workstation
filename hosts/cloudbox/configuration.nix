@@ -6589,6 +6589,27 @@ EOF
     { address = "169.254.169.254"; prefixLength = 32; }
   ];
 
+  # Keep dhcpcd off container interfaces. By default it manages every
+  # interface it is not told to ignore, so each Docker veth got a DHCP client:
+  # a raw packet socket bound to the veth, DHCPDISCOVERs into the container,
+  # and an IPv4LL 169.254.0.0/16 route when nobody answered (the route the pin
+  # above exists to outrank). A raw socket sees frames before netfilter, so a
+  # container that ANSWERED could hand the host a lease (routes such as
+  # 0.0.0.0/1 via itself, DNS servers via resolvconf), and no firewall rule
+  # can stop it. That defeats the isolation of the lgtm-sample network
+  # (lgtm-sample-network.nix), which runs untrusted PR-head code. Docker
+  # configures these interfaces itself; dhcpcd has no business on them.
+  # Keep the /32 pin anyway: it is what DNS depends on.
+  #
+  # `persistent`: without it, stopping dhcpcd deconfigures eth0, so every
+  # dhcpcd restart (a config change like this one restarts it on switch) drops
+  # the VM's address and routes until the new process rebinds. With it, a
+  # restart leaves eth0 configured. The switch that FIRST adds it still
+  # stops the old, non-persistent process, so it blips once: applied at a
+  # quiet hour (03:15 ET, after the nightly restart; Jonathan, 2026-11-18).
+  networking.dhcpcd.denyInterfaces = [ "veth*" "docker*" "br-*" "lgtm-sample*" ];
+  networking.dhcpcd.persistent = true;
+
   # Disable Google OS Login (we manage users/keys declaratively via NixOS)
   security.googleOsLogin.enable = lib.mkForce false;
   users.mutableUsers = false;
