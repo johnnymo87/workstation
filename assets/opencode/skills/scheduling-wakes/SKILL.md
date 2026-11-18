@@ -1,6 +1,6 @@
 ---
 name: scheduling-wakes
-description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong. Also use when you are waiting on something checkable (another PR merging, a reply in a Slack thread or on a Jira issue, a PR someone will open, a date): on cloudbox that is registered with `agent-wait add`, not polled with timed wakes.
+description: Schedules, reads, and cancels future self-wakes with swarm_schedule and swarm_scheduled. Use when you are about to end a turn with something still owed to the future and would need swarm_schedule to return to it — "check the deploy after the 09:00 run", "revisit once CI finishes", "the rate limit clears in 4h", "verify this tomorrow". Also use when a scheduled wake arrives (an envelope carrying scheduled_for or delivered_late_ms) and you need to know what it can and cannot be trusted to mean, when your work is gated on someone else's item, or when a claim in an already-queued payload turns out to be wrong. Also use when you are waiting on something checkable (another PR merging, a reply in a Slack thread or DM or on a Jira issue, a PR someone will open, a date): on cloudbox that is registered with `agent-wait add`, not polled with timed wakes.
 ---
 
 # Scheduling Wakes
@@ -44,6 +44,7 @@ you get one wake carrying your note and what it saw:
 ```bash
 agent-wait add --pr acme/infra#6630 --note "rebase #6551 onto main, undraft it"   # --until merged (default) | closed | approved | feedback
 agent-wait add --slack <permalink of your own question> --keep --note "apply the reviewer's choice of fix"
+agent-wait add --slack <DM or channel id, e.g. D0123ABCD> --from <user id> --keep --since <when you asked> --deadline +12h --deadline-wakes --note "..."   # new top-level messages
 agent-wait add --jira <link to your own comment> --note "apply the answer to the spec"   # --until comment (default) | status:<name>
 agent-wait add --new-pr acme/infra --author some-login --path 'deploy/**' --note "review the follow-up"   # a PR not opened yet
 agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the variant check"
@@ -59,13 +60,20 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
   covers that rebase.
 - **Slack:** register right after posting, with the permalink of *your own
   question*, so a reply that lands first still fires. `--from <user id>` limits
-  it to the person you asked. Pass `--keep` for a conversation (without it the
+  it to the person you asked. Pass `--keep` for a back-and-forth (without it the
   first reply's wake closes the wait; a `reopen` then reports any reply posted
   since, but never one already delivered), and cancel it once you have your
   answer: it never closes by itself, and never stops listening. A busy thread
   is batched, not cut off: at most one wake per 5-minute pass, listing every
   reply since the last wake (none while one is still waiting for you to go
   idle); every 25th wake also tells the human.
+- **A whole DM, MPIM or channel:** pass its bare id (or an
+  `…/archives/<id>` link) to watch for new *top-level* messages, which is how a
+  DM gets answered. A reply in a thread there does not fire it, so also register
+  a thread wait on your own message's permalink. `--since <time>` (RFC3339 or
+  `2h` ago, at most 7 days) counts from when you asked rather than from
+  registration. On a channel, pass `--from`. Cancel a `--keep` watch when the
+  window closes; `--deadline-wakes` wakes you to do so.
 - **Jira** works the same way: link your own comment (`…/browse/KEY?focusedCommentId=N`)
   so a reply posted first still counts; without one the baseline is
   registration time. `--from` takes the person's Jira accountId (not a name: a
@@ -89,7 +97,7 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
 - **cloudbox only.** On devbox and macOS `agent-wait` exits 2; use
   `swarm_schedule` there.
 
-A wait on a person with no thread to watch has no checker: that is still a
+A wait on a person with no thread or conversation to watch has no checker: that is still a
 timed wake, or a word to whoever tracks it. When only the date matters, either
 tool works; `--at` survives a deleted worktree (the wake reroutes) and has no
 30-day limit. A goose worker (pull mode) cannot receive `swarm_schedule` wakes,
