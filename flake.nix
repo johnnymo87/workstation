@@ -2971,6 +2971,7 @@
         ./hosts/cloudbox/configuration.nix
         ./hosts/cloudbox/hardware.nix
         ./hosts/cloudbox/disko.nix
+        ./hosts/cloudbox/lgtm-sample-network.nix
       ];
     };
 
