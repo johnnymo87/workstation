@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=109
+EXPECTED_ASSERTIONS=112
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -584,6 +584,16 @@ if [ -n "$oc_aa" ]; then
     pass 'goose: a gone directory is named in the log'
   else
     printf 'FAIL  goose: a gone directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[{\"sessionId\":\"20261019_7\",\"cwd\":null,\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=10 run_goose 'goose:20261019_7')" 'goose: a session without recorded directory is exit 3'
+  assert_eq "1" "$(cat "$goose_tmp/count")" 'goose: a session without recorded directory exits 3 without polling'
+  if grep -q 'has no recorded directory' "$goose_tmp/err"; then
+    pass 'goose: a missing directory is named in the log'
+  else
+    printf 'FAIL  goose: a missing directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
     exit 1
   fi
   fake_honk "echo 'connection failed: refused' >&2; exit 1"

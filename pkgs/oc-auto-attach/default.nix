@@ -413,7 +413,12 @@ ${builtins.readFile ./canonical-path.sh}
                 ;;
               "FOUND "*)
                 session_dir="''${parsed#FOUND }"
-                if [ -z "$session_dir" ] || [ ! -d "$session_dir" ]; then
+                if [ -z "$session_dir" ]; then
+                  log "goose session $goose_id has no recorded directory; giving up"
+                  rm -f "$honk_err"
+                  exit 3
+                fi
+                if [ ! -d "$session_dir" ]; then
                   log "goose session $goose_id directory $session_dir no longer exists; giving up"
                   rm -f "$honk_err"
                   exit 3

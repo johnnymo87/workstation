@@ -445,10 +445,11 @@ still notify on completion without a TUI — the pigeon plugin runs inside
 
 `honk launch` auto-opens the new goose session in `honk chat` by default
 (opt-outs: `--no-attach`, `HONK_LAUNCH_NO_ATTACH=1` (allowlist truthy:
-1/true/yes/on), `--tmux-session <name>`), and pigeon's Telegram `/launch
---backend goose` opens it too; both call `oc-auto-attach goose:<id>`, which
-waits up to `OC_AA_GOOSE_GRACE_SECS` (default 10) for goose to list a brand-new
-session.
+`1`, `true`/`TRUE`, `yes`/`YES`, `on`/`ON`; `0` does not disable));
+pass `--tmux-session <name>` to confine the attach to that tmux session
+(forwarded to `oc-auto-attach`). Pigeon's Telegram `/launch --backend goose`
+opens it too; both call `oc-auto-attach goose:<id>`, which waits up to
+`OC_AA_GOOSE_GRACE_SECS` (default 10) for goose to list a brand-new session.
 
 If something goes wrong and you don't see a tab open, check
 `/tmp/oc-auto-attach.log` for the per-invocation trace.
