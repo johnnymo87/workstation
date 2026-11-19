@@ -175,7 +175,10 @@ PY
     # The alert for these is raised once per run by the caller, not per row:
     # both credentials share one sign-in.
     human_required|waiting_for_human) failed=yes ;;
-    *) alert_human "gcloud reauth failed ($cred): $outcome" "$detail"; failed=yes ;;
+    # mac-adc alerts get their own slot: one on screen must not swallow a
+    # remote credential's alert raised later in the same run (or the reverse).
+    *) alert_human "gcloud reauth failed ($cred): $outcome" "$detail" \
+         "$([ "$cred" = mac-adc ] && echo sync || echo ok)"; failed=yes ;;
   esac
 }
 
@@ -194,14 +197,14 @@ PY
 # "Open sign-in page" raises the IdP sign-in in the isolated Chrome. Unanswered
 # alerts give up after 50 min, so the hourly runs re-ask rather than pile up.
 # REAUTH_OSASCRIPT overrides osascript, for tests only.
-# Usage: alert_human <title> <message> [signin|ok]
+# Usage: alert_human <title> <message> [signin|sync|ok]
 # Process start time, whitespace-normalised: ps pads lstart with trailing
 # spaces, which `read` would strip from the stored copy.
 started_at_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/ $//'; }
 
 alert_human() {
   local title="$1" message="$2" kind="${3:-ok}" pidf pid start buttons
-  [ "$kind" = signin ] || kind=ok
+  case "$kind" in signin|sync) ;; *) kind=ok ;; esac
   # One slot per kind, so a routine failure alert can never hide the sign-in
   # prompt (or the reverse). The pid file stores pid AND start time: a pid
   # alone is reused within the hour on this Mac, and a stale file pointing at
@@ -221,7 +224,7 @@ alert_human() {
     buttons='{"OK"} default button 1'
   fi
   (
-    # osascript runs as a direct, recorded child so dismiss_signin_alert can
+    # osascript runs as a direct, recorded child so dismiss_alert can
     # take exactly this alert down (a $(...) would hide it a level deeper).
     out="$(mktemp "$STATE/alert.XXXXXX")"
     "${REAUTH_OSASCRIPT:-/usr/bin/osascript}" \
@@ -248,9 +251,10 @@ alert_human() {
   echo "$pid $(started_at_of "$pid")" > "$pidf"
 }
 
-# Take down a sign-in prompt that is no longer true (the refresh succeeded).
-dismiss_signin_alert() {
-  local pidf="$STATE/alert-signin.pid" pid start
+# Take down an alert that is no longer true: the sign-in prompt once the
+# refresh succeeded, a mac-adc failure once a later sync succeeded.
+dismiss_alert() {
+  local pidf="$STATE/alert-$1.pid" pid start
   read -r pid start 2>/dev/null < "$pidf" || return 0
   if [ -n "${pid:-}" ] && [ "$(started_at_of "$pid")" = "${start:-}" ]; then
     kill "$pid" 2>/dev/null
@@ -272,8 +276,15 @@ ADC_REFRESHED=no
 # Only a 16-char fingerprint crosses the link unless the two differ. A copy is
 # proven live (a token minted from it at Google's token endpoint) BEFORE it
 # replaces the Mac's file, so a dead remote credential can never overwrite a
-# live local one. The Mac's quota_project_id is kept: it decides where this
-# Mac's Vertex calls bill, and the remote's may differ.
+# live local one. The Mac's file is REBUILT from an allowlist of fields, not
+# copied verbatim: an authorized_user file can carry e.g. a token_uri that
+# some client libraries honour, and the remote runs agents with shell access.
+# quota_project_id comes from the remote, where the ADC login pins and checks
+# it (LOGIN_CMD_ADC, below); the Mac's own was only ever an old login's guess.
+#
+# A manual `gcloud auth application-default login` on the Mac is therefore
+# undone within the hour while the remote's credential is live. That is the
+# design: the remote's is the one being kept fresh.
 #
 # Always one `mac-adc` row. Its failures alert like any other, but count
 # separately (SYNC_FAILED): a sync fault must not stop a successful refresh
@@ -293,10 +304,14 @@ local_adc_fp() {
 }
 
 sync_mac_adc() {
-  local saved_failed="$failed" remote_fp="" local_fp tmp resp code err qp
+  local saved_failed="$failed" remote_fp="" local_fp tmp raw resp code err
   record_sync() {
     record mac-adc "$1" "$2"
-    case "$1" in synced|in_sync|unreachable) ;; *) SYNC_FAILED=yes ;; esac
+    case "$1" in
+      synced|in_sync) dismiss_alert sync ;;   # an earlier failure alert is stale
+      unreachable) ;;
+      *) SYNC_FAILED=yes ;;
+    esac
     failed="$saved_failed"
   }
   # Retried like the account read below: the first run after a wake can start
@@ -326,16 +341,31 @@ sync_mac_adc() {
     record_sync sync_failed "Cannot create a temp file beside $LOCAL_ADC"; return; }
   resp="$(umask 077; mktemp "$STATE/token-resp.XXXXXX")" || {
     rm -f "$tmp"; record_sync sync_failed "Cannot create a temp file in $STATE"; return; }
-  if ! timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" "$REMOTE_ADC_CAT_CMD" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp" "$resp"
-    record_sync sync_failed "Could not copy the remote ADC file; the Mac's file is unchanged"
+  raw="$tmp.raw"
+  if ! (umask 077; timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" "$REMOTE_ADC_CAT_CMD" > "$raw" 2>/dev/null); then
+    rm -f "$tmp" "$raw" "$resp"
+    # The fingerprint read just worked, so this is a blip or a sleep: quiet,
+    # and the next run retries.
+    record_sync unreachable "Lost $REMOTE while copying its ADC; the Mac's file is unchanged"
     return
   fi
-  if ! jq -e '.type == "authorized_user" and (.refresh_token // "") != "" and (.client_id // "") != "" and (.client_secret // "") != ""' "$tmp" >/dev/null 2>&1; then
-    rm -f "$tmp" "$resp"
+  # The copy must be the file that was fingerprinted. A concurrent remote login
+  # (a manual --force) can rewrite it in between, or be caught mid-write.
+  if [ "$(LOCAL_ADC="$raw" local_adc_fp)" != "$remote_fp" ]; then
+    rm -f "$tmp" "$raw" "$resp"
+    record_sync unreachable "The remote ADC changed while it was being copied; the next run retries. The Mac's file is unchanged"
+    return
+  fi
+  if ! (umask 077; jq -e 'select(.type == "authorized_user" and (.refresh_token // "") != ""
+                                 and (.client_id // "") != "" and (.client_secret // "") != "")
+                          | {type, client_id, client_secret, refresh_token}
+                            + (if (.quota_project_id // "") != "" then {quota_project_id} else {} end)' \
+          "$raw" > "$tmp" 2>/dev/null); then
+    rm -f "$tmp" "$raw" "$resp"
     record_sync sync_failed "The remote ADC file is not an authorized_user credential; the Mac's file is unchanged"
     return
   fi
+  rm -f "$raw"
   # Live? The exchange every client library makes. The form goes on stdin, not
   # argv, so the secret never shows up in ps; the response (an access token)
   # goes to a 0600 file that is removed at once.
@@ -352,23 +382,12 @@ sync_mac_adc() {
     return
   fi
   rm -f "$resp"
-  # Keep the Mac's quota project when it has one; otherwise keep the remote's.
-  qp="$(jq -r '.quota_project_id // empty' "$LOCAL_ADC" 2>/dev/null)"
-  if [ -n "$qp" ]; then
-    if ! (umask 077; jq --arg qp "$qp" '.quota_project_id = $qp' "$tmp" > "$tmp.qp" 2>/dev/null) \
-       || ! mv "$tmp.qp" "$tmp"; then
-      rm -f "$tmp" "$tmp.qp"
-      record_sync sync_failed "Could not carry the Mac's quota_project_id into the copied ADC; the Mac's file is unchanged"
-      return
-    fi
-    chmod 600 "$tmp"
-  fi
   if ! mv "$tmp" "$LOCAL_ADC"; then
     rm -f "$tmp"
     record_sync sync_failed "Could not replace $LOCAL_ADC"
     return
   fi
-  record_sync synced "Copied the remote's live ADC to the Mac (refresh token $local_fp -> $remote_fp${qp:+, quota project kept})"
+  record_sync synced "Copied the remote's live ADC to the Mac (refresh token $local_fp -> $remote_fp)"
 }
 
 # A sync on every run, including those where nothing is due.
@@ -932,7 +951,7 @@ if [ "$ADC_REFRESHED" = yes ]; then
 fi
 
 if [ "$failed" = no ]; then
-  dismiss_signin_alert
+  dismiss_alert signin
   [ "$SYNC_FAILED" = no ] && exit 0
 fi
 exit 1
