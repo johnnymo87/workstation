@@ -277,11 +277,32 @@ else
     done < <(jq -r '.presence | keys[] | select(test("^[A-Za-z0-9_-]+$"))' <<<"$GOT_BODY" 2>/dev/null || true)
     # last_close.cause "server" with wants_out null (it is an object {why, at}
     # when the close was wanted) means the server dropped us unasked.
+    # The game's idle close of an account no agent plays (last_close.idle true
+    # and agent_driven false, eternal-machinery kdubj.115) is expected: nobody
+    # is typing. It is one event, told once and only while the close is under
+    # an hour old, never a standing problem. With an agent playing it stays a
+    # problem: the agent sent nothing for an hour. A BEAM older than
+    # agent_driven leaves the field out, and that reads as a problem as before.
+    while IFS=$'\t' read -r key line; do
+      [ -n "$key" ] || continue
+      if jq -e --arg k "$key" 'has($k)' >/dev/null <<<"$events_seen"; then continue; fi
+      new_event_keys+=("$key"); new_event_texts+=("$line")
+    done < <(jq -r --argjson now "$now" '
+      .presence | to_entries[]
+      | select(.value.link == "offline" and .value.last_close.cause == "server" and .value.wants_out == null
+               and .value.last_close.idle == true and .value.agent_driven == false)
+      | select(((.value.last_close.at // "") | sub("\\.[0-9]+"; "") | try fromdateiso8601 catch 0) > ($now - 3600))
+      | ["idle:" + .key + ":" + (.value.last_close.at | tostring),
+         "session \(.key): the game closed an idle link at \(.value.last_close.at)"
+         + (if .value.last_close.idle_minutes then " after \(.value.last_close.idle_minutes) min without input" else " after its idle notice" end)
+         + "; no agent plays this account, so nothing is wrong"]
+      | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
     while IFS=$'\t' read -r key line; do
       [ -z "$key" ] || add "$key" "$line" deb
     done < <(jq -r '
       .presence | to_entries[]
       | select(.value.link == "offline" and .value.last_close.cause == "server" and .value.wants_out == null)
+      | select((.value.last_close.idle == true and .value.agent_driven == false) | not)
       | ["presence:" + .key,
          "session \(.key) is offline: the server closed the link at \(.value.last_close.at // "?") (code \(.value.last_close.code // "?"))"
          + (if .value.last_close.idle == true then ", while idle (TEC logs out an idle character)" else "" end)
