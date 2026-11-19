@@ -86,11 +86,12 @@ RATES: dict[tuple[str, str], object] = {
     # promo is Anthropic-API-only; the Vertex route below charges standard.
     # TODO(2026-08-31): bump these to 3/15/0.30/3.75.
     ("anthropic", "claude-sonnet-5"):              {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
-    # claude-sonnet-5-5 (released 2026-09-28): standard 2/10, cache 0.20/2.5.
-    # Explicit row so it does not inherit the sonnet-5 row (and its TODO) via
-    # rate_for's longest-prefix fallback. Source: platform.claude.com pricing,
-    # fetched 2026-09-28.
-    ("anthropic", "claude-sonnet-5-5"):            {"input": 2, "output": 10, "cache_read": 0.20, "cache_write": 2.5},
+    # claude-sonnet-5-5 (released 2026-09-28): standard 2/10, 5m cache write
+    # 2.5. Cache hits are 0.05x input ($0.10), not the usual 0.1x. Explicit row
+    # so it does not inherit the sonnet-5 row (and its TODO) via rate_for's
+    # longest-prefix fallback. Source: platform.claude.com pricing, re-checked
+    # 2026-11-19.
+    ("anthropic", "claude-sonnet-5-5"):            {"input": 2, "output": 10, "cache_read": 0.10, "cache_write": 2.5},
     # claude-fable-5 (Fable 5, 1M ctx, new tokenizer): flagship tier with NO
     # introductory promo (unlike sonnet-5) — flat 10/50, cache 1/12.5 (5m write).
     # Export-controlled 2026-06, access restored 2026-07-01. Vertex resells at the
@@ -116,6 +117,11 @@ RATES: dict[tuple[str, str], object] = {
     # so no 2026-08-31 flip is needed. cloudbox claude traffic takes this route
     # (claude-failover-proxy -> aigateway -> Vertex).
     ("google-vertex-anthropic", "claude-sonnet-5"):   {"input": 3, "output": 15, "cache_read": 0.30, "cache_write": 3.75},
+    # Vertex Global resells sonnet-5-5 at Anthropic's list (2/10, cache
+    # 0.10/2.50; cloud.google.com/model-garden/partner-models/pricing, checked
+    # 2026-11-17). Without this row the id longest-prefixes onto the
+    # claude-sonnet-5 row above.
+    ("google-vertex-anthropic", "claude-sonnet-5-5"): {"input": 2, "output": 10, "cache_read": 0.10, "cache_write": 2.5},
     # Vertex charges Anthropic's standard list for fable-5 (same 10/50/1/12.5 as
     # the first-party entry above; no intro promo to flip). cloudbox claude traffic
     # takes this route (claude-failover-proxy -> aigateway -> Vertex).

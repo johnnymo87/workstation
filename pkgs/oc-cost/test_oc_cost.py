@@ -464,6 +464,17 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
             self.assertAlmostEqual(cost, expected, places=9, msg=prov)
             self.assertEqual(tier, "long_context", prov)
 
+    def test_sonnet_5_5_rates_on_both_routes(self):
+        # Sonnet 5.5 cache hits are 0.05x input ($0.10), not the usual 0.1x.
+        # Vertex resells at the same list; without its own row the Vertex id
+        # would longest-prefix onto claude-sonnet-5's 3/15/0.30/3.75.
+        for prov, mid in (("anthropic", "claude-sonnet-5-5"),
+                          ("google-vertex-anthropic", "claude-sonnet-5-5@default")):
+            e = oc_cost.rate_for(prov, mid)
+            self.assertEqual(
+                (e["input"], e["output"], e["cache_read"], e["cache_write"]),
+                (2, 10, 0.10, 2.5), prov)
+
     def test_rate_for_unknown_returns_none(self):
         self.assertIsNone(oc_cost.rate_for("openai", "totally-unknown"))
 
