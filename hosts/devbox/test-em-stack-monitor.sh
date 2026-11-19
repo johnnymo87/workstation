@@ -201,6 +201,34 @@ serve_jq 4002_v1_presence presence.json '.presence.livia.link = "online" | .pres
 run; at 600; run
 check "an online link is not a presence problem" '[ "$(tgn)" -eq 0 ]'
 
+# 8b. The game's idle close (eternal-machinery kdubj.115). The text is window
+# 1119's: "The system has not detected keyboard input from you for 62 minutes."
+# With no agent playing the account it is one event, told once, never a
+# standing problem; with an agent playing it stays a problem.
+idle_close='.presence.jonathan.wants_out = null | .presence.jonathan.link = "offline"
+  | .presence.jonathan.last_close = {at: $at, by: null, cause: "server", code: 1000, idle: true, idle_minutes: 62}'
+setup
+serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = false" --arg at 2027-01-15T07:59:00Z
+run
+check "idle close, nobody plays: an event at once, in plain words" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: event" <<<"$m" && grep -q "the game closed an idle link at 2027-01-15T07:59:00Z after 62 min without input" <<<"$m" && ! grep -q "problem" <<<"$m"'
+at 600; run; at 1200; run
+check "idle close, nobody plays: told once, no standing key" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | length")" = 0 ]'
+setup
+serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = false" --arg at 2027-01-15T06:00:00Z
+run; at 600; run
+check "idle close, nobody plays, more than an hour old: nothing" '[ "$(tgn)" -eq 0 ]'
+setup
+serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
+run; at 600; run
+check "idle close while an agent plays: a problem" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$m" && grep -q "session jonathan is offline" <<<"$m"'
+setup
+serve_jq 4002_v1_presence presence.json "$idle_close | del(.presence.jonathan.agent_driven)" --arg at 2027-01-15T07:59:00Z
+run; at 600; run
+check "idle close from a BEAM without agent_driven: a problem, as before" \
+  '[ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$(tglast)"'
+
 # 9. Quarantine: the reason is a string; null is fine.
 setup
 serve_jq 4400_em_quiescence quiescence.json '.agents.warrior_f.quarantined = "mcp child unrecoverable after 5 restarts"'
