@@ -370,6 +370,13 @@ ${builtins.readFile ./canonical-path.sh}
       if [[ ! "$goose_grace" =~ ^[0-9]+$ ]]; then
         log "OC_AA_GOOSE_GRACE_SECS='$goose_grace' is not a non-negative integer; defaulting to 10"
         goose_grace=10
+      else
+        goose_grace=$(( 10#$goose_grace ))
+      fi
+
+      call_timeout=10
+      if [ "$goose_grace" -gt 0 ] && [ "$goose_grace" -lt 10 ]; then
+        call_timeout="$goose_grace"
       fi
 
       honk_err="$(mktemp)"
@@ -381,7 +388,7 @@ ${builtins.readFile ./canonical-path.sh}
 
       while :; do
         list_rc=0
-        list_json="$(timeout 10 "$honk_bin" list --json 2>"$honk_err")" || list_rc=$?
+        list_json="$(timeout "$call_timeout" "$honk_bin" list --json 2>"$honk_err")" || list_rc=$?
         if [ "$list_rc" -ne 0 ]; then
           last_rc=2
           last_log="honk list --json failed (exit $list_rc): $(head -n 3 "$honk_err" | tr '\n' ' ')"

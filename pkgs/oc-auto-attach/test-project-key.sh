@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=112
+EXPECTED_ASSERTIONS=113
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -634,6 +634,9 @@ if [ -n "$oc_aa" ]; then
     printf 'FAIL  goose: invalid OC_AA_GOOSE_GRACE_SECS logs a warning\n        log: %s\n' "$(cat "$goose_tmp/err")"
     exit 1
   fi
+
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS="08" run_goose 'goose:20261019_7')" 'goose: leading-zero OC_AA_GOOSE_GRACE_SECS is accepted without octal error'
 
   echo 0 >"$goose_tmp/count"
   fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[]'"
