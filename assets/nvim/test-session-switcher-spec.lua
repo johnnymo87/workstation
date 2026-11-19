@@ -1137,6 +1137,42 @@ do
   vim.system = orig_system
 end
 
+-- 43b. EXEC: the switch_pane remote-expr lands on the buffer's OWN tab
+-- (workstation-f8qg). With several coordinators in one nvim, a bare
+-- nvim_set_current_buf put the picked one into whichever tab was current,
+-- hiding that tab's terminal. Evaluated here, in this nvim, as the remote one
+-- would evaluate it.
+do
+  local captured
+  local orig_system = vim.system
+  vim.system = function(cmd, opts, on_exit)
+    if cmd[1] == "nvim" then captured = cmd[5] end
+    return { pid = 1, wait = function() return { code = 0, stdout = "" } end }
+  end
+
+  local home_tab = vim.api.nvim_get_current_tabpage()
+  local home_buf = vim.api.nvim_get_current_buf()
+  vim.cmd("tabnew")
+  local target_tab = vim.api.nvim_get_current_tabpage()
+  local target_buf = vim.api.nvim_get_current_buf()
+  vim.api.nvim_set_current_tabpage(home_tab)
+
+  exec.switch_pane({ pane = "3", sock = "/tmp/nvim-3.sock", buffer = target_buf }, "client_0")
+  pcall(vim.api.nvim_eval, captured)
+  check(vim.api.nvim_get_current_tabpage() == target_tab, "remote-expr switches to the tab already showing the buffer")
+  check(vim.api.nvim_win_get_buf(vim.api.nvim_tabpage_get_win(home_tab)) == home_buf, "remote-expr leaves the previously current tab's window alone")
+
+  -- A buffer shown in no window still opens, in the current window.
+  local hidden = vim.api.nvim_create_buf(true, false)
+  exec.switch_pane({ pane = "3", sock = "/tmp/nvim-3.sock", buffer = hidden }, "client_0")
+  pcall(vim.api.nvim_eval, captured)
+  check(vim.api.nvim_get_current_buf() == hidden, "remote-expr falls back to setting a hidden buffer current")
+
+  vim.cmd("tabonly")
+  vim.api.nvim_set_current_buf(home_buf)
+  vim.system = orig_system
+end
+
 -- 44. EXEC: attach shells out to oc-auto-attach binary with stdin=false (Contract 10).
 do
   local system_calls = {}
