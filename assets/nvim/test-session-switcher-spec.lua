@@ -1176,6 +1176,9 @@ do
   check(exec.attach({ sid = "goose:20261019_1" }) == true, "goose attach spawns")
   check(calls[2].cmd[2] == "goose:20261019_1", "goose attach passes the picker id to oc-auto-attach")
   check(calls[2].opts.text == true, "goose attach captures text output")
+  check(calls[2].opts.env and calls[2].opts.env.OC_AA_GOOSE_GRACE_SECS == "0",
+    "goose attach from the picker fails fast: no grace for a session honk already listed")
+  check(calls[1].opts.env == nil, "opencode attach sets no grace (or any) env")
   check(type(calls[2].on_exit) == "function", "goose attach watches the exit")
 
   calls[2].on_exit({ code = 0, stderr = "[oc-auto-attach] tab opened\n" })
