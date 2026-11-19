@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=113
+EXPECTED_ASSERTIONS=120
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -84,11 +84,14 @@ fi
 
 # ---- helpers under test (mirror of default.nix) -----------------------------
 
-# project_key: collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.
+# project_key: collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>,
+# and a stall-watch coord-sessions/<dir> -> the coord-sessions root.
 project_key() {
   local dir="$1"
   if [[ "$dir" =~ ^"${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
     printf '%s/projects/%s\n' "$HOME" "${BASH_REMATCH[1]}"
+  elif [[ "$dir" == "$HOME/.local/state/stall-watch/coord-sessions" || "$dir" == "$HOME/.local/state/stall-watch/coord-sessions"/* ]]; then
+    printf '%s\n' "$HOME/.local/state/stall-watch/coord-sessions"
   else
     printf '%s\n' "$dir"
   fi
@@ -103,6 +106,8 @@ window_name() {
   local dir="$1"
   if [[ "$dir" =~ ^"${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
+  elif [[ "$dir" == "$HOME/.local/state/stall-watch/coord-sessions" || "$dir" == "$HOME/.local/state/stall-watch/coord-sessions"/* ]]; then
+    printf '%s\n' coordinators
   else
     printf '%s\n' "$(basename "$dir")"
   fi
@@ -257,6 +262,19 @@ assert_eq "pigeon"      "$(window_name "$HOME/projects/pigeon")"             "wi
 assert_eq "pigeon"      "$(window_name "$HOME/projects/pigeon/foo/bar")"     "window_name: project subdir -> project name"
 assert_eq "workstation" "$(window_name "$HOME/projects/workstation/.worktrees/x")" "window_name: worktree -> project name"
 assert_eq "foo"         "$(window_name "/tmp/foo")"                          "window_name: non-project path -> basename"
+
+# Stall-watch coordinators (workstation-f8qg). Each one runs in its own
+# coord-sessions/<tag>-<ms> dir; collapsing them to the coord-sessions root puts
+# them all in ONE "coordinators" window, one nvim, a tab each, instead of a
+# window per coordinator. The root is fixed (eng-agent-platform
+# stallwatch/config.py STATE_DIR).
+coord_root="$HOME/.local/state/stall-watch/coord-sessions"
+assert_eq "$coord_root"  "$(project_key "$coord_root/oms-baf-contract-1792617933815")" "project_key: coordinator dir -> coord-sessions root"
+assert_eq "coordinators" "$(window_name "$coord_root/oms-baf-contract-1792617933815")" "window_name: coordinator dir -> coordinators"
+assert_eq "$coord_root"  "$(project_key "$coord_root")"                                "project_key: coord-sessions root itself"
+# Anchored on the slash: a sibling that merely shares the prefix is not a coordinator.
+assert_eq "${coord_root}-old/x" "$(project_key "${coord_root}-old/x")"                 "project_key: coord-sessions-<suffix> sibling stays verbatim"
+assert_eq "x"            "$(window_name "${coord_root}-old/x")"                        "window_name: coord-sessions-<suffix> sibling -> basename"
 
 # ---- resolve_nvims tests ----------------------------------------------------
 
@@ -792,6 +810,27 @@ if [ -f "$default_nix" ]; then
     pass 'source derives window_name as basename for non-project dirs'
   else
     printf 'FAIL  source derives window_name as basename for non-project dirs\n        basename derivation not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # The coordinators collapse (workstation-f8qg) mirrored by project_key and
+  # window_name above must exist in the source too, or the mirror tests prove
+  # nothing about what ships.
+  if grep -qF '/.local/state/stall-watch/coord-sessions"' "$default_nix" \
+    && grep -qF '"$session_dir" == "$coord_root"/*' "$default_nix" \
+    && grep -qF 'window_name="coordinators"' "$default_nix"; then
+    pass 'source collapses coord-sessions/* into the coordinators window'
+  else
+    printf 'FAIL  source collapses coord-sessions/* into the coordinators window\n        coord_root derivation not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  # A tmux server started by `new-session` keeps every fd it inherits. With the
+  # create lock's fd 201 among them it held the lock for life and every later
+  # oc-auto-attach exited 9 (workstation-f8qg, measured with an isolated server).
+  if grep -qF '"$nvims_path" 201>&- 2>/dev/null' "$default_nix" \
+    && grep -qF 'tmux new-session -d -P' "$default_nix"; then
+    pass 'source closes the create-lock fd for the tmux server new-session starts'
+  else
+    printf 'FAIL  source closes the create-lock fd for the tmux server new-session starts\n        "201>&-" on the new-session line not found in: %s\n' "$default_nix"
     exit 1
   fi
 

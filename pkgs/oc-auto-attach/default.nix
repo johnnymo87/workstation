@@ -574,9 +574,20 @@ ${builtins.readFile ./canonical-path.sh}
 
     # Step 2: compute project key for editor routing.
     # Collapse ~/projects/<P>/(/.worktrees/<W>)?(/.*)? -> ~/projects/<P>.
+    #
+    # Stall-watch coordinators (workstation-f8qg) collapse too: each runs in
+    # its own coord-sessions/<tag>-<ms> dir, which used to mean a tmux window
+    # and an nvim per coordinator. Keyed on the coord-sessions root they share
+    # ONE "coordinators" window and nvim, a tab each; the tab's honk chat still
+    # runs in the coordinator's own dir (the payload's dir is $session_dir).
+    # The root is fixed by stall-watch (eng-agent-platform stallwatch/config.py).
+    coord_root="''${HOME}/.local/state/stall-watch/coord-sessions"
     if [[ "$session_dir" =~ ^"''${HOME}/projects/"([^/]+)(/.*)?$ ]]; then
       project_key="''${HOME}/projects/''${BASH_REMATCH[1]}"
       window_name="''${BASH_REMATCH[1]}"
+    elif [[ "$session_dir" == "$coord_root" || "$session_dir" == "$coord_root"/* ]]; then
+      project_key="$coord_root"
+      window_name="coordinators"
     else
       project_key="$session_dir"
       window_name="$(basename "$session_dir")"
@@ -775,9 +786,13 @@ ${builtins.readFile ./canonical-path.sh}
         # BUN_INSPECT likewise: it is opencode-serve's inspector address and
         # rides in from an opencode bash tool; any `opencode attach` that
         # inherits it dies with EADDRINUSE (workstation-u8xx).
+        # `201>&-`: the server this starts outlives us and keeps every fd it
+        # inherits. Holding the create lock's fd, it held the lock for its
+        # whole life, so every later oc-auto-attach waited 30s and exited 9
+        # (measured, workstation-f8qg).
         pane_id="$(env -u NVIM -u BUN_INSPECT tmux new-session -d -P -F '#{pane_id}' \
           "''${pane_guard_env[@]}" \
-          -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 2>/dev/null || true)"
+          -s "$target_session" -c "$project_key" -n "$window_name" -- "$nvims_path" 201>&- 2>/dev/null || true)"
       fi
       if [ -z "$pane_id" ]; then
         log "tmux window/session create failed in $target_session; giving up"
