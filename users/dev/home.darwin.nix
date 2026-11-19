@@ -225,7 +225,7 @@ lib.mkIf isDarwin {
     # path, whose whole job is to behave correctly on a day you cannot schedule.
     (pkgs.writeShellApplication {
       name = "gcloud-reauth-refresh";
-      runtimeInputs = [ pkgs.openssh pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs ];
+      runtimeInputs = [ pkgs.openssh pkgs.curl pkgs.coreutils pkgs.python3 pkgs.nodejs pkgs.jq ];
       # bashOptions WITHOUT errexit, deliberately. writeShellApplication defaults
       # to `set -euo pipefail`, and both scripts are built on non-zero exits NOT
       # aborting: every failure is meant to reach the logging/notify path at the
