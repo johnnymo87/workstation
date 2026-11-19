@@ -443,6 +443,14 @@ processes**, each ~240 MB, in tmux scopes with no memory cap and no reaper.
 still notify on completion without a TUI — the pigeon plugin runs inside
 `opencode serve`, not in the attach process.
 
+`honk launch` auto-opens the new goose session in `honk chat` by default
+(opt-outs: `--no-attach`, `HONK_LAUNCH_NO_ATTACH=1` (allowlist truthy:
+`1`, `true`/`TRUE`, `yes`/`YES`, `on`/`ON`; `0` does not disable));
+pass `--tmux-session <name>` to confine the attach to that tmux session
+(forwarded to `oc-auto-attach`). Pigeon's Telegram `/launch --backend goose`
+opens it too; both call `oc-auto-attach goose:<id>`, which waits up to
+`OC_AA_GOOSE_GRACE_SECS` (default 10) for goose to list a brand-new session.
+
 If something goes wrong and you don't see a tab open, check
 `/tmp/oc-auto-attach.log` for the per-invocation trace.
 
@@ -482,6 +490,8 @@ curl -s http://127.0.0.1:4700/session | jq
 - `FRONTDOOR_URL` defaults to `http://127.0.0.1:4700`: the front door, which every launch goes through.
 - `OPENCODE_URL` defaults to `http://127.0.0.1:4096`: a raw serve, used only as the fallback
   when pigeon cannot route the session to a pool member.
+- `OC_AA_GOOSE_GRACE_SECS` defaults to `10`: seconds `oc-auto-attach goose:<id>` waits for goose
+  to list a newly-launched session before giving up (exit 3).
 
 ## Prerequisites
 

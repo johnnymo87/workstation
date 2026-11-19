@@ -189,8 +189,16 @@ function M.attach(desc, opts)
   -- pre-goose Lua until its next restart -- and without this Enter would do
   -- nothing visible. The opencode spawn stays fire-and-forget, as it was.
   local is_goose = desc.sid:sub(1, 6) == "goose:"
-  local spawn_opts = { stdin = false, env = env }
   local on_exit = nil
+  if is_goose then
+    -- Fail fast (honk-9qf.30). oc-auto-attach waits up to 10s for goose to list
+    -- a session a launcher has only just created; the picker only shows
+    -- sessions `honk list` already returned, so for it a miss is real and the
+    -- wait would only delay the warning below.
+    env = env or {}
+    env.OC_AA_GOOSE_GRACE_SECS = "0"
+  end
+  local spawn_opts = { stdin = false, env = env }
   if is_goose then
     spawn_opts.text = true
     on_exit = function(out)

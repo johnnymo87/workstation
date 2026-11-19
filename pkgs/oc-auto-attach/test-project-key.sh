@@ -35,7 +35,7 @@ set -o errexit -o nounset -o pipefail
 # Total assertions this suite makes when nothing is skipped. Bump it in the same
 # commit that adds or removes an assertion -- a diff that changes coverage
 # without touching this number is exactly the silent drift this pins down.
-EXPECTED_ASSERTIONS=99
+EXPECTED_ASSERTIONS=113
 
 ASSERT_COUNT=0
 SKIP_COUNT=0
@@ -571,19 +571,33 @@ if [ -n "$oc_aa" ]; then
   assert_exit 1 "$(run_goose 'goose:')" 'goose: empty goose id is rejected (exit 1)'
   assert_exit 1 "$(run_goose 'goose:abc')" 'goose: non-numeric goose id is rejected (exit 1)'
   fake_honk "[ \"\$1 \$2\" = 'list --json' ] || exit 9; echo '[{\"sessionId\":\"20261019_8\",\"cwd\":\"/x\",\"archivedAt\":null}]'"
-  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session honk does not list is not found (exit 3, no front-door probe)'
-  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/x\",\"archivedAt\":\"2026-10-19T00:00:00Z\"}]'"
-  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: an archived session is not found (exit 3)'
-  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
-  assert_exit 3 "$(run_goose 'goose:20261019_7')" 'goose: a session whose directory is gone is exit 3'
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=1 run_goose 'goose:20261019_7')" 'goose: a session honk does not list is not found (exit 3, no front-door probe)'
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/x\",\"archivedAt\":\"2026-10-19T00:00:00Z\"}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=10 run_goose 'goose:20261019_7')" 'goose: an archived session is not found (exit 3)'
+  assert_eq "1" "$(cat "$goose_tmp/count")" 'goose: an archived session exits 3 without polling'
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=10 run_goose 'goose:20261019_7')" 'goose: a session whose directory is gone is exit 3'
+  assert_eq "1" "$(cat "$goose_tmp/count")" 'goose: a gone directory exits 3 without polling'
   if grep -q 'no longer exists' "$goose_tmp/err"; then
     pass 'goose: a gone directory is named in the log'
   else
     printf 'FAIL  goose: a gone directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
     exit 1
   fi
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[{\"sessionId\":\"20261019_7\",\"cwd\":null,\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=10 run_goose 'goose:20261019_7')" 'goose: a session without recorded directory is exit 3'
+  assert_eq "1" "$(cat "$goose_tmp/count")" 'goose: a session without recorded directory exits 3 without polling'
+  if grep -q 'has no recorded directory' "$goose_tmp/err"; then
+    pass 'goose: a missing directory is named in the log'
+  else
+    printf 'FAIL  goose: a missing directory is named in the log\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
   fake_honk "echo 'connection failed: refused' >&2; exit 1"
-  assert_exit 2 "$(run_goose 'goose:20261019_7')" 'goose: honk failing is "could not find out" (exit 2)'
+  assert_exit 2 "$(OC_AA_GOOSE_GRACE_SECS=1 run_goose 'goose:20261019_7')" 'goose: honk failing is "could not find out" (exit 2)'
   if grep -q 'connection failed: refused' "$goose_tmp/err"; then
     pass 'goose: honk failure text reaches the log'
   else
@@ -591,7 +605,43 @@ if [ -n "$oc_aa" ]; then
     exit 1
   fi
   fake_honk "echo 'not json'"
-  assert_exit 2 "$(run_goose 'goose:20261019_7')" 'goose: unparseable honk output is exit 2'
+  assert_exit 2 "$(OC_AA_GOOSE_GRACE_SECS=1 run_goose 'goose:20261019_7')" 'goose: unparseable honk output is exit 2'
+
+  # A session appearing on the Nth poll is found and resolved
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); c=\$((c + 1)); echo \$c >'$goose_tmp/count'; if [ \$c -lt 3 ]; then echo '[]'; else echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"$goose_tmp\",\"archivedAt\":null}]'; fi"
+  app_rc="$(OC_AA_GOOSE_GRACE_SECS=5 run_goose 'goose:20261019_7')"
+  assert_eq "3" "$(cat "$goose_tmp/count")" 'goose: session appearing on 3rd call polls 3 times'
+  if [ "$app_rc" -ne 2 ] && [ "$app_rc" -ne 3 ]; then
+    pass 'goose: resolved session proceeds past resolution (exit code distinguishable from 2 and 3)'
+  else
+    printf 'FAIL  goose: resolved session proceeds past resolution\n        expected exit != 2 and != 3, got: %s\n' "$app_rc"
+    exit 1
+  fi
+  if grep -q "goose session 20261019_7 dir=$goose_tmp" "$goose_tmp/err"; then
+    pass 'goose: session appearing on 3rd call is found and resolved'
+  else
+    printf 'FAIL  goose: session appearing on 3rd call is found and resolved\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
+
+  # Grace validation
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS="invalid" run_goose 'goose:20261019_7')" 'goose: invalid OC_AA_GOOSE_GRACE_SECS still resolves session list'
+  if grep -q "OC_AA_GOOSE_GRACE_SECS='invalid' is not a non-negative integer; defaulting to 10" "$goose_tmp/err"; then
+    pass 'goose: invalid OC_AA_GOOSE_GRACE_SECS logs a warning and defaults to 10'
+  else
+    printf 'FAIL  goose: invalid OC_AA_GOOSE_GRACE_SECS logs a warning\n        log: %s\n' "$(cat "$goose_tmp/err")"
+    exit 1
+  fi
+
+  fake_honk "echo '[{\"sessionId\":\"20261019_7\",\"cwd\":\"/nonexistent/goose-cwd\",\"archivedAt\":null}]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS="08" run_goose 'goose:20261019_7')" 'goose: leading-zero OC_AA_GOOSE_GRACE_SECS is accepted without octal error'
+
+  echo 0 >"$goose_tmp/count"
+  fake_honk "c=\$(cat '$goose_tmp/count' 2>/dev/null || echo 0); echo \$((c + 1)) >'$goose_tmp/count'; echo '[]'"
+  assert_exit 3 "$(OC_AA_GOOSE_GRACE_SECS=0 run_goose 'goose:20261019_7')" 'goose: grace 0 exits 3 on not-found'
+  assert_eq "1" "$(cat "$goose_tmp/count")" 'goose: grace 0 performs only one attempt'
   rm -rf "$goose_tmp"
   # An nvim running pre-goose Lua refuses the open (returns 0). Driving that
   # needs a live tmux pane and nvim, so it is pinned by source instead.
@@ -710,6 +760,12 @@ if [ -f "$default_nix" ]; then
     pass 'source fast-fails on definitive 404 (OC_AA_404_GRACE_SECS grace)'
   else
     printf 'FAIL  source fast-fails on definitive 404\n        OC_AA_404_GRACE_SECS not found in: %s\n' "$default_nix"
+    exit 1
+  fi
+  if grep -q 'OC_AA_GOOSE_GRACE_SECS' "$default_nix"; then
+    pass 'source defines goose grace period (OC_AA_GOOSE_GRACE_SECS)'
+  else
+    printf 'FAIL  source defines goose grace period\n        OC_AA_GOOSE_GRACE_SECS not found in: %s\n' "$default_nix"
     exit 1
   fi
   # The old swallow-everything SESSION probe (`curl -sf ... "$url/session/$sid"`

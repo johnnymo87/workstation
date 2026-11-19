@@ -18,8 +18,10 @@ pkgs.writeShellApplication {
     #
     # Also accepts a goose session as goose:<goose-id> (honk-9qf.15.11, design
     # in docs/plans/2026-10-19-goose-sessions-in-pickers.md): the directory comes
-    # from `honk list --json` instead of steps 1 and 1.5, and the tab runs
-    # `honk chat <goose-id>`. Everything from step 2 on is shared.
+    # from `honk list --json` instead of steps 1 and 1.5, polling every 0.5s up
+    # to OC_AA_GOOSE_GRACE_SECS (default 10) to tolerate goose's delay in listing
+    # brand-new sessions, and the tab runs `honk chat <goose-id>`. Everything
+    # from step 2 on is shared.
     #
     # Behavior:
     #   1. Wait for the session to be visible at GET /session/<id> with
@@ -349,37 +351,106 @@ ${builtins.readFile ./canonical-path.sh}
     # body, no apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool
     # single-serve behavior, so this is strictly safe.
 
-    # Goose (honk-9qf.15.11): honkd's session list is the truth for whether the
-    # session exists and where it lives. Same exit codes as the opencode probe:
-    # 3 = definitively not there, 2 = could not find out.
+    # Goose (honk-9qf.15.11, honk-9qf.30): honkd's session list is the truth
+    # for whether the session exists and where it lives. Brand-new sessions
+    # (from `honk launch` or `/launch --backend goose`) may not be listed
+    # until their first user message is persisted, so we poll every 0.5s up
+    # to OC_AA_GOOSE_GRACE_SECS (default 10; non-negative integer, invalid
+    # values log a warning and fall back to 10; grace 0 means one attempt only).
+    #
+    # Exit codes:
+    #   3 = definitively not there (archived, directory gone, or deadline reached
+    #       and still not listed)
+    #   2 = could not find out (honk list failed or printed non-array at deadline)
+    # Conclusive states (archived, or cwd gone) exit 3 immediately without polling.
     if [ "$harness" = goose ]; then
       honk_bin="''${OC_AA_HONK_BIN:-honk}"
       goose_id="''${sid#goose:}"
+      goose_grace="''${OC_AA_GOOSE_GRACE_SECS:-10}"
+      if [[ ! "$goose_grace" =~ ^[0-9]+$ ]]; then
+        log "OC_AA_GOOSE_GRACE_SECS='$goose_grace' is not a non-negative integer; defaulting to 10"
+        goose_grace=10
+      else
+        goose_grace=$(( 10#$goose_grace ))
+      fi
+
+      call_timeout=10
+      if [ "$goose_grace" -gt 0 ] && [ "$goose_grace" -lt 10 ]; then
+        call_timeout="$goose_grace"
+      fi
+
       honk_err="$(mktemp)"
-      list_rc=0
-      list_json="$(timeout 10 "$honk_bin" list --json 2>"$honk_err")" || list_rc=$?
-      if [ "$list_rc" -ne 0 ]; then
-        log "honk list --json failed (exit $list_rc): $(head -n 3 "$honk_err" | tr '\n' ' ')"
-        rm -f "$honk_err"
-        exit 2
-      fi
-      rm -f "$honk_err"
-      session_dir="$(printf '%s' "$list_json" | jq -r --arg id "$goose_id" \
-        'if type == "array" then (map(select(.sessionId == $id and .archivedAt == null)) | .[0].cwd // empty) else error("not an array") end' \
-        2>/dev/null)" || {
-        log "honk list --json printed something that is not a JSON array"
-        exit 2
-      }
-      if [ -z "$session_dir" ]; then
-        log "goose session $goose_id not found in honk list (or archived, or no directory); giving up"
-        exit 3
-      fi
-      # Checked here so a deleted cwd is not later misread as a refusing nvim
-      # (oc_auto_attach.lua's open() returns 0 for a missing dir as well).
-      if [ ! -d "$session_dir" ]; then
-        log "goose session $goose_id directory $session_dir no longer exists; giving up"
-        exit 3
-      fi
+      session_dir=""
+      last_rc=3
+      last_log="goose session $goose_id not found in honk list; giving up"
+      start_time="$SECONDS"
+      deadline=$(( start_time + goose_grace ))
+
+      while :; do
+        list_rc=0
+        list_json="$(timeout "$call_timeout" "$honk_bin" list --json 2>"$honk_err")" || list_rc=$?
+        if [ "$list_rc" -ne 0 ]; then
+          last_rc=2
+          last_log="honk list --json failed (exit $list_rc): $(head -n 3 "$honk_err" | tr '\n' ' ')"
+        else
+          parsed="$(printf '%s' "$list_json" | jq -r --arg id "$goose_id" '
+            if type == "array" then
+              (map(select(.sessionId == $id))) as $matches |
+              if ($matches | length) == 0 then
+                "MISSING"
+              elif $matches[0].archivedAt != null then
+                "ARCHIVED"
+              else
+                "FOUND " + ($matches[0].cwd // "")
+              end
+            else
+              error("not an array")
+            end
+          ' 2>/dev/null)" || list_rc=$?
+
+          if [ "$list_rc" -ne 0 ]; then
+            last_rc=2
+            last_log="honk list --json printed something that is not a JSON array"
+          else
+            case "$parsed" in
+              ARCHIVED)
+                log "goose session $goose_id is archived; giving up"
+                rm -f "$honk_err"
+                exit 3
+                ;;
+              "FOUND "*)
+                session_dir="''${parsed#FOUND }"
+                if [ -z "$session_dir" ]; then
+                  log "goose session $goose_id has no recorded directory; giving up"
+                  rm -f "$honk_err"
+                  exit 3
+                fi
+                if [ ! -d "$session_dir" ]; then
+                  log "goose session $goose_id directory $session_dir no longer exists; giving up"
+                  rm -f "$honk_err"
+                  exit 3
+                fi
+                rm -f "$honk_err"
+                break
+                ;;
+              *)
+                # MISSING
+                last_rc=3
+                last_log="goose session $goose_id not found in honk list; giving up"
+                ;;
+            esac
+          fi
+        fi
+
+        if [ "$goose_grace" -eq 0 ] || [ "$SECONDS" -ge "$deadline" ]; then
+          log "$last_log"
+          rm -f "$honk_err"
+          exit "$last_rc"
+        fi
+
+        sleep 0.5
+      done
+
       log "goose session $goose_id dir=$session_dir"
     else
       # Step 1: wait for session to be visible with a non-empty directory.
