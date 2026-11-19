@@ -29,6 +29,18 @@
 # travels is a public auth URL one way, and a single-use authorization code
 # the other.
 #
+# THE MAC'S OWN ADC IS A COPY OF THE REMOTE'S. opencode on this Mac signs its
+# Vertex calls with ~/.config/gcloud/application_default_credentials.json here,
+# and nothing refreshed it: on 2026-11-19 it died (invalid_grant) while both
+# remote credentials were green. Rather than a third browser login, every run
+# copies the remote's ADC file over when the two differ (sync_mac_adc, below).
+# That deliberately relaxes "no credential crosses the link" for this one
+# file, a human decision: it is the same account's credential the remote
+# already holds, it travels over an ssh session this Mac starts, and it is
+# pulled, never pushed. Consequence worth knowing: the two hosts now share ONE
+# refresh token, so `gcloud auth application-default revoke` on either host
+# kills both.
+#
 # Required env (supplied by the launchd agent from Keychain):
 #   REAUTH_REMOTE        ssh host alias of the remote machine
 # Optional:
@@ -41,6 +53,9 @@
 #                        both); without them every due run goes to the browser
 #   REAUTH_REFRESH_AFTER_SECONDS   default 21600 (6h); see "which credentials"
 #   REAUTH_HUMAN_WAIT_SECONDS      default 900; see "waiting for a human"
+#   REAUTH_LOCAL_ADC     default ~/.config/gcloud/application_default_credentials.json
+#   REAUTH_TOKEN_URL     default https://oauth2.googleapis.com/token
+#                        (both overridable for tests only)
 #
 # Usage: gcloud-reauth-refresh [--force]
 #   --force   refresh every credential now, however recently it was refreshed
@@ -144,9 +159,14 @@ with open(log, "a") as f:
     }) + "\n")
 PY
   LAST_OUTCOME="$outcome"
+  [ "$cred" = adc ] && [ "$outcome" = refreshed ] && ADC_REFRESHED=yes
   echo "credential=$cred outcome=$outcome ${detail:+detail=$detail}"
   case "$outcome" in
     refreshed|not_due|skipped) ;;
+    # mac-adc (sync_mac_adc): copied, already identical, or the remote could
+    # not be reached -- offline, Vertex is unusable anyway, and the Mac's file
+    # is left exactly as it was.
+    synced|in_sync|unreachable) ;;
     # The Mac slept mid-step: nothing is wrong, and the next run retries with
     # no backoff (QUIET in cred_status).
     interrupted) ;;
@@ -240,6 +260,119 @@ dismiss_signin_alert() {
 
 failed=no
 LAST_OUTCOME=""
+ADC_REFRESHED=no
+
+# --- the Mac's own ADC --------------------------------------------------------
+# Make this Mac's ADC file carry the same refresh token as the remote's (see
+# "the Mac's own ADC is a copy" at the top). Runs on EVERY run, not only after
+# the remote ADC is refreshed, so a dead Mac file next to a live remote one --
+# the 2026-11-19 state -- is repaired within the hour, not at the next 6h
+# refresh. Needs no browser and no lock.
+#
+# Only a 16-char fingerprint crosses the link unless the two differ. A copy is
+# proven live (a token minted from it at Google's token endpoint) BEFORE it
+# replaces the Mac's file, so a dead remote credential can never overwrite a
+# live local one. The Mac's quota_project_id is kept: it decides where this
+# Mac's Vertex calls bill, and the remote's may differ.
+#
+# Always one `mac-adc` row. Its failures alert like any other, but count
+# separately (SYNC_FAILED): a sync fault must not stop a successful refresh
+# from dismissing the sign-in alert, nor the reverse.
+LOCAL_ADC="${REAUTH_LOCAL_ADC:-$HOME/.config/gcloud/application_default_credentials.json}"
+TOKEN_URL="${REAUTH_TOKEN_URL:-https://oauth2.googleapis.com/token}"
+# shellcheck disable=SC2016  # expanded by the remote shell, deliberately
+REMOTE_ADC_FP_CMD='t="$(jq -r ".refresh_token // empty" "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null)"; if [ -n "$t" ]; then printf "%s" "$t" | sha256sum | cut -c1-16; else echo none; fi'
+# shellcheck disable=SC2016
+REMOTE_ADC_CAT_CMD='cat "$HOME/.config/gcloud/application_default_credentials.json"'
+SYNC_FAILED=no
+
+local_adc_fp() {
+  local t
+  t="$(jq -r '.refresh_token // empty' "$LOCAL_ADC" 2>/dev/null)"
+  if [ -n "$t" ]; then printf '%s' "$t" | sha256sum | cut -c1-16; else echo none; fi
+}
+
+sync_mac_adc() {
+  local saved_failed="$failed" remote_fp="" local_fp tmp resp code err qp
+  record_sync() {
+    record mac-adc "$1" "$2"
+    case "$1" in synced|in_sync|unreachable) ;; *) SYNC_FAILED=yes ;; esac
+    failed="$saved_failed"
+  }
+  # Retried like the account read below: the first run after a wake can start
+  # before the network is back.
+  for _ in 1 2 3 4; do
+    remote_fp="$(timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" "$REMOTE_ADC_FP_CMD" \
+      2>/dev/null | tr -d '\r' | tail -1)"
+    [ -n "$remote_fp" ] && break
+    sleep 15
+  done
+  if [ -z "$remote_fp" ]; then
+    record_sync unreachable "Could not reach $REMOTE to compare ADC; the Mac's file is unchanged"
+    return
+  fi
+  if [ "$remote_fp" = none ]; then
+    record_sync sync_failed "The remote has no ADC refresh token to copy; the Mac's file is unchanged"
+    return
+  fi
+  local_fp="$(local_adc_fp)"
+  if [ "$local_fp" = "$remote_fp" ]; then
+    record_sync in_sync "The Mac's ADC already carries the remote's refresh token"
+    return
+  fi
+
+  mkdir -p "$(dirname "$LOCAL_ADC")"
+  tmp="$(umask 077; mktemp "$LOCAL_ADC.sync.XXXXXX")" || {
+    record_sync sync_failed "Cannot create a temp file beside $LOCAL_ADC"; return; }
+  resp="$(umask 077; mktemp "$STATE/token-resp.XXXXXX")" || {
+    rm -f "$tmp"; record_sync sync_failed "Cannot create a temp file in $STATE"; return; }
+  if ! timeout 30 ssh -o ClearAllForwardings=yes "$REMOTE" "$REMOTE_ADC_CAT_CMD" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" "$resp"
+    record_sync sync_failed "Could not copy the remote ADC file; the Mac's file is unchanged"
+    return
+  fi
+  if ! jq -e '.type == "authorized_user" and (.refresh_token // "") != "" and (.client_id // "") != "" and (.client_secret // "") != ""' "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp" "$resp"
+    record_sync sync_failed "The remote ADC file is not an authorized_user credential; the Mac's file is unchanged"
+    return
+  fi
+  # Live? The exchange every client library makes. The form goes on stdin, not
+  # argv, so the secret never shows up in ps; the response (an access token)
+  # goes to a 0600 file that is removed at once.
+  code="$(jq -r '"grant_type=refresh_token&client_id=\(.client_id|@uri)&client_secret=\(.client_secret|@uri)&refresh_token=\(.refresh_token|@uri)"' "$tmp" \
+    | curl -sS -m 30 -o "$resp" -w '%{http_code}' -d @- "$TOKEN_URL" 2>/dev/null)"
+  err="$(jq -r '[.error, .error_subtype] | map(select(. != null)) | join("/")' "$resp" 2>/dev/null)"
+  if [ "$code" != 200 ] || ! jq -e '(.access_token // "") != ""' "$resp" >/dev/null 2>&1; then
+    rm -f "$tmp" "$resp"
+    if [ -z "$code" ] || [ "$code" = 000 ]; then
+      record_sync unreachable "Could not reach Google's token endpoint to check the remote ADC; the Mac's file is unchanged"
+    else
+      record_sync sync_failed "The remote ADC could not mint a token (HTTP $code${err:+, $err}); the Mac's file is unchanged. The remote ADC refresh should replace it"
+    fi
+    return
+  fi
+  rm -f "$resp"
+  # Keep the Mac's quota project when it has one; otherwise keep the remote's.
+  qp="$(jq -r '.quota_project_id // empty' "$LOCAL_ADC" 2>/dev/null)"
+  if [ -n "$qp" ]; then
+    if ! (umask 077; jq --arg qp "$qp" '.quota_project_id = $qp' "$tmp" > "$tmp.qp" 2>/dev/null) \
+       || ! mv "$tmp.qp" "$tmp"; then
+      rm -f "$tmp" "$tmp.qp"
+      record_sync sync_failed "Could not carry the Mac's quota_project_id into the copied ADC; the Mac's file is unchanged"
+      return
+    fi
+    chmod 600 "$tmp"
+  fi
+  if ! mv "$tmp" "$LOCAL_ADC"; then
+    rm -f "$tmp"
+    record_sync sync_failed "Could not replace $LOCAL_ADC"
+    return
+  fi
+  record_sync synced "Copied the remote's live ADC to the Mac (refresh token $local_fp -> $remote_fp${qp:+, quota project kept})"
+}
+
+# A sync on every run, including those where nothing is due.
+sync_mac_adc
 
 # --- which credentials are due ----------------------------------------------
 # Due = no `refreshed` row in the last REAUTH_REFRESH_AFTER_SECONDS. The
@@ -328,7 +461,7 @@ while read -r cred due age last since; do
   fi
 done <<<"$status"
 if [ "${#CREDENTIALS[@]}" -eq 0 ]; then
-  [ "$failed" = no ] && exit 0   # backing_off is not "fine"
+  [ "$failed" = no ] && [ "$SYNC_FAILED" = no ] && exit 0   # backing_off is not "fine"
   exit 1
 fi
 
@@ -791,8 +924,15 @@ if [ "$HANDED_OFF" = yes ] && [ "$HANDOFF_REASON" = idp_login_required ] \
   fi
 fi
 
+# The remote ADC may have just been replaced: carry it to the Mac now rather
+# than at the next hourly run.
+if [ "$ADC_REFRESHED" = yes ]; then
+  SYNC_FAILED=no   # this sync supersedes the one at the start of the run
+  sync_mac_adc
+fi
+
 if [ "$failed" = no ]; then
   dismiss_signin_alert
-  exit 0
+  [ "$SYNC_FAILED" = no ] && exit 0
 fi
 exit 1
