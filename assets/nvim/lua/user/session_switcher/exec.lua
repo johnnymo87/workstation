@@ -139,7 +139,16 @@ function M.switch_pane(desc, client)
     vim.system({ "tmux", "switch-client", "-c", client, "-t", target_pane }, { stdin = false })
 
     if desc.sock and desc.sock ~= "" and desc.buffer and type(desc.buffer) == "number" then
-      local expr = string.format("luaeval(\"pcall(vim.api.nvim_set_current_buf, %d)\")", desc.buffer)
+      -- Go to a window already showing the buffer (switching to its tab), and
+      -- only set it current in the current window when none does. A bare
+      -- nvim_set_current_buf put it in whatever tab was current, which, in an
+      -- nvim holding several sessions (the coordinators window,
+      -- workstation-f8qg), hid that tab's own terminal.
+      local expr = string.format(
+        "luaeval(\"pcall(function(b) local w = vim.fn.win_findbuf(b)[1]; "
+          .. "if w then vim.api.nvim_set_current_win(w) else vim.api.nvim_set_current_buf(b) end end, %d)\")",
+        desc.buffer
+      )
       vim.system({ "nvim", "--server", desc.sock, "--remote-expr", expr }, { stdin = false })
     end
   end)

@@ -2064,8 +2064,8 @@
           echo "GATE FAILURE: session_switcher.model did not report expected 117 assertions." >&2
           exit 1
         }
-        grep -q '^PASS  session_switcher\.spec unit tests (1002 assertions via nvim -l)' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: session_switcher.spec did not report expected 1002 assertions." >&2
+        grep -q '^PASS  session_switcher\.spec unit tests (1005 assertions via nvim -l)' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: session_switcher.spec did not report expected 1005 assertions." >&2
           exit 1
         }
         grep -q '^PASS  stallwatch_picker\.model unit tests (154 assertions via nvim -l)' "$TMPDIR/out.txt" || {
@@ -2851,7 +2851,7 @@
         touch $out
       '';
 
-      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 113-assertion
+      # workstation-pscu. pkgs/oc-auto-attach/test-project-key.sh is a 120-assertion
       # suite covering project_key/window_name derivation, pool-aware serve
       # resolution, the tmux window/session name collision that once leaked
       # `main`'s panes into confined sessions, and an `nvim -l` unit test of the
@@ -2896,8 +2896,8 @@
         # Assert the assertions RAN, not merely that the script exited 0 -- the
         # store-prefix / oc-session-list-bin lesson. The count is the gate: any
         # block that goes dark changes it.
-        grep -q '^ALL PASS (oc-auto-attach): 113 assertions' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: the suite did not report its full 113-assertion tally." >&2
+        grep -q '^ALL PASS (oc-auto-attach): 120 assertions' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: the suite did not report its full 120-assertion tally." >&2
           echo "If you deliberately changed coverage, update EXPECTED_ASSERTIONS in" >&2
           echo "pkgs/oc-auto-attach/test-project-key.sh and this gate together." >&2
           exit 1
