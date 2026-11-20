@@ -46,8 +46,8 @@ READ_ONLY_MAX_TURNS = 80
 # effort a delegate would otherwise inherit from its lead (INHERITED_SESSION_PARAM_KEYS).
 # Every role runs high, as opencode's SDD roles (variant high) and reviewers do, so
 # a worker lead launched at medium (`honk launch --effort medium`) does not drag its
-# roles down. Needs a goose that knows the field: `goose recipe validate` in
-# default.nix rejects it on an older one.
+# roles down. An older goose ignores the unknown key silently, so default.nix
+# probes that the pinned goose knows it (a bogus value must fail validation).
 ROLE_THINKING_EFFORT = "high"
 
 
