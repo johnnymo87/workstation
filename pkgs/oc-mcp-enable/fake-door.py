@@ -65,8 +65,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(
                     200,
                     {
-                        "chrome-devtools-9222": {"status": "disabled"},
-                        "chrome-devtools-9223": {"status": "disabled"},
+                        "atlassian": {"status": "disabled"},
+                        "atlassian-alt": {"status": "disabled"},
                         "slack-ro": {"status": "disabled"},
                     },
                 )

@@ -1834,24 +1834,24 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
       fi
     ''));
 
-  # npm-global packages that can't be managed by Nix
-  # (e.g. nixpkgs version is too old, or package not in nixpkgs)
-  # Installed to ~/.npm-global which is already on sessionPath
-  home.activation.installNpmGlobalPackages = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+  # Remove browser MCP servers this file used to install into ~/.npm-global.
+  #
+  # chrome-devtools-mcp (installed here until 2026-11) and @playwright/mcp
+  # (until 4bfe7367, 2026-03) backed the retired chrome-devtools-922x /
+  # playwright-922x opencode MCP entries; agents now use Chrome's DevTools
+  # Protocol port directly. Home-manager never removes what an activation
+  # script installed, so @playwright/mcp was still on the Mac's PATH eight
+  # months after its install was dropped. Uninstall only when present, so a
+  # clean host pays nothing; failure is non-fatal.
+  home.activation.removeRetiredNpmGlobalPackages = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
     set -euo pipefail
     export PATH="${pkgs.nodejs}/bin:$PATH"
-    export npm_config_prefix="$HOME/.npm-global"
-
-    # chrome-devtools-mcp: primary browser MCP server for AI agent visual QA
-    # (replaces @playwright/mcp — better token efficiency, DevTools-native
-    # capabilities like Lighthouse audits, perf traces, memory snapshots)
-    wanted_cdmcp="0.20.3"
-    current_cdmcp="$(npm ls -g --prefix "$HOME/.npm-global" chrome-devtools-mcp --json 2>/dev/null \
-      | ${pkgs.jq}/bin/jq -r '.dependencies["chrome-devtools-mcp"].version // empty' 2>/dev/null || true)"
-    if [[ "$current_cdmcp" != "$wanted_cdmcp" ]]; then
-      echo "Installing chrome-devtools-mcp@$wanted_cdmcp (have: ''${current_cdmcp:-none})"
-      npm install -g "chrome-devtools-mcp@$wanted_cdmcp" --prefix "$HOME/.npm-global" --no-fund --no-audit 2>&1 || true
-    fi
+    for pkg in chrome-devtools-mcp @playwright/mcp; do
+      if [[ -d "$HOME/.npm-global/lib/node_modules/$pkg" ]]; then
+        echo "Uninstalling retired npm-global package $pkg"
+        npm uninstall -g "$pkg" --prefix "$HOME/.npm-global" --no-fund --no-audit 2>&1 || true
+      fi
+    done
   '';
 
 }

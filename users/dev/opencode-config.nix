@@ -1365,6 +1365,35 @@ in
     ' "$tmp" > "$cleaned"
     mv "$cleaned" "$tmp"
 
+    # Strip the retired browser MCP servers.
+    #
+    # Same lingering-key problem as above. `playwright`, `playwright-9222` and
+    # `playwright-9223` (@playwright/mcp) were dropped from opencode.base.json
+    # in 4bfe7367 (2026-03) but were still in the runtime opencode.json on the
+    # Mac in 2026-11. `chrome-devtools-9222` / `-9223` (chrome-devtools-mcp)
+    # were dropped later for the same reason: agents talk to Chrome's DevTools
+    # Protocol port directly (curl /json/*, CDP over the target's websocket),
+    # which needs no MCP server.
+    #
+    # Deliberately narrow: an entry is dropped only when its name is one of
+    # these AND its command still runs the retired package, so a server
+    # hand-added under one of these names with a different command survives.
+    cleaned="$(mktemp "''${runtime}.tmp.XXXXXX")"
+    ${pkgs.jq}/bin/jq '
+      if (.mcp | type) == "object" then
+        .mcp |= with_entries(select(
+          ((.key | IN("playwright", "playwright-9222", "playwright-9223",
+                      "chrome-devtools-9222", "chrome-devtools-9223"))
+           and ((.value | type) == "object")
+           and ((.value.command | type) == "array")
+           and (.value.command | any(.[]; type == "string"
+                 and test("^(playwright-mcp|chrome-devtools-mcp(@.*)?|@playwright/mcp(@.*)?)$"))))
+          | not
+        ))
+      else . end
+    ' "$tmp" > "$cleaned"
+    mv "$cleaned" "$tmp"
+
     mv "$tmp" "$runtime"
     [[ "$base" == "$runtime" ]] || rm -f "$base"
   '';

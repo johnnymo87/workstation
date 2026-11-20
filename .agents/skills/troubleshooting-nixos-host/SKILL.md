@@ -140,7 +140,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 
 ### Multi-project CDP
 
-Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. See each project's VQA skill for the specific Chrome launch command and MCP server name (`chrome-devtools-9222` or `chrome-devtools-9223`).
+Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. Agents talk to the port directly (no MCP server): `curl -s http://127.0.0.1:9222/json/version` confirms the forward and the browser, `/json/list` gives each tab's `webSocketDebuggerUrl` for CDP commands. See each project's VQA skill for the specific Chrome launch command.
 
 ## Can't SSH After Recreate
 
