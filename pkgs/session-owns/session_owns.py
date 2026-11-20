@@ -52,17 +52,26 @@
 #    checked against NOW, not against the caller's activity window, because it
 #    is an assertion rather than an inference from last activity. The 24h cap
 #    bounds the damage from a claim that is never removed or names a bogus far
-#    future: a file whose mtime is older than that is ignored unread. A FRESH
-#    claim that cannot be parsed is "unknown" (keeps everything for at most
-#    24h), because it might name the directory about to be deleted.
+#    future: a file whose mtime is older than that is ignored unread. A claim
+#    that cannot be parsed (or names a non-finite expiry, a relative path, or
+#    a path shallower than CLAIM_MIN_PATH_DEPTH) is "unknown" -- it might name
+#    the directory about to be deleted -- but only for its first
+#    CLAIM_MALFORMED_GRACE_SECONDS; after that it is ignored with a warning on
+#    stderr, so one bad file cannot freeze every guard on the host.
+#
+#    Unlike a session row, a claim also protects everything UNDER its path: it
+#    asserts "work is happening in this tree", so a sweep of <tree>/target or
+#    a bazel workspace below the claimed root is covered too.
 #
 # Matching, for all three: an owner directory protects a candidate when it IS
 # the candidate or lies UNDER it (a session that ran `cd src` inside a
-# worktree, a clone inside a scratch dir). Candidates are the path as given
-# plus its realpath.
+# worktree, a clone inside a scratch dir); a claim also protects candidates
+# under its path (see 3). Candidates are the path as given plus its realpath.
 import json
+import math
 import os
 import sqlite3
+import sys
 import time
 
 SESSION_ACTIVE_DAYS = 7
@@ -71,6 +80,10 @@ OPENCODE_SESSION_DB_DEFAULT = os.path.expanduser(
 GOOSE_SESSION_DB_DEFAULT = os.path.expanduser(
     "~/.local/share/goose/sessions/sessions.db")
 CLAIM_MAX_TTL_SECONDS = 24 * 3600
+# A fresh claim that cannot be parsed is "unknown" only this long; see claim_owner.
+CLAIM_MALFORMED_GRACE_SECONDS = 120
+# "/", "/home", "/home/dev" are not claimable: a claim covers its descendants.
+CLAIM_MIN_PATH_DEPTH = 3
 
 
 def path_claims_dir_default():
@@ -140,6 +153,14 @@ def goose_session_owner(candidates, goose_db_path, cutoff_s):
     return ("free", "")
 
 
+def _claim_covers(path, candidates):
+    """A claim asserts work IN `path`: it protects the path, anything under it,
+    and anything above it (deleting a parent deletes the claimed tree)."""
+    path = path.rstrip("/") or "/"
+    return _path_matches(path, candidates) or any(
+        c == path or c.startswith(path + "/") for c in candidates)
+
+
 def claim_owner(candidates, claims_dir, now=None):
     """(verdict, detail) for the path-claims directory. See the header."""
     if now is None:
@@ -164,21 +185,40 @@ def claim_owner(candidates, claims_dir, now=None):
             continue
         if mtime < now - CLAIM_MAX_TTL_SECONDS:
             continue
+        if mtime > now + 300:
+            # A future mtime (clock step, touch -d) would push the 24h cap out
+            # with it, as far as it likes. Not a claim anyone made honestly.
+            print("session-owns: WARN: ignoring path claim with a future mtime %s"
+                  % fp, file=sys.stderr)
+            continue
         try:
             with open(fp, encoding="utf-8") as fh:
                 claim = json.load(fh)
             path = claim["path"]
             expires_at = float(claim["expires_at"])
+            if not math.isfinite(expires_at):
+                raise ValueError("expires_at is not finite: %r" % (claim["expires_at"],))
             if not isinstance(path, str) or not path.startswith("/"):
                 raise ValueError("path is not absolute: %r" % (path,))
+            if len([c for c in path.split("/") if c]) < CLAIM_MIN_PATH_DEPTH:
+                raise ValueError("path is too shallow to claim: %r" % (path,))
         except FileNotFoundError:
             continue
         except Exception as exc:
-            unknown = unknown or "claim %s unreadable: %s" % (name, exc)
+            # A malformed claim might name the directory about to go, so it
+            # keeps everything -- but only for CLAIM_MALFORMED_GRACE_SECONDS,
+            # the window in which it could be a non-atomic writer mid-write.
+            # After that it is a bug, not an assertion, and one bad file must
+            # not freeze every guard on the host for a day.
+            if now - mtime < CLAIM_MALFORMED_GRACE_SECONDS:
+                unknown = unknown or "claim %s unreadable: %s" % (name, exc)
+            else:
+                print("session-owns: WARN: ignoring malformed path claim %s: %s"
+                      % (fp, exc), file=sys.stderr)
             continue
         if now >= min(expires_at, mtime + CLAIM_MAX_TTL_SECONDS):
             continue
-        if _path_matches(path, candidates):
+        if _claim_covers(path, candidates):
             what = claim.get("what") or claim.get("owner") or "?"
             return ("session", "claim %s (%s)" % (name, what))
     if unknown:

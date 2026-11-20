@@ -1486,12 +1486,15 @@ lib.mkMerge [
       session_owns_worktree() {
         local path="$1" verdict="" rc=0
 
+        # stdout only: the verdict line. Its stderr (warnings, a traceback)
+        # goes to the journal as-is.
         verdict=$(${sessionOwnsBin} --opencode-db "$SESSION_DB" --goose-db "$GOOSE_SESSION_DB" \
-          --active-seconds "$((SESSION_ACTIVE_DAYS * 86400))" "$path" 2>&1) || rc=$?
+          --active-seconds "$((SESSION_ACTIVE_DAYS * 86400))" "$path") || rc=$?
 
-        case "$rc" in
-          0) return 0 ;;
-          1) return 1 ;;
+        # Free ONLY when it says so: rc 1 is also a python crash before main().
+        case "$rc:$verdict" in
+          0:session*) return 0 ;;
+          1:free) return 1 ;;
           *)
             log "WARN: session probe for $path: ''${verdict:-no output (rc $rc)}"
             return 2

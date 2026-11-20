@@ -191,10 +191,12 @@ EOF
       out="$(${sessionOwns}/bin/session-owns \
         --opencode-db "$PRUNE_SESSION_DB" --goose-db "$PRUNE_GOOSE_DB" \
         --claims-dir "$PRUNE_CLAIMS_DIR" \
-        --active-seconds "$((PRUNE_SESSION_ACTIVE_DAYS * 86400))" "$wt" 2>&1)" || rc=$?
-      case "$rc" in
-        0) printf '%s\n' "''${out#session }"; return 0 ;;
-        1) return 1 ;;
+        --active-seconds "$((PRUNE_SESSION_ACTIVE_DAYS * 86400))" "$wt")" || rc=$?
+      # stdout is the verdict line; warnings and tracebacks go to our stderr.
+      # Free ONLY when it says so: rc 1 is also a python crash before main().
+      case "$rc:$out" in
+        "0:session "*) printf '%s\n' "''${out#session }"; return 0 ;;
+        1:free) return 1 ;;
         *) printf '%s\n' "''${out#unknown }" | head -1; return 2 ;;
       esac
     }

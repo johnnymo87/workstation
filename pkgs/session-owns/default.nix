@@ -7,6 +7,10 @@
 #                [--goose-db P] [--claims-dir D] [--active-seconds N] PATH
 #
 # Prints "session <who>", "free" or "unknown <why>"; exits 0, 1 or 2.
+# Callers must treat the tree as free ONLY on rc 1 AND stdout exactly "free":
+# 1 is also what python exits with when it crashes before main() runs. -I
+# keeps PYTHONPATH/PYTHONHOME and user site-packages from an agent's shell
+# (devenv, a venv) out of the probe.
 { pkgs }:
 
 pkgs.writeTextFile {
@@ -14,7 +18,7 @@ pkgs.writeTextFile {
   executable = true;
   destination = "/bin/session-owns";
   text = ''
-    #!${pkgs.python3}/bin/python3
+    #!${pkgs.python3}/bin/python3 -I
   '' + builtins.readFile ./session_owns.py + ''
 
 

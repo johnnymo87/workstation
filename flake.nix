@@ -1429,8 +1429,8 @@
         export HOME="$TMPDIR"
         # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
         python3 pkgs/session-owns/test_session_owns.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q '^Ran 29 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 29 tests'. If you added or removed" >&2
+        grep -q '^Ran 35 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 35 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

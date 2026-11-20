@@ -164,6 +164,47 @@ class Claims(Base):
         self.claim("c.json", None, None, raw="{not json")
         self.assertEqual(self.owner()[0], "unknown")
 
+    def test_garbage_past_the_grace_is_ignored(self):
+        # One bad file must not freeze every guard on the host for a day.
+        old = self.now - so.CLAIM_MALFORMED_GRACE_SECONDS - 5
+        self.claim("c.json", None, None, mtime=old, raw="{not json")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.owner()[0], "free")
+        self.assertIn("ignoring malformed path claim", err.getvalue())
+
+    def test_non_finite_expiry_is_malformed(self):
+        self.claim("c.json", None, None, raw='{"path": "%s", "expires_at": NaN}' % self.wt)
+        self.assertEqual(self.owner()[0], "unknown")
+        self.claim("c.json", None, None, raw='{"path": "%s", "expires_at": null}' % self.wt)
+        self.assertEqual(self.owner()[0], "unknown")
+
+    def test_shallow_path_is_malformed(self):
+        self.claim("c.json", "/home/dev", self.now + 3600)
+        self.assertEqual(self.owner()[0], "unknown")
+
+    def test_claim_protects_descendants(self):
+        # A sweep of <tree>/target, or a bazel workspace below the claimed root.
+        sub = os.path.join(self.wt, "crates", "x", "target")
+        os.makedirs(sub)
+        self.claim("c.json", self.wt, self.now + 3600)
+        self.assertEqual(self.owner(sub)[0], "session")
+
+    def test_session_rows_still_do_not_protect_descendants(self):
+        sub = os.path.join(self.wt, "target")
+        os.makedirs(sub)
+        self.make_goose([("g1", self.wt, utc(self.now))])
+        self.assertEqual(self.owner(sub)[0], "free")
+
+    def test_future_mtime_does_not_extend_the_cap(self):
+        fp = self.claim("c.json", self.wt, self.now + 10 * 86400)
+        future = self.now + 10 * 86400
+        os.utime(fp, (future, future))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.owner()[0], "free")
+        self.assertIn("future mtime", err.getvalue())
+
     def test_relative_path_is_unknown(self):
         self.claim("c.json", "relative/dir", self.now + 3600)
         self.assertEqual(self.owner()[0], "unknown")
