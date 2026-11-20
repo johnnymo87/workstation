@@ -2394,6 +2394,42 @@
           echo "darwin-goose-wiring: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
         '';
 
+      # The Mac's pigeon-daemon Slack wiring (pigeon-4ogz.17, chat-transport
+      # phase 2), the macbook twin of devbox-pigeon-slack-wiring. Must be in
+      # place BEFORE macbook flips to Slack (pigeon-4ogz.11): without the Slack
+      # owner id in the allowlist every topic-bound goose session refuses his
+      # replies, and without the webhook the direct-fallback alarm has nowhere
+      # to go. Eval-only on the Linux leg (same constraint as darwin-goose-wiring):
+      # it reads the launchd agent's env and its start-script STRING. The webhook
+      # is a credential: it must come from the Keychain at start, never sit in
+      # EnvironmentVariables (the plist is a world-readable file).
+      darwin-pigeon-slack-wiring = let
+        hm = self.homeConfigurations.${mac.hostname}.config;
+        agent = hm.launchd.agents.pigeon-daemon.config;
+        env = agent.EnvironmentVariables;
+        lib = devboxPkgs.lib;
+        script = lib.concatStringsSep "\n" agent.ProgramArguments;
+        allowed = lib.splitString "," (env.PIGEON_PULL_ALLOWED_USER_IDS or "");
+        checks = {
+          "owner id env" = (env.PIGEON_SLACK_OWNER_USER_ID or null) == "U0CKKHX34MR";
+          "allowlist has Slack owner" = builtins.elem "U0CKKHX34MR" allowed;
+          "allowlist keeps Telegram owner" = builtins.elem "8248645256" allowed;
+          "no pushes (NOTIFY_OWNER unset)" = !(env ? PIGEON_SLACK_NOTIFY_OWNER);
+          "webhook not in EnvironmentVariables" = !(env ? PIGEON_SLACK_ALARM_WEBHOOK_URL);
+          "script reads webhook from Keychain" =
+            lib.hasInfix ''find-generic-password -s pigeon-slack-alarm-webhook -w 2>/dev/null || true'' script;
+          "script exports only a non-empty webhook" =
+            lib.hasInfix ''if [ -n "$w" ]; then'' script
+            && lib.hasInfix ''export PIGEON_SLACK_ALARM_WEBHOOK_URL="$w"'' script;
+          "no webhook URL inlined" = !(lib.hasInfix "hooks.slack.com" script);
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+      in
+        assert lib.assertMsg (failed == [ ]) "darwin-pigeon-slack-wiring failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "darwin-pigeon-slack-wiring" { } ''
+          echo "darwin-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
+        '';
+
       # oc-mcp-enable grants a RUNNING session an MCP server (connect + a
       # session-scoped allow rule). The suite pins the two things a silent
       # regression would break: the `<server>_*` permission pattern (a wrong
