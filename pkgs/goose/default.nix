@@ -137,6 +137,15 @@
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
 # still hold outside the patched lines.
+#
+# DARWIN (the Mac, workstation-6w7i.17). The aarch64-apple-darwin asset is
+# upstream's bundle-macos.yml CLI build of the same patched source (default
+# features, unsigned: a Nix fetch sets no quarantine attribute and the linker's
+# ad-hoc signature is all Apple Silicon needs). Releases from patched-1.54.0.16
+# on carry it; patched-1.54.0.15's was backfilled onto the existing release by
+# the fork's patched-release-darwin.yml without touching its Linux assets.
+# On the Mac, goose-serve (launchd, users/dev/home.darwin.nix) and the CLI
+# (users/dev/goose-config.nix) run this package.
 
 { lib
 , stdenv
@@ -164,6 +173,10 @@ let
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
       hash = "sha256-Bwkat3rT+Oo0whw5Qwsn0LlKe7EfkZxAkDa4cauj/9M=";
     };
+    "aarch64-darwin" = {
+      asset = "goose-aarch64-apple-darwin.tar.gz";
+      hash = "sha256-h7+nLFAHsvsT8/Fc2LrYWdTgIni0GO3ehhd5Y8CKhH8=";
+    };
   };
 
   platformInfo =
@@ -179,8 +192,10 @@ stdenv.mkDerivation {
     inherit (platformInfo) hash;
   };
 
-  nativeBuildInputs = [ autoPatchelfHook ];
-  buildInputs = [ stdenv.cc.cc.lib ];
+  # ELF only. The darwin binary links only system libraries (/usr/lib,
+  # /System), which every macOS has at the same paths.
+  nativeBuildInputs = lib.optionals stdenv.hostPlatform.isLinux [ autoPatchelfHook ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
 
   dontConfigure = true;
   dontBuild = true;
@@ -202,7 +217,8 @@ stdenv.mkDerivation {
 
   # autoPatchelfHook rewrites the interpreter to the nix loader, so this must
   # run to confirm the result is actually executable -- a patchelf miss is
-  # invisible until runtime otherwise. Cheap, and it is the whole point of
+  # invisible until runtime otherwise. On darwin it is the check that the
+  # unsigned binary execs at all. Cheap, and it is the whole point of
   # packaging rather than pointing at $HOME.
   doInstallCheck = true;
   installCheckPhase = ''

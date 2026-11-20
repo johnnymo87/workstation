@@ -1,8 +1,11 @@
 # macOS-specific home-manager configuration
 # Contains Darwin-only scripts, aliases, and settings
-{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, ... }:
+{ config, pkgs, lib, localPkgs, assetsPath, isDarwin, projects, honkPkg, ... }:
 
 let
+  # The same package users/dev/goose-config.nix puts on PATH. Its own name:
+  # `pkgs.goose` in nixpkgs is the pressly/goose database migration tool.
+  gooseCli = pkgs.callPackage ../../pkgs/goose { };
   servePool = (import ./serve-pool.nix).forHost.darwin;
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 
@@ -170,6 +173,9 @@ lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
   home.packages = [
+    # honk CLI + honkd. honkd's --swarm-mcp-bin is the profile's bin/honk (a
+    # stable path: goose stores the swarm extension's command per session).
+    honkPkg
     (pkgs.writeShellScriptBin "opencode-serve-pool-restart" ''
       # Generated from serve-pool.nix
       ${lib.concatStringsSep "\n" (lib.imap0 (i: _: ''
@@ -441,39 +447,106 @@ lib.mkIf isDarwin {
       };
     };
 
-    # Goose ACP server launchd agent — persistent headless serve for pigeon
+    # goose ACP server: the backend honkd (below) fronts for pigeon and honk chat.
+    # Same patched goose package as the CLI on PATH (users/dev/goose-config.nix)
+    # and every Linux host (pkgs/goose): one binary per host, because the serve
+    # and the CLI share ~/.local/share/goose/sessions/sessions.db. Until
+    # workstation-6w7i.17 this ran a hand-installed stock goose 1.48.0 from
+    # ~/.local/bin; goose-config.nix now warns on every switch while that exists.
+    #
+    # Provider config mirrors cloudbox's goose-serve (hosts/cloudbox), minus what
+    # a laptop lacks: gcp_vertex_ai pinned by env; Claude through this Mac's cfp
+    # (:8789) when the Max pool is seeded, the same gate opencode's Vertex
+    # baseURL uses, else straight to Vertex; Gemini (the sonnet-tier subagent
+    # roles, pkgs/goose-roles) always straight to Vertex, because cfp is
+    # Claude-only and there is no aigateway here.
+    #
+    # RESTARTS: home-manager reloads a launchd agent whose plist changed, and the
+    # plist names this script's store path, so a goose bump or any edit here
+    # restarts goose-serve on `home-switch` and drops in-flight goose turns
+    # (honkd reconnects with backoff). Check for running goose sessions first.
     goose-serve = {
       enable = true;
       config = {
         ProgramArguments = [
-          "/bin/sh" "-c"
-          ''
-            if [ ! -x "${config.home.homeDirectory}/.local/bin/goose" ]; then
-              echo "goose binary not found at ${config.home.homeDirectory}/.local/bin/goose; skipping" >&2
-              exit 0
-            fi
+          "${pkgs.writeShellScript "goose-serve-start" ''
+            set -u
             SEC="/usr/bin/security"
             SECRET="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
             if [ -z "$SECRET" ]; then
-              echo "pigeon-goose-acp-token not found in Keychain; exiting" >&2
+              echo "goose-serve: pigeon-goose-acp-token not found in Keychain; exiting" >&2
               exit 1
             fi
             export GOOSE_SERVER__SECRET_KEY="$SECRET"
-            export GOOSE_MODE="auto"
-            export GOOSE_DISABLE_KEYRING="true"
-            GCP_PROJECT="$($SEC find-generic-password -s google-cloud-project -w 2>/dev/null || true)"
-            [ -n "$GCP_PROJECT" ] && export GCP_PROJECT_ID="$GCP_PROJECT"
-            export GCP_LOCATION="global"
-            cd "${config.home.homeDirectory}"
-            exec "${config.home.homeDirectory}/.local/bin/goose" serve --port 4080
-          ''
+            unset SECRET
+            GCP_PROJECT_ID="$($SEC find-generic-password -s google-cloud-project -w 2>/dev/null || true)"
+            if [ -z "$GCP_PROJECT_ID" ]; then
+              echo "goose-serve: google-cloud-project not found in Keychain; Vertex turns would fail" >&2
+              exit 1
+            fi
+            export GCP_PROJECT_ID
+            # Tool shells: the same two Keychain reads the opencode serves make.
+            export GOOGLE_CLOUD_PROJECT="$GCP_PROJECT_ID"
+            GH_TOKEN_VAL="$($SEC find-generic-password -s github-api-token -w 2>/dev/null || true)"
+            [ -n "$GH_TOKEN_VAL" ] && export GH_TOKEN="$GH_TOKEN_VAL"
+            unset GH_TOKEN_VAL
+
+            # Claude: cfp, under the same two conditions its own wrapper starts on
+            # (a seeded Max pool and a proxy apiKey); otherwise straight to Vertex.
+            # Read at start only: this Mac has no nightly restart, so after seeding
+            # or un-seeding teamclaude, kickstart goose-serve.
+            if ${localPkgs.teamclaude}/bin/teamclaude-seeded \
+              && [ -n "$(${pkgs.jq}/bin/jq -r '.proxy.apiKey // empty' "$TEAMCLAUDE_CONFIG" 2>/dev/null || true)" ]; then
+              export GCP_VERTEX_HOST=http://127.0.0.1:8789
+            fi
+
+            cfg="$HOME/.config/goose/config.yaml"
+            if [ ! -r "$cfg" ]; then
+              echo "goose-serve: $cfg missing or unreadable; goose cannot resolve its extensions" >&2
+              exit 1
+            fi
+            if [ ! -r "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+              echo "goose-serve: $GOOGLE_APPLICATION_CREDENTIALS missing; run: gcloud auth application-default login" >&2
+              exit 1
+            fi
+
+            cd "$HOME"
+            exec ${gooseCli}/bin/goose serve --port 4080
+          ''}"
         ];
         EnvironmentVariables = {
           HOME = config.home.homeDirectory;
+          GOOSE_MODE = "auto";
+          GOOSE_DISABLE_KEYRING = "true";
+          GOOSE_PROVIDER = "gcp_vertex_ai";
+          # Default for NEW sessions only (each can switch). By env, as on devbox:
+          # this Mac's config.yaml was left on gemini-2.5-flash by `goose configure`.
+          GOOSE_MODEL = "claude-opus-5-5";
+          GCP_LOCATION = "global";
+          GOOGLE_APPLICATION_CREDENTIALS = "${config.home.homeDirectory}/.config/gcloud/application_default_credentials.json";
+          GCP_VERTEX_GEMINI_HOST = "https://aiplatform.googleapis.com";
+          # cfp's session stickiness and a delegated subagent's parent; see
+          # hosts/cloudbox. Needs goose >= patched-1.54.0.13 (comma list).
+          GCP_VERTEX_SESSION_HEADER = "x-opencode-session,x-session-id";
+          GCP_VERTEX_PARENT_SESSION_HEADER = "x-parent-session-id";
+          # Thinking parity with opencode's SDD agents (bead workstation-6w7i.18;
+          # rationale in hosts/cloudbox). Serve-wide, not in config.yaml.
+          GOOSE_THINKING_EFFORT = "high";
+          GCP_AUTH_SCOPES = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email";
+          # Tool shells: no editor or pager can hang an unattended turn.
+          GIT_EDITOR = ":";
+          GIT_SEQUENCE_EDITOR = ":";
+          EDITOR = ":";
+          GIT_PAGER = "cat";
+          GOOGLE_CLOUD_LOCATION = "global";
+          # Pinned like the cfp and teamclaude agents, so the cfp gate above
+          # reads the same file they do.
+          TEAMCLAUDE_CONFIG = "${config.home.homeDirectory}/.config/teamclaude.json";
           PATH = lib.concatStringsSep ":" [
-            "${config.home.homeDirectory}/.local/bin"
             "${config.home.homeDirectory}/.nix-profile/bin"
             "/run/current-system/sw/bin"
+            "/nix/var/nix/profiles/default/bin"
+            "${config.home.homeDirectory}/.local/bin"
             "/usr/bin"
             "/bin"
             "/usr/sbin"
@@ -484,6 +557,85 @@ lib.mkIf isDarwin {
         KeepAlive = true;
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/goose-serve.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/goose-serve.err.log";
+      };
+    };
+
+    # honkd: the durable ACP relay in front of goose-serve, as on cloudbox and
+    # devbox (users/dev/home.cloudbox.nix has the full flag rationale). pigeon
+    # talks to it at :4280 (PIGEON_GOOSE_ACP_URL below), so a goose turn survives
+    # a pigeon or honkd restart, every client's turns reach the session's
+    # Telegram topic (--turn-hook-url), and goose sessions get swarm tools
+    # (--swarm-default) and opencode's MCP servers per session (--mcp-catalog,
+    # --mcp-self-grant, --project-mcp).
+    #
+    # Mac differences: the shared secret lives in the Keychain, so the wrapper
+    # writes it to the two files honkd reads (0600, rewritten each start).
+    # state/honk/secret is honkd's DOWNSTREAM secret, which pigeon and `honk`
+    # present; absent, honkd mints a random one and pigeon's token stops
+    # matching. No token flags for pigeon: this Mac's daemon runs without
+    # PIGEON_DAEMON_AUTH_TOKEN. No memory cap (launchd has no MemoryMax).
+    #
+    # RESTARTS: as for goose-serve, a honk bump (flake input) changes this plist
+    # and restarts honkd on `home-switch`, dropping attached streams.
+    #
+    # ROTATING pigeon-goose-acp-token: restart goose-serve, then honkd, then
+    # pigeon-daemon (each reads it only at start), e.g.
+    #   launchctl kickstart -k gui/$(id -u)/org.nix-community.home.goose-serve
+    honkd = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "honkd-start" ''
+            set -u
+            SECRET="$(/usr/bin/security find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
+            if [ -z "$SECRET" ]; then
+              echo "honkd: pigeon-goose-acp-token not found in Keychain; not starting" >&2
+              exit 0
+            fi
+            state="$HOME/.local/state/honk"
+            umask 077
+            mkdir -p "$state"
+            chmod 700 "$state"
+            for f in upstream-secret secret; do
+              printf '%s' "$SECRET" > "$state/.$f.tmp"
+              mv -f "$state/.$f.tmp" "$state/$f"
+            done
+            unset SECRET
+            exec ${honkPkg}/bin/honkd \
+              --state-dir "$state" \
+              --listen 127.0.0.1:4280 \
+              --models-file ${import ./honk-models.nix { inherit pkgs; }} \
+              --upstream http://127.0.0.1:4080/acp \
+              --allow-production-upstream \
+              --upstream-secret-file "$state/upstream-secret" \
+              --turn-hook-url http://127.0.0.1:4731/goose/turn-event \
+              --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json \
+              --mcp-no-confirm slack-ro,figma \
+              --mcp-self-grant \
+              --swarm-default \
+              --project-mcp \
+              --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk \
+              --swarm-pigeon-url http://127.0.0.1:4731
+          ''}"
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          PATH = lib.concatStringsSep ":" [
+            "${config.home.homeDirectory}/.nix-profile/bin"
+            "/run/current-system/sw/bin"
+            "/usr/bin"
+            "/bin"
+          ];
+        };
+        RunAtLoad = true;
+        # Always respawn, at most every 30s: honkd exits when goose is not up
+        # yet (login), and exits 0 on SIGTERM, so SuccessfulExit=false could
+        # leave it down for good while pigeon still offers goose. Without a
+        # Keychain secret this costs one cheap exit per 30s.
+        KeepAlive = true;
+        ThrottleInterval = 30;
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/honkd.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/honkd.err.log";
       };
     };
 
@@ -511,6 +663,12 @@ lib.mkIf isDarwin {
             export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
             export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
             export PIGEON_GOOSE_ACP_TOKEN="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
+            # No token: disable the goose backend rather than half-configure it
+            # (pigeon's capability gate keys off the URL alone; as on cloudbox).
+            if [ -z "$PIGEON_GOOSE_ACP_TOKEN" ]; then
+              echo "pigeon-daemon: pigeon-goose-acp-token not in Keychain; disabling the goose backend" >&2
+              unset PIGEON_GOOSE_ACP_TOKEN PIGEON_GOOSE_ACP_URL
+            fi
             cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
             exec ${pkgs.nodejs}/bin/node \
               "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
@@ -526,7 +684,14 @@ lib.mkIf isDarwin {
           PIGEON_SERVE_ENDPOINTS = servePool.endpointsCsv;
           PIGEON_SERVE_LIVENESS = "self";
           PIGEON_DAEMON_DB_PATH = routingDbPath;
-          PIGEON_GOOSE_ACP_URL = "ws://127.0.0.1:4080/acp";
+          # honkd (:4280), the durable relay in front of goose-serve (:4080),
+          # as on cloudbox and devbox. Same token as goose (honkd's downstream
+          # secret is written from the same Keychain item).
+          PIGEON_GOOSE_ACP_URL = "ws://127.0.0.1:4280/acp";
+          # The owner's Telegram user id (same as cloudbox/devbox). Empty means a
+          # goose session bound to a Telegram topic accepts no prompts, and a
+          # pull-mode session banks nothing. pigeon config.ts pullAllowedUserIds.
+          PIGEON_PULL_ALLOWED_USER_IDS = "8248645256";
           # workstation-debug: widen the heartbeat-staleness window before a serve
           # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
           # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat

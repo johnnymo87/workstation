@@ -28,7 +28,7 @@
 runCommand "goose-roles" {
   nativeBuildInputs = [ (python3.withPackages (ps: [ ps.pyyaml ])) goose ];
   meta = {
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 } ''
   python3 ${./gen_goose_roles.py} --agents-dir ${agentsDir} --out $out \
