@@ -157,26 +157,6 @@
     "prune": false
   },
   "mcp": {
-    "chrome-devtools-9222": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--browserUrl=http://localhost:9222"
-      ],
-      "enabled": false
-    },
-    "chrome-devtools-9223": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--browserUrl=http://localhost:9223"
-      ],
-      "enabled": false
-    },
     "notion": {
       "type": "remote",
       "url": "https://mcp.notion.com/mcp",

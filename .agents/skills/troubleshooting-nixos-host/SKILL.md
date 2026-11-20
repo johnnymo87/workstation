@@ -116,8 +116,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 | 4005 | Local (-L) | eternal-machinery (tertiary) |
 | 4173 | Local (-L) | citadels Vite dev server |
 | 1455 | Local (-L) | OpenCode OAuth callback |
-| 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
-| 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
+| 9222 | Remote (-R) | Chrome DevTools Protocol |
 | 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
 | 2850 | Remote (-R) | gclpr clipboard (copy/paste to macOS) |
 
@@ -128,8 +127,7 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 | 1455 | Local (-L) | OpenCode OAuth callback |
 | 3334 | Local (-L) | mcp-remote OAuth (default Atlassian) |
 | 3335 | Local (-L) | mcp-remote OAuth (alt Atlassian) |
-| 9222 | Remote (-R) | Chrome DevTools Protocol - project A |
-| 9223 | Remote (-R) | Chrome DevTools Protocol - project B |
+| 9222 | Remote (-R) | Chrome DevTools Protocol |
 | 3033 | Remote (-R) | chatgpt-relay (`/ask-question` CLI) |
 | 2850 | Remote (-R) | gclpr clipboard (copy/paste to macOS) |
 
@@ -140,7 +138,9 @@ Ports are configured in `scripts/update-ssh-config.sh` and carried by the persis
 
 ### Multi-project CDP
 
-Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Both CDP ports are reverse-forwarded over the same SSH session. See each project's VQA skill for the specific Chrome launch command and MCP server name (`chrome-devtools-9222` or `chrome-devtools-9223`).
+Each project that uses human-in-the-loop visual QA needs its own Chrome instance on macOS with a unique `--remote-debugging-port` and `--user-data-dir`. Only **9222** is reverse-forwarded today: the 9223 forward was deliberately removed because 9223 is the gcloud-reauth Chrome holding a live SSO session (see the note in `scripts/update-ssh-config.sh`; do not re-add it).
+
+Agents talk to the port directly, with no MCP server: `curl -s http://127.0.0.1:9222/json/version` confirms the forward and the browser, and `/json/list` gives each tab's `webSocketDebuggerUrl`. CDP commands (`Page.navigate`, `Page.captureScreenshot`, `Runtime.evaluate`, ...) go over that websocket; `bun` is on PATH on every host and its built-in `WebSocket` is enough, so no CDP library or `npx` package is needed. See each project's VQA skill for the specific Chrome launch command.
 
 ## Can't SSH After Recreate
 

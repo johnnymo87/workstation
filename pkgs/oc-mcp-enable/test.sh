@@ -233,10 +233,10 @@ if [ -n "${OC_MCP_ENABLE_BIN:-}" ]; then
   assert_not_contains "$work/err" "Stop and report" "not-configured: does not use the escalate footer"
   no_grant not-configured
 
-  run_scenario did-you-mean chrome-devtools
+  run_scenario did-you-mean atlas
   assert_eq 1 "$rc" "did-you-mean: exits 1"
   assert_contains "$work/err" "not configured on this host" "did-you-mean: says so"
-  assert_contains "$work/err" "did you mean: chrome-devtools-9222, chrome-devtools-9223" "did-you-mean: suggests prefix/substring matches"
+  assert_contains "$work/err" "did you mean: atlassian, atlassian-alt" "did-you-mean: suggests prefix/substring matches"
   assert_contains "$work/err" "caller error" "did-you-mean: says unknown name is caller error"
   assert_contains "$work/err" "calling the service's API directly" "did-you-mean: warns against direct API call"
   assert_not_contains "$work/err" "Stop and report" "did-you-mean: does not use the escalate footer"
