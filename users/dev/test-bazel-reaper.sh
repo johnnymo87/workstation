@@ -152,7 +152,10 @@ PYEOF
 
 run_reaper() {
   local root="$1"; shift
-  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" "$@" "$script" 2>&1
+  # PATH_CLAIMS_DIR: never the real ~/.local/state/path-claims; a test that
+  # wants claims passes its own (later assignments win in env).
+  env BAZEL_REAP_BASE="$root" BAZEL_REAP_USED_PCT="${BAZEL_REAP_USED_PCT-0}" \
+    PATH_CLAIMS_DIR="$tmpdir/no-path-claims" "$@" "$script" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -376,6 +379,28 @@ test_lgtm_workspace_idle_45m_high_pressure_reaped() {
   check "lgtm workspace untouched" "$([ -d "$wt" ] && echo yes || echo no)"
   check "logged lgtm reap under pressure" \
     "$(grep -q 'reaped 10000000.*under pressure 90%' <<<"$out" && echo yes || echo no)"
+}
+
+# bd workstation-6w7i.19: lgtm's goose review turns (up to 2h) work in the
+# lgtm-pr-<N> tree, but their private sessions.db names an empty cwd, so the
+# session tables cannot protect the base. lgtm registers a path claim instead.
+test_lgtm_workspace_with_live_claim_kept_under_pressure() {
+  echo "TEST: lgtm-pr-* workspace idle 45min with a live path claim is kept at high pressure"
+  local root wt base out claims
+  root="$(new_root)"
+  wt="$root/lgtm-pr-1235"
+  mkdir -p "$wt"
+  base="$(make_base "$root" 10000000000000000000000000000005 "$wt")"
+  echo "log" > "$base/command.log"
+  touch -d "45 minutes ago" "$base/command.log"
+  claims="$tmpdir/claims-1235"
+  mkdir -p "$claims"
+  printf '{"path": "%s", "expires_at": %s, "owner": "lgtm", "what": "goose review"}\n' \
+    "$wt" "$(( $(date +%s) + 3600 ))" > "$claims/lgtm-review-o_r-1235.json"
+  out="$(run_reaper "$root" BAZEL_REAP_USED_PCT=90 PATH_CLAIMS_DIR="$claims")"
+  check "claimed lgtm base survived at high pressure" "$([ -d "$base" ] && echo yes || echo no)"
+  check "logged agent session active" \
+    "$(grep -q 'keep 10000000.*agent session active in .*lgtm-pr-1235 within 30m' <<<"$out" && echo yes || echo no)"
 }
 
 test_non_lgtm_workspace_idle_45m_high_pressure_kept() {
@@ -691,6 +716,7 @@ test_dry_run_under_pressure
 test_stat_command_log_failure_keeps_base
 test_orphans_prioritized_over_pressure_under_rate_limit
 test_used_pct_trailing_percent_stripped
+test_lgtm_workspace_with_live_claim_kept_under_pressure
 test_session_active_in_workspace_keeps_base_under_pressure
 test_session_stale_in_workspace_allows_reap_under_pressure
 test_goose_session_active_in_workspace_keeps_base_under_pressure
