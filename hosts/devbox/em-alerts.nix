@@ -18,7 +18,7 @@
 # secrets/devbox.yaml as em_alerts_slack_webhook, rebuild devbox, then smoke it.
 # A healthy system posts nothing, so nothing else proves the webhook works:
 #   sudo systemd-run --wait --pipe --same-dir -p LoadCredential=slack_webhook:/run/secrets/em_alerts_slack_webhook \
-#     -p Environment=PATH=/run/current-system/sw/bin:$(nix build --no-link --print-out-paths nixpkgs#jq.bin)/bin \
+#     -p Environment=PATH=/run/current-system/sw/bin \
 #     bash -c '. hosts/devbox/em-slack.sh; slack_send "em-alerts smoke test"'
 # (run from a workstation checkout; Slack's reply, "ok" or an error code, is printed).
 { config, lib, ... }:
