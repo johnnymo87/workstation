@@ -225,11 +225,11 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1795182456,
-        "narHash": "sha256-+F8YplX/8wXOp7CTK+2vaGLWV+IG+qc47qFnOjSWlK0=",
+        "lastModified": 1795195900,
+        "narHash": "sha256-WpQ9LtCM2eoMik0rxKfFU+IO7CMzkawT2+95k1GMDwg=",
         "owner": "johnnymo87",
         "repo": "honk",
-        "rev": "8702bffb255b9d7484493d345b7e6ae3733a18e8",
+        "rev": "447fa5bacb06deebacaf1bea1baabdff21b04618",
         "type": "github"
       },
       "original": {
