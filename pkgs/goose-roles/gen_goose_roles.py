@@ -42,6 +42,14 @@ Your final message is your whole report to the caller."""
 IMPLEMENTER_MAX_TURNS = 250
 READ_ONLY_MAX_TURNS = 80
 
+# settings.thinking_effort (goose fork patch, workstation-6w7i.20) overrides the
+# effort a delegate would otherwise inherit from its lead (INHERITED_SESSION_PARAM_KEYS).
+# Every role runs high, as opencode's SDD roles (variant high) and reviewers do, so
+# a worker lead launched at medium (`honk launch --effort medium`) does not drag its
+# roles down. An older goose ignores the unknown key silently, so default.nix
+# probes that the pinned goose knows it (a bogus value must fail validation).
+ROLE_THINKING_EFFORT = "high"
+
 
 class GenError(Exception):
     pass
@@ -131,7 +139,8 @@ def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model):
         "extensions": exts,
         "settings": {"goose_provider": provider,
                      "goose_model": map_model(fm.get("model"), opus_model, sonnet_model, provider),
-                     "max_turns": READ_ONLY_MAX_TURNS if ro else IMPLEMENTER_MAX_TURNS},
+                     "max_turns": READ_ONLY_MAX_TURNS if ro else IMPLEMENTER_MAX_TURNS,
+                     "thinking_effort": ROLE_THINKING_EFFORT},
     }
 
 

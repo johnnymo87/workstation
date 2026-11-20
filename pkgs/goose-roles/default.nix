@@ -38,4 +38,13 @@ runCommand "goose-roles" {
   for f in $out/roles/*.yaml $out/unscoped.yaml; do
     goose recipe validate "$f" || { echo "goose-roles: $f failed goose recipe validate" >&2; exit 1; }
   done
+  # settings.thinking_effort only works on a goose that knows the field; an
+  # older one ignores unknown settings keys, and the roles would silently inherit
+  # their lead's effort (workstation-6w7i.20). A goose that knows it rejects a
+  # bogus value, so require that rejection.
+  sed 's/^  thinking_effort: high$/  thinking_effort: bogus/' $out/roles/implementer.yaml > $TMPDIR/effort-probe.yaml
+  grep -q '^  thinking_effort: bogus$' $TMPDIR/effort-probe.yaml || { echo "goose-roles: effort probe did not rewrite thinking_effort" >&2; exit 1; }
+  if goose recipe validate $TMPDIR/effort-probe.yaml >/dev/null 2>&1; then
+    echo "goose-roles: this goose accepts settings.thinking_effort: bogus, so it ignores the field (needs patched-1.54.0.16+)" >&2; exit 1
+  fi
 ''
