@@ -180,6 +180,16 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Incoming-webhook URL for #alerts in the devbox Slack workspace
+      # (pigeon-4ogz.7/.15). Only the daemon start script reads it, as
+      # PIGEON_SLACK_ALARM_WEBHOOK_URL: the direct-fallback alarm for when the
+      # worker is unreachable. It can post to that one channel and nothing else.
+      # A credential, so it is exported in the start script, never Environment=.
+      pigeon_slack_alarm_webhook = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Bearer token for the pigeon daemon's HTTP API. Parity with cloudbox
       # (hosts/cloudbox/configuration.nix), which has had this since the dx8p
       # work; devbox never got it, and that gap is what made the daemon
@@ -400,8 +410,17 @@ in
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
         # Goose ACP server endpoint for pigeon goose runner (points at honkd proxy)
         "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
-        # Who may leave a message for a pull-mode session (owner's Telegram user id)
-        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256"
+        # Who may leave a message for a pull-mode session or prompt a topic-bound
+        # goose session: the owner's Telegram user id, plus his user id in the
+        # devbox Slack workspace (pigeon-4ogz.15), which must be here BEFORE devbox
+        # flips to Slack or every bound coordinator refuses his replies. Drop the
+        # Telegram id when Telegram is deleted (pigeon-4ogz.13).
+        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256,U0CKTGLSULR"
+        # His devbox-workspace Slack user id (not a secret). The direct-fallback
+        # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
+        # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
+        # PR #231). Adding that line later turns the alarm mention on.
+        "PIGEON_SLACK_OWNER_USER_ID=U0CKTGLSULR"
         # workstation-debug: widen the heartbeat-staleness window before a serve
         # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
         # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat
@@ -447,6 +466,14 @@ in
         fi
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
+        # Slack direct-fallback alarm (pigeon-4ogz.15): #alerts incoming webhook.
+        # Degrade, never die: a missing secret leaves the daemon on whatever
+        # other alarm path it has, instead of `set -e` killing it.
+        if [ -s ${config.sops.secrets.pigeon_slack_alarm_webhook.path} ]; then
+          export PIGEON_SLACK_ALARM_WEBHOOK_URL="$(cat ${config.sops.secrets.pigeon_slack_alarm_webhook.path})"
+        else
+          echo "pigeon-daemon: ${config.sops.secrets.pigeon_slack_alarm_webhook.path} missing or empty; no Slack direct-fallback alarm" >&2
+        fi
         # Must match goose-serve's GOOSE_SERVER__SECRET_KEY. Degrade gracefully
         # if missing/empty (disables goose backend rather than killing pigeon-daemon).
         if [ -r /run/secrets/pigeon_goose_acp_token ]; then
