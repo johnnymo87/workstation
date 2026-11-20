@@ -46,7 +46,7 @@ check "no mention by default (no pushes, D7)" '[ "$(payload | jq -r .text | head
 check "escapes & < > (Slack markup), keeps newlines" \
   '[ "$(payload | jq -r .text | sed -n 2p)" = "- 2 job(s) queued &gt;= 20 min &amp; &lt;idle&gt;" ]'
 check "no link or media unfurls" '[ "$(payload | jq -c "[.unfurl_links, .unfurl_media]")" = "[false,false]" ]'
-check "fails on HTTP errors (-f), so callers can ping /fail" 'grep -qx -- "-fsS" "$S/curl.args"'
+check "fails on HTTP errors, keeping Slack's error body" 'grep -qx -- "--fail-with-body" "$S/curl.args" && ! grep -qx -- "-o" "$S/curl.args"'
 
 # 2. Delivery failure is a non-zero return.
 setup; touch "$S/down"; send "x"
@@ -60,6 +60,8 @@ url = "https://example.com/"' ''; do
   setup; printf '%s\n' "$bad" >"$CREDENTIALS_DIRECTORY/slack_webhook"; send "x"
   check "rejects webhook credential [$bad]" '[ "$rc" -ne 0 ] && [ ! -e "$S/curl.args" ] && grep -q "not a https://hooks.slack.com" "$S/err"'
 done
+setup; printf '%s \r\n\n' "$hook" >"$CREDENTIALS_DIRECTORY/slack_webhook"; send "x"
+check "a pasted trailing space/CR is trimmed" '[ "$rc" -eq 0 ] && grep -qx "url = \"$hook\"" "$S/curl.in"'
 setup; rm "$CREDENTIALS_DIRECTORY/slack_webhook"; send "x"
 check "missing credential: non-zero, nothing sent" '[ "$rc" -ne 0 ] && [ ! -e "$S/curl.args" ]'
 

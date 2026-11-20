@@ -15,7 +15,12 @@
 #
 # Rotating the webhook: re-install the em-alerts app on api.slack.com/apps (it
 # issues a new URL, the old one keeps working until removed), put the new URL in
-# secrets/devbox.yaml as em_alerts_slack_webhook, rebuild devbox.
+# secrets/devbox.yaml as em_alerts_slack_webhook, rebuild devbox, then smoke it.
+# A healthy system posts nothing, so nothing else proves the webhook works:
+#   sudo systemd-run --wait --pipe --same-dir -p LoadCredential=slack_webhook:/run/secrets/em_alerts_slack_webhook \
+#     -p Environment=PATH=/run/current-system/sw/bin:$(nix build --no-link --print-out-paths nixpkgs#jq.bin)/bin \
+#     bash -c '. hosts/devbox/em-slack.sh; slack_send "em-alerts smoke test"'
+# (run from a workstation checkout; Slack's reply, "ok" or an error code, is printed).
 { config, lib, ... }:
 
 {

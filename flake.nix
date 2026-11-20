@@ -652,8 +652,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-em-slack.sh 2>&1 | tee "$TMPDIR/e.txt"
-        grep -q '^ALL PASS (23 assertions)' "$TMPDIR/e.txt" || {
-          echo "GATE FAILURE: em-slack suite did not reach ALL PASS (23 assertions)." >&2
+        grep -q '^ALL PASS (24 assertions)' "$TMPDIR/e.txt" || {
+          echo "GATE FAILURE: em-slack suite did not reach ALL PASS (24 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }

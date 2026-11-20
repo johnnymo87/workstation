@@ -13,9 +13,10 @@
 #   EM_SLACK_OWNER_ID                     his user id in that workspace (used, and
 #                                         required, only when the mention is on).
 #
-# $1: plain text. Returns non-zero when delivery failed (curl -f: Slack answers
-# a revoked webhook or an archived channel with a 4xx), so each caller keeps
-# its own healthchecks.io failure contract.
+# $1: plain text. Returns non-zero when delivery failed (Slack answers a revoked
+# webhook or an archived channel with a 4xx), so each caller keeps its own
+# healthchecks.io failure contract. Slack's reply body (its error code, such as
+# no_service or channel_is_archived, or "ok") goes to stderr, i.e. the journal.
 #
 # The URL is a secret. It reaches curl only through a config on stdin (-K -,
 # written by the printf builtin), never on a command line, where any host user
@@ -42,7 +43,8 @@ slack_text() { # $1: plain text -> the Slack message text on stdout
 
 slack_send() { # $1: plain text. Non-zero when delivery failed.
   local url text payload
-  url=$(cat "${CREDENTIALS_DIRECTORY:?}/slack_webhook") || return 1
+  # tr: a pasted secret may carry a trailing space or \r; a URL has no whitespace.
+  url=$(tr -d '[:space:]' <"${CREDENTIALS_DIRECTORY:?}/slack_webhook") || return 1
   if ! [[ $url =~ ^https://hooks\.slack\.com/services/[A-Za-z0-9/]+$ ]]; then
     echo "slack_webhook credential is not a https://hooks.slack.com/services/ URL; not sending" >&2
     return 1
@@ -50,6 +52,8 @@ slack_send() { # $1: plain text. Non-zero when delivery failed.
   text=$(slack_text "$1") || return 1
   payload=$(jq -cn --arg t "$text" '{text: $t, unfurl_links: false, unfurl_media: false}') || return 1
   printf 'url = "%s"\n' "$url" |
-    curl -fsS -m 20 --retry 3 -o /dev/null \
-      -H "Content-Type: application/json" --data-binary "$payload" -K -
+    curl -sS --fail-with-body -m 20 --retry 3 \
+      -H "Content-Type: application/json" --data-binary "$payload" -K - >&2
+  # >&2, not -o /dev/stderr: under systemd stderr is the journal's socket, and
+  # opening /dev/stderr (/proc/self/fd/2) on a socket fails.
 }
