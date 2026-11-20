@@ -1,12 +1,15 @@
 { pkgs }:
 
+let
+  # The one shared definition of a live session (bd workstation-6w7i.19).
+  sessionOwns = pkgs.callPackage ../session-owns { };
+in
 pkgs.writeShellApplication {
   name = "work";
   runtimeInputs = with pkgs; [
     git
     coreutils
     gnused
-    sqlite
   ];
   text = ''
     # work - a repo-agnostic git-worktree helper
@@ -52,7 +55,8 @@ Options:
               primary root, the current worktree, a worktree created within
               the grace period (WORK_PRUNE_GRACE_DAYS, default 3), or one that
               an opencode or goose session updated within
-              WORK_PRUNE_SESSION_ACTIVE_DAYS (default 7) has as its directory.
+              WORK_PRUNE_SESSION_ACTIVE_DAYS (default 7) has as its directory,
+              or that a live path claim (~/.local/state/path-claims) names.
               Takes no <slug>.
   -h, --help  Show this help message.
 
@@ -170,56 +174,31 @@ EOF
       printf '%s\n' "$(( now > created ? now - created : 0 ))"
     }
 
-    # Is <wt> (or a directory under it) the directory of an opencode session
-    # updated within PRUNE_SESSION_ACTIVE_DAYS? An opencode session's working
-    # directory is a row in opencode.db, not any process's cwd, so /proc cannot
-    # answer this. 0 = yes (prints the session id), 1 = no, 2 = probe failed
-    # (prints the error). A MISSING db means no opencode here: answers no.
-    session_owner() {
-      local wt="$1" cutoff_ms sql_path out
-      [ -f "$PRUNE_SESSION_DB" ] || return 1
-      cutoff_ms=$(( ($(date +%s) - PRUNE_SESSION_ACTIVE_DAYS * 86400) * 1000 ))
-      sql_path="''${wt//\'/\'\'}"
-      # Read-only: a live serve is writing this database. substr() rather than
-      # LIKE because worktree names are full of '_', a LIKE wildcard.
-      # .timeout: a WAL reader can briefly see SQLITE_BUSY during a checkpoint.
-      if ! out="$(sqlite3 -readonly -cmd '.timeout 5000' "$PRUNE_SESSION_DB" \
-        "select id from session
-           where (directory = '$sql_path'
-                  or substr(directory, 1, length('$sql_path') + 1) = '$sql_path' || '/')
-             and time_updated >= $cutoff_ms
-           order by time_updated desc limit 1;" 2>&1)"; then
-        printf '%s\n' "$out" | head -1
-        return 2
-      fi
-      [ -n "$out" ] || return 1
-      printf '%s\n' "$out"
-      return 0
-    }
+    PRUNE_CLAIMS_DIR="''${WORK_PRUNE_CLAIMS_DIR:-''${PATH_CLAIMS_DIR:-$HOME/.local/state/path-claims}}"
 
-    # Is <wt> (or a directory under it) the working_dir of a goose session
-    # updated within PRUNE_SESSION_ACTIVE_DAYS? Goose rows are in sessions.db
-    # with updated_at in UTC text. 0 = yes (prints the session id), 1 = no,
-    # 2 = probe failed (prints the error). A MISSING db means no goose here:
-    # answers no.
-    goose_session_owner() {
-      local wt="$1" sql_path out
-      [ -f "$PRUNE_GOOSE_DB" ] || return 1
-      sql_path="''${wt//\'/\'\'}"
-      # Read-only: a live goose-serve or honkd is writing this database.
-      # .timeout: WAL reader can briefly see SQLITE_BUSY during a checkpoint.
-      if ! out="$(sqlite3 -readonly -cmd '.timeout 5000' "$PRUNE_GOOSE_DB" \
-        "select id from sessions
-           where (working_dir = '$sql_path'
-                  or substr(working_dir, 1, length('$sql_path') + 1) = '$sql_path' || '/')
-             and updated_at >= datetime('now', '-$PRUNE_SESSION_ACTIVE_DAYS days')
-           order by updated_at desc limit 1;" 2>&1)"; then
-        printf '%s\n' "$out" | head -1
-        return 2
-      fi
-      [ -n "$out" ] || return 1
-      printf '%s\n' "$out"
-      return 0
+    # Does a live session own <wt> (or a directory under it)? One probe,
+    # pkgs/session-owns, shared with disk-cleanup's GUARD 1b and every python
+    # sweeper, so the three definitions of "live" cannot drift again: opencode
+    # rows (directory, time_updated), goose rows (working_dir; updated_at OR any
+    # message inside the window) and live path claims, which is how agents
+    # whose session table names some other directory (lgtm's goose reviews)
+    # register the tree they work in. An opencode or goose session's working
+    # directory is a row, not any process's cwd, so /proc cannot answer this.
+    # 0 = yes (prints the owner), 1 = no, 2 = probe failed (prints the error).
+    # MISSING databases mean no opencode / no goose here and answer no.
+    session_owner() {
+      local wt="$1" out rc=0
+      out="$(${sessionOwns}/bin/session-owns \
+        --opencode-db "$PRUNE_SESSION_DB" --goose-db "$PRUNE_GOOSE_DB" \
+        --claims-dir "$PRUNE_CLAIMS_DIR" \
+        --active-seconds "$((PRUNE_SESSION_ACTIVE_DAYS * 86400))" "$wt")" || rc=$?
+      # stdout is the verdict line; warnings and tracebacks go to our stderr.
+      # Free ONLY when it says so: rc 1 is also a python crash before main().
+      case "$rc:$out" in
+        "0:session "*) printf '%s\n' "''${out#session }"; return 0 ;;
+        1:free) return 1 ;;
+        *) printf '%s\n' "''${out#unknown }" | head -1; return 2 ;;
+      esac
     }
 
     # --prune-merged: remove every worktree under <root>/.worktrees/ whose branch
@@ -317,19 +296,14 @@ EOF
         log "prune-merged: keep $wt_path (created $((age / 3600))h ago, within ''${PRUNE_GRACE_DAYS}d grace period)"
         return 1
       fi
-      # Never remove a worktree a recent opencode or goose session has as its directory.
+      # Never remove a worktree a recent opencode or goose session (or a live
+      # path claim) has as its directory.
       local owner="" owner_rc=0
       owner="$(session_owner "$real_wt")" || owner_rc=$?
       case "$owner_rc" in
-        0) log "prune-merged: keep $wt_path (opencode session $owner lives here)"; return 1 ;;
+        0) log "prune-merged: keep $wt_path ($owner lives here)"; return 1 ;;
         1) : ;;
         *) log "prune-merged: keep $wt_path (session probe failed: $owner)"; return 1 ;;
-      esac
-      owner_rc=0; owner="$(goose_session_owner "$real_wt")" || owner_rc=$?
-      case "$owner_rc" in
-        0) log "prune-merged: keep $wt_path (goose session $owner lives here)"; return 1 ;;
-        1) : ;;
-        *) log "prune-merged: keep $wt_path (goose session probe failed: $owner)"; return 1 ;;
       esac
       # Never remove a dirty worktree.
       if [ -n "$(git -C "$real_wt" status --porcelain 2>/dev/null)" ]; then

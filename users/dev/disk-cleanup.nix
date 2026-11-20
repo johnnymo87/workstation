@@ -89,145 +89,32 @@ let
         return inuse
   '';
 
-  # ONE implementation of "does a recent opencode (or goose) session live in this
-  # directory", shared by tmp-scratch-sweep and venv-sweep rather than written
-  # twice and allowed to drift (it was inline in tmpScratchSweepPy until
-  # venv-sweep needed the same answer). Interpolated into each sweeper's python
-  # heredoc AFTER its `import os, sqlite3, time`; the database path is a
-  # parameter, so each sweeper keeps its own env-var test seam for it.
+  # ONE implementation of "does a live agent session own this directory":
+  # pkgs/session-owns/session_owns.py, whose header explains the three sources
+  # it consults (opencode's session table, goose's sessions table, and the
+  # path-claims directory that lgtm's private-GOOSE_PATH_ROOT goose runs
+  # register in) and how each fails. It is pasted in here, verbatim, so every
+  # python sweeper below shares it; GUARD 1b and git-work --prune-merged call
+  # the same file as bin/session-owns (sessionOwnsBin). One definition, because
+  # three slightly different ones each deleted what another kept
+  # (bd workstation-6w7i.19).
   #
-  # The opencode session table is a guard of its own because
-  # paths_in_use() is documented as sufficient on the grounds that "an agent
-  # sitting in a worktree always has it as cwd even when idle". That is true of
+  # Callers pass the opencode database path, so each keeps its own env-var
+  # test seam for it. A MISSING opencode db is the one case they disagree on,
+  # so it is a parameter: the default, "free", is tmp-scratch-sweep's (no
+  # opencode, no sessions, stay inert on a host that never runs it);
+  # venv-sweep passes "unknown" (it only runs on devbox, where opencode IS
+  # installed, so a missing db means the path is wrong and the guard would
+  # silently go inert on exactly the sessions it exists to protect).
+  #
+  # Why the session tables are a guard at all: paths_in_use() above is true of
   # a shell or an nvim and FALSE of an opencode session, whose working
-  # directory is a ROW IN opencode.db and not any process's cwd -- the serve
-  # that owns the session runs from its own directory and holds no handle
-  # inside the tree. Measured on cloudbox 2026-09-01, when the sibling worktree
-  # sweeper deleted a live session's directory with /proc showing nothing there.
-  #
-  # This is not a theoretical overlap with /tmp. Sessions live in these very
-  # roots: cloudbox's opencode.db has 130 sessions whose directory is under
-  # /tmp, mostly /tmp/opencode/<name>, two of them touched within the window
-  # tmp-scratch-sweep calls stale. A clean throwaway clone that a week-long
-  # review session reads from but never writes to is exactly the shape that
-  # clears every other guard.
-  #
-  # Tri-state, and only "free" permits removal. Anything that goes wrong --
-  # unreadable, corrupt, locked -- is "unknown", because an empty answer from a
-  # probe that never ran looks exactly like "no session lives here".
-  #
-  # A MISSING db is the one case the callers disagree on, so it is a parameter
-  # rather than a second implementation. The default, "free", is
-  # tmp-scratch-sweep's: no opencode, no sessions, stay inert on a host that
-  # never runs it. venv-sweep passes "unknown": it only ever runs on devbox, where
-  # opencode IS installed, so a missing db there means the path is wrong or the
-  # data directory moved -- and the guard would silently go inert on exactly the
-  # sessions it exists to protect.
-  #
-  # GOOSE sessions are consulted too (bd workstation-6w7i.2). A goose worker's
-  # directory is likewise a row and not a handle -- `sessions.working_dir` in
-  # ~/.local/share/goose/sessions/sessions.db -- so the same blind spot applies,
-  # and it is the same check GUARD 1b (cleanup_worktrees) and git-work
-  # --prune-merged already make. The two verdicts combine as
-  # session > unknown > free: either database naming a live session keeps the
-  # tree, either probe failing keeps it. A MISSING goose db is always "free"
-  # (goose is not installed), whatever `missing` says about opencode's, as in
-  # GUARD 1b.
-  sessionOwnsPy = ''
-    SESSION_ACTIVE_DAYS = 7
-    GOOSE_SESSION_DB_DEFAULT = os.path.expanduser(
-        "~/.local/share/goose/sessions/sessions.db")
-
-    def _path_matches(directory, candidates):
-        directory = directory.rstrip("/") or "/"
-        return any(directory == c or directory.startswith(c + "/") for c in candidates)
-
-    def goose_session_owns(candidates, goose_db_path, cutoff_s):
-        """'session' | 'free' | 'unknown' for goose's sessions.db.
-
-        Every row counts, whatever its session_type (user, acp, hidden,
-        sub_agent): a subagent is a row of its own with its OWN working_dir,
-        which need not be its parent's, so it is matched on its own row rather
-        than through parent_session_id. A row is live when `updated_at` (UTC
-        text, "YYYY-MM-DD HH:MM:SS") is inside the window OR any of its
-        messages' created_timestamp (epoch seconds) is. The union is the
-        fail-safe direction: either clock alone saying "recent" keeps the tree.
-        """
-        if not goose_db_path or not os.path.isfile(goose_db_path):
-            return "free"
-        cutoff_text = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(cutoff_s))
-        try:
-            # Read-only: a live goose-serve or honkd is writing this database.
-            con = sqlite3.connect("file:%s?mode=ro" % goose_db_path, uri=True, timeout=10)
-            try:
-                rows = con.execute(
-                    "select s.working_dir from sessions s "
-                    "where s.updated_at >= ? "
-                    "or exists (select 1 from messages m "
-                    "           where m.session_id = s.id and m.created_timestamp >= ?)",
-                    (cutoff_text, int(cutoff_s)),
-                ).fetchall()
-            finally:
-                con.close()
-        except Exception:
-            return "unknown"
-        for (working_dir,) in rows:
-            if working_dir and _path_matches(working_dir, candidates):
-                return "session"
-        return "free"
-
-    def session_owns(p, db_path, missing="free", active_seconds=None,
-                     goose_db_path=GOOSE_SESSION_DB_DEFAULT):
-        """'session' | 'free' | 'unknown'. Only 'free' permits removal.
-
-        Consults opencode's db at `db_path` and goose's at `goose_db_path`.
-        `missing` is what an opencode db file that does not exist counts as.
-        """
-        candidates = {p.rstrip("/") or "/"}
-        try:
-            candidates.add(os.path.realpath(p))
-        except OSError:
-            pass
-        if active_seconds is None:
-            active_seconds = SESSION_ACTIVE_DAYS * 86400
-        cutoff_s = time.time() - active_seconds
-        verdicts = (
-            opencode_session_owns(candidates, db_path, missing, cutoff_s),
-            goose_session_owns(candidates, goose_db_path, cutoff_s),
-        )
-        for v in ("session", "unknown"):
-            if v in verdicts:
-                return v
-        return "free"
-
-    def opencode_session_owns(candidates, db_path, missing, cutoff_s):
-        if not os.path.isfile(db_path):
-            return missing
-        cutoff_ms = int(cutoff_s * 1000)
-        try:
-            # Read-only URI: a concurrent serve is writing this database and
-            # must never be disturbed by a cleanup probe.
-            con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
-            # Filter in SQL by TIME only, then match paths in python. The
-            # worktree sweeper compares directory with `in (...)`, which is an
-            # exact match -- fine there, because it is handed the worktree path
-            # itself. Here the candidate is a DIRECTORY and the session may be
-            # sitting in a subdirectory of it (a clone inside a scratch dir, a
-            # `cd src` inside a worktree), which an exact match misses while
-            # deleting the parent out from under it. Recent sessions are few;
-            # the stale rows that make this table large are excluded by the
-            # time predicate.
-            rows = con.execute(
-                "select id, directory from session where time_updated >= ?",
-                (cutoff_ms,),
-            ).fetchall()
-        except Exception:
-            return "unknown"
-        for _id, directory in rows:
-            if directory and _path_matches(directory, candidates):
-                return "session"
-        return "free"
-  '';
+  # directory is a ROW IN opencode.db and not any process's cwd. Measured on
+  # cloudbox 2026-09-01, when the sibling worktree sweeper deleted a live
+  # session's directory with /proc showing nothing there. Sessions live in
+  # these very roots: cloudbox's opencode.db had 130 sessions under /tmp.
+  sessionOwnsPy = builtins.readFile ../../pkgs/session-owns/session_owns.py;
+  sessionOwnsBin = "${pkgs.callPackage ../../pkgs/session-owns { }}/bin/session-owns";
 
   # ONE implementation of the stale-/tmp-scratch sweep, shared by cloudbox's
   # nightly disk-cleanup (as cleanup_tmp_scratch) and devbox's standalone
@@ -1583,92 +1470,33 @@ lib.mkMerge [
       # keeping a tree for every session that ever named one would re-create
       # the disk-full incident this script exists to prevent.
       #
-      # Both opencode and goose sessions are consulted. Goose workers started
-      # with `honk launch` record their worktree as `working_dir` in a second
-      # database (~/.local/share/goose/sessions/sessions.db). Neither is deleted
-      # while updated within SESSION_ACTIVE_DAYS. Missing DBs answer no; an
-      # unreadable or locked DB keeps the tree.
+      # The probe is pkgs/session-owns (sessionOwnsBin), the SAME definition
+      # every python sweeper here and git-work --prune-merged use: opencode
+      # rows whose directory is the tree or under it, goose rows (working_dir;
+      # updated_at or any message inside the window), and live path claims
+      # (~/.local/state/path-claims), which is how lgtm's goose review turns --
+      # whose private sessions.db names an empty cwd, not the lgtm-pr-<N> tree
+      # they work in -- become visible (bd workstation-6w7i.19). Missing DBs
+      # answer no; an unreadable or locked one, or a fresh unreadable claim,
+      # keeps the tree.
       SESSION_DB="$HOME/.local/share/opencode/opencode.db"
       GOOSE_SESSION_DB="$HOME/.local/share/goose/sessions/sessions.db"
       SESSION_ACTIVE_DAYS=7
 
       session_owns_worktree() {
-        local path="$1" verdict=""
+        local path="$1" verdict="" rc=0
 
-        [ -f "$SESSION_DB" ] || [ -f "$GOOSE_SESSION_DB" ] || return 1
+        # stdout only: the verdict line. Its stderr (warnings, a traceback)
+        # goes to the journal as-is.
+        verdict=$(${sessionOwnsBin} --opencode-db "$SESSION_DB" --goose-db "$GOOSE_SESSION_DB" \
+          --active-seconds "$((SESSION_ACTIVE_DAYS * 86400))" "$path") || rc=$?
 
-        verdict=$(python3 - "$SESSION_DB" "$path" "$SESSION_ACTIVE_DAYS" "$GOOSE_SESSION_DB" <<'PYEOF' 2>/dev/null
-      import os
-      import sqlite3
-      import sys
-      import time
-
-      db_path, wt_path, active_days = sys.argv[1], sys.argv[2], int(sys.argv[3])
-      goose_db_path = sys.argv[4] if len(sys.argv) > 4 else None
-      cutoff_ms = int((time.time() - active_days * 86400) * 1000)
-
-      candidates = {wt_path.rstrip("/") or "/"}
-      try:
-          candidates.add(os.path.realpath(wt_path))
-      except OSError:
-          pass
-
-      if os.path.isfile(db_path):
-          try:
-              # Read-only URI: a concurrent serve is writing this database and must
-              # never be disturbed by a cleanup probe.
-              con = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True, timeout=10)
-              cand_list = sorted(candidates)
-              placeholders = ",".join("?" for _ in cand_list)
-              row = con.execute(
-                  "select id from session where directory in (%s) and time_updated >= ? order by time_updated desc limit 1"
-                  % placeholders,
-                  tuple(cand_list + [cutoff_ms]),
-              ).fetchone()
-              con.close()
-              if row:
-                  print("SESSION %s" % row[0])
-                  sys.exit(0)
-          except Exception as exc:
-              print("PROBE-FAILED: %s" % exc)
-              sys.exit(0)
-
-      if goose_db_path and os.path.isfile(goose_db_path):
-          try:
-              con_goose = sqlite3.connect("file:%s?mode=ro" % goose_db_path, uri=True, timeout=10)
-              cand_list = sorted(candidates)
-              in_placeholders = ",".join("?" for _ in cand_list)
-              prefix_conds = " or ".join(
-                  "substr(working_dir, 1, length(?) + 1) = ? || '/'" for _ in cand_list
-              )
-              sql = (
-                  "select id from sessions "
-                  "where (working_dir in (%s) or %s) "
-                  "and updated_at >= datetime('now', ?) "
-                  "order by updated_at desc limit 1"
-              ) % (in_placeholders, prefix_conds)
-              params = list(cand_list)
-              for c in cand_list:
-                  params.extend([c, c])
-              params.append("-%d days" % active_days)
-              goose_row = con_goose.execute(sql, tuple(params)).fetchone()
-              con_goose.close()
-              if goose_row:
-                  print("SESSION goose:%s" % goose_row[0])
-                  sys.exit(0)
-          except Exception as exc:
-              print("PROBE-FAILED: goose: %s" % exc)
-              sys.exit(0)
-
-      print("FREE")
-      PYEOF
-      ) || verdict=""
-
-        case "$verdict" in
-          SESSION\ *) return 0 ;;
-          FREE)       return 1 ;;
+        # Free ONLY when it says so: rc 1 is also a python crash before main().
+        case "$rc:$verdict" in
+          0:session*) return 0 ;;
+          1:free) return 1 ;;
           *)
-            [ -n "$verdict" ] && log "WARN: session probe for $path: $verdict"
+            log "WARN: session probe for $path: ''${verdict:-no output (rc $rc)}"
             return 2
             ;;
         esac

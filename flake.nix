@@ -856,8 +856,8 @@
         }
         # Pinned, following checks.oc-auto-attach: a suite that stops
         # adjudicating must not be able to present as green.
-        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 40 ] || {
-          echo "GATE FAILURE: expected 40 'PASS ' lines, got" \
+        [ "$(grep -c '^PASS ' "$TMPDIR/dc.txt")" = 41 ] || {
+          echo "GATE FAILURE: expected 41 'PASS ' lines, got" \
                "$(grep -c '^PASS ' "$TMPDIR/dc.txt")." >&2
           exit 1
         }
@@ -1043,15 +1043,15 @@
         cd ${self}
         export HOME="$TMPDIR"
         bash users/dev/test-bazel-reaper.sh 2>&1 | tee "$TMPDIR/br.txt"
-        grep -q '^=== 64 passed, 0 failed ===' "$TMPDIR/br.txt" || {
-          echo "GATE FAILURE: bazel-reap suite did not reach its 64/0 tally." >&2
+        grep -q '^=== 66 passed, 0 failed ===' "$TMPDIR/br.txt" || {
+          echo "GATE FAILURE: bazel-reap suite did not reach its 66/0 tally." >&2
           exit 1
         }
         # Same anti-vacuity pin as its neighbours: the tally is printed by the
         # suite, so a suite gutted to three assertions still prints a truthful
         # "3 passed, 0 failed". The count is what makes deletion visible.
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 64 ] || {
-          echo "GATE FAILURE: expected 64 'PASS' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")" = 66 ] || {
+          echo "GATE FAILURE: expected 66 'PASS' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/br.txt")." >&2
           exit 1
         }
@@ -1415,6 +1415,26 @@
           echo "GATE FAILURE: update-cfp-sources suite did not report OK." >&2
           exit 1
         }
+        touch $out
+      '';
+
+      # session-owns: the ONE definition of "a live agent session owns this
+      # directory" (opencode rows, goose rows, path claims) that every cleanup
+      # guard shares (bd workstation-6w7i.19). Hermetic stdlib unittest over
+      # temp sqlite fixtures and a temp claims dir. Count pinned, as below.
+      session-owns-tests = devboxPkgs.runCommand "session-owns-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/session-owns/test_session_owns.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 35 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 35 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || exit 1
         touch $out
       '';
 

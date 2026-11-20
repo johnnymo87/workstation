@@ -289,6 +289,10 @@ con.execute(
     "create table sessions (id text primary key, working_dir text not null, "
     "updated_at timestamp)"
 )
+con.execute(
+    "create table messages (id integer primary key, session_id text, "
+    "created_timestamp integer)"
+)
 con.executemany(
     "insert into sessions (id, working_dir, updated_at) values (?, ?, ?)",
     [
@@ -324,7 +328,7 @@ exec "$REAL_GIT" "$@"
 SH
 chmod +x "$fakebin/git"
 
-# GitHub stand-in for lgtm-pr-N tests. Emits OPEN for 202, MERGED for 201/203/204.
+# GitHub stand-in for lgtm-pr-N tests. Emits OPEN for 202, MERGED for 201/203/204/205.
 # When called with -q, emits raw state (python caller); when called with
 # --json state (bash caller), emits JSON.
 printf '#!%s\n' "$(command -v bash)" > "$fakebin/gh"
@@ -359,7 +363,7 @@ emit_state() {
 }
 case "$3" in
   202) emit_state OPEN ;;
-  201|203|204|301) emit_state MERGED ;;
+  201|203|204|205|301) emit_state MERGED ;;
   *)       echo "fake gh: HTTP 502" >&2; exit 1 ;;
 esac
 SH
@@ -475,8 +479,9 @@ lgtm_pr_201_wt="$lgtm_repo/.worktrees/lgtm-pr-201"
 lgtm_pr_202_wt="$lgtm_repo/.worktrees/lgtm-pr-202"
 lane_pr_203_wt="$lgtm_repo/.worktrees/pr-203"
 dirty_lgtm_pr_wt="$lgtm_repo/.worktrees/lgtm-pr-204"
+claimed_lgtm_pr_wt="$lgtm_repo/.worktrees/lgtm-pr-205"
 
-for wt in "$lgtm_pr_201_wt" "$lgtm_pr_202_wt" "$lane_pr_203_wt" "$dirty_lgtm_pr_wt"; do
+for wt in "$lgtm_pr_201_wt" "$lgtm_pr_202_wt" "$lane_pr_203_wt" "$dirty_lgtm_pr_wt" "$claimed_lgtm_pr_wt"; do
   git -C "$lgtm_repo" worktree add --detach "$wt" origin/main >/dev/null
   echo "pr commit" > "$wt/pr.txt"
   git -C "$wt" add pr.txt
@@ -486,6 +491,19 @@ done
 
 # Fresh uncommitted changes on dirty_lgtm_pr_wt to trigger the dirty guard
 printf 'uncommitted changes\n' >> "$dirty_lgtm_pr_wt/pr.txt"
+
+# A live path claim on lgtm-pr-205 (bd workstation-6w7i.19): lgtm's goose
+# review turns record an empty private cwd in their own sessions.db, so the
+# claim is the only thing that says a turn is working in this tree. MERGED and
+# untouched for 20 days, it would otherwise be removed like 201. lgtm-pr-201
+# carries an EXPIRED claim, which must not pin it.
+mkdir -p "$lgtm_home/.local/state/path-claims"
+printf '{"path": "%s", "expires_at": %s, "owner": "lgtm", "what": "goose review"}\n' \
+  "$(cd "$claimed_lgtm_pr_wt" && pwd -P)" "$(( $(date +%s) + 3600 ))" \
+  > "$lgtm_home/.local/state/path-claims/lgtm-review-example_lgtmrepo-205.json"
+printf '{"path": "%s", "expires_at": %s, "owner": "lgtm", "what": "goose review"}\n' \
+  "$(cd "$lgtm_pr_201_wt" && pwd -P)" "$(( $(date +%s) - 60 ))" \
+  > "$lgtm_home/.local/state/path-claims/lgtm-review-example_lgtmrepo-201.json"
 
 : > "$remove_log"
 set +e
@@ -508,6 +526,8 @@ assert_remove_logged "$lane_pr_203_wt" \
   "lane pr-N worktree whose PR is MERGED is still selected for removal (unchanged)"
 assert_remove_not_logged "$dirty_lgtm_pr_wt" \
   "dirty lgtm-pr worktree whose PR is MERGED is not selected for removal"
+assert_remove_not_logged "$claimed_lgtm_pr_wt" \
+  "lgtm-pr worktree with a live path claim (goose review turn) is not selected for removal"
 
 # --- Squash-merged PRs whose branch is kept, default branches other than
 # main, and the dependency lane's own clones ---

@@ -37,6 +37,8 @@ echo "Testing: $work_script"
 
 # Isolate test runs from the real goose session DB
 export WORK_PRUNE_GOOSE_DB="${WORK_PRUNE_GOOSE_DB_TEST:-/nonexistent/goose-sessions.db}"
+# ... and from the real path-claims directory.
+export WORK_PRUNE_CLAIMS_DIR="${WORK_PRUNE_CLAIMS_DIR_TEST:-/nonexistent/path-claims}"
 
 # Source the real production script to load helper functions without executing main()
 source "$work_script"
@@ -452,6 +454,7 @@ wt_goose_live="$(realpath "$fresh_clone/.worktrees/goose_live")"
 wt_goose_sub="$(realpath "$fresh_clone/.worktrees/goose-sub")"
 wt_goose_stale="$(realpath "$fresh_clone/.worktrees/goose-stale")"
 sqlite3 "$goose_db" "create table sessions (id text primary key, working_dir text not null, updated_at timestamp);
+  create table messages (id integer primary key, session_id text, created_timestamp integer);
   insert into sessions values ('20261104_1', '$wt_goose_live', datetime('now'));
   insert into sessions values ('20261104_2', '$wt_goose_sub/crates/x', datetime('now'));
   insert into sessions values ('20261001_9', '$wt_goose_stale', datetime('now', '-30 days'));"
@@ -469,10 +472,33 @@ echo "not a database" > "$tmpdir/goose-broken.db"
 wt_goose_broken="$(realpath "$fresh_clone/.worktrees/goose-broken")"
 prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db WORK_PRUNE_GOOSE_DB="$tmpdir/goose-broken.db" "$work_script" --prune-merged 2>&1)"
 check "goose session: unreadable DB keeps the worktree (fail safe)" "1" "$([ -d "$wt_goose_broken" ] && echo 1 || echo 0)"
-if [[ "$prune_out" == *"goose session probe failed"* ]]; then
+if [[ "$prune_out" == *"session probe failed: goose: "* ]]; then
   echo "PASS: goose session: probe failure logged"
 else
   echo "FAIL: goose session: probe failure not logged. Got: [$prune_out]"; fail=1
+fi
+
+# Test 9g: PATH CLAIM guard (bd workstation-6w7i.19). A live claim naming the
+# worktree keeps it; an expired one does not. This is how agents whose session
+# table names some other directory (lgtm's goose reviews) protect their tree.
+cd "$fresh_clone"
+claims_dir="$tmpdir/path-claims"
+mkdir -p "$claims_dir"
+"$work_script" --no-fetch claim-live >/dev/null 2>&1
+"$work_script" --no-fetch claim-expired >/dev/null 2>&1
+wt_claim_live="$(realpath "$fresh_clone/.worktrees/claim-live")"
+wt_claim_expired="$(realpath "$fresh_clone/.worktrees/claim-expired")"
+printf '{"path": "%s", "expires_at": %s, "owner": "test", "what": "live claim"}\n' \
+  "$wt_claim_live" "$(( $(date +%s) + 3600 ))" > "$claims_dir/live.json"
+printf '{"path": "%s", "expires_at": %s, "owner": "test", "what": "old claim"}\n' \
+  "$wt_claim_expired" "$(( $(date +%s) - 60 ))" > "$claims_dir/expired.json"
+prune_out="$(WORK_PRUNE_GRACE_DAYS=0 WORK_PRUNE_SESSION_DB=/nonexistent/opencode.db WORK_PRUNE_CLAIMS_DIR="$claims_dir" "$work_script" --prune-merged 2>&1)"
+check "claim: live claim keeps the worktree" "1" "$([ -d "$wt_claim_live" ] && echo 1 || echo 0)"
+check "claim: expired claim does not pin the worktree" "0" "$([ -d "$wt_claim_expired" ] && echo 1 || echo 0)"
+if [[ "$prune_out" == *"claim-live (claim live.json (live claim) lives here)"* ]]; then
+  echo "PASS: claim: keep reason names the claim"
+else
+  echo "FAIL: claim: keep reason missing. Got: [$prune_out]"; fail=1
 fi
 
 # Test 10: slug path-traversal guard (the worktree dir name must stay under
