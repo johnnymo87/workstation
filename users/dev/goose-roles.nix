@@ -5,7 +5,7 @@
 #   GOOSE_SUBAGENT_ROLES_DIR: /home/dev/.config/goose/subagent-roles/roles
 #   GOOSE_SUBAGENT_DEFAULT_RECIPE: /home/dev/.config/goose/subagent-roles/unscoped.yaml
 # Requires goose >= patched-1.54.0.10. Design: docs/plans/2026-10-20-goose-subagent-roles-design.md
-{ lib, localPkgs, isCloudbox, isDevbox, ... }:
+{ lib, localPkgs, isCloudbox, isDevbox, isDarwin, ... }:
 
 #
 # PROVIDER IS PER HOST. A role's settings.goose_provider outranks every other
@@ -21,7 +21,10 @@
 # GCP_VERTEX_GEMINI_HOST in hosts/cloudbox). devbox: all Opus. Omitting
 # goose_provider instead would pair the parent's provider (e.g. openai) with the
 # roles' model, which fails.
-lib.mkIf (isCloudbox || isDevbox) {
+# The Mac gets cloudbox's build: its goose-serve is on gcp_vertex_ai too, Claude
+# via its own cfp when the Max pool is seeded, Gemini straight to Vertex
+# (users/dev/home.darwin.nix, workstation-6w7i.17).
+lib.mkIf (isCloudbox || isDevbox || isDarwin) {
   home.file.".config/goose/subagent-roles".source =
     if isDevbox
     then localPkgs.goose-roles.override { provider = "anthropic"; }

@@ -2324,6 +2324,33 @@
         touch $out
       '';
 
+      # The Mac's goose wiring (workstation-6w7i.17), checked at EVAL time on the
+      # Linux CI leg (a Linux builder cannot build the darwin derivations, so this
+      # reads module values only). Pins what the Mac had wrong before: pigeon
+      # talking to bare goose at :4080, no owner id for topic-bound goose
+      # sessions, no packaged goose, no honkd or honk CLI, no roles. The launchd
+      # scripts themselves are covered by checks.aarch64-darwin.home-mac on the Mac.
+      darwin-goose-wiring = let
+        hm = self.homeConfigurations.${mac.hostname}.config;
+        agents = hm.launchd.agents;
+        pigeonEnv = agents.pigeon-daemon.config.EnvironmentVariables;
+        lib = devboxPkgs.lib;
+        checks = {
+          "pigeon -> honkd :4280" = pigeonEnv.PIGEON_GOOSE_ACP_URL == "ws://127.0.0.1:4280/acp";
+          "owner id set" = (pigeonEnv.PIGEON_PULL_ALLOWED_USER_IDS or "") != "";
+          "honkd agent enabled" = agents ? honkd && agents.honkd.enable;
+          "goose-serve agent enabled" = agents.goose-serve.enable;
+          "honk CLI on PATH (honkd's --swarm-mcp-bin)" = builtins.any (p: (p.pname or "") == "honkd") hm.home.packages;
+          "goose CLI on PATH" = builtins.any (p: (p.pname or "") == "goose" && lib.hasInfix "patched" (p.version or "")) hm.home.packages;
+          "roles deployed" = hm.home.file ? ".config/goose/subagent-roles";
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+      in
+        assert lib.assertMsg (failed == [ ]) "darwin-goose-wiring failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "darwin-goose-wiring" { } ''
+          echo "darwin-goose-wiring: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
+        '';
+
       # oc-mcp-enable grants a RUNNING session an MCP server (connect + a
       # session-scoped allow rule). The suite pins the two things a silent
       # regression would break: the `<server>_*` permission pattern (a wrong

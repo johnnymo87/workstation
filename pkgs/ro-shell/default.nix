@@ -33,6 +33,6 @@ python3.pkgs.buildPythonApplication {
   meta = {
     description = "Read-only shell MCP server for goose subagent roles";
     mainProgram = "ro-shell";
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }
