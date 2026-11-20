@@ -669,6 +669,18 @@ lib.mkIf isDarwin {
               echo "pigeon-daemon: pigeon-goose-acp-token not in Keychain; disabling the goose backend" >&2
               unset PIGEON_GOOSE_ACP_TOKEN PIGEON_GOOSE_ACP_URL
             fi
+            # Slack direct-fallback alarm (pigeon-4ogz.17): the #alerts incoming
+            # webhook of the pigeon-macbook workspace, for when the worker is
+            # unreachable. A credential, so it is read here and never put in
+            # EnvironmentVariables (the plist is world-readable). Degrade, never
+            # die: without it the daemon keeps whatever other alarm path it has.
+            w="$($SEC find-generic-password -s pigeon-slack-alarm-webhook -w 2>/dev/null || true)"
+            if [ -n "$w" ]; then
+              export PIGEON_SLACK_ALARM_WEBHOOK_URL="$w"
+            else
+              echo "pigeon-daemon: pigeon-slack-alarm-webhook not in Keychain; no Slack direct-fallback alarm" >&2
+            fi
+            unset w
             cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
             exec ${pkgs.nodejs}/bin/node \
               "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \
@@ -688,10 +700,19 @@ lib.mkIf isDarwin {
           # as on cloudbox and devbox. Same token as goose (honkd's downstream
           # secret is written from the same Keychain item).
           PIGEON_GOOSE_ACP_URL = "ws://127.0.0.1:4280/acp";
-          # The owner's Telegram user id (same as cloudbox/devbox). Empty means a
-          # goose session bound to a Telegram topic accepts no prompts, and a
-          # pull-mode session banks nothing. pigeon config.ts pullAllowedUserIds.
-          PIGEON_PULL_ALLOWED_USER_IDS = "8248645256";
+          # Who may prompt a topic-bound goose session or leave a message for a
+          # pull-mode session (pigeon config.ts pullAllowedUserIds): the owner's
+          # Telegram user id, plus his user id in the pigeon-macbook Slack
+          # workspace (pigeon-4ogz.17), which must be here BEFORE macbook flips to
+          # Slack (pigeon-4ogz.11). Drop the Telegram id when Telegram is deleted
+          # (pigeon-4ogz.13). Empty would mean a bound goose session accepts no
+          # prompts and a pull-mode session banks nothing.
+          PIGEON_PULL_ALLOWED_USER_IDS = "8248645256,U0CKKHX34MR";
+          # His pigeon-macbook Slack user id (not a secret). The direct-fallback
+          # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
+          # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
+          # PR #231). Adding that line later turns the alarm mention on.
+          PIGEON_SLACK_OWNER_USER_ID = "U0CKKHX34MR";
           # workstation-debug: widen the heartbeat-staleness window before a serve
           # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
           # (or GC/swap stall) blocks its event loop and starves the 5s heartbeat
