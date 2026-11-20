@@ -187,7 +187,7 @@ let
     };
     "aarch64-darwin" = {
       asset = "goose-aarch64-apple-darwin.tar.gz";
-      hash = "sha256-h7+nLFAHsvsT8/Fc2LrYWdTgIni0GO3ehhd5Y8CKhH8=";
+      hash = "sha256-4l/+mcHu97wEac7SNy+CAl4FRqUQLUChEoxN3gFLdcg=";
     };
   };
 
