@@ -5,17 +5,18 @@
 # header only says where each one lives).
 #
 # Credentials come from systemd LoadCredential ($CREDENTIALS_DIRECTORY):
-#   tg_bot_token    pigeon's Telegram bot token
-#   tg_chat_id      the forum group's chat id (no thread id -> General topic)
+#   slack_webhook   the em-alerts app's incoming webhook (#em-alerts; em-slack.sh)
 #   hc_ping_url     healthchecks.io ping URL; optional, the dead-man's ping is
 #                   sent only when this file exists (hcEnabled in the .nix)
-# Secrets (the bot token, the chat id, the ping URL) reach curl only through a
+# Secrets (the webhook URL, the ping URL) reach curl only through a
 # config on stdin (`-K -`, written by the printf builtin), never on a command
 # line, where any host user could read them from /proc.
 #
 # Configuration (environment, set by the unit): EM_STACK_REPO (the main EM
 # checkout, where bin/stack-health runs), EM_STACK_RUNBOOK, EM_STACK_REMIND_H,
-# EM_STACK_GM_MIN, STATE_DIRECTORY. EM_STACK_MONITOR_DRY_RUN=1 prints the raw
+# EM_STACK_GM_MIN, STATE_DIRECTORY, PIGEON_SLACK_NOTIFY_OWNER and
+# EM_SLACK_OWNER_ID (em-slack.sh).
+# EM_STACK_MONITOR_DRY_RUN=1 prints the raw
 # key set and the message instead of sending and pinging, and keeps no state.
 #
 # Test hooks (everything outside this script is injectable; each is the path of
@@ -26,7 +27,7 @@
 #   EM_STACK_GATE_CMD    exit 0 when a stack (a BEAM on 127.0.0.1:4002) is up.
 #   EM_STACK_MODE_CMD    prints the BEAM's EM_MODE (empty when unknown).
 #   EM_STACK_HEALTH_CMD  prints bin/stack-health's output (exit code ignored).
-#   EM_STACK_TG_CMD      reads the Telegram message on stdin; non-zero = failed.
+#   EM_STACK_SLACK_CMD   reads the Slack message on stdin; non-zero = failed.
 #   EM_STACK_NOW         epoch seconds.
 #
 # Source tolerance. Under errexit/nounset/pipefail every source is graded on
@@ -70,7 +71,7 @@
 #            rate window)
 #
 # Heartbeat contract (as em-ci-monitor). The healthchecks.io check measures the
-# MONITOR: a pass that observed everything and delivered every Telegram message
+# MONITOR: a pass that observed everything and delivered every Slack message
 # it owed pings success (a reported problem still earns a success ping). A pass
 # that could not deliver, or exits non-zero for any other reason, pings /fail.
 # A pass that never runs sends nothing; healthchecks.io reports it down.
@@ -98,18 +99,13 @@ on_exit() {
 }
 trap on_exit EXIT
 
-tg_send() { # $1: text. Returns non-zero when delivery failed.
-  if dry; then printf '[dry-run] telegram:\n%s\n' "$1"; return 0; fi
-  if [ -n "${EM_STACK_TG_CMD:-}" ]; then
-    printf '%s' "$1" | "$EM_STACK_TG_CMD"
+send() { # $1: text. Returns non-zero when delivery failed. slack_send: em-slack.sh.
+  if dry; then printf '[dry-run] slack:\n%s\n' "$1"; return 0; fi
+  if [ -n "${EM_STACK_SLACK_CMD:-}" ]; then
+    printf '%s' "$1" | "$EM_STACK_SLACK_CMD"
     return
   fi
-  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\ndata-urlencode = "chat_id=%s"\n' \
-    "$(cred tg_bot_token)" "$(cred tg_chat_id)" |
-    curl -fsS -m 20 --retry 3 -o /dev/null \
-      --data-urlencode "text=$1" \
-      --data-urlencode "disable_web_page_preview=true" \
-      -K -
+  slack_send "$1"
 }
 
 # --- Sources (default implementations; tests replace them) -------------------------
@@ -477,7 +473,8 @@ else
     body=""
   fi
   if [ -n "$body" ]; then
-    # Telegram rejects messages over 4096 characters.
+    # Keep under 4096 characters (Telegram's old limit, kept for Slack: an
+    # alert that long is unreadable on a phone anyway).
     [ "${#body}" -le 3500 ] || body="${body:0:3500}... (truncated; see the runbook)"
     msg="$body"
     # A bare "resolved" needs no footer; everything else names the checkout.
@@ -485,12 +482,12 @@ else
   fi
 fi
 
-# One Telegram message per pass. A failed send records nothing, so the next
+# One Slack message per pass. A failed send records nothing, so the next
 # pass redoes the whole message and nothing is half-announced.
 sent_at=$prev_sent
 if [ -n "$msg" ]; then
-  if ! tg_send "$msg"; then
-    hc_ping /fail "em-stack monitor could not deliver to Telegram: ${msg:0:1000}"
+  if ! send "$msg"; then
+    hc_ping /fail "em-stack monitor could not deliver to Slack: ${msg:0:1000}"
     failed_pinged=1
     exit 1
   fi
@@ -523,6 +520,6 @@ fi
 if [ "$sig" = ok ] || [ "$nostack" = 1 ]; then
   hc_ping "" "ok"
 else
-  hc_ping "" "problems reported to Telegram: ${#active[@]}"
+  hc_ping "" "problems reported to Slack: ${#active[@]}"
 fi
 exit 0

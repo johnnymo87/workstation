@@ -1,4 +1,4 @@
-# Telegram alerts for the running Eternal Machinery stack, if one is running.
+# Slack alerts (#em-alerts) for the running Eternal Machinery stack, if one is running.
 #
 # Every 10 minutes a hardened oneshot (as dev: stack-health lives in /home/dev,
 # uses per-user pgrep and /run/user/1000, and reads postgres through the
@@ -11,15 +11,14 @@
 #   - GET :4002/v1/sessions/<sid>/status: a GM halt unanswered for 20+ min;
 #   - GET :4400/em/quiescence: a quarantined agent, and one-off events
 #     (child_restart_failed, flapping recoveries).
-# Problems go to the Telegram forum group's General topic through pigeon's bot
-# (no message_thread_id), one message per pass. A standing problem set is
+# Problems go to #em-alerts in the devbox Slack workspace through the em-alerts
+# app's incoming webhook (em-alerts.nix), one message per pass. A standing problem set is
 # announced once, repeated every 6 h, and followed by "resolved" when it clears;
 # most keys must be seen on 2 passes in a row before they alert.
 #
-# Secrets: Telegram's are pigeon's (telegram_bot_token, telegram_chat_id), read
-# via LoadCredential. The dead-man's ping (hcEnabled below) reads sops secret
+# Secrets: the Slack webhook is em-alerts.nix's, read via LoadCredential. The dead-man's ping (hcEnabled below) reads sops secret
 # em_stack_hc_ping_url (root 0400): the healthchecks.io check "devbox em-stack
-# monitor", in em-ci's project, period 10 m, grace 20 m, email + Telegram. The
+# monitor", in em-ci's project, period 10 m, grace 20 m, email + chat. The
 # script pings only when the credential exists, with em-ci-monitor's contract
 # (em-stack-monitor.sh).
 #
@@ -51,11 +50,11 @@ let
     runtimeInputs = with pkgs; [
       bash coreutils curl jq gnused gnugrep gawk findutils procps iproute2 python3 git
     ];
-    text = builtins.readFile ./em-stack-monitor.sh;
+    text = config.devbox.emAlerts.script + builtins.readFile ./em-stack-monitor.sh;
   };
 
   unit = extraEnv: {
-    description = "EM stack monitor (Telegram alerts)";
+    description = "EM stack monitor (Slack #em-alerts)";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     environment = {
@@ -64,12 +63,12 @@ let
       EM_STACK_REMIND_H = "6";
       EM_STACK_GM_MIN = "20";
       XDG_RUNTIME_DIR = "/run/user/${uid}";
-    } // extraEnv;
+    } // config.devbox.emAlerts.env // extraEnv;
     serviceConfig = {
       Type = "oneshot";
       ExecStart = lib.getExe monitor;
       # Worst case: stack-health 200 s (its own timeout) + four 10 s fetches +
-      # Telegram (3 retries of 20 s plus backoff, ~90 s) + a /fail ping
+      # Slack (3 retries of 20 s plus backoff, ~90 s) + a /fail ping
       # (~45 s) is about 6.5 min, so 8 min; the timeout inside the script stays.
       TimeoutStartSec = "8min";
       User = "dev";
@@ -77,12 +76,11 @@ let
       # systemd creates /var/lib/em-stack-monitor and chowns it to User=.
       StateDirectory = "em-stack-monitor";
       LoadCredential = [
-        "tg_bot_token:${config.sops.secrets.telegram_bot_token.path}"
-        "tg_chat_id:${config.sops.secrets.telegram_chat_id.path}"
+        "slack_webhook:${config.sops.secrets.em_alerts_slack_webhook.path}"
       ] ++ lib.optional hcEnabled "hc_ping_url:${config.sops.secrets.em_stack_hc_ping_url.path}";
       # Light by nature: this runs dev-writable code as dev. No PrivateTmp
       # (stack-health scans /tmp/devenv-* and writes mktemp files there) and no
-      # PrivateNetwork (localhost and api.telegram.org). ProtectHome=read-only,
+      # PrivateNetwork (localhost and hooks.slack.com). ProtectHome=read-only,
       # not tmpfs: the script and the checkout must stay readable.
       ProtectSystem = "strict";
       ProtectHome = "read-only";

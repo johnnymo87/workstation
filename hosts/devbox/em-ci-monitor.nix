@@ -8,21 +8,22 @@
 #   - both containers active, and the disk watchdog not in a failed state;
 #   - root disk >= 20 GB free, the em-ci Volume >= 8 GB free (jobs refuse to
 #     start below 5 GB, so this warns first).
-# Problems go to the Telegram forum group's General topic through pigeon's bot
-# (no message_thread_id). A standing problem is announced once, repeated every
+# Problems go to #em-alerts in the devbox Slack workspace through the em-alerts
+# app's incoming webhook (em-alerts.nix). A standing problem is announced once, repeated every
 # 6 h, and followed by a "resolved" message when it clears.
 #
 # Dead-man's switch: each pass pings a healthchecks.io check (period 10 m,
-# grace 20 m) whose own Telegram integration posts to the same group. The check
+# grace 20 m) whose own integrations (email, and Slack or Telegram as set in
+# healthchecks.io) reach the human. The check
 # measures the MONITOR, not runner health: a pass that observed everything and
 # delivered its alerts pings success; one that could not deliver, or exited
 # non-zero, pings /fail; one that never ran pings nothing. So devbox being
-# down, the monitor dying, and Telegram delivery breaking all reach the human;
+# down, the monitor dying, and Slack delivery breaking all reach the human;
 # em-ci-monitor.sh has the exact contract.
 #
 # Secrets (devbox sops, root 0400): em_ci_monitor_gh_token (fine-grained,
 # eternal-machinery only, Actions: read + Administration: read) and
-# em_ci_hc_ping_url. Telegram secrets are pigeon's, read via LoadCredential.
+# em_ci_hc_ping_url; the Slack webhook is em-alerts.nix's. All via LoadCredential.
 #
 # Run a pass now:  sudo systemctl start em-ci-monitor; journalctl -u em-ci-monitor -n 30
 # Dry run (prints what it would send; sends, pings and records nothing):
@@ -39,11 +40,11 @@ let
   monitor = pkgs.writeShellApplication {
     name = "em-ci-monitor";
     runtimeInputs = with pkgs; [ coreutils curl jq gnused systemd ];
-    text = builtins.readFile ./em-ci-monitor.sh;
+    text = config.devbox.emAlerts.script + builtins.readFile ./em-ci-monitor.sh;
   };
 
   unit = extraEnv: {
-    description = "em-ci runner monitor (Telegram alerts + healthchecks.io heartbeat)";
+    description = "em-ci runner monitor (Slack #em-alerts + healthchecks.io heartbeat)";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
     environment = {
@@ -61,7 +62,7 @@ let
       EM_CI_VOLUME_MIN_GB = "8";
       EM_CI_REMIND_H = "6";
       EM_CI_RUNBOOK = runbook;
-    } // extraEnv;
+    } // config.devbox.emAlerts.env // extraEnv;
     serviceConfig = {
       Type = "oneshot";
       ExecStart = lib.getExe monitor;
@@ -82,8 +83,7 @@ let
       LoadCredential = [
         "gh_token:${config.sops.secrets.em_ci_monitor_gh_token.path}"
         "hc_ping_url:${config.sops.secrets.em_ci_hc_ping_url.path}"
-        "tg_bot_token:${config.sops.secrets.telegram_bot_token.path}"
-        "tg_chat_id:${config.sops.secrets.telegram_chat_id.path}"
+        "slack_webhook:${config.sops.secrets.em_alerts_slack_webhook.path}"
       ];
       # Read-only checks plus outbound HTTPS; nothing else.
       ProtectSystem = "strict";

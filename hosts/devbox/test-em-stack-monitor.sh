@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for em-stack-monitor.sh. Everything outside the script is faked through
-# its env hooks (fetch, gate, mode, stack-health, Telegram, clock), so this runs
+# its env hooks (fetch, gate, mode, stack-health, Slack, clock), so this runs
 # in the nix sandbox: no network, no /home, no stack. The fixtures under
 # test-em-stack-monitor-fixtures/ were captured from the live stack on
 # 2026-11-04 (real field types); variants are derived from them with jq.
@@ -17,7 +17,7 @@ bash_bin=$(command -v bash)
 bin=$(mktemp)
 repo=$(mktemp -d)
 trap 'rm -f "$bin"; rm -rf "$repo"' EXIT
-{ echo "#!$bash_bin"; echo 'set -euo pipefail'; cat "$here/em-stack-monitor.sh"; } >"$bin"; chmod +x "$bin"
+{ echo "#!$bash_bin"; echo 'set -euo pipefail'; cat "$here/em-slack.sh" "$here/em-stack-monitor.sh"; } >"$bin"; chmod +x "$bin"
 
 # A throwaway repo (the one place bare identity flags are right) so the message
 # can name a real short HEAD.
@@ -31,9 +31,9 @@ setup() { # fresh sandbox per case; the healthy live stack
   S=$(mktemp -d)
   export STATE_DIRECTORY=$S/state CREDENTIALS_DIRECTORY=$S/cred
   mkdir -p "$STATE_DIRECTORY" "$CREDENTIALS_DIRECTORY" "$S/web" "$S/tg" "$S/bin"
-  echo bot >"$CREDENTIALS_DIRECTORY/tg_bot_token"; echo 1 >"$CREDENTIALS_DIRECTORY/tg_chat_id"
+  echo https://hooks.slack.com/services/T0/B0/sEcReT >"$CREDENTIALS_DIRECTORY/slack_webhook"
   export EM_STACK_REPO=$repo EM_STACK_RUNBOOK="eternal-machinery docs/runbooks/stack-health.md" \
-         EM_STACK_REMIND_H=6 EM_STACK_GM_MIN=20 EM_STACK_NOW=$T0
+         EM_STACK_REMIND_H=6 EM_STACK_GM_MIN=20 EM_STACK_NOW=$T0 EM_SLACK_OWNER_ID=U0OWNER1
   unset EM_STACK_MONITOR_DRY_RUN
   cat >"$S/fetch" <<EOF
 #!$bash_bin
@@ -46,7 +46,7 @@ EOF
   printf '#!%s\n[ ! -e "%s/nostack" ]\n' "$bash_bin" "$S" >"$S/gate"
   printf '#!%s\ncat "%s/mode" 2>/dev/null || true\n' "$bash_bin" "$S" >"$S/mode_cmd"
   printf '#!%s\ncat "%s/health"\n' "$bash_bin" "$S" >"$S/health_cmd"
-  # Telegram stub: fails (records nothing) while tg_down exists.
+  # Slack stub: fails (records nothing) while tg_down exists.
   cat >"$S/tg_cmd" <<EOF
 #!$bash_bin
 if [ -e "$S/tg_down" ]; then cat >/dev/null; exit 7; fi
@@ -55,7 +55,7 @@ cat >"$S/tg/\$n"
 EOF
   chmod +x "$S/fetch" "$S/gate" "$S/mode_cmd" "$S/health_cmd" "$S/tg_cmd"
   export EM_STACK_FETCH_CMD=$S/fetch EM_STACK_GATE_CMD=$S/gate EM_STACK_MODE_CMD=$S/mode_cmd \
-         EM_STACK_HEALTH_CMD=$S/health_cmd EM_STACK_TG_CMD=$S/tg_cmd
+         EM_STACK_HEALTH_CMD=$S/health_cmd EM_STACK_SLACK_CMD=$S/tg_cmd
   echo manual-live >"$S/mode"
   cat "$fx/stack-health.txt" >"$S/health"
   serve 4002_v1_presence 200 "$fx/presence.json"
@@ -502,15 +502,15 @@ setup; cat "$fx/stack-health-deferred.txt" >"$S/health"; echo sim >"$S/mode"; ru
 : >"$S/health"; at 1200; run
 check "session_not_started is carried when stack-health printed no SUMMARY" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | index(\"session_not_started\") != null")" = true ]'
 
-# 14. One Telegram message per pass: events ride with the standing problems.
+# 14. One Slack message per pass: events ride with the standing problems.
 setup; mkhealth "postgres FAIL refused"; run
 crf b1 child_restart_failed; at 600; run
 check "problem and event leave in ONE message" '[ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$(tglast)" && grep -q "^Events:" <<<"$(tglast)"'
 # ... and a failed send retried next pass cannot duplicate part of it.
 setup; mkhealth "postgres FAIL refused"; run
 crf b1 child_restart_failed; touch "$S/tg_down"; at 600; run
-check "Telegram failure: exit non-zero" '[ "$rc" -ne 0 ]'
-check "Telegram failure: records nothing" '[ "$(tgn)" -eq 0 ] && [ "$(st ".events | length")" -eq 0 ] && [ "$(st .sig)" = ok ]'
+check "Slack failure: exit non-zero" '[ "$rc" -ne 0 ]'
+check "Slack failure: records nothing" '[ "$(tgn)" -eq 0 ] && [ "$(st ".events | length")" -eq 0 ] && [ "$(st .sig)" = ok ]'
 rm "$S/tg_down"; at 1200; run
 check "after the failure the next pass delivers it all in one message" \
   '[ "$rc" -eq 0 ] && [ "$(tgn)" -eq 1 ] && grep -q "^- postgres FAIL" <<<"$(tglast)" && grep -q "child_restart_failed" <<<"$(tglast)"'
@@ -521,7 +521,7 @@ check "a failed first announcement is not latched" '[ "$rc" -ne 0 ] && [ "$(st .
 rm "$S/tg_down"; at 1200; run
 check "a failed announcement is retried" '[ "$(tgn)" -eq 1 ]'
 
-# 15. Truncation: Telegram rejects messages over 4096 characters.
+# 15. Truncation: messages stay under 4096 characters.
 setup
 { grep -v '^SUMMARY' "$fx/stack-health.txt"
   for i in $(seq 1 60); do printf '  %-12s %-8s %s\n' "check$i" FAIL "$(printf 'x%.0s' $(seq 1 280))"; done
@@ -573,12 +573,12 @@ cat >>"$S/curl.in"
 EOF
   chmod +x "$S/bin/curl"
 }
-setup; fake_curl; unset EM_STACK_TG_CMD
+setup; fake_curl; unset EM_STACK_SLACK_CMD
 echo "https://hc.example.invalid/ping/abc" >"$CREDENTIALS_DIRECTORY/hc_ping_url"
 mkhealth "postgres FAIL refused"; prun; at 600; prun
-check "default Telegram path: token and chat id reach curl on stdin only" \
-  'grep -q "api.telegram.org/botbot/sendMessage" "$S/curl.in" && grep -q "chat_id=1" "$S/curl.in" && ! grep -q "botbot" "$S/curl.args" && ! grep -q "chat_id" "$S/curl.args" && ! grep -q "api.telegram" "$S/curl.args"'
-check "default Telegram path: the message text goes out as form data" 'grep -q "text=EM stack: problem" "$S/curl.args"'
+check "default Slack path: the webhook URL reaches curl on stdin only" \
+  'grep -q "url = \"https://hooks.slack.com/services/T0/B0/sEcReT\"" "$S/curl.in" && ! grep -q "sEcReT" "$S/curl.args" && ! grep -q "hooks.slack" "$S/curl.args"'
+check "default Slack path: the message goes out as JSON text, no mention by default" 'grep -qF "\"text\":\"EM stack: problem" "$S/curl.args"'
 check "dead-man ping: success after a delivering pass, URL on stdin" 'grep -q "hc.example.invalid/ping/abc\"" "$S/curl.in" && ! grep -q "hc.example.invalid" "$S/curl.args"'
 setup; fake_curl; echo "https://hc.example.invalid/ping/abc" >"$CREDENTIALS_DIRECTORY/hc_ping_url"
 touch "$S/tg_down"; mkhealth "postgres FAIL refused"; prun; at 600; prun

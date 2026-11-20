@@ -9,7 +9,7 @@ let
   failover = pkgs.writeShellApplication {
     name = "em-ci-failover";
     runtimeInputs = with pkgs; [ coreutils curl gawk jq ];
-    text = builtins.readFile ./em-ci-failover.sh;
+    text = config.devbox.emAlerts.script + builtins.readFile ./em-ci-failover.sh;
   };
 in
 {
@@ -27,7 +27,7 @@ in
       EM_CI_OVERFLOW_MIN_MEM_GB = "14";  # ...unless devbox MemAvailable is below this (2 runners can take 12 GB)
       EM_CI_ERROR_ALERT = "10";
       EM_CI_PRIMARY_OFFLINE_ALERT_H = "9";   # above the 8 h streaming-pause ceiling (RuntimeMaxSec)
-    };
+    } // config.devbox.emAlerts.env;   # alerts go to #em-alerts (em-alerts.nix)
     serviceConfig = {
       Type = "oneshot";
       ExecStart = lib.getExe failover;
@@ -37,8 +37,7 @@ in
       LoadCredential = [
         # Administration: write is needed for label edits; the monitor's token is read-only.
         "gh_token:${config.sops.secrets.em_ci_runner_pat.path}"
-        "tg_bot_token:${config.sops.secrets.telegram_bot_token.path}"
-        "tg_chat_id:${config.sops.secrets.telegram_chat_id.path}"
+        "slack_webhook:${config.sops.secrets.em_alerts_slack_webhook.path}"
       ];
       ProtectSystem = "strict";
       ProtectHome = "tmpfs";

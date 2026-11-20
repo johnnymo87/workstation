@@ -14,7 +14,7 @@
 # so a backlog drains on five runners instead of three. It ends once gamebox has
 # not been saturated for EM_CI_TICKS passes. A busy gamebox with nothing queued
 # costs nothing: a label only lets an idle runner take a job that is waiting.
-# Overflow never changes the failover state (`desired`) and sends no Telegram.
+# Overflow never changes the failover state (`desired`) and sends no Slack message.
 
 cred() { cat "${CREDENTIALS_DIRECTORY:?}/$1"; }
 now=${EM_CI_NOW:-$(date +%s)}
@@ -29,11 +29,9 @@ gh_api() { # $1 method, $2 path, [$3 json body]
       -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
       "${body[@]}" -K - "https://api.github.com$2"
 }
-tg_send() {
-  if [ -n "${EM_CI_TG_STUB:-}" ]; then "$EM_CI_TG_STUB" "$1"; return; fi
-  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$(cred tg_bot_token)" |
-    curl -fsS -m 20 --retry 3 -o /dev/null \
-      --data-urlencode "chat_id=$(cred tg_chat_id)" --data-urlencode "text=$1" -K -
+send() { # $1: text. slack_send: em-slack.sh, prepended by em-ci-failover.nix.
+  if [ -n "${EM_CI_SLACK_STUB:-}" ]; then "$EM_CI_SLACK_STUB" "$1"; return; fi
+  slack_send "$1"
 }
 # An empty file (crash mid-write before put became atomic, or a manual
 # truncate) reads as the default, never as "" -- "" would wedge desired.
@@ -50,7 +48,7 @@ if ! runners=$(gh_api GET "/repos/$EM_CI_REPO/actions/runners?per_page=100") ||
    ! jq -e '.runners | type == "array"' >/dev/null <<<"$runners"; then
   errors=$((errors + 1)); put errors "$errors"
   [ "$errors" -ne "$EM_CI_ERROR_ALERT" ] ||
-    tg_send "em-ci failover (devbox): cannot reach the GitHub API for $errors passes; devbox runner labels frozen at '$desired'." || true
+    send "em-ci failover (devbox): cannot reach the GitHub API for $errors passes; devbox runner labels frozen at '$desired'." || true
   exit 0
 fi
 put errors 0
@@ -82,17 +80,17 @@ fi
 
 if [ "$desired" = present ] && [ "$on" -ge "$EM_CI_TICKS" ]; then
   desired=absent
-  tg_send "em-ci failover: gamebox runners online; devbox runners stop taking em-ci jobs (label removed, in-flight jobs finish)." || true
+  send "em-ci failover: gamebox runners online; devbox runners stop taking em-ci jobs (label removed, in-flight jobs finish)." || true
 elif [ "$desired" = absent ] && [ "$off" -ge "$EM_CI_TICKS" ]; then
   desired=present
-  tg_send "em-ci failover: gamebox runners offline; devbox runners now take em-ci jobs." || true
+  send "em-ci failover: gamebox runners offline; devbox runners now take em-ci jobs." || true
 fi
 
 if [ -n "$offline_since" ] && [ "$offline_alerted" = 0 ] &&
    [ $((now - offline_since)) -ge $((EM_CI_PRIMARY_OFFLINE_ALERT_H * 3600)) ]; then
   # Latch only on a successful send: a lost one-shot alert is the only signal
   # of a dead gamebox (e.g. its runners deleted by GitHub after 14 days).
-  tg_send "em-ci failover: gamebox runners offline for $(( (now - offline_since) / 3600 )) h (longer than a streaming pause can last). devbox is carrying CI." &&
+  send "em-ci failover: gamebox runners offline for $(( (now - offline_since) / 3600 )) h (longer than a streaming pause can last). devbox is carrying CI." &&
     offline_alerted=1
 fi
 
@@ -126,7 +124,7 @@ done
 if [ "$write_failed" = 1 ]; then
   write_errors=$((write_errors + 1))
   [ "$write_errors" -ne "$EM_CI_ERROR_ALERT" ] ||
-    tg_send "em-ci failover (devbox): label writes on devbox runners have failed for $write_errors passes; devbox labels do not match '$want'." || true
+    send "em-ci failover (devbox): label writes on devbox runners have failed for $write_errors passes; devbox labels do not match '$want'." || true
 else
   write_errors=0
 fi

@@ -637,12 +637,46 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-em-ci-failover.sh 2>&1 | tee "$TMPDIR/f.txt"
-        grep -q '^ALL PASS (40 assertions)' "$TMPDIR/f.txt" || {
-          echo "GATE FAILURE: em-ci-failover suite did not reach ALL PASS (40 assertions)." >&2
+        grep -q '^ALL PASS (41 assertions)' "$TMPDIR/f.txt" || {
+          echo "GATE FAILURE: em-ci-failover suite did not reach ALL PASS (41 assertions)." >&2
           exit 1
         }
         touch $out
       '';
+
+      # slack_send, shared by the em-* monitors (#em-alerts, pigeon bead pigeon-4ogz.9).
+      # Pinned assertion count; see hosts/devbox/test-em-slack.sh.
+      em-slack-tests = devboxPkgs.runCommand "em-slack-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep
+                              devboxPkgs.gawk devboxPkgs.jq ];
+      } ''
+        cd ${self}
+        bash hosts/devbox/test-em-slack.sh 2>&1 | tee "$TMPDIR/e.txt"
+        grep -q '^ALL PASS (23 assertions)' "$TMPDIR/e.txt" || {
+          echo "GATE FAILURE: em-slack suite did not reach ALL PASS (23 assertions)." >&2
+          echo "If you added assertions, bump the pinned count here deliberately." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # The suites above build each monitor by prepending em-slack.sh by hand. This
+      # checks that the BUILT units do the same (a monitor without slack_send would
+      # fail every alert, and ping /fail, only at runtime), and that none of them
+      # still loads a Telegram credential.
+      em-alerts-wiring = let
+        svc = n: self.nixosConfigurations.devbox.config.systemd.services.${n}.serviceConfig;
+        units = [ "em-ci-monitor" "em-ci-failover" "em-stack-monitor" ];
+      in devboxPkgs.runCommand "em-alerts-wiring" {
+        nativeBuildInputs = [ devboxPkgs.gnugrep ];
+      } (devboxPkgs.lib.concatMapStrings (n: ''
+        grep -q '^slack_send() {' ${(svc n).ExecStart} ||
+          { echo "GATE FAILURE: ${n} has no slack_send (em-slack.sh not prepended)" >&2; exit 1; }
+        ${devboxPkgs.lib.optionalString (devboxPkgs.lib.any (c: devboxPkgs.lib.hasPrefix "tg_" c) (svc n).LoadCredential)
+          "echo 'GATE FAILURE: ${n} still loads a Telegram credential' >&2; exit 1"}
+        ${devboxPkgs.lib.optionalString (!(devboxPkgs.lib.any (c: devboxPkgs.lib.hasPrefix "slack_webhook:" c) (svc n).LoadCredential))
+          "echo 'GATE FAILURE: ${n} does not load slack_webhook' >&2; exit 1"}
+      '') units + "touch $out\n");
 
       # EM stack monitor (devbox em-stack-monitor, bead eternal-machinery-qpmfc.103.1).
       # Pinned assertion count; see hosts/devbox/test-em-stack-monitor.sh.
@@ -3131,6 +3165,7 @@
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
         ./hosts/devbox/em-ci.nix
+        ./hosts/devbox/em-alerts.nix
         ./hosts/devbox/em-ci-monitor.nix
         ./hosts/devbox/em-ci-failover.nix
         ./hosts/devbox/em-stack-monitor.nix

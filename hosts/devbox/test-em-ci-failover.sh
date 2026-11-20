@@ -11,12 +11,12 @@ check() { if eval "$2"; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL
 bash_bin=$(command -v bash)
 bin=$(mktemp)
 trap 'rm -f "$bin"' EXIT
-{ echo "#!$bash_bin"; echo 'set -euo pipefail'; cat "$here/em-ci-failover.sh"; } >"$bin"; chmod +x "$bin"
+{ echo "#!$bash_bin"; echo 'set -euo pipefail'; cat "$here/em-slack.sh" "$here/em-ci-failover.sh"; } >"$bin"; chmod +x "$bin"
 
 setup() { # fresh sandbox per case
   S=$(mktemp -d); export STATE_DIRECTORY=$S/state CREDENTIALS_DIRECTORY=$S/cred
   mkdir -p "$STATE_DIRECTORY" "$CREDENTIALS_DIRECTORY"
-  echo tok >"$CREDENTIALS_DIRECTORY/gh_token"; echo bot >"$CREDENTIALS_DIRECTORY/tg_bot_token"; echo 1 >"$CREDENTIALS_DIRECTORY/tg_chat_id"
+  echo tok >"$CREDENTIALS_DIRECTORY/gh_token"; echo https://hooks.slack.com/services/T0/B0/x >"$CREDENTIALS_DIRECTORY/slack_webhook"
   export EM_CI_REPO=o/r EM_CI_PRIMARY_PREFIX=gamebox- EM_CI_FALLBACK_RUNNERS="devbox-em-ci-1 devbox-em-ci-2" \
          EM_CI_LABEL=em-ci EM_CI_TICKS=3 EM_CI_ERROR_ALERT=10 EM_CI_PRIMARY_OFFLINE_ALERT_H=6 EM_CI_NOW=1000000 \
          EM_CI_OVERFLOW_TICKS=2 EM_CI_OVERFLOW_MIN_MEM_GB=14 EM_CI_MEMINFO=$S/meminfo
@@ -29,9 +29,9 @@ setup() { # fresh sandbox per case
 [ -e "$S/write_down" ] && [ "\$1" != GET ] && exit 22
 case "\$1" in GET) cat "$S/runners.json" ;; *) echo "\$*" >>"$S/writes" ;; esac
 EOF
-  # Telegram stub fails (sends nothing) while $S/tg_down exists.
+  # Slack stub fails (sends nothing) while $S/tg_down exists.
   printf '#!%s\n[ -e "%s/tg_down" ] && exit 7\necho "$1" >>"%s/tg"\n' "$bash_bin" "$S" "$S" >"$S/tgs"
-  chmod +x "$S/gh" "$S/tgs"; export EM_CI_GH_API_STUB=$S/gh EM_CI_TG_STUB=$S/tgs
+  chmod +x "$S/gh" "$S/tgs"; export EM_CI_GH_API_STUB=$S/gh EM_CI_SLACK_STUB=$S/tgs
 }
 runners() { # $1: gamebox status, $2: devbox labels json array (e.g. '["em-ci"]' or '[]'), [$3: gamebox busy]
   jq -n --arg g "$1" --argjson d "$2" --argjson b "${3:-false}" '{runners:[
@@ -47,7 +47,7 @@ setup; runners online '["em-ci"]'; tick
 check "initial desired present" '[ "$(cat $STATE_DIRECTORY/desired)" = present ]'
 check "no writes when no drift" '[ -z "$(writes)" ]'
 
-# 2. Online for 3 ticks -> desired absent -> DELETE on both devbox runners, one Telegram.
+# 2. Online for 3 ticks -> desired absent -> DELETE on both devbox runners, one Slack message.
 setup; runners online '["em-ci"]'; tick; tick; tick
 check "absent after 3 online" '[ "$(cat $STATE_DIRECTORY/desired)" = absent ]'
 check "deleted label on runner 11" 'grep -q "DELETE /repos/o/r/actions/runners/11/labels/em-ci" <<<"$(writes)"'
@@ -130,7 +130,7 @@ tick
 check "overflow adds label on 11" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
 check "overflow adds label on 12" 'grep -q "POST /repos/o/r/actions/runners/12/labels" <<<"$(writes)"'
 check "failover state stays absent in overflow" '[ "$(cat $STATE_DIRECTORY/desired)" = absent ]'
-check "overflow sends no Telegram" '[ ! -s "$S/tg" ]'
+check "overflow sends no Slack message" '[ ! -s "$S/tg" ]'
 : >"$S/writes"; runners online '["em-ci"]' true; tick
 check "no writes while overflow holds" '[ -z "$(writes)" ]'
 runners online '["em-ci"]' false; tick; tick
@@ -164,6 +164,15 @@ echo "MemAvailable:   20000000 kB" >"$S/meminfo"; tick
 check "overflow resumes when memory is back" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
 setup; echo "MemAvailable:   8000000 kB" >"$S/meminfo"; runners offline '[]'; tick
 check "failover ignores the memory guard" 'grep -q "POST /repos/o/r/actions/runners/11/labels" <<<"$(writes)"'
+
+# 19. Without the stub, an alert goes through em-slack.sh's slack_send (fake curl).
+setup; unset EM_CI_SLACK_STUB; export EM_SLACK_OWNER_ID=U0OWNER1
+mkdir -p "$S/bin"; printf '#!%s\nprintf "%%s\\n" "$*" >>"%s/curl.args"\ncat >>"%s/curl.in"\n' "$bash_bin" "$S" "$S" >"$S/bin/curl"
+chmod +x "$S/bin/curl"; touch "$S/api_down"
+for _ in 1 2 3 4 5 6 7 8 9 10; do PATH="$S/bin:$PATH" tick; done
+check "real path: the alert reaches the webhook via slack_send" \
+  'grep -qx "url = \"https://hooks.slack.com/services/T0/B0/x\"" "$S/curl.in" && grep -qF "\"text\":\"em-ci failover (devbox): cannot reach the GitHub API" "$S/curl.args"'
+unset EM_SLACK_OWNER_ID
 
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"
