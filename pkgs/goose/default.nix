@@ -95,6 +95,13 @@
 #      rewriting the system prompt, which invalidated the provider's prompt
 #      cache from the first token on every later turn. Delivered hints are
 #      re-queued if compaction or another history replacement drops them.
+#  21. session/prompt accepts _meta.goose.messageId and stores the user message
+#      under it; _goose/unstable/session/conversation/truncate_from_message
+#      {sessionId, messageId} -> {found} deletes that message and everything
+#      after it (row boundary, no same-second hazard), refused while a run or
+#      live voice is active, and clears the session's stale context usage.
+#      Advertised as agentCapabilities._meta.goose.truncateFromMessage. honkd
+#      uses it for /undo in honk chat.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -124,6 +131,8 @@
 # (2026-11-16) adds patch 19 (johnnymo87/goose#12); no schema change.
 # patched-1.54.0.14 (2026-11-17) adds patch 20 (johnnymo87/goose#13); no
 # schema change.
+# patched-1.54.0.15 (2026-11-20) adds patch 21 (johnnymo87/goose#14); no
+# schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -136,8 +145,8 @@
 }:
 
 let
-  version = "1.54.0-patched.14";
-  tag = "patched-1.54.0.14";
+  version = "1.54.0-patched.15";
+  tag = "patched-1.54.0.15";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -149,11 +158,11 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-svYKd0Kg8Dyc6jyXCorDe3YzxedeaUuh5KApsAgbrFQ=";
+      hash = "sha256-YifQj3xYe56KQicb/vyAvo7+rFpg6/gCdnNIC0eaMYw=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-eVeDa/rYcgjY2N7RhVsLZNwkYs6AteFpxCWX6X6HcK0=";
+      hash = "sha256-Bwkat3rT+Oo0whw5Qwsn0LlKe7EfkZxAkDa4cauj/9M=";
     };
   };
 
