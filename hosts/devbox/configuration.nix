@@ -417,7 +417,9 @@ in
         # Telegram id when Telegram is deleted (pigeon-4ogz.13).
         "PIGEON_PULL_ALLOWED_USER_IDS=8248645256,U0CKTGLSULR"
         # His devbox-workspace Slack user id (not a secret). The direct-fallback
-        # alarm prefixes <@id> so the post notifies him; see the webhook below.
+        # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
+        # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
+        # PR #231). Adding that line later turns the alarm mention on.
         "PIGEON_SLACK_OWNER_USER_ID=U0CKTGLSULR"
         # workstation-debug: widen the heartbeat-staleness window before a serve
         # is flagged "dead". opencode serve is single-threaded; a CPU-heavy turn
