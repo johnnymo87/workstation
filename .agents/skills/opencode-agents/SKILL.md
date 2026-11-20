@@ -166,7 +166,8 @@ A `permission:` deny is **not** a substitute — the breakage is in the tool
 *declaration* sent to the model, which happens before any permission check.
 This is deliberately a denylist of the two known-bad servers, not a blanket MCP
 ban: atlassian, slack, notion, rollbar, devcycle, playwright and chrome-devtools
-were all tested against Gemini and pass.
+were all tested against Gemini and pass. (The playwright and chrome-devtools
+servers have since been removed; agents use the CDP port directly.)
 
 **Caching caveat.** Agent definitions are memoized per **directory** in
 opencode's `InstanceState` (`packages/opencode/src/agent/agent.ts`), so a
