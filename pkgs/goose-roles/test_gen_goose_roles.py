@@ -45,7 +45,7 @@ class GenTest(unittest.TestCase):
     def test_read_only_role(self):
         r = g.build_role("oracle", RO, **KW)
         self.assertEqual(r["settings"], {"goose_provider": "gcp_vertex_ai", "goose_model": "claude-opus-5-5",
-                                         "max_turns": 80})
+                                         "max_turns": 80, "thinking_effort": "high"})
         self.assertEqual(r["description"], "Read-only advisor — architecture")
         exts = {e["name"]: e for e in r["extensions"]}
         self.assertEqual(set(exts), {"developer", "analyze", "skills", "ro-shell"})
@@ -68,6 +68,11 @@ class GenTest(unittest.TestCase):
         self.assertEqual(g.build_role("implementer", RW, **KW)["settings"]["max_turns"], 250)
         for src in (RO, EXAMPLES):
             self.assertEqual(g.build_role("x", src, **KW)["settings"]["max_turns"], 80)
+
+    def test_every_role_thinks_high(self):
+        # A medium worker lead must not drag its roles down (workstation-6w7i.20).
+        for src in (RO, RW, EXAMPLES):
+            self.assertEqual(g.build_role("x", src, **KW)["settings"]["thinking_effort"], "high")
 
     def test_no_role_gets_summon(self):
         for src in (RO, RW, EXAMPLES):
@@ -120,6 +125,7 @@ class GenTest(unittest.TestCase):
             ro = "ro-shell" in [e["name"] for e in r["extensions"]]
             self.assertEqual(ro, role != "implementer", role)
             self.assertEqual(r["settings"]["max_turns"], 80 if ro else 250, role)
+            self.assertEqual(r["settings"]["thinking_effort"], "high", role)
         self.assertTrue(os.path.isfile(os.path.join(out, "unscoped.yaml")))
 
     def test_unreachable_provider_rejected(self):
