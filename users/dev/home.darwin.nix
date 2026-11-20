@@ -485,10 +485,18 @@ lib.mkIf isDarwin {
               exit 1
             fi
             export GCP_PROJECT_ID
+            # Tool shells: the same two Keychain reads the opencode serves make.
+            export GOOGLE_CLOUD_PROJECT="$GCP_PROJECT_ID"
+            GH_TOKEN_VAL="$($SEC find-generic-password -s github-api-token -w 2>/dev/null || true)"
+            [ -n "$GH_TOKEN_VAL" ] && export GH_TOKEN="$GH_TOKEN_VAL"
+            unset GH_TOKEN_VAL
 
-            # Claude: cfp when it has a Max pool to fail over to (it does not run
-            # otherwise; see the claude-failover-proxy agent). Read at start only.
-            if ${localPkgs.teamclaude}/bin/teamclaude-seeded; then
+            # Claude: cfp, under the same two conditions its own wrapper starts on
+            # (a seeded Max pool and a proxy apiKey); otherwise straight to Vertex.
+            # Read at start only: this Mac has no nightly restart, so after seeding
+            # or un-seeding teamclaude, kickstart goose-serve.
+            if ${localPkgs.teamclaude}/bin/teamclaude-seeded \
+              && [ -n "$(${pkgs.jq}/bin/jq -r '.proxy.apiKey // empty' "$TEAMCLAUDE_CONFIG" 2>/dev/null || true)" ]; then
               export GCP_VERTEX_HOST=http://127.0.0.1:8789
             fi
 
@@ -531,6 +539,9 @@ lib.mkIf isDarwin {
           EDITOR = ":";
           GIT_PAGER = "cat";
           GOOGLE_CLOUD_LOCATION = "global";
+          # Pinned like the cfp and teamclaude agents, so the cfp gate above
+          # reads the same file they do.
+          TEAMCLAUDE_CONFIG = "${config.home.homeDirectory}/.config/teamclaude.json";
           PATH = lib.concatStringsSep ":" [
             "${config.home.homeDirectory}/.nix-profile/bin"
             "/run/current-system/sw/bin"
@@ -566,6 +577,10 @@ lib.mkIf isDarwin {
     #
     # RESTARTS: as for goose-serve, a honk bump (flake input) changes this plist
     # and restarts honkd on `home-switch`, dropping attached streams.
+    #
+    # ROTATING pigeon-goose-acp-token: restart goose-serve, then honkd, then
+    # pigeon-daemon (each reads it only at start), e.g.
+    #   launchctl kickstart -k gui/$(id -u)/org.nix-community.home.goose-serve
     honkd = {
       enable = true;
       config = {
@@ -587,6 +602,7 @@ lib.mkIf isDarwin {
             done
             unset SECRET
             exec ${honkPkg}/bin/honkd \
+              --state-dir "$state" \
               --listen 127.0.0.1:4280 \
               --models-file ${import ./honk-models.nix { inherit pkgs; }} \
               --upstream http://127.0.0.1:4080/acp \
@@ -612,10 +628,12 @@ lib.mkIf isDarwin {
           ];
         };
         RunAtLoad = true;
-        # Exit 0 (no Keychain secret) stays down; anything else (goose not up
-        # yet at login) is retried, at most every 10s.
-        KeepAlive = { SuccessfulExit = false; };
-        ThrottleInterval = 10;
+        # Always respawn, at most every 30s: honkd exits when goose is not up
+        # yet (login), and exits 0 on SIGTERM, so SuccessfulExit=false could
+        # leave it down for good while pigeon still offers goose. Without a
+        # Keychain secret this costs one cheap exit per 30s.
+        KeepAlive = true;
+        ThrottleInterval = 30;
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/honkd.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/honkd.err.log";
       };
