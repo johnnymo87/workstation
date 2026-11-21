@@ -34,7 +34,7 @@ rec {
   # DM5-3 pool sizing; DM5-4 numbering (base 4096 = serve-0).
   portsByHost = {
     cloudbox = [ 4096 4097 4098 4099 ]; # K=4 (14G/serve, 32G opencode-serve.slice aggregate)
-    devbox = [ 4096 4097 ]; # K=2 (10G cap -> ~4.5G/serve)
+    devbox = [ 4096 4097 ]; # K=2 (MemoryMax=8G/serve, users/dev/home.devbox.nix; a third serve was weighed and declined there 2026-11-20)
     darwin = [ 4096 4097 ]; # K=2
   };
 
