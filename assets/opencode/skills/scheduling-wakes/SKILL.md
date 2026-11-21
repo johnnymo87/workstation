@@ -89,10 +89,10 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
   wait on him is not a registry wait: end the turn saying what you need from him.
 - **Who gets the wake.** A worker registers without `--program`: the wake goes
   to its root session, or, if that session is gone, to its program's
-  coordinator, then Telegram. A program coordinator registers with
+  coordinator, then the human's chat. A program coordinator registers with
   `--program <tag>`. A worker does not pass `--program` to hand a wait to its
   coordinator; if the coordinator should own it, tell the coordinator.
-- No deadline by default. `--deadline +3d` sends the human a Telegram line when
+- No deadline by default. `--deadline +3d` posts a line in the human's chat when
   it passes and leaves the wait open.
 - **cloudbox only.** On devbox and macOS `agent-wait` exits 2; use
   `swarm_schedule` there.

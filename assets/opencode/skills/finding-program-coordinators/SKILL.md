@@ -109,7 +109,7 @@ mailbox. Every coordinator is registered there under the label
 
 For another machine's program it asks this host's pigeon daemon
 (`GET /swarm/remote-sessions`, whose `coordinators` are the sessions bound to
-the `stallwatch:<tag>` Telegram topics on other machines), checks the program
+the `stallwatch:<tag>` chat channels on other machines), checks the program
 is enabled and in tools mode in this checkout's `programs.toml`, and checks
 what the relay would do with a send to that machine. It cannot see the other
 machine's `state.db`, so a **paused** program's coordinator on another machine
@@ -136,8 +136,8 @@ the tag.
   mail into a coordinator's goose session as its own turn the moment you send
   it, the same way it pushes into an opencode session. That holds whether the
   program's heartbeat is on or off. If the coordinator is mid-turn, the message
-  queues behind that turn. Its answer is also posted in the human's Telegram
-  topic for that program, so the human sees the exchange without you reporting
+  queues behind that turn. Its answer is also posted in the human's chat
+  channel for that program, so the human sees the exchange without you reporting
   it. Sending is handing off: no separate message to the human, just one line
   in your end-of-turn report saying which coordinator you messaged.
 - **Write it so a stranger can act on it.** The coordinator has not seen your

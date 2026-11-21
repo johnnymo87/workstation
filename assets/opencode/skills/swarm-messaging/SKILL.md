@@ -104,7 +104,7 @@ The human runs stall-watch, which keeps one **program coordinator** per program
 of work on each machine that runs it (cloudbox, devbox). Each is a goose session
 with a `gse_` id, keyed by the program's session-tags tag. It watches the
 program's workers, answers for the human where he would want it to, starts the
-workers he asks for, and talks with him in that program's Telegram topic. When
+workers he asks for, and talks with him in that program's chat channel. When
 something you found belongs to another program, its coordinator is the right
 recipient: look it up with `finding-program-coordinators`, never from
 bead notes. The lookup works from any machine, and a coordinator on another
@@ -137,7 +137,7 @@ be glad not to be asked) send it a swarm message from `stall-watch` with kind
 It only
 accepts the recipient's own recommendation (never invents or overrides), holds
 no shared context, assigns no work of its own, and every answer is recorded and shown to
-the human (who usually also sees a notice in that session's Telegram thread and
+the human (who usually also sees a notice in that session's chat channel and
 can countermand).
 
 What a worker should understand:
@@ -418,7 +418,7 @@ either way, and it reports back to the launching `ses_` or `gse_` id.
   nothing about your conversation. Say what to do, what not to touch, and to
   report back to you with `swarm_send` (pigeon also prepends a
   `[Remote launch requested by <your id> on <machine>; report back …]` line).
-  **Put no secrets in it**: its first 300 characters are posted to Telegram, and
+  **Put no secrets in it**: its first 300 characters are posted to the chat, and
   the whole prompt is stored by pigeon on both machines and in its worker.
 - **If you were launched, do not `swarm_launch` further** unless your prompt
   says to; report the need back instead. Nothing enforces this (pigeon has no
@@ -437,7 +437,7 @@ either way, and it reports back to the launching `ses_` or `gse_` id.
   pigeon daemon, but must restart the pool last, from a delayed detached job,
   after it has reported. See pigeon's `cross-device-deployment` skill.
 - **Every launch is visible.** The target posts a `🚀 Remote launch from …`
-  notice to Telegram, and the launched session gets its own topic. There is no
+  notice to the chat, and the launched session gets its own channel. There is no
   per-launch approval, so the human sees launches only after they start; launch
   only what the human would expect you to.
 

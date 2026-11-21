@@ -153,7 +153,7 @@ When the work is done:
 curl -sf -X DELETE http://127.0.0.1:4700/session/ses_<worker-id>
 # ... etc (or against raw port :4096 with -u "opencode:$(cat /run/secrets/opencode_server_password)")
 
-# Or from Telegram
+# Or from chat
 /kill <session-id>
 ```
 
