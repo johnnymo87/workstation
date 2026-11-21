@@ -52,7 +52,7 @@ server's tools are usable from your next step (no need to end the turn).
 - **Enabling servers:** call `swarm__mcp_enable {names: ["slack-ro"]}`. A server marked `!`
   in `mcp_list` can write or act: name it with a trailing `!` (e.g. `names: ["slack!"]`) and
   give `reason`, one sentence saying what you will do with it. The change and reason are logged
-  by honkd, and shown in honk chat if someone is attached (Telegram and unattended coordinators
+  by honkd, and shown in honk chat if someone is attached (chat and unattended coordinators
   show nothing).
 - **Disabling servers:** call `swarm__mcp_disable {names: ["slack-ro"]}` when done. Disabling
   `swarm` itself is refused because it would remove these tools.
@@ -92,8 +92,8 @@ Be unambiguous:
   (or started while honkd was unreachable). Ask the human for `/mcp disable swarm` then
   `/mcp enable swarm` in honk chat.
 - **No swarm tools at all:** ask the human for `/mcp enable swarm`.
-- **Sessions launched from Telegram:** the human has to attach with `honk chat <session>` to run
-  these (Telegram's `/mcp` doesn't cover goose yet).
+- **Sessions launched from chat:** the human has to attach with `honk chat <session>` to run
+  these (pigeon's `/mcp` doesn't cover goose yet).
 - **Hosts without honkd (macOS):** the server can't be turned on for this session.
 - **A server missing from `mcp_list`:** each host offers only the servers in its own
   `opencode.json`, so work-only servers (slack, atlassian, ...) are absent on devbox. That is
