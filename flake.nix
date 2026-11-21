@@ -745,7 +745,7 @@
         checks = {
           "owner id env" = envVal "PIGEON_SLACK_OWNER_USER_ID" == "U0CKTGLSULR";
           "allowlist has Slack owner" = builtins.elem "U0CKTGLSULR" allowed;
-          "allowlist keeps Telegram owner" = builtins.elem "8248645256" allowed;
+          "allowlist has no Telegram id (pigeon-4ogz.13)" = !(builtins.elem "8248645256" allowed);
           "webhook not in Environment" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_ALARM_WEBHOOK_URL=" e) envList);
           "webhook sops secret declared" = secret != null;
           "webhook secret owned by dev" = secret != null && secret.owner == "dev" && secret.mode == "0400";
@@ -764,7 +764,10 @@
           if ${g} -q 'hooks\.slack\.com' "$s"; then
             echo "GATE FAILURE: a webhook URL is inlined in the start script" >&2; exit 1
           fi
-          echo "devbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 3 script checks passed" > $out
+          if ${g} -q 'TELEGRAM_' "$s"; then
+            echo "GATE FAILURE: the start script still exports Telegram env (pigeon-4ogz.13)" >&2; exit 1
+          fi
+          echo "devbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 4 script checks passed" > $out
         '';
 
       # cloudbox pigeon-daemon Slack wiring (pigeon-4ogz.10, chat-transport
@@ -790,7 +793,7 @@
         checks = {
           "owner id env" = envVal "PIGEON_SLACK_OWNER_USER_ID" == "U0CKLESTD45";
           "allowlist has Slack owner" = builtins.elem "U0CKLESTD45" allowed;
-          "allowlist keeps Telegram owner" = builtins.elem "8248645256" allowed;
+          "allowlist has no Telegram id (pigeon-4ogz.13)" = !(builtins.elem "8248645256" allowed);
           "no pushes (NOTIFY_OWNER unset)" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_NOTIFY_OWNER=" e) envList);
           "webhook not in Environment" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_ALARM_WEBHOOK_URL=" e) envList);
           "webhook sops secret declared" = secret != null;
@@ -810,7 +813,10 @@
           if ${g} -q 'hooks\.slack\.com' "$s"; then
             echo "GATE FAILURE: a webhook URL is inlined in the start script" >&2; exit 1
           fi
-          echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 3 script checks passed" > $out
+          if ${g} -q 'TELEGRAM_' "$s"; then
+            echo "GATE FAILURE: the start script still exports Telegram env (pigeon-4ogz.13)" >&2; exit 1
+          fi
+          echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 4 script checks passed" > $out
         '';
 
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
@@ -2545,7 +2551,7 @@
         checks = {
           "owner id env" = (env.PIGEON_SLACK_OWNER_USER_ID or null) == "U0CKKHX34MR";
           "allowlist has Slack owner" = builtins.elem "U0CKKHX34MR" allowed;
-          "allowlist keeps Telegram owner" = builtins.elem "8248645256" allowed;
+          "allowlist has no Telegram id (pigeon-4ogz.13)" = !(builtins.elem "8248645256" allowed);
           "no pushes (NOTIFY_OWNER unset)" = !(env ? PIGEON_SLACK_NOTIFY_OWNER);
           "webhook not in EnvironmentVariables" = !(env ? PIGEON_SLACK_ALARM_WEBHOOK_URL);
           "script reads webhook from Keychain" =
@@ -2554,6 +2560,7 @@
             lib.hasInfix ''if [ -n "$w" ]; then'' script
             && lib.hasInfix ''export PIGEON_SLACK_ALARM_WEBHOOK_URL="$w"'' script;
           "no webhook URL inlined" = !(lib.hasInfix "hooks.slack.com" script);
+          "no Telegram env (pigeon-4ogz.13)" = !(lib.hasInfix "TELEGRAM_" script);
         };
         failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
       in

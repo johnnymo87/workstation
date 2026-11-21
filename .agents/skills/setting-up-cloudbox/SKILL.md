@@ -120,8 +120,6 @@ Then create `secrets/cloudbox.yaml` with the same values for:
 - `cloudflared_tunnel_token` — same tunnel (pigeon uses it)
 - `cloudflare_api_token` — same API token
 - `ccr_api_key` — pigeon daemon secret
-- `telegram_bot_token` — pigeon daemon secret
-- `telegram_chat_id` — pigeon daemon secret
 
 To set values in the encrypted file from the cloudbox (where the age key lives):
 

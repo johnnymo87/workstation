@@ -170,16 +170,6 @@ in
         group = "dev";
         mode = "0400";
       };
-      telegram_bot_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-      telegram_chat_id = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
       # Incoming-webhook URL for #alerts in the devbox Slack workspace
       # (pigeon-4ogz.7/.15). Only the daemon start script reads it, as
       # PIGEON_SLACK_ALARM_WEBHOOK_URL: the direct-fallback alarm for when the
@@ -411,11 +401,9 @@ in
         # Goose ACP server endpoint for pigeon goose runner (points at honkd proxy)
         "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
         # Who may leave a message for a pull-mode session or prompt a topic-bound
-        # goose session: the owner's Telegram user id, plus his user id in the
-        # devbox Slack workspace (pigeon-4ogz.15), which must be here BEFORE devbox
-        # flips to Slack or every bound coordinator refuses his replies. Drop the
-        # Telegram id when Telegram is deleted (pigeon-4ogz.13).
-        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256,U0CKTGLSULR"
+        # goose session: the owner's user id in the devbox Slack workspace
+        # (pigeon-4ogz.15). The Telegram id went with Telegram (pigeon-4ogz.13).
+        "PIGEON_PULL_ALLOWED_USER_IDS=U0CKTGLSULR"
         # His devbox-workspace Slack user id (not a secret). The direct-fallback
         # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
         # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
@@ -447,7 +435,7 @@ in
         # so listing a machine trusts it with a shell here). SEND=1: agents here may
         # launch on machines that list this one. Receiving also needs the relay SEND
         # above, since the launched session reports back by swarm. Every launch posts
-        # a notice to Telegram General from this machine. Rollback: delete both lines
+        # a notice to #alerts from this machine. Rollback: delete both lines
         # and rebuild; launches queued for this machine return to their requesters
         # as never_collected.
         "PIGEON_REMOTE_LAUNCH_FROM=cloudbox,macbook"
@@ -464,8 +452,6 @@ in
         else
           export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         fi
-        export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
-        export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
         # Slack direct-fallback alarm (pigeon-4ogz.15): #alerts incoming webhook.
         # Degrade, never die: a missing secret leaves the daemon on whatever
         # other alarm path it has, instead of `set -e` killing it.

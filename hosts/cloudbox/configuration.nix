@@ -304,16 +304,6 @@ in
         group = "dev";
         mode = "0400";
       };
-      telegram_bot_token = {
-        owner = "dev";
-        group = "dev";
-        mode = "0400";
-      };
-        telegram_chat_id = {
-          owner = "dev";
-          group = "dev";
-          mode = "0400";
-        };
         # dx8p Stage 1: the pigeon bearer token. owner=dev is LOAD-BEARING, not
         # boilerplate -- sops-nix defaults to root:0400, but pigeon, the four
         # serves, and the front door all run as dev and read this file at CALL
@@ -1020,15 +1010,12 @@ in
         # Who may leave a message for a pull-mode session (a goose lane, which
         # cannot be pushed to; pigeon #165). Empty means nobody, and such a
         # session answers "not reachable". It also gates who may prompt a
-        # topic-bound goose session. The ids are the owner's Telegram user id
-        # (the same id as the private chat in the worker's ALLOWED_CHAT_IDS) and
-        # his user id in the cloudbox Slack workspace (pigeon-4ogz.10), which
-        # must be here BEFORE cloudbox flips to Slack or every bound coordinator
-        # refuses his replies. Drop the Telegram id when Telegram is deleted
-        # (pigeon-4ogz.13).
+        # topic-bound goose session. The id is the owner's user id in the
+        # cloudbox Slack workspace (pigeon-4ogz.10); the Telegram id went with
+        # Telegram (pigeon-4ogz.13).
         # It is half of a two-part switch: the lane only reads banked messages
         # when its own flag file exists, so set and unset the two together.
-        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256,U0CKLESTD45"
+        "PIGEON_PULL_ALLOWED_USER_IDS=U0CKLESTD45"
         # His cloudbox-workspace Slack user id (not a secret). The direct-fallback
         # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
         # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
@@ -1107,7 +1094,6 @@ in
         else
           export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         fi
-        export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
         # Slack direct-fallback alarm (pigeon-4ogz.10): #alerts incoming webhook.
         # Degrade, never die: a missing secret leaves the daemon on whatever
         # other alarm path it has, instead of `set -e` killing it.
@@ -1146,7 +1132,6 @@ in
           echo "pigeon-daemon: /run/secrets/pigeon_goose_acp_token missing or unreadable; disabling the goose backend" >&2
           unset PIGEON_GOOSE_ACP_URL
         fi
-          export TELEGRAM_CHAT_ID="$(cat /run/secrets/telegram_chat_id)"
           # dx8p Stage 1: ARMS pigeon's auth. Until this line exists, checkAuth's
           # falsy-token branch keeps every route anonymous (back-compat). Once it
           # exists, EVERY route except GET /health requires a bearer.
