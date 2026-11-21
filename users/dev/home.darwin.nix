@@ -647,10 +647,11 @@ lib.mkIf isDarwin {
           ''
             SEC="/usr/bin/security"
             export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
-            # Prefer this machine's own worker key (pigeon-k0qn.8). Rollback
-            # without a rebuild: touch ~/.config/pigeon/use-shared-worker-key
-            # and restart the daemon (only works while macbook is not in the
-            # worker's SHARED_KEY_REFUSED_MACHINES).
+            # This machine's own worker key (pigeon-k0qn.8). The
+            # use-shared-worker-key file switches to the shared key, which is
+            # DEAD as a rollback: macbook is in the worker's
+            # SHARED_KEY_REFUSED_MACHINES, and since Telegram's deletion
+            # (pigeon-4ogz.13) the shared key cannot post anywhere either.
             k="$($SEC find-generic-password -s pigeon-worker-key -w 2>/dev/null || true)"
             if [ -n "$k" ] && [ ! -e "$HOME/.config/pigeon/use-shared-worker-key" ]; then
               export CCR_API_KEY="$k"

@@ -746,6 +746,7 @@
           "owner id env" = envVal "PIGEON_SLACK_OWNER_USER_ID" == "U0CKTGLSULR";
           "allowlist has Slack owner" = builtins.elem "U0CKTGLSULR" allowed;
           "allowlist has no Telegram id (pigeon-4ogz.13)" = !(builtins.elem "8248645256" allowed);
+          "no Telegram sops secret (pigeon-4ogz.13)" = !(cfg.sops.secrets ? telegram_bot_token || cfg.sops.secrets ? telegram_chat_id);
           "webhook not in Environment" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_ALARM_WEBHOOK_URL=" e) envList);
           "webhook sops secret declared" = secret != null;
           "webhook secret owned by dev" = secret != null && secret.owner == "dev" && secret.mode == "0400";
@@ -794,6 +795,7 @@
           "owner id env" = envVal "PIGEON_SLACK_OWNER_USER_ID" == "U0CKLESTD45";
           "allowlist has Slack owner" = builtins.elem "U0CKLESTD45" allowed;
           "allowlist has no Telegram id (pigeon-4ogz.13)" = !(builtins.elem "8248645256" allowed);
+          "no Telegram sops secret (pigeon-4ogz.13)" = !(cfg.sops.secrets ? telegram_bot_token || cfg.sops.secrets ? telegram_chat_id);
           "no pushes (NOTIFY_OWNER unset)" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_NOTIFY_OWNER=" e) envList);
           "webhook not in Environment" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_ALARM_WEBHOOK_URL=" e) envList);
           "webhook sops secret declared" = secret != null;

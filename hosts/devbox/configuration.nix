@@ -444,9 +444,10 @@ in
       ExecStart = "${pkgs.writeShellScript "pigeon-daemon-start" ''
         set -euo pipefail
         export CCR_WORKER_URL="$(cat /run/secrets/ccr_worker_url)"
-        # Prefer this machine's own worker key. Rollback without a rebuild:
-        # touch ~/.config/pigeon/use-shared-worker-key and restart the daemon
-        # (only works while this machine is not in SHARED_KEY_REFUSED_MACHINES).
+        # This machine's own worker key. The use-shared-worker-key file switches to
+        # the shared key, which is DEAD as a rollback: every machine is in the
+        # worker's SHARED_KEY_REFUSED_MACHINES, and since Telegram's deletion
+        # (pigeon-4ogz.13) the shared key cannot post anywhere either.
         if [ -s /run/secrets/pigeon_worker_key ] && [ ! -e "$HOME/.config/pigeon/use-shared-worker-key" ]; then
           export CCR_API_KEY="$(cat /run/secrets/pigeon_worker_key)"
         else
