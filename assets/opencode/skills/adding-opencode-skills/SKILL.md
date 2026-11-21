@@ -150,7 +150,7 @@ Generic skill-writing discipline lives in `superpowers:writing-skills` (deployed
 
 ### 6. Executable bit is opt-in
 
-Default `home.file."path".source = ...` deploys read-only and **not executable**. Helper scripts need the `executable = true;` attrset form shown in Workflow B step 3. Existing examples: `notifyTelegramScript`, `atlassianExtras`'s `confluence-to-md.sh`.
+Default `home.file."path".source = ...` deploys read-only and **not executable**. Helper scripts need the `executable = true;` attrset form shown in Workflow B step 3. Existing example: `atlassianExtras`'s `confluence-to-md.sh`.
 
 ### 7. New SKILL.md left git-untracked → dangling symlink, "failed to load skill"
 

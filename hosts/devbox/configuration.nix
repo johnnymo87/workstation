@@ -297,9 +297,9 @@ in
   # Cloudflare Tunnel (dashboard-managed with token).
   #
   # NOT "for CCR webhooks", which is what this said until 2026-09-12 and which
-  # was actively misleading: the CCR webhook architecture is dead. Telegram
-  # posts to the Worker (`ccr-router.<...>.workers.dev/webhook/telegram/...`),
-  # the Worker only calls api.telegram.org, and this box POLLS the Worker
+  # was actively misleading: the CCR webhook architecture is dead. Slack
+  # posts to the Worker (`ccr-router.<...>.workers.dev/slack/<machine>/...`),
+  # the Worker is the only caller of the chat API, and this box POLLS the Worker
   # outbound (`pigeon/packages/daemon/src/index.ts:183`). Nothing is pushed in.
   #
   # What the tunnel actually serves is dashboard-managed and invisible to this
@@ -360,7 +360,7 @@ in
   # verbatim. The daemon binds loopback and initiates every connection it
   # makes -- it polls the CCR Worker outbound and never receives a push -- so it
   # does not need the tunnel at all. `requires=` was also actively harmful: a
-  # cloudflared failure would STOP the daemon, coupling the whole Telegram
+  # cloudflared failure would STOP the daemon, coupling the whole chat
   # notification path to a tunnel it does not use.
   #
   # Boot behaviour is unchanged: the pigeon-stack target still `wants` both
@@ -793,7 +793,7 @@ in
   # attribution and liveness, and wakes sessions through pigeon's /swarm/send
   # (PIGEON_DAEMON_URL default, loopback :4731; bearer token read at call time
   # from /run/secrets/pigeon_daemon_auth_token). Alerts go to this box's own
-  # pigeon /alert, i.e. devbox's Telegram.
+  # pigeon /alert, i.e. devbox's Slack #alerts.
   #
   # Runs from a DEDICATED clone, /home/dev/projects/lgtm-deploy, not from
   # ~/projects/lgtm, where sessions do lgtm development: a branch checked out

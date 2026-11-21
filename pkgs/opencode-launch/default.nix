@@ -24,7 +24,7 @@ pkgs.writeShellApplication {
   # host's home-manager switch. oc-tags is one pure-Python file, stdlib only.
   # $OC_TAGS_BIN overrides the resolved binary -- an escape hatch for pointing
   # at a checkout or a stub, not something any deployed config sets.
-  # (Note pigeon's Telegram /launch does NOT go through this script -- it calls
+  # (Note pigeon's chat /launch does NOT go through this script -- it calls
   # createSession over HTTP directly, see launch-ingest.ts -- so --tag is not
   # reachable from a phone. Pigeon's own /tag command covers that.)
   runtimeInputs = [ pkgs.curl pkgs.jq pkgs.util-linux pkgs.git pkgs.coreutils oc-tags ];
@@ -89,7 +89,7 @@ pkgs.writeShellApplication {
       #
       # Tell the pigeon daemon "I am about to inject this exact text into this
       # session", so its /mirror route does not echo the launch prompt back into
-      # Telegram as `🧑 <label> <prompt>` -- which reads as though a human typed
+      # the chat as `🧑 <label> <prompt>` -- which reads as though a human typed
       # it. The daemon records sha256(text) in its injected_prompts table and
       # consumes one count the next time an identical user message arrives for
       # that session (pigeon-w36w).
@@ -124,7 +124,7 @@ pkgs.writeShellApplication {
         case "$code" in
           200) ;;
           000|"") ;;
-          *) echo "Note: pigeon launch-prompt record returned HTTP $code; the launch prompt may echo into Telegram" >&2 ;;
+          *) echo "Note: pigeon launch-prompt record returned HTTP $code; the launch prompt may echo into the chat" >&2 ;;
         esac
       }
 

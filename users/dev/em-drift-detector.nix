@@ -24,7 +24,7 @@
 # Alerting for v1 is journald (WARNING on drift, INFO when clean) plus a
 # machine-readable status file at ~/.local/state/em-drift/status.json that a
 # consumer can surface. Escalation to
-# Telegram/pigeon is a deliberate follow-up, not wired here.
+# Chat (pigeon /alert) is a deliberate follow-up, not wired here.
 { config, pkgs, lib, isDevbox, ... }:
 
 lib.mkIf isDevbox {

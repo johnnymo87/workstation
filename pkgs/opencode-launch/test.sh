@@ -502,7 +502,7 @@ if [ -f "$default_nix" ]; then
     printf 'FAIL  source disarms cleanup only on success (launch_ok=1)\n        not found in: %s\n' "$default_nix"; exit 1
   fi
   # pigeon-w36w: the launch prompt must be recorded with the pigeon daemon so
-  # /mirror does not echo it into Telegram as if a human had typed it.
+  # /mirror does not echo it into the chat as if a human had typed it.
   if grep -q 'PIGEON_DAEMON_URL/injected-prompts' "$default_nix"; then
     printf 'PASS  source records the launch prompt with pigeon (w36w)\n'
   else
@@ -551,7 +551,7 @@ if [ -f "$default_nix" ]; then
   fi
   # Best-effort but not mute: a 404/401/400 is a real misconfiguration and must
   # not be swallowed the way a daemon-down 000 legitimately is.
-  if grep -q 'may echo into Telegram' "$default_nix"; then
+  if grep -q 'may echo into the chat' "$default_nix"; then
     printf 'PASS  launch-prompt record warns on unexpected HTTP status (w36w)\n'
   else
     printf 'FAIL  launch-prompt record must warn on unexpected HTTP status (w36w)\n'; exit 1

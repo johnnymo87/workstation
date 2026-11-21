@@ -199,7 +199,7 @@ alerted && bad "$QUIET_PCT% is quiet (this host's worst normal reading)" \
   "on cloudbox 84% was the highest normal pre-nightly peak in the measured series; on devbox 84% is
    the post-GC BASELINE. Either way, alerting at the host's ordinary level is the daily-wallpaper
    failure that makes an alarm worthless -- and worse than absent, since it also burns the shared
-   Telegram channel the other canaries use" \
+   chat channel (#alerts) the other canaries use" \
   || ok "$QUIET_PCT% is quiet (this host's worst normal reading)"
 
 run_at "$WARN_PCT" || true

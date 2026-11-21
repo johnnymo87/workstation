@@ -235,7 +235,7 @@ elif [ "$sig" != "$prev_sig" ] || [ $(( now - prev_at )) -ge $(( EM_CI_REMIND_H 
   head="em-ci (CI runners): problem"
   [ "$sig" = "$prev_sig" ] && head="em-ci (CI runners): STILL failing"
   body=$(printf -- '- %s\n' "${problems[@]}")
-  # Keep under 4096 characters (Telegram's limit, kept for Slack: an alert
+  # Keep under 4096 characters (a 4096 cap kept for Slack: an alert
   # that long is unreadable on a phone anyway).
   [ "${#body}" -le 3500 ] || body="${body:0:3500}... (truncated; see the Actions tab)"
   msg="$head

@@ -338,7 +338,7 @@ lib.mkIf isCloudbox {
   home.sessionVariables.VITEST_MAX_WORKERS = "2";  # 4-core box, keep 50% free
 
   # `honk chat --new` registers the session it creates with the local pigeon
-  # daemon, which gives it a Telegram topic (honk PR #13, bead honk-9qf.11).
+  # daemon, which gives it a Slack channel (honk PR #13, bead honk-9qf.11).
   # The token file is pigeon's daemon bearer token (sops, readable by dev).
   # Shells opened before a switch don't have these until they are reopened.
   home.sessionVariables.HONK_PIGEON_URL = "http://127.0.0.1:4731";
@@ -1162,7 +1162,7 @@ lib.mkIf isCloudbox {
   #   opencode serve pool instance). reset-workspace DOES bounce goose-serve, and honkd
   #   rides that out by re-initializing its upstream connection with backoff.
   # - --turn-hook-url: report every turn's start and end to pigeon's /goose/turn-event so a
-  #   registered goose session's Telegram topic shows turns from every client (honk chat,
+  #   registered goose session's Slack channel shows turns from every client (honk chat,
   #   coordinator wakes), not only pigeon's own. Loopback only; the token is pigeon's daemon
   #   token (honkd -> pigeon). Requires a pigeon daemon that has the route (pigeon#181).
   # - --mcp-catalog, --mcp-self-grant: honk chat's `/mcp` turns opencode's MCP servers on per
@@ -1416,7 +1416,7 @@ lib.mkIf isCloudbox {
   # happened. A devbox rollout would double-report eternal-machinery against
   # em-drift-detector and needs that overlap resolved first.
   #
-  # Delivery is TELEGRAM, deliberately. The bead asked for the daily morning
+  # Delivery is the chat (pigeon /alert), deliberately. The bead asked for the daily morning
   # recommendation agent, which was deleted on 2026-08-10 (678ae2f); routing to
   # journald alone would inherit workstation-yb4b ("nothing watches failed user
   # units"), and a detector nobody reads is worth about as much as no detector.

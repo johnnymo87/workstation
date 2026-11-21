@@ -13,7 +13,7 @@
 # 6 h, and followed by a "resolved" message when it clears.
 #
 # Dead-man's switch: each pass pings a healthchecks.io check (period 10 m,
-# grace 20 m) whose own integrations (email, and Slack or Telegram as set in
+# grace 20 m) whose own integrations (email and Slack #em-alerts, as set in
 # healthchecks.io) reach the human. The check
 # measures the MONITOR, not runner health: a pass that observed everything and
 # delivered its alerts pings success; one that could not deliver, or exited

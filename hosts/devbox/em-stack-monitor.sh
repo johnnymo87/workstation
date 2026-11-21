@@ -473,7 +473,7 @@ else
     body=""
   fi
   if [ -n "$body" ]; then
-    # Keep under 4096 characters (Telegram's old limit, kept for Slack: an
+    # Keep under 4096 characters (a 4096 cap kept for Slack: an
     # alert that long is unreadable on a phone anyway).
     [ "${#body}" -le 3500 ] || body="${body:0:3500}... (truncated; see the runbook)"
     msg="$body"
