@@ -17,8 +17,6 @@ Secrets are managed with sops-nix using age encryption. They're encrypted in the
 | `cloudflare_api_token` | Wrangler CLI | Exported as `CLOUDFLARE_API_TOKEN` in bash |
 | `claude_personal_oauth_token` | **cloudbox only** as of 2026-09-02. Removed from devbox: nothing consumed it. The old entry claimed the `@ex-machina/opencode-anthropic-auth` plugin did — it does not (zero references to `CLAUDE_CODE_OAUTH_TOKEN` in the shipped dist), and on devbox that plugin runs shape-only with a dummy credential while TeamClaude owns the tokens. | Exported as `CLAUDE_CODE_OAUTH_TOKEN` on cloudbox. `shell-env.ts` still maps it for bash tool calls, but the mapping is guarded on `/run/secrets/<name>` existing, so it is inert on devbox. |
 | `ccr_api_key` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
-| `telegram_bot_token` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
-| `telegram_chat_id` | Pigeon daemon | Read by systemd ExecStart from `/run/secrets/` |
 | `typesafe_api_key` | TypeSafe AI (jev decision model) via `typesafe-sdk`. devbox and cloudbox, each in its own `secrets/<host>.yaml` (neither host can encrypt to the other's file). On cloudbox (a work host) data sent is retained under TypeSafe's DPA; ZDR is enterprise-only. | Exported as `TYPESAFE_API_KEY` in bash and by `shell-env.ts` |
 | `dd_pat` | Datadog CLI (dd-cli) + MCP — Personal Access Token (Bearer auth) | Exported as `DD_PAT` in bash |
 

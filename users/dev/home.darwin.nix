@@ -296,8 +296,6 @@ lib.mkIf isDarwin {
 
         secrets=(
           "pigeon-ccr-api-key"
-          "pigeon-telegram-bot-token"
-          "pigeon-telegram-chat-id"
           "pigeon-goose-acp-token"
         )
 
@@ -649,10 +647,11 @@ lib.mkIf isDarwin {
           ''
             SEC="/usr/bin/security"
             export CCR_WORKER_URL="$($SEC find-generic-password -s ccr-worker-url -w)"
-            # Prefer this machine's own worker key (pigeon-k0qn.8). Rollback
-            # without a rebuild: touch ~/.config/pigeon/use-shared-worker-key
-            # and restart the daemon (only works while macbook is not in the
-            # worker's SHARED_KEY_REFUSED_MACHINES).
+            # This machine's own worker key (pigeon-k0qn.8). The
+            # use-shared-worker-key file switches to the shared key, which is
+            # DEAD as a rollback: macbook is in the worker's
+            # SHARED_KEY_REFUSED_MACHINES, and since Telegram's deletion
+            # (pigeon-4ogz.13) the shared key cannot post anywhere either.
             k="$($SEC find-generic-password -s pigeon-worker-key -w 2>/dev/null || true)"
             if [ -n "$k" ] && [ ! -e "$HOME/.config/pigeon/use-shared-worker-key" ]; then
               export CCR_API_KEY="$k"
@@ -660,8 +659,6 @@ lib.mkIf isDarwin {
               export CCR_API_KEY="$($SEC find-generic-password -s pigeon-ccr-api-key -w)"
             fi
             unset k
-            export TELEGRAM_BOT_TOKEN="$($SEC find-generic-password -s pigeon-telegram-bot-token -w)"
-            export TELEGRAM_CHAT_ID="$($SEC find-generic-password -s pigeon-telegram-chat-id -w)"
             export PIGEON_GOOSE_ACP_TOKEN="$($SEC find-generic-password -s pigeon-goose-acp-token -w 2>/dev/null || true)"
             # No token: disable the goose backend rather than half-configure it
             # (pigeon's capability gate keys off the URL alone; as on cloudbox).
@@ -702,12 +699,11 @@ lib.mkIf isDarwin {
           PIGEON_GOOSE_ACP_URL = "ws://127.0.0.1:4280/acp";
           # Who may prompt a topic-bound goose session or leave a message for a
           # pull-mode session (pigeon config.ts pullAllowedUserIds): the owner's
-          # Telegram user id, plus his user id in the pigeon-macbook Slack
-          # workspace (pigeon-4ogz.17), which must be here BEFORE macbook flips to
-          # Slack (pigeon-4ogz.11). Drop the Telegram id when Telegram is deleted
-          # (pigeon-4ogz.13). Empty would mean a bound goose session accepts no
-          # prompts and a pull-mode session banks nothing.
-          PIGEON_PULL_ALLOWED_USER_IDS = "8248645256,U0CKKHX34MR";
+          # user id in the pigeon-macbook Slack workspace (pigeon-4ogz.17); the
+          # Telegram id went with Telegram (pigeon-4ogz.13). Empty would mean a
+          # bound goose session accepts no prompts and a pull-mode session banks
+          # nothing.
+          PIGEON_PULL_ALLOWED_USER_IDS = "U0CKKHX34MR";
           # His pigeon-macbook Slack user id (not a secret). The direct-fallback
           # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
           # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
@@ -744,7 +740,7 @@ lib.mkIf isDarwin {
           # so listing a machine trusts it with a shell here). SEND=1: agents here may
           # launch on machines that list this one. Receiving also needs the relay SEND
           # above, since the launched session reports back by swarm. Every launch posts
-          # a notice to Telegram General from this machine. Rollback: delete both lines
+          # a notice to #alerts from this machine. Rollback: delete both lines
           # and rebuild; launches queued for this machine return to their requesters
           # as never_collected.
           PIGEON_REMOTE_LAUNCH_FROM = "cloudbox,devbox";
