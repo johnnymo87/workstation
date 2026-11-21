@@ -294,6 +294,16 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Incoming-webhook URL for #alerts in the cloudbox Slack workspace
+      # (pigeon-4ogz.10). Only the pigeon-daemon start script reads it, as
+      # PIGEON_SLACK_ALARM_WEBHOOK_URL: the direct-fallback alarm for when the
+      # worker is unreachable. It can post to that one channel and nothing else.
+      # A credential, so it is exported in the start script, never Environment=.
+      pigeon_slack_alarm_webhook = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       telegram_bot_token = {
         owner = "dev";
         group = "dev";
@@ -1009,11 +1019,21 @@ in
         "PIGEON_ALLOWED_PROVIDERS=anthropic,openai,google-vertex,google-vertex-anthropic"
         # Who may leave a message for a pull-mode session (a goose lane, which
         # cannot be pushed to; pigeon #165). Empty means nobody, and such a
-        # session answers "not reachable". This is the owner's Telegram user id
-        # (the same id as the private chat in the worker's ALLOWED_CHAT_IDS).
+        # session answers "not reachable". It also gates who may prompt a
+        # topic-bound goose session. The ids are the owner's Telegram user id
+        # (the same id as the private chat in the worker's ALLOWED_CHAT_IDS) and
+        # his user id in the cloudbox Slack workspace (pigeon-4ogz.10), which
+        # must be here BEFORE cloudbox flips to Slack or every bound coordinator
+        # refuses his replies. Drop the Telegram id when Telegram is deleted
+        # (pigeon-4ogz.13).
         # It is half of a two-part switch: the lane only reads banked messages
         # when its own flag file exists, so set and unset the two together.
-        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256"
+        "PIGEON_PULL_ALLOWED_USER_IDS=8248645256,U0CKLESTD45"
+        # His cloudbox-workspace Slack user id (not a secret). The direct-fallback
+        # alarm prefixes <@id> only when PIGEON_SLACK_NOTIFY_OWNER=1, which is
+        # deliberately NOT set: Jonathan wants no pushes for now (pigeon design
+        # PR #231). Adding that line later turns the alarm mention on.
+        "PIGEON_SLACK_OWNER_USER_ID=U0CKLESTD45"
         # Cross-machine swarm relay (pigeon-k0qn.11). ACCEPT_FROM: machines whose
         # swarm messages this daemon takes from the worker; SEND=1: relay a
         # message whose target is on another machine instead of failing it.
@@ -1088,6 +1108,14 @@ in
           export CCR_API_KEY="$(cat /run/secrets/ccr_api_key)"
         fi
         export TELEGRAM_BOT_TOKEN="$(cat /run/secrets/telegram_bot_token)"
+        # Slack direct-fallback alarm (pigeon-4ogz.10): #alerts incoming webhook.
+        # Degrade, never die: a missing secret leaves the daemon on whatever
+        # other alarm path it has, instead of `set -e` killing it.
+        if [ -s ${config.sops.secrets.pigeon_slack_alarm_webhook.path} ]; then
+          export PIGEON_SLACK_ALARM_WEBHOOK_URL="$(cat ${config.sops.secrets.pigeon_slack_alarm_webhook.path})"
+        else
+          echo "pigeon-daemon: ${config.sops.secrets.pigeon_slack_alarm_webhook.path} missing or empty; no Slack direct-fallback alarm" >&2
+        fi
         # Must match goose-serve's GOOSE_SERVER__SECRET_KEY. Same sops secret,
         # but NOT auto-restarted on rotation -- see pigeon_goose_acp_token
         # above -- so rotating it means restarting both units by hand.

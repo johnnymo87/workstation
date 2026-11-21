@@ -767,6 +767,52 @@
           echo "devbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 3 script checks passed" > $out
         '';
 
+      # cloudbox pigeon-daemon Slack wiring (pigeon-4ogz.10, chat-transport
+      # phase 2), the cloudbox twin of devbox-pigeon-slack-wiring. Must be in
+      # place BEFORE cloudbox flips to Slack: without the Slack owner id in the
+      # allowlist every bound coordinator refuses his replies, and without the
+      # webhook the daemon's direct-fallback alarm has nowhere to go. Eval half:
+      # the env and the sops declaration. Build half: the BUILT start script
+      # reads the webhook from the secret file and degrades when it is absent
+      # (set -euo pipefail would otherwise kill the daemon on a missing file).
+      # The webhook URL is a credential and must never appear in Environment=,
+      # which `systemctl show` prints to any local uid.
+      cloudbox-pigeon-slack-wiring = let
+        cfg = self.nixosConfigurations.cloudbox.config;
+        svc = cfg.systemd.services.pigeon-daemon.serviceConfig;
+        lib = devboxPkgs.lib;
+        envList = svc.Environment;
+        envVal = name: let
+          hits = builtins.filter (e: lib.hasPrefix "${name}=" e) envList;
+        in if hits == [ ] then null else lib.removePrefix "${name}=" (builtins.head hits);
+        allowed = lib.splitString "," (toString (envVal "PIGEON_PULL_ALLOWED_USER_IDS"));
+        secret = cfg.sops.secrets.pigeon_slack_alarm_webhook or null;
+        checks = {
+          "owner id env" = envVal "PIGEON_SLACK_OWNER_USER_ID" == "U0CKLESTD45";
+          "allowlist has Slack owner" = builtins.elem "U0CKLESTD45" allowed;
+          "allowlist keeps Telegram owner" = builtins.elem "8248645256" allowed;
+          "no pushes (NOTIFY_OWNER unset)" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_NOTIFY_OWNER=" e) envList);
+          "webhook not in Environment" = !(builtins.any (e: lib.hasPrefix "PIGEON_SLACK_ALARM_WEBHOOK_URL=" e) envList);
+          "webhook sops secret declared" = secret != null;
+          "webhook secret owned by dev" = secret != null && secret.owner == "dev" && secret.mode == "0400";
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+        script = svc.ExecStart;
+        g = "${devboxPkgs.gnugrep}/bin/grep";
+      in
+        assert lib.assertMsg (failed == [ ]) "cloudbox-pigeon-slack-wiring failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "cloudbox-pigeon-slack-wiring" { } ''
+          s=${script}
+          ${g} -qF 'export PIGEON_SLACK_ALARM_WEBHOOK_URL="$(cat ${secret.path})"' "$s" || {
+            echo "GATE FAILURE: start script does not export the webhook from ${secret.path}" >&2; exit 1; }
+          ${g} -qF '[ -s ${secret.path} ]' "$s" || {
+            echo "GATE FAILURE: start script does not guard a missing/empty webhook secret" >&2; exit 1; }
+          if ${g} -q 'hooks\.slack\.com' "$s"; then
+            echo "GATE FAILURE: a webhook URL is inlined in the start script" >&2; exit 1
+          fi
+          echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 3 script checks passed" > $out
+        '';
+
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
       # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
       credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {
