@@ -396,8 +396,8 @@ up from a tagged session therefore lands on the program's tag without passing
   environment, so an attach that (re)starts the tmux server cannot plant the
   agent's id in tmux's global env for every later pane to inherit.
 
-Chat `/launch` gets the same rule from pigeon (pigeon#158). It inherits from the session whose channel it was typed in
-(Telegram: topic, or the notification it replies to; no opt-out syntax; `/launch` in `#alerts`/General
+Slack `/launch` gets the same rule from pigeon (pigeon#158). It inherits from the session whose channel it was typed in
+(a coordinator's channel included; no opt-out syntax; `/launch` in `#alerts`
 inherits nothing). See
 `docs/plans/2026-09-23-launch-tag-inheritance-design.md` in the workstation
 repo.
@@ -447,7 +447,7 @@ still notify on completion without a TUI — the pigeon plugin runs inside
 (opt-outs: `--no-attach`, `HONK_LAUNCH_NO_ATTACH=1` (allowlist truthy:
 `1`, `true`/`TRUE`, `yes`/`YES`, `on`/`ON`; `0` does not disable));
 pass `--tmux-session <name>` to confine the attach to that tmux session
-(forwarded to `oc-auto-attach`). Pigeon's chat `/launch --backend goose`
+(forwarded to `oc-auto-attach`). Pigeon's Slack `/launch --backend goose`
 opens it too; both call `oc-auto-attach goose:<id>`, which waits up to
 `OC_AA_GOOSE_GRACE_SECS` (default 10) for goose to list a brand-new session.
 
@@ -477,7 +477,7 @@ curl -sf -u "opencode:$(cat /run/secrets/opencode_server_password)" \
   -X DELETE http://127.0.0.1:4096/session/<session-id>
 ```
 
-Or from chat: `/kill <session-id>` (works in any channel)
+Or from Slack: `/kill <session-id>` (works in any channel, not inside a Slack thread: slash commands don't run there)
 
 ## Listing Sessions
 
