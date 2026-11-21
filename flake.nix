@@ -2060,6 +2060,12 @@
         shell_bin=$(grep -oP '"shell":\s*"\K[^"]+' "$managed" || true)
         [ -n "$shell_bin" ] || { echo "FAIL: opencode.managed.json does not set shell for devbox"; exit 1; }
         [ -x "$shell_bin" ] || { echo "FAIL: devbox shell $shell_bin is not executable"; exit 1; }
+        # opencode keys the bash tool's prompt text, its -l login flag and its
+        # bashrc handling on the shell's BASENAME; anything but `bash` changes all
+        # three (and busts the prompt cache).
+        [ "$(basename "$shell_bin")" = bash ] || {
+          echo "FAIL: devbox shell basename is $(basename "$shell_bin"), not bash"; exit 1;
+        }
 
         floor=$(grep -hoP 'OOM_SCORE_ADJ_FLOOR="\K[0-9]+' "$(readlink -f "$shell_bin")" || true)
         [ -n "$floor" ] || { echo "FAIL: could not read OOM_SCORE_ADJ_FLOOR from $shell_bin"; exit 1; }

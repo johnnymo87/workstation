@@ -948,7 +948,11 @@ ${serveIdCase}
       # the rest is reclaimable page cache).
       #
       # LIVE AT SWITCH despite keep-old: the user manager's daemon-reload
-      # re-realizes cgroup limits on running units.
+      # re-realizes cgroup limits on running units. That cuts both ways: a
+      # revert that LOWERS this below a serve's current usage forces reclaim and
+      # can OOM it on the spot, so roll back with OOMPolicy=continue still in
+      # place (and, for the shell, `jq 'del(.shell)'` the runtime opencode.json,
+      # which keeps unmanaged keys).
       MemoryMax = "8G";
       # OOMPolicy=continue, NOT systemd's default `stop` (2026-11-20). With
       # `stop`, ANY oom kill in this cgroup stops the unit, so a killed tool
@@ -960,7 +964,10 @@ ${serveIdCase}
       # users/dev/opencode-config.nix), which raises tool commands to adj 500 so
       # the kernel picks them over the serve at 200. Same shape as goose-serve
       # (hosts/devbox/configuration.nix). Guarded by the
-      # devbox-serve-oom-shape flake check.
+      # devbox-serve-oom-shape flake check. Trade-off: when the hog is the
+      # serve's own heap or an LSP, tools are killed instead of the serve being
+      # recycled, until the nightly reset; nothing alerts on that yet
+      # (follow-up bead workstation-cjpe).
       OOMPolicy = "continue";
       # OOM score adjustment: an OOM at a cgroup limit sizes adj points against
       # memory.max + swap (26G here, so 1 point = 26 MB). At 500 the serves
