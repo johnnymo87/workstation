@@ -299,8 +299,8 @@ in
   # NOT "for CCR webhooks", which is what this said until 2026-09-12 and which
   # was actively misleading: the CCR webhook architecture is dead. Slack
   # posts to the Worker (`ccr-router.<...>.workers.dev/slack/<machine>/...`),
-  # the Worker is the only caller of the chat API, and this box POLLS the Worker
-  # outbound (`pigeon/packages/daemon/src/index.ts:183`). Nothing is pushed in.
+  # and this box only calls out: it POLLS the Worker and posts to Slack webhooks
+  # (`pigeon/packages/daemon/src/index.ts`). Nothing is pushed in.
   #
   # What the tunnel actually serves is dashboard-managed and invisible to this
   # repo. As of 2026-09-24 it is:

@@ -37,7 +37,7 @@
 #   floor is 15 minutes.
 #
 # Severity escalates warning -> error on the 3rd alert (~45m at the default base), which
-# The chat renders it as a distinct ❌ rather than ⚠️ so a persistent condition looks different
+# the chat renders as a distinct ❌ rather than ⚠️ so a persistent condition looks different
 # from a fresh one in the notification list. NOTE: pigeon's /alert coerces any severity
 # outside info|warning|error to "info" (packages/daemon/src/app.ts) -- escalating to
 # "critical" would silently DOWNGRADE the alert. "error" is the ceiling; do not "raise" it.
