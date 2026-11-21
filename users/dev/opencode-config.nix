@@ -934,6 +934,18 @@ let
     }
     // (lib.optionalAttrs isDevbox {
       model = devboxModel;
+      # Spawn-time bash wrapper (devbox): raises each bash-tool command's
+      # oom_score_adj to 500, above the serve's 200, so when a tool command
+      # fills its serve's MemoryMax the kernel kills the tool rather than the
+      # serve and every turn on it (the 2026-11-20 :4096 OOM). The same wrapper
+      # goose-serve uses here (GOOSE_SHELL); its binary is named `bash`, so the
+      # bash tool's prompt text is unchanged. Not cloudbox's oc-scoped-shell:
+      # devbox has no oc-agent.slice yet (that port is workstation-irga, which
+      # would replace this line). Pairs with OOMPolicy=continue on the serve unit
+      # (users/dev/home.devbox.nix); flake check devbox-serve-oom-shape guards
+      # both. Like the rest of this config it reaches opencode instances started
+      # after the switch; every session has it after the next pool restart.
+      shell = "${localPkgs.goose-tool-shell}/bin/bash";
       # Route the built-in `compaction` agent to Sonnet 5.5 on devbox.
       # Without this, compaction inherits opencode.base.json's top-level default
       # (openai/gpt-5.5), which is billed per-token AND hits OpenAI usage caps —

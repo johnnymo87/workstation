@@ -716,7 +716,8 @@ in
       # runaway here (goose itself, or anything a goose tool shell runs: every
       # one is a child in this cgroup) could take the whole 30G host.
       #
-      # 6G = each opencode-serve@'s cap (users/dev/home.devbox.nix; devbox has
+      # 6G = what each opencode-serve@'s cap was when this was set (8G since
+      # 2026-11-20, users/dev/home.devbox.nix; devbox has
       # no per-command scopes, so there both caps hold the tool commands too). Measured
       # peak over the 45 days to 2026-11-05: 565M (the Nov 4-5 run), so this is
       # 10x headroom for the coordinators this serve hosts. Worst case with the
@@ -1824,8 +1825,8 @@ Check:
   # when the dev workload exceeds the ceiling. Sized 2026-07-03 (workstation-94g8)
   # for the CURRENT 30G host (the old 12G value dated from the 16G box):
   # 20G leaves ~10G for system/kernel/buffers and comfortably contains the
-  # opencode serve pool worst case (K=2 x MemoryMax=6G, users/dev/
-  # home.devbox.nix) plus editors/BEAM/tools.
+  # opencode serve pool worst case (K=2 x MemoryMax=8G since 2026-11-20,
+  # users/dev/home.devbox.nix) plus editors/BEAM/tools.
   #
   # MemoryHigh was replaced with MemoryMax following the 2026-10-11 incident:
   # a runaway systemd-run --user test job landed in unmetered app.slice and pinned

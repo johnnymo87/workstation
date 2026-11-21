@@ -932,9 +932,43 @@ ${serveIdCase}
       # the nightly reset). See docs/investigations/2026-07-03-serve-4096-wedge.md.
       # With Max-only, a ballooned serve OOM-kills fast and Restart=always
       # recovers it in ~10s (sessions persist in the shared DB; TUIs reconnect).
-      # Budget: 6G/serve, K=2 -> 12G worst case, inside the user-1000.slice
+      # Budget: 8G/serve, K=2 -> 16G worst case, inside the user-1000.slice
       # MemoryMax=20G (hosts/devbox/configuration.nix) on the 30G host.
-      MemoryMax = "6G";
+      #
+      # 8G, not 6G (2026-11-20, after :4096 was OOM-killed at 6G): devbox has no
+      # per-command scopes yet (workstation-irga), so this cap holds the serve
+      # (~2G heap after a few hours), its long-lived MCP/LSP children (~1-2G,
+      # mostly swapped) AND every bash-tool command its sessions run. That left
+      # ~2-3G for tools, and each of the five serve OOMs Nov 3-20 was a tool
+      # burst on top of that baseline (`nix` evals of 1.5-5G, vitest, linkers).
+      # Raising the cap was chosen over a third serve: a third serve pays the
+      # baseline a third time and leaves each serve the same ~2-3G of burst room,
+      # so the same single `nix flake check` still fills it. The user slice is
+      # the aggregate bound either way (its anon was 8.6G of 20G on 2026-11-21;
+      # the rest is reclaimable page cache).
+      #
+      # LIVE AT SWITCH despite keep-old: the user manager's daemon-reload
+      # re-realizes cgroup limits on running units. That cuts both ways: a
+      # revert that LOWERS this below a serve's current usage forces reclaim and
+      # can OOM it on the spot, so roll back with OOMPolicy=continue still in
+      # place (and, for the shell, `jq 'del(.shell)'` the runtime opencode.json,
+      # which keeps unmanaged keys).
+      MemoryMax = "8G";
+      # OOMPolicy=continue, NOT systemd's default `stop` (2026-11-20). With
+      # `stop`, ANY oom kill in this cgroup stops the unit, so a killed tool
+      # command took the serve and every turn on it down with it: 3 of the 5
+      # serve OOMs Nov 3-20 killed only a `nix` process and the serve still
+      # died. With `continue` that is one failed tool call. If the serve itself
+      # is the victim, its main process exits and Restart=always brings it back,
+      # as before. Pairs with opencode's `shell` on devbox (goose-tool-shell,
+      # users/dev/opencode-config.nix), which raises tool commands to adj 500 so
+      # the kernel picks them over the serve at 200. Same shape as goose-serve
+      # (hosts/devbox/configuration.nix). Guarded by the
+      # devbox-serve-oom-shape flake check. Trade-off: when the hog is the
+      # serve's own heap or an LSP, tools are killed instead of the serve being
+      # recycled, until the nightly reset; nothing alerts on that yet
+      # (follow-up bead workstation-cjpe).
+      OOMPolicy = "continue";
       # OOM score adjustment: an OOM at a cgroup limit sizes adj points against
       # memory.max + swap (26G here, so 1 point = 26 MB). At 500 the serves
       # carried a 7.8G handicap against an adj-200 `systemd-run --user` job.

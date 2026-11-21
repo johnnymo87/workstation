@@ -2027,6 +2027,58 @@
         touch $out
       '';
 
+      # devbox serve OOM shape (2026-11-20 :4096 OOM). devbox has no per-command
+      # scopes (that port is workstation-irga), so every bash-tool command lives in
+      # its serve's cgroup. Two things must hold together or a tool command that
+      # fills the serve's MemoryMax takes the serve, and every turn on it, down:
+      #   1. OOMPolicy=continue on the serve unit. systemd's default `stop` ends
+      #      the whole unit after ANY oom kill in it -- 3 of the 5 serve OOMs
+      #      Nov 3-20 killed only a `nix` tool process and still stopped the serve.
+      #   2. opencode's `shell` raises tool commands' oom_score_adj above the
+      #      serve's own, so the kernel picks the tool, not the serve. Without it
+      #      the victim is whichever process is biggest -- on Nov 20 the serve
+      #      (2.06G) outranked a 1.99G `nix` by 70M.
+      # Each half is a no-op without the other, and nothing else connects a
+      # wrapper's floor (shell script) to a unit's OOMScoreAdjust (Nix attr).
+      devbox-serve-oom-shape = devboxPkgs.runCommand "devbox-serve-oom-shape-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep ];
+        gen = self.homeConfigurations.dev.activationPackage;
+      } ''
+        unit="$gen/home-files/.config/systemd/user/opencode-serve@.service"
+        [ -e "$unit" ] || { echo "FAIL: opencode-serve@.service does not ship in the devbox generation"; exit 1; }
+
+        grep -qx 'OOMPolicy=continue' "$unit" || {
+          echo "FAIL: devbox opencode-serve@ lacks OOMPolicy=continue; an oom kill of any"
+          echo "      tool command in the serve's cgroup would stop the whole serve."
+          exit 1
+        }
+
+        serve_adj=$(grep -oP '^OOMScoreAdjust=\K-?[0-9]+' "$unit" || echo 0)
+
+        managed="$gen/home-files/.config/opencode/opencode.managed.json"
+        [ -e "$managed" ] || { echo "FAIL: opencode.managed.json does not ship in the devbox generation"; exit 1; }
+        shell_bin=$(grep -oP '"shell":\s*"\K[^"]+' "$managed" || true)
+        [ -n "$shell_bin" ] || { echo "FAIL: opencode.managed.json does not set shell for devbox"; exit 1; }
+        [ -x "$shell_bin" ] || { echo "FAIL: devbox shell $shell_bin is not executable"; exit 1; }
+        # opencode keys the bash tool's prompt text, its -l login flag and its
+        # bashrc handling on the shell's BASENAME; anything but `bash` changes all
+        # three (and busts the prompt cache).
+        [ "$(basename "$shell_bin")" = bash ] || {
+          echo "FAIL: devbox shell basename is $(basename "$shell_bin"), not bash"; exit 1;
+        }
+
+        floor=$(grep -hoP 'OOM_SCORE_ADJ_FLOOR="\K[0-9]+' "$(readlink -f "$shell_bin")" || true)
+        [ -n "$floor" ] || { echo "FAIL: could not read OOM_SCORE_ADJ_FLOOR from $shell_bin"; exit 1; }
+        [ "$floor" -gt "$serve_adj" ] || {
+          echo "FAIL: devbox shell floor $floor is not above the serve's OOMScoreAdjust=$serve_adj;"
+          echo "      the raise-only wrapper no-ops and the serve ties with its own tools."
+          exit 1
+        }
+
+        echo "ALL PASS (devbox serve OOM shape: OOMPolicy=continue, tool floor $floor > serve adj $serve_adj)"
+        touch $out
+      '';
+
       # lgtm-review-slice-wiring: pins the workstation half of the contract
       # for lgtm's goose review slice on cloudbox.
       #
