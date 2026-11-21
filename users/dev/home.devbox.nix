@@ -29,7 +29,7 @@ let
   # (http://127.0.0.1:4700) correct on devbox — before this, devbox was a
   # doorless host whose clients pointed at a :4700 that never existed.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
-  # Shared canary alert helper (pigeon /alert -> Telegram), same package cloudbox
+  # Shared canary alert helper (pigeon /alert -> Slack #alerts), same package cloudbox
   # uses. Devbox shipped the frontdoor drift DETECTION half but never the
   # ESCALATION half, so on 2026-07-29/30 it reproduced cloudbox's 2026-07-24
   # incident beat for beat: the canary logged "version drift" 1363 times across
@@ -809,7 +809,7 @@ lib.mkIf isDevbox {
   # mn9r M5: serve-0 binds 4096, the permanent anchor — clients create new
   # sessions on it and fall back to it, while M7 routes session-targeted traffic
   # to the owning serve via pigeon /route (opencode-launch/-send, reset-workspace,
-  # opencode-llm-audit, my-podcasts, the telegram launch path). The hand-typed
+  # opencode-llm-audit, my-podcasts, the chat /launch path). The hand-typed
   # `opencode attach` TUI still resolves :4096 directly (tracked in 7zr7); lgtm
   # run-mode is disabled. Setting OPENCODE_ROUTING_DB (Environment below)
   # activates the dormant M4 serve-side per-session lease CAS against pigeon's

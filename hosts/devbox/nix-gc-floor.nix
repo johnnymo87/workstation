@@ -16,7 +16,7 @@
 # THRESHOLDS, against the other lines on the same disk:
 #   35G  target: room for one more flake check before the trigger
 #   25G  trigger: this unit           <- acts first
-#   20G  em-ci-monitor early warning (Telegram)
+#   20G  em-ci-monitor early warning (Slack #em-alerts)
 #   15G  em-ci setup refuses jobs (EM_CI_MIN_STORE_FREE_GB)
 #   10G  em-ci-disk-watchdog stops both runners; nix min-free
 #

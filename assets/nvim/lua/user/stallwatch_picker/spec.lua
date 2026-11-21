@@ -190,7 +190,7 @@ end
 --- Screen 1 previewer: ONLY the program's top item -- its `[kind] text`
 --- with marks, the sessions it names, and `why: <top_reason>` when present --
 --- then one `+N more open (M new)` line, M counting the other items whose
---- status is new/changed. Mirrors the Telegram digest: the human reads one
+--- status is new/changed. Mirrors the chat digest: the human reads one
 --- ask per program; the rest are a count, reachable per session on Screen 2.
 function M.program_preview_lines(prow)
   local raw_items = type(prow) == "table" and prow.items

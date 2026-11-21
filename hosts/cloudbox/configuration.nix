@@ -78,12 +78,12 @@ let
   enableLgtmShepherd = true;
 
   # oc-auto-attach is a self-packaged shell tool (pkgs/oc-auto-attach) that the
-  # pigeon daemon shells out to after a `/launch` telegram command, to open the
+  # pigeon daemon shells out to after a `/launch` chat command, to open the
   # new session in the right tmux+nvim window. We pin its absolute path here
   # because the daemon runs under systemd with a locked-down PATH that does NOT
   # include ~/.nix-profile/bin (where home-manager installs it for the user).
   # Without this, the spawn returns ENOENT and is silently swallowed — sessions
-  # launched from telegram never auto-attach. The same package is *also*
+  # launched from the chat never auto-attach. The same package is *also*
   # installed into the user's profile via users/dev/home.base.nix, so the CLI
   # `opencode-launch` keeps working as before.
   oc-auto-attach = pkgs.callPackage ../../pkgs/oc-auto-attach { };
@@ -94,7 +94,7 @@ let
   # into the pigeon-daemon service env, `command -v nvims` returns empty and
   # the script's "tmux new-window -- nvims" branch silently skips. End result:
   # /launch into a project with no existing nvim pane runs headlessly inside
-  # opencode-serve with no plugin loaded, completes with no Telegram
+  # opencode-serve with no plugin loaded, completes with no chat
   # notification, and the user is left hanging. See workstation-1lp.
   nvims = pkgs.callPackage ../../pkgs/nvims { };
 
@@ -595,7 +595,7 @@ in
   # This host ran a second connector on the SAME tunnel as devbox, sharing one
   # token. It served exactly two hostnames, and both reasons are now gone:
   #   - `ccr.mohrbacher.dev` fronted the pigeon daemon. It was a dead relic of
-  #     the CCR webhook architecture (Telegram now posts to the Worker and the
+  #     the CCR webhook architecture (the chat now posts to the Worker and the
   #     daemon POLLS outbound), and it was exposing pigeon unauthenticated to
   #     the internet -- see #502. The tunnel was deleted outright on 2026-09-13.
   #   - `boldco.mohrbacher.dev` was a DEVBOX-only service (retired 2026-10-26).
@@ -1036,7 +1036,7 @@ in
         # so listing a machine trusts it with a shell here). SEND=1: agents here may
         # launch on machines that list this one. Receiving also needs the relay SEND
         # above, since the launched session reports back by swarm. Every launch posts
-        # a notice to Telegram General from this machine. Rollback: delete both lines
+        # a notice to #alerts from this machine. Rollback: delete both lines
         # and rebuild; launches queued for this machine return to their requesters
         # as never_collected.
         "PIGEON_REMOTE_LAUNCH_FROM=devbox,macbook"
@@ -1490,7 +1490,7 @@ in
   # Author-side PR shepherd (lgtm-afm). Watches MY open PRs. Review threads
   # waiting, red CI, merge conflicts and a moved base wake the session that
   # wrote the PR (LGTM_ENABLE_AGENT_ROUTING below); ready-to-merge, gone quiet,
-  # and anything it cannot route to a session go to the human as one Telegram
+  # and anything it cannot route to a session go to the human as one chat
   # line. It replaces the agent-side watchdog that workstation#398
   # disabled, where the authoring agent woke ITSELF on a backoff schedule all
   # night — a cold LLM turn per check, almost always to learn nothing had
@@ -1566,10 +1566,10 @@ in
         # Wakes the session that WROTE a PR, instead of texting the human to go
         # chase that session, for four signals: review threads waiting on a
         # reply (needs_reply), red CI (ci_red), merge conflicts (conflicted) and
-        # a moved base (base_merged). landable and idle still go to Telegram.
+        # a moved base (base_merged). landable and idle still go to the chat.
         #
         # Its own switch, separate from the one above, because the failure modes
-        # differ in kind: the shepherd going wrong costs a noisy Telegram, this
+        # differ in kind: the shepherd going wrong costs a noisy chat post, this
         # going wrong costs tokens. Turning it off leaves the shepherd running
         # and those four signals fall back to the human, which is simply
         # the behaviour of the previous release.
@@ -1988,7 +1988,7 @@ Check:
   # permanent anchor: clients create new sessions on it and fall back to it, while
   # M7 routes session-targeted traffic to the owning serve via pigeon /route
   # (opencode-launch/-send, reset-workspace, opencode-llm-audit, my-podcasts, the
-  # telegram launch path). The hand-typed `opencode attach` TUI still resolves
+  # chat /launch path). The hand-typed `opencode attach` TUI still resolves
   # :4096 directly (tracked in 7zr7); lgtm run-mode is disabled. Setting
   # OPENCODE_ROUTING_DB (in Environment below) activates the dormant M4 serve-side
   # session-lease path.
@@ -2426,7 +2426,7 @@ ${serveIdCase}
         # so ALL FOUR serves were reported as drifted and escalated to "dangerous …
         # pending alert". The serves were correct; the canary was wrong.
         #
-        # Only the 2-consecutive-pass dampening stopped that becoming a false Telegram
+        # Only the 2-consecutive-pass dampening stopped that becoming a false chat
         # page. That is a thin margin: a switch straddling two passes would page with a
         # bogus pool-wide "dangerous drift", and the documented consequence is worse than
         # a missed alert — it teaches the operator to ignore the channel, after which the
@@ -4367,7 +4367,7 @@ Check:
   # token rates as each other.
   #
   # WHAT IT DOES. Every 5 minutes it reads TeamClaude's own status endpoint and
-  # alerts (via Pigeon -> Telegram, throttled) when healthy < total, turning a
+  # alerts (via Pigeon -> Slack #alerts, throttled) when healthy < total, turning a
   # 7-day blind spot into ~10 minutes. It deliberately does NOT auto-remediate:
   # the fix is an interactive `teamclaude login`, which only a human can run.
   #
@@ -6119,7 +6119,7 @@ EOF
           # format change, or a transient `systemctl show` failure — EXECSTART_PATH is
           # empty, the case falls through to *), and the canary reports "version drift"
           # against an empty execstart. This canary alerts UNCONDITIONALLY (no
-          # dangerous-only gating), so that becomes a Telegram page on the 2nd pass
+          # dangerous-only gating), so that becomes a chat alert on the 2nd pass
           # telling the operator to restart a door that is perfectly healthy. A format
           # change would make it page forever on the 24h TTL. Unknown must never alert.
           if [ -z "$RUNNING_VER" ]; then
@@ -6154,7 +6154,7 @@ Installed store path: $EXECSTART_PATH
 Note: Restarting opencode-frontdoor drops in-flight SSE legs so pick an appropriate moment to restart.
 EOF
 )
-                  # Throttled Telegram alert via Pigeon (2026-07-24 incident recovery).
+                  # Throttled chat alert via Pigeon (2026-07-24 incident recovery).
                   # Auto-restart is intentionally omitted: restarting frontdoor drops all
                   # in-flight SSE connections and routing state, turning minor drift into an
                   # outage. A human decides when to restart.

@@ -171,7 +171,7 @@ function M.dispatch(desc, row, client, opts)
   -- Clearing now follows evidence of PRESENCE instead, and lives in the
   -- pigeon daemon where the evidence actually is (pigeon #131): a human
   -- authoring a turn, or resolving a question, in either the TUI or
-  -- Telegram. Asking a follow-up question is close to proof you read what
+  -- the chat. Asking a follow-up question is close to proof you read what
   -- came before it. Arriving somewhere is not.
   --
   -- The case neither signal can see -- reading a session and never typing --

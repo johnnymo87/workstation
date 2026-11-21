@@ -62,7 +62,7 @@
 #    Untracked files are still counted and recorded -- just not alerted on.
 #    TDD_IGNORE_REPOS exists as an escape hatch and ships EMPTY.
 #
-# 5. DELIVERY IS TELEGRAM, NOT THE JOURNAL. Signalling only through journald or
+# 5. DELIVERY IS THE CHAT (pigeon /alert), NOT THE JOURNAL. Signalling only through journald or
 #    systemd failure state assumes something looks (bead workstation-yb4b, still
 #    open); ff-mono-root's own adversarial review flagged that, and a detector
 #    nobody reads is indistinguishable from no detector. The bead originally said

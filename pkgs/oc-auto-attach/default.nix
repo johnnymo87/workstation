@@ -77,7 +77,7 @@ ${builtins.readFile ./canonical-path.sh}
     # locked-down nix-store list that does NOT include ~/.nix-profile/bin,
     # so a bare `command -v nvims` returns empty and the launcher silently
     # skips creating a TUI — which in turn means no pigeon plugin loads
-    # and the launched session completes with no Telegram notification.
+    # and the launched session completes with no chat notification.
     # See workstation-1lp for the full incident writeup.
     #
     # A stale $OC_NVIMS_BIN (set but not -x) warns and falls back, so an
@@ -346,7 +346,7 @@ ${builtins.readFile ./canonical-path.sh}
     # opencode-serve's streaming event bus is in-memory per process; with K>1
     # serves sharing one opencode.db, pigeon places a session on one serve via
     # rendezvous hashing, and ONLY that serve emits the session's turn events.
-    # A TUI hardwired to a different serve renders stale (misses telegram/
+    # A TUI hardwired to a different serve renders stale (misses chat/
     # swarm-delivered turns). Any failure (pigeon down, non-2xx, empty/garbage
     # body, no apiBase) degrades to $OPENCODE_URL, i.e. the pre-pool
     # single-serve behavior, so this is strictly safe.

@@ -3364,7 +3364,7 @@ lib.mkMerge [
   # `nix-collect-garbage --delete-older-than 14d` reclaimed 9.3G. 84% is not a
   # peak on this host, it is the floor. Cloudbox's 85% line would therefore be
   # tripped essentially always, and an alarm that is always on is one that gets
-  # muted -- strictly worse than none, because it also consumes the Telegram
+  # muted -- strictly worse than none, because it also consumes the chat
   # channel the other canaries share.
   #
   # Read as absolute free space, which is what actually kills a database:

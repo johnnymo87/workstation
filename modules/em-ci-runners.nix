@@ -417,7 +417,7 @@ in
       # them failed or queued. They stay stopped until someone starts them again:
       #   sudo systemctl start container@em-ci-{1,2}     # devbox
       #   sudo systemctl start container@em-ci-{1,2,3}   # gamebox
-      # Exits non-zero when it fires so the unit shows failed. Telegram
+      # Exits non-zero when it fires so the unit shows failed. Chat
       # alerting hooks in with bead eternal-machinery-0oycj.5.
       em-ci-disk-watchdog = {
         description = "Stop em-ci runner containers when root disk is low";

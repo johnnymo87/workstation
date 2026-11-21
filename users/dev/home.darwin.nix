@@ -37,7 +37,7 @@ let
   # successor decision for darwin.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
 
-  # Shared canary alert helper (pigeon /alert -> Telegram), same package
+  # Shared canary alert helper (pigeon /alert -> Slack #alerts), same package
   # cloudbox and devbox use. Shipping the drift DETECTOR without the
   # ESCALATION half is a known, twice-repeated failure here: cloudbox
   # 2026-07-24 and devbox 2026-07-29/30 each logged drift for hours into a log
@@ -562,7 +562,7 @@ lib.mkIf isDarwin {
     # devbox (users/dev/home.cloudbox.nix has the full flag rationale). pigeon
     # talks to it at :4280 (PIGEON_GOOSE_ACP_URL below), so a goose turn survives
     # a pigeon or honkd restart, every client's turns reach the session's
-    # Telegram topic (--turn-hook-url), and goose sessions get swarm tools
+    # Slack channel (--turn-hook-url), and goose sessions get swarm tools
     # (--swarm-default) and opencode's MCP servers per session (--mcp-catalog,
     # --mcp-self-grant, --project-mcp).
     #

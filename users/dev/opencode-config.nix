@@ -2391,7 +2391,7 @@ in
   #
   # NOTE: Gemini (`google-vertex/gemini-3.8-flash`) is the GLOBAL DEFAULT
   # model on cloudbox, so routing it through the gateway means every
-  # session (interactive + opencode-serve/pigeon/Telegram) depends on the
+  # session (interactive + opencode-serve/pigeon/Slack) depends on the
   # gateway being up. The gateway parses Gemini `usageMetadata` and prices
   # `gemini-3.8-flash`; unpriced Gemini models still ledger tokens (NULL
   # dollars). Verified live 2026-06-05 — see investigation report

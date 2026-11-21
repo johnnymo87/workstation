@@ -857,7 +857,7 @@ class TestCli(unittest.TestCase):
     #
     # `which` answers the question `ls` cannot: not "what mappings exist" but
     # "what tag would this session's dollars be billed to". It exists so that
-    # consumers (pigeon's Telegram footer) do not reimplement effective_tag's
+    # consumers (pigeon's chat footer) do not reimplement effective_tag's
     # precedence, which would drift from the chart.
 
     def test_which_tolerates_a_legacy_whitespace_tag(self):
