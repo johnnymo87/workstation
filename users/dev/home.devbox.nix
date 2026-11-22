@@ -1758,7 +1758,7 @@ down and its silence means nothing. This host has no second leg.
         [ "$MAX_ETIMES" -eq 0 ] && CUTOFF=$NOW
         echo "sweeper: db=$DB max_etimes=$MAX_ETIMES cutoff=$CUTOFF now=$NOW dry=$DRY"
 
-        # The abort text names the restart that orphaned the row and says the
+        # The abort text gives the oldest live serve's boot time and says the
         # sweeper did not stop the turn. The old text ("in-flight row predates
         # all live serves, silent >30min") was read as "the sweeper killed a
         # turn for being silent 30 min" (2026-11-22, a session whose turn and
@@ -1766,12 +1766,17 @@ down and its silence means nothing. This host has no second leg.
         # 08:30Z), and workers began backgrounding long steps to dodge a
         # timeout that never applies to a live serve's turn. Keep the
         # "Aborted (phantom-busy sweeper" prefix: stall-watch matches on it.
-        # The interpolated text is digits, letters, ':', '-', spaces; no quote
-        # can reach the SQL or JSON below.
+        # Say only what the gate proves: the row is older than every live pool
+        # serve, so a pool serve that ran it is gone. It does NOT prove which
+        # restart that was (with one member restarted twice, the oldest boot
+        # can postdate the turn's real death), and it says nothing about a
+        # standalone TUI's rows (see the caveat above).
+        # LABEL lands inside a single-quoted SQL literal and a JSON string:
+        # never put ', " or \ in it (an apostrophe fails every chunk, loudly).
         if [ "$MAX_ETIMES" -eq 0 ]; then
-          CAUSE="no pool serve is running, so the serve that ran this turn is gone"
+          CAUSE="no pool serve is running, so a pool serve that ran this turn is gone"
         else
-          CAUSE="the serve that ran this turn stopped before $(date -u -d "@$CUTOFF" +%Y-%m-%dT%H:%M:%SZ), when the oldest live serve booted"
+          CAUSE="row created before every live pool serve booted (oldest at $(date -u -d "@$CUTOFF" +%Y-%m-%dT%H:%M:%SZ)), so the pool serve that ran it is gone"
         fi
         LABEL="Aborted (phantom-busy sweeper: $CAUSE; this labels the orphaned row 30+ min later, it did not stop the turn)"
 

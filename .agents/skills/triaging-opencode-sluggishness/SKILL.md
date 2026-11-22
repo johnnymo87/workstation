@@ -98,15 +98,17 @@ incident. If serves are live and you are running this by hand, add the gate.
 The 30-min gate leaves headroom for long silent tool calls; a false positive
 self-heals (the owning serve's completion write lands last).
 
-**A sweeper abort is a post-mortem, not the cause of death.** The boot-time
-gate means it never finalizes a row that a live serve created, however long
-that turn has been silent. A row it labels was orphaned when its serve stopped,
-usually by the nightly reset, sometimes by a canary restart, OOM or deploy.
-Look for the cause at the serve restart, not at the sweep 30+ minutes later.
-Long tool calls do not need to be backgrounded to avoid the sweeper. Measured
-2026-11-22 (bead `workstation-yvxh.16`): every devbox sweep in 31 days (138
-rows) traces to a pool restart, and 0 of 129 swept rows got a part written
-after the sweep.
+**A sweeper abort is a post-mortem, not the cause of death.** The dead-owner
+gates (boot time on both hosts, plus the provenance stamp on cloudbox) mean it
+never finalizes a row that a live pool serve created, however long that turn
+has been silent. A row it labels was orphaned when its serve stopped, usually
+by the nightly reset, sometimes by a canary restart, OOM or deploy. Look for
+the cause at a serve restart, not at the sweep 30+ minutes later. Turns on the
+pool do not need long tool calls backgrounded to avoid the sweeper (a
+standalone `opencode` TUI's rows have only the 30-min silence gate). Measured
+2026-11-22 (bead `workstation-yvxh.16`): on devbox, 129 rows swept in 31 days,
+each sweep following a pool restart, and none of them got a part written after
+the sweep; on cloudbox, 10 rows in 30 days, all just after the nightly reset.
 
 Both timers additionally gate on the oldest live serve's boot time and support
 `--dry-run`; prefer running the shipped unit over hand-SQL. Tests:

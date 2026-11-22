@@ -4190,7 +4190,7 @@ Check:
           if got=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "$DB" "
             UPDATE message SET data = json_set(data,
                 '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: owning serve is gone — stamped invocation dead, or row predates all live serves — silent >30min)\"}}'))
+                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: owning serve is gone — stamped invocation dead, or row predates all live serves; this labels the orphaned row 30+ min later, it did not stop the turn)\"}}'))
             WHERE id IN ($chunk)
               AND json_extract(data, '\$.role') = 'assistant'
               AND json_extract(data, '\$.time.completed') IS NULL
