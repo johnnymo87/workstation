@@ -30,16 +30,26 @@ exit 0 iff all pass; bead .27.1).
   holding the lock.
 - State: `/var/lib/goose-cutover/state.json` =
   `{phase: prepared|deploying|deployed|rolled-back|failed, pr, head_sha,
-  merge_sha, old_target, candidate, toplevel, hm_package, old_system,
-  started_at, step}`. deploy refuses to start if `phase=deploying` from an
+  merge_sha, built_from, old_target, candidate, toplevel, hm_package, old_system,
+  started_at, step}`.
+  `merge_sha` is the PR's squash commit SHA from GitHub (`mergeCommit.oid`), never
+  overwritten. `built_from` is the `origin/main` SHA the system and candidate paths
+  were built at (updated by D3 reconcile when main moves). Revert and `deployed.json`
+  always use `merge_sha`. deploy refuses to start if `phase=deploying` from an
   earlier run (crashed mid-deploy) unless `--recover`, which runs the rollback.
-  P1 and D1 refuse if `phase=failed` (requires `--recover` or human intervention).
+  P1 and D1 refuse if `phase=failed` (requires `--recover`, `--resume-merged` or human).
 - Global `flock -n /var/lib/goose-cutover/run.lock` for both phases: one
-  cutover at a time.
+  cutover at a time. The launcher verifies this with `flock -n run.lock true`
+  before calling `systemctl start`, refusing with exit 2 if busy.
+- Notifications: `pkgs/opencode-drift-alert/default.nix` accepts 5 positional arguments
+  (`STATE_FILE SIGNATURE TEXT [TTL_SECONDS [MAX_INTERVAL]]`) and derives severity
+  internally (warning -> error after 3 alerts); it does not accept a severity flag.
+  Notification severity levels (info, warning, error) are therefore embedded in the
+  alert text (`[LEVEL] ...`) and signature.
 - Exit codes:
   - 0: success, dry-run, or clean "not now" refusal (quiet-window 2h give-up, pre-D5 refusal);
-  - 1: failure during deploy post-D5 (rolled back) or fatal execution error;
-  - 2: invocation/cgroup guard refusal or CLI usage error;
+  - 1: failure during deploy post-D5 (rolled back), merged-mismatch in D3, or fatal execution error;
+  - 2: invocation/cgroup guard refusal, run.lock busy at launch, or CLI usage error;
   - 3: rollback failure (goose-serve in unknown state).
 
 Implementation: `pkgs/goose-cutover/goose_cutover.py`, Python 3 stdlib; every
@@ -114,8 +124,9 @@ P3. **Probe.** As dev: `goose-upgrade-probe <cand>/bin/goose --old-bin
     /var/lib/goose/current/bin/goose`; non-zero = fail (log last 40 lines).
 P4. **Merge & Build from origin/main** (skipped by `--dry-run`). `gh pr merge <pr>
     -R johnnymo87/workstation --squash --match-head-commit <head>`; poll until MERGED (5 min).
-    Fetch `origin/main`; throwaway worktree at `origin/main`. Build candidate +
-    toplevel + HM activation package from that worktree:
+    Record `merge_sha` from `gh pr view <pr> -R johnnymo87/workstation --json mergeCommit -q .mergeCommit.oid`.
+    Fetch `origin/main`; throwaway worktree at `origin/main`. Record `built_from = origin/main`.
+    Build candidate + toplevel + HM activation package from that worktree:
     `<wt_main>#nixosConfigurations.cloudbox.config.environment.etc."goose/pinned".source`
     (`--out-link /var/lib/goose-cutover/gcroots/candidate-<pr>`),
     `<wt_main>#nixosConfigurations.cloudbox.config.system.build.toplevel`
@@ -124,17 +135,15 @@ P4. **Merge & Build from origin/main** (skipped by `--dry-run`). `gh pr merge <p
     (`--out-link /var/lib/goose-cutover/gcroots/hm-<pr>`).
     Require that the candidate store path built from `origin/main` == the probed path from P2;
     a mismatch => phase `failed`, step `merged-mismatch`, nothing deployed (needs re-probe;
-    `prepare --resume-merged <pr>` re-runs probe on origin/main's candidate and builds/persists).
-P5. Write state.json `phase=prepared` with all paths; notify (info):
+    `prepare --resume-merged <pr>`: for a MERGED PR with step=merged-mismatch, re-runs probe on
+    origin/main's candidate and builds/persists without calling merge).
+P5. Write state.json `phase=prepared` with all paths, `merge_sha` and `built_from`; notify (info):
     "goose-cutover: PR #<pr> merged and prepared; deploy pending".
 
 ## deploy
 
-D1. **Load & Reconcile.** Load state.json, require `phase=prepared` (or `--recover`, below).
-    Refuse if `phase=failed`. Re-verify the GC-rooted paths exist. Fetch `origin/main`. If
-    `origin/main` != recorded `merge_sha`, re-run the build at current `origin/main` before D5,
-    requiring candidate store path == recorded candidate path (fail otherwise); update toplevel
-    and hm_package in state.json.
+D1. **Load.** Load state.json, require `phase=prepared` (or `--recover`, below).
+    Refuse if `phase=failed` (unless `--recover`). Re-verify the GC-rooted paths exist.
 D2. **Quiet window** (poll 30 s; give up after 2 h => stays `prepared`, notify warning,
     exit 0; deploy is resumable). Quiet = all at once:
     - latest stall-watch JSON tick line (root: `journalctl
@@ -145,27 +154,33 @@ D2. **Quiet window** (poll 30 s; give up after 2 h => stays `prepared`, notify w
       for >= 10 min of this run's observation;
     - no PID under `/sys/fs/cgroup/system.slice/goose-serve.service`
       (recursive `cgroup.procs`) with `oom_score_adj >= 500`;
-    - `honk list --json` (as dev) shows no session running a turn or with
+    - `honk list --json` (via HONK_BIN as dev) shows no session running a turn or with
       pending requests (field names: read honk's list output; if the shape is
       unknown, treat as not quiet and log it).
     Refuse to proceed past D2 with less than 60 min left of `TimeoutStartSec` (5h).
 D3. **Locks and holds**, in this order, released in `finally` in reverse:
     open `/tmp/reset-workspace.lock` READ-ONLY (never O_CREAT; create it as dev
     if absent) and `flock -n` (busy => back to D2 polling within the 2h budget);
-    as dev take `/run/user/1000/pull-workstation.lock` (`flock -n`, held by a child
-    process `runuser -u dev -- flock -n ... sleep infinity` so root never creates it);
+    as dev take `/run/user/1000/pull-workstation.lock` (`flock -n -o ... sh -c 'echo locked; exec sleep infinity'`
+    held by child process, readiness check on 'locked');
     as dev stop BOTH `stall-watch.timer` AND `stall-watch-wake.path`
     (`systemctl --user stop stall-watch.timer stall-watch-wake.path`), wait until
     `stall-watch.service` is inactive (max 10 min; timing out is a pre-D5 clean refusal).
-    Re-check D2 once (fails => release, restore, back to D2 polling). Write `phase=deploying`.
+    Reconcile main: fetch `origin/main`; if `origin/main` != `built_from`, rebuild candidate +
+    top + HM activation package from `origin/main`. If candidate store path differs from
+    `candidate`, set `phase=failed, step=merged-mismatch`, notify error, and exit 1 (so
+    `prepare --resume-merged <pr>` is the recovery path). If candidate is unchanged, update
+    `built_from`, `toplevel`, `hm_package` in `state.json`.
+    Re-check D2 once (fails => release, restore, back to D2 polling).
 D4. **Gate + backup.** `<toplevel>/bin/switch-to-configuration dry-activate` (parse
     stdout AND stderr); refuse if it would stop/restart any unit outside an allowlist
     (start empty plus units this host restarts harmlessly, e.g. `systemd-tmpfiles-resetup`;
-    `lgtm-run`: wait until inactive). sqlite online backup of sessions.db to
+    `lgtm-run`: wait until inactive/failed). sqlite online backup of sessions.db to
     `/var/lib/goose-cutover/backups/sessions-<UTC>-pr<pr>.db` (failure is fatal), keep newest 5.
     Record `old_system=readlink -f /nix/var/nix/profiles/system`.
-    *Pre-D5 failure rule:* any failure or SIGTERM before D5 exits 0 with a warning, releases locks,
-    restores stall-watch, and leaves `phase=prepared`.
+    *Pre-D5 failure rule:* any failure, timeout, or SIGTERM in D3/D4 resets state to `phase=prepared`,
+    releases locks, restores stall-watch (timer + path), notifies warning, and exits 0.
+    Immediately before D5: write `phase=deploying`.
 D5. **Activate.** `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`
     then `<toplevel>/bin/switch-to-configuration switch`; as dev
     `<hm_package>/activate`. (No re-evaluation: exactly what prepare built.)
@@ -190,17 +205,19 @@ D8. **Post-checks.** (a) honk headless as dev: `honk launch --tag goose-upgrade
     --text-only <id>` (rc 124 ok) contains `PONG`; log session id.
     (b) restart `stall-watch.timer` and `stall-watch-wake.path`, then
     wait (max 10 min) for the first tick JSON line with `ts` (milliseconds epoch)
-    after the goose restart; require `ok == true`; log its `coordinator.runs`.
+    after the goose restart; require `ok == true`; log its `coordinator.runs`. Failure here
+    triggers rollback.
 D9. **Success.** `phase=deployed`; write `/var/lib/goose-cutover/deployed.json`
     {pr, merge_sha, store_path, version, ts} (L7 reads it); notify
     "goose-cutover: PR #<pr> live: <old> -> <new>". Release everything.
 
 **Rollback** (failure in D5-D8, SIGTERM in D5-D8, or `deploy --recover`):
-Rollback executes while the `/tmp/reset-workspace.lock` is held.
+Rollback executes while `/tmp/reset-workspace.lock` is held.
 1. `goose-link set <old_target from state.json>` (never `rollback`: it swaps
    with whatever `previous` holds, wrong when the flip was a no-op);
 2. set restarted_goose=True before calling restart; if goose-serve was restarted
-   (or `--recover`): restart it and verify `/status` up to 60s + argv0/exe == old target;
+   (or `--recover`): restart it, poll `/status` up to 60 s, and verify argv0 ==
+   /var/lib/goose/current/bin/goose and exe == <old_target>/bin/goose;
    restart honkd if D7 restarted it;
 3. system/HM generations are NOT rolled back (pull-workstation re-applies main;
    the revert PR restores pin-gated config);
@@ -210,7 +227,8 @@ Rollback executes while the `/tmp/reset-workspace.lock` is held.
    deploy" with no revert PR, `phase=prepared` (deploy can be retried);
 5. otherwise open the revert PR as dev (worktree at origin/main, `git -C <wt> revert
    --no-edit <merge_sha>`, push `goose-cutover-revert-<pr>`, `gh pr create
-   -R johnnymo87/workstation --label goose-revert`, body: failing step + redacted detail).
+   -R johnnymo87/workstation --base main --head goose-cutover-revert-<pr> --label goose-revert`,
+   body: failing step + redacted detail) with cwd=<revert worktree>.
    `goose-revert` PRs are pin moves back to what is already running: merging one is safe
    and is covered by the standing auto-merge (no `goose-upgrade` label); the next
    switch only rebuilds config. `phase=rolled-back`; notify error with the
