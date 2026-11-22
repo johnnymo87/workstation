@@ -1,146 +1,208 @@
-# goose-cutover (L3a, bead workstation-6w7i.27.3)
+# goose-cutover (L3a, bead workstation-6w7i.27.3) — plan v2
 
 The only path by which a goose pin PR (workstation, label `goose-upgrade`)
 reaches the running goose on cloudbox. Runbook: epic workstation-6w7i.27 design
-section 6. Research facts with file:line evidence: bead workstation-6w7i.27.3
-notes ("W3 research for L3a"). Depends on L6 (`/var/lib/goose/current`,
-`goose-link`, PR #902) and L2 (`goose-upgrade-probe <bin> [--old-bin <bin>]`,
-exit 0 iff every check passes; bead .27.1, worktree .worktrees/goose-upgrade-probe).
+section 6. Researched facts with file:line evidence: bead .27.3 notes ("W3
+research for L3a"). v1 was reviewed by adversarial-reviewer-opus 2026-11-22;
+this v2 folds in its fixes (summary in the bead notes).
 
-## Shape
+Depends on L6 (merged, #902: `/var/lib/goose/current`, `goose-link`,
+`/etc/goose/pinned`) and L2 (`goose-upgrade-probe <bin> [--old-bin <bin>]`,
+exit 0 iff all pass; bead .27.1).
 
-- `pkgs/goose-cutover/goose_cutover.py`: Python 3 stdlib only. All side effects
-  go through one `Runner` object (run a command, read a file, sleep, now) so the
-  unit tests (`test_goose_cutover.py`, unittest) drive every path with fakes.
-- `pkgs/goose-cutover/default.nix`: wraps it (`goose-cutover` on PATH) with
-  runtime inputs: python3, gh, git, nix, curl, util-linux (flock, runuser),
-  systemd, goose-link (pkgs/goose-link). `goose-upgrade-probe` and `honk` are
-  resolved by absolute path from env with defaults
-  (`GOOSE_UPGRADE_PROBE`, default `/home/dev/.nix-profile/bin/goose-upgrade-probe`;
-  `HONK_BIN`, default `/home/dev/.nix-profile/bin/honk`); missing = hard fail.
-- `modules/goose-cutover.nix` (cloudbox only, imported from flake modules list):
-  `systemd.services."goose-cutover@"` template: root, `Type=oneshot`,
-  `ExecStart=goose-cutover --run %i`, `TimeoutStartSec=4h`, `PrivateTmp=false`,
-  **`restartIfChanged=false` and `stopIfChanged=false`** (the unit runs
-  `nixos-rebuild switch` itself; a changed unit would otherwise be restarted
-  mid-cutover and kill its own run), `StateDirectory=goose-cutover`,
-  `Environment=PATH` incl. `/run/wrappers` and `/run/current-system/sw/bin`.
-  Installs `goose-cutover` in `environment.systemPackages`.
+## Shape: two phases, one state file
 
-## CLI
+    goose-cutover prepare <pr> [--dry-run] [--allow-noop]
+    goose-cutover deploy  [--dry-run]
+    goose-cutover status
+    goose-cutover --run <phase>-<instance>      # inside the unit only
 
-    goose-cutover <pr> [--dry-run] [--allow-noop]     # launcher (human/opencode shell)
-    goose-cutover --run <instance>                    # inside the unit only
+- **prepare** (no lock, no restart): preconditions, build candidate + system
+  toplevel + HM activation package from the PR's merge ref, probe, merge,
+  rebuild at `origin/main`, verify, persist. Afterwards the pin is merged but
+  NOT deployed: on cloudbox nothing moved (L6), which is the same state a
+  rollback leaves.
+- **deploy** (idempotent, resumable from the state file): quiet window, locks,
+  pause stall-watch, dry-activate gate, activate the PREBUILT system and HM,
+  `goose-link set <cand>`, restart, post-checks, restore.
+- State: `/var/lib/goose-cutover/state.json` =
+  `{phase: prepared|deploying|deployed|rolled-back|failed, pr, head_sha,
+  merge_sha, old_target, candidate, toplevel, hm_package, old_system,
+  started_at, step}`. deploy refuses to start if `phase=deploying` from an
+  earlier run (crashed mid-deploy) unless `--recover`, which runs the rollback.
+- Global `flock -n /var/lib/goose-cutover/run.lock` for both phases: one
+  cutover at a time.
 
-Launcher: refuse (exit 2) if `/proc/self/cgroup` contains `goose-serve` (a goose
-tool shell lives in goose-serve's cgroup; the restart would kill the caller).
-Then `sudo systemctl start --no-block goose-cutover@<instance>.service`, where
-instance is `<pr>`, `dry-<pr>`, `noop-<pr>` or `dry-noop-<pr>`; print the
+Implementation: `pkgs/goose-cutover/goose_cutover.py`, Python 3 stdlib; every
+side effect through one injectable `Runner` (run, read_file, write_file, now,
+sleep) so `test_goose_cutover.py` (unittest) drives every path with fakes.
+`default.nix` wraps it with runtime inputs (python3, gh, git, nix, curl, jq,
+util-linux, systemd, goose-link). `goose-upgrade-probe` and `honk` by absolute
+path from env (`GOOSE_UPGRADE_PROBE`, `HONK_BIN`; defaults in
+`/home/dev/.nix-profile/bin`); missing = hard fail.
+
+Unit (`modules/goose-cutover.nix`, cloudbox only):
+`systemd.services."goose-cutover@"`: root oneshot, `ExecStart=goose-cutover
+--run %i`, **`restartIfChanged=false`, `stopIfChanged=false`** (deploy activates
+a system config itself), `PrivateTmp=false`, `TimeoutStartSec=5h`,
+`MemoryMax=8G` (the probe builds/runs things), `StateDirectory=goose-cutover`,
+`OnFailure=goose-cutover-failed.service` (one notify via opencode-drift-alert:
+"goose-cutover@%i died; state.json phase=..., goose-serve may need
+`goose-cutover deploy --recover`"). The script traps SIGTERM: inside deploy
+steps D5-D8 it runs the rollback before exiting.
+
+The launcher (`prepare`/`deploy` without `--run`) refuses (exit 2) if
+`/proc/self/cgroup` contains `goose-serve`, then `sudo systemctl start
+--no-block goose-cutover@<phase>-<instance>.service` (instance encodes pr and
+flags, e.g. `prepare-902`, `prepare-dry-noop-902`, `deploy-1`) and prints the
 `journalctl -fu` line. `--run` refuses unless `$INVOCATION_ID` is set and
 `/proc/self/cgroup` names `goose-cutover@`.
 
-Every log line is `goose-cutover: <step>: <message>` on stdout (journal).
+Commands that need dev's identity run as `runuser -u dev -- env HOME=/home/dev
+XDG_RUNTIME_DIR=/run/user/1000 GH_TOKEN=<from /run/secrets/github_api_token>`.
+Log lines: `goose-cutover: <step>: <msg>`.
 
-## Run steps
+## prepare <pr>
 
-Each step is a function; failure raises `CutoverError(step, detail)`.
-`dry-` runs steps 1-4 for real (all read-only to production) and prints what
-5-12 would do, then exits 0 if 1-4 passed.
+P1. **Preconditions.** hostname `cloudbox`; `goose-link status` exit 0; no
+    state.json in `prepared`/`deploying`; PR (`gh pr view --json
+    state,baseRefName,labels,headRefOid,files,statusCheckRollup,mergeable`):
+    OPEN, base `main`, label `goose-upgrade`, every check
+    SUCCESS/NEUTRAL/SKIPPED, not CONFLICTING;
+    - labelled `goose-major` => also `goose-major-ok`;
+    - **files changed only `pkgs/goose/**`** unless labelled `goose-config-ok`
+      (a rollback then runs the old binary under the new config; the probe did
+      not test that combination);
+    - label **`goose-hosts-ready`** required (human-applied) until devbox and
+      the Mac can report `goose-link status`: a merge moves devbox's CLI
+      (fallback to the pin while it has no link) and schedules an unprobed Mac
+      restart on its next home-switch (A10).
+P2. **Candidate.** As dev: fetch `origin` and `refs/pull/<pr>/merge`; require
+    the merge ref's first parent == current `origin/main` (else fail
+    `stale-merge-ref`: GitHub has not recomputed it; rerun later). Throwaway
+    detached worktree at the merge ref. Build, with out-links under
+    `/var/lib/goose-cutover/gcroots/` (GC roots for the hours until deploy):
+    `.#nixosConfigurations.cloudbox.config.environment.etc."goose/pinned".source`
+    (= candidate), `.#nixosConfigurations.cloudbox.config.system.build.toplevel`,
+    `.#homeConfigurations.cloudbox.activationPackage`. candidate == current
+    link target => fail unless `--allow-noop`.
+P3. **Probe.** As dev: `goose-upgrade-probe <cand>/bin/goose --old-bin
+    /var/lib/goose/current/bin/goose`; non-zero = fail (log last 40 lines).
+P4. **Merge** (skipped by `--dry-run`). `gh pr merge <pr> --squash
+    --match-head-commit <head>`; poll until MERGED (5 min). Fetch; require
+    `origin/main` == the merge commit (if main moved past it, rebuild at
+    `origin/main` and require all three paths to be identical to P2's; a
+    mismatch => phase `failed`, step `merged-mismatch`, nothing deployed;
+    `prepare --resume-merged` re-runs P2-P3 at origin/main for a MERGED PR).
+P5. Write state.json `phase=prepared` with all paths; notify (info):
+    "goose-cutover: PR #<pr> merged and prepared; deploy pending".
 
-1. **Preconditions.** hostname is `cloudbox`; `goose-link status` exits 0;
-   PR (via `gh pr view <pr> --repo johnnymo87/workstation --json
-   state,baseRefName,labels,headRefOid,files,statusCheckRollup,mergeable`) is
-   OPEN, base `main`, labelled `goose-upgrade`, touches `pkgs/goose/default.nix`,
-   every status check SUCCESS/NEUTRAL/SKIPPED (none pending/failed), mergeable
-   not CONFLICTING; if labelled `goose-major`, also `goose-major-ok`.
-   GH auth: `GH_TOKEN` from `/run/secrets/github_api_token`. All git/gh/nix
-   build/probe/honk/HM commands run as dev: `runuser -u dev -- env HOME=/home/dev
-   XDG_RUNTIME_DIR=/run/user/1000 GH_TOKEN=... <cmd>`.
-2. **Candidate.** As dev: `git -C /home/dev/projects/workstation fetch origin`,
-   throwaway `git worktree add --detach <tmp> <headRefOid>`; `nix build --no-link
-   --print-out-paths '<tmp>#nixosConfigurations.cloudbox.config.environment.etc."goose/pinned".source'`
-   = candidate store path. If candidate == current link target: fail unless
-   `noop-` (the no-op pin test path). Remove the worktree in a `finally`.
-3. **Probe.** As dev: `goose-upgrade-probe <cand>/bin/goose --old-bin
-   /var/lib/goose/current/bin/goose`; non-zero = fail (log its last 40 lines).
-4. **Quiet window.** Poll every 30 s, give up after 2 h (fail `quiet-window`).
-   Quiet = all three, evaluated together:
-   - latest stall-watch tick JSON line (root: `journalctl _SYSTEMD_USER_UNIT=stall-watch.service
-     _UID=1000 --since -15min -o cat`, last line starting `{"ts"`) has
-     `coordinator.runs == 0`; no such line in 15 min = not quiet;
-   - `select max(id) from messages` in sessions.db (sqlite3, `file:...?mode=ro`)
-     unchanged for >= 10 min of observation (the script's own observation clock;
-     the window starts when first observed);
-   - no PID under `/sys/fs/cgroup/system.slice/goose-serve.service` (any
-     `cgroup.procs`, recursive) has `/proc/<pid>/oom_score_adj >= 500`.
-   Dry-run: one evaluation, report each condition, do not wait.
-5. **Lock.** Open `/tmp/reset-workspace.lock` READ-ONLY (never O_CREAT: dev-owned
-   file in sticky /tmp, protected_regular) and `flock -n`; if held, keep polling
-   inside the quiet-window deadline. Held from here through step 11; re-check
-   the quiet window once immediately after taking it. If the file is absent,
-   create it as dev (`runuser -u dev -- touch`) first.
-6. **Backup.** sqlite3 online backup (python `sqlite3.Connection.backup`) of
-   sessions.db to `/var/lib/goose-cutover/backups/sessions-<UTC ts>-pr<pr>.db`;
-   keep the newest 5. Record rollback state in `/var/lib/goose-cutover/run.json`:
-   old link target, old system generation (`readlink -f
-   /nix/var/nix/profiles/system`), PR, candidate.
-7. **Merge.** As dev: `gh pr merge <pr> --squash --match-head-commit <headRefOid>`;
-   poll `gh pr view --json state,mergeCommit` until MERGED (5 min). Fetch, new
-   throwaway detached worktree at the merge commit's `origin/main` descendant
-   (`origin/main` after fetch; it must contain the merge commit); rebuild the
-   pinned path there and require == candidate (else fail `merged-pin-mismatch`:
-   link not yet moved, so production is unchanged).
-8. **Switch.** `nixos-rebuild switch --flake <wt>#cloudbox` (root), then as dev
-   `nix run github:nix-community/home-manager/release-25.11 -- switch --flake <wt>#cloudbox`.
-9. **Flip.** `goose-link pinned`; then require `goose-link status` current ==
-   candidate.
-10. **Restart.** Record goose-serve `ExecMainStartTimestampMonotonic`;
-    `systemctl restart goose-serve`; poll `curl -sf http://127.0.0.1:4080/status`
-    60 s; timestamp must have increased; `/proc/<MainPID>/cmdline` argv0 ==
-    `/var/lib/goose/current/bin/goose` and `readlink /proc/<MainPID>/exe` ==
-    `<cand>/bin/goose`; ACP initialize (`POST :4080/acp`, header `x-secret-key`
-    from `/run/secrets/pigeon_goose_acp_token`) `result.agentInfo.version` ==
-    the candidate's upstream version (pkg version before `-patched`).
+## deploy
+
+D1. **Load** state.json, require `phase=prepared` (or `--recover`, below).
+    Re-verify the GC-rooted paths exist.
+D2. **Quiet window** (poll 30 s; give up after 2 h => stays `prepared`, notify,
+    exit 1; deploy is resumable). Quiet = all at once:
+    - latest stall-watch JSON tick line (root: `journalctl
+      _SYSTEMD_USER_UNIT=stall-watch.service _UID=1000 --since -15min -o cat`,
+      last line starting `{"ts"`) has `coordinator.runs == 0`, and
+      `stall-watch.service` is not active right now;
+    - sessions.db `select max(id) from messages` (sqlite `mode=ro`) unchanged
+      for >= 10 min of this run's observation;
+    - no PID under `/sys/fs/cgroup/system.slice/goose-serve.service`
+      (recursive `cgroup.procs`) with `oom_score_adj >= 500`;
+    - `honk list --json` (as dev) shows no session running a turn or with
+      pending requests (field names: read honk's list output; if the shape is
+      unknown, treat as not quiet and log it).
+    Refuse to proceed past D2 with less than 60 min left of `TimeoutStartSec`.
+D3. **Locks and holds**, in this order, released in `finally` in reverse:
+    open `/tmp/reset-workspace.lock` READ-ONLY (never O_CREAT; create it as dev
+    if absent) and `flock -n` (busy => back to D2 polling); as dev take
+    `/run/user/1000/pull-workstation.lock` (`flock -n`, held by a child
+    process for the duration); as dev `systemctl --user stop
+    stall-watch.timer`, wait until `stall-watch.service` is inactive (max 10
+    min; a tick in progress means not quiet). Re-check D2 once. Write
+    `phase=deploying`.
+D4. **Gate + backup.** `<toplevel>/bin/switch-to-configuration dry-activate`;
+    refuse if it would stop/restart any unit outside an allowlist (start empty
+    plus units this host restarts harmlessly, e.g. `systemd-tmpfiles-resetup`;
+    `lgtm-run`: wait until inactive). sqlite online backup of sessions.db to
+    `/var/lib/goose-cutover/backups/sessions-<UTC>-pr<pr>.db`, keep newest 5.
+    Record `old_system=readlink -f /nix/var/nix/profiles/system`.
+D5. **Activate.** `nix-env -p /nix/var/nix/profiles/system --set <toplevel>`
+    then `<toplevel>/bin/switch-to-configuration switch`; as dev
+    `<hm_package>/activate`. (No re-evaluation: exactly what prepare built.)
+D6. **Flip.** `goose-link set <candidate>`; require `goose-link status`
+    current == candidate.
+D7. **Restart.** Record goose-serve `ExecMainStartTimestampMonotonic`;
+    `systemctl restart goose-serve`; poll `curl -sf :4080/status` 60 s; the
+    timestamp increased; `/proc/<MainPID>/cmdline` argv0 ==
+    `/var/lib/goose/current/bin/goose`; `readlink /proc/<MainPID>/exe` ==
+    `<cand>/bin/goose`; ACP initialize (`POST :4080/acp`, `x-secret-key` from
+    `/run/secrets/pigeon_goose_acp_token`) `result.agentInfo.version` == the
+    candidate's upstream version (package version before `-patched`).
     honkd (dev user unit, keep-old): if its `ExecStart` path differs from
-    `/proc/<MainPID>/exe`, restart it. Either way wait up to 30 s for
-    `Upstream control connection re-initialized successfully` in its journal
-    since the goose restart.
-11. **Post-checks.** (a) force one stall-watch tick as dev (`systemctl --user
-    start stall-watch.service`, blocks) and require its JSON line `ok == true`;
-    (b) honk headless: `honk launch --tag auto --no-attach --title goose-cutover-probe
-    /tmp 'Reply with exactly: PONG'`, parse `native=<id>`, then `timeout 300 honk
-    tail --text-only --exit-on-turn-end <id>` output contains `PONG`.
-    Release the lock.
-12. **Success.** Write `/var/lib/goose-cutover/deployed.json` {pr, store_path,
-    version, merged_sha, ts} (L7 reads it); notify via opencode-drift-alert
-    (signature `goose-cutover:<pr>:<sha>:ok`): "goose-cutover: PR #<pr> live:
-    <old> -> <new>".
+    `/proc/<MainPID>/exe`, restart it and wait for `listening` in its journal;
+    otherwise wait 30 s for `Upstream control connection re-initialized
+    successfully` since the goose restart.
+D8. **Post-checks.** (a) honk headless as dev: `honk launch --tag goose-upgrade
+    --no-attach --title goose-cutover-probe --model claude-haiku-4-5@20251001
+    --effort off /tmp 'Reply with exactly: PONG'` (check the flags exist on
+    this honk; drop any that do not), parse `native=<id>`, then `timeout 300
+    honk tail --text-only --exit-on-turn-end <id>` contains `PONG`; archive or
+    delete the session if honk can. (b) restart `stall-watch.timer`, then
+    wait (max 10 min) for the first tick JSON line with `ts` after the goose
+    restart; require `ok == true`; log its `coordinator.runs` (it may be 0:
+    report, do not claim coordinator coverage).
+D9. **Success.** `phase=deployed`; write `/var/lib/goose-cutover/deployed.json`
+    {pr, merge_sha, store_path, version, ts} (L7 reads it); notify
+    "goose-cutover: PR #<pr> live: <old> -> <new>". Release everything.
 
-**Failure handling.** Steps 1-7 failing: nothing in production moved (a merge
-without a switch is still a no-op for the running goose, thanks to L6); notify
-error and exit 1. A failure in 8-11 runs **rollback**: `goose-link rollback`
-(only if step 9 flipped), restart goose-serve (only if 10 started) and honkd
-(only if restarted), verify `/status` and argv0/exe == old target; then open the
-revert PR as dev (worktree at origin/main, `git revert --no-edit <merge sha>`,
-push `goose-cutover-revert-<pr>`, `gh pr create --label goose-upgrade` with the
-failing step in the body); notify error with the step, detail and revert PR URL.
-It does NOT roll back system/HM generations: pull-workstation re-applies main;
-the revert PR is what restores pin-gated config. A rollback failure notifies
-"ROLLBACK FAILED, goose-serve state unknown" and exits 3.
+**Rollback** (failure in D5-D8, SIGTERM in D5-D8, or `deploy --recover`):
+1. `goose-link set <old_target from state.json>` (never `rollback`: it swaps
+   with whatever `previous` holds, wrong when the flip was a no-op);
+2. if goose-serve was restarted (or `--recover`): restart it and verify
+   `/status` + argv0/exe == old target; restart honkd if D7 restarted it;
+3. system/HM generations are NOT rolled back (pull-workstation re-applies main;
+   the revert PR restores pin-gated config);
+4. **control check**: run the D8(a) PONG against the old binary. If it also
+   fails, the cause is environmental: notify "goose-cutover: rolled back,
+   failure looks environmental (<step>: <detail>); pin left merged; rerun
+   deploy" with no revert PR, `phase=prepared` (deploy can be retried);
+5. otherwise open the revert PR as dev (worktree at origin/main, `git revert
+   --no-edit <merge_sha>`, push `goose-cutover-revert-<pr>`, `gh pr create
+   --label goose-revert`, body: failing step + detail). `goose-revert` PRs are
+   pin moves back to what is already running: merging one is safe and is
+   covered by the standing auto-merge (no `goose-upgrade` label); the next
+   switch only rebuilds config. `phase=rolled-back`; notify error with the
+   revert PR URL;
+6. a rollback step failing: notify "ROLLBACK FAILED at <step>; goose-serve
+   state unknown", `phase=failed`, exit 3.
+Always restore stall-watch.timer and release locks.
 
-Always: release the lock, remove throwaway worktrees.
+## Dry runs
 
-## Tests (unittest, `python3 pkgs/goose-cutover/test_goose_cutover.py`)
+`prepare --dry-run` runs P1-P3 (P3 makes real model turns and runs tool shells
+with dev's HOME on a COPY of sessions.db; it changes no production state) and
+reports what P4-P5 would do. `deploy --dry-run` runs D1-D2 once without waiting
+and D4's dry-activate gate, and reports D3-D9. Neither merges, activates,
+flips or restarts. Test against a no-op pin: `prepare --allow-noop` on a PR
+that changes only a comment in pkgs/goose (candidate == current).
 
-Fake `Runner` records commands and returns scripted results. Cover at least:
-launcher refuses inside goose-serve cgroup; `--run` refuses outside a unit;
-each precondition failing (label, base, checks pending/failed, major without
-ok, file not touched); candidate == current refused without noop, allowed with;
-probe failure stops before quiet window; quiet window: each of the three
-conditions individually blocks, all three pass after 10 min of unchanged max(id),
-deadline gives up; lock taken read-only and re-check; merged-pin mismatch fails
-without flip; failure at switch/flip/restart/post-check each triggers the right
-subset of rollback actions and the revert PR; dry-run performs no mutating
-command (assert no merge/switch/goose-link set/systemctl restart in the log);
-success writes deployed.json and notifies once. Gate in flake.nix like
-astra-probe-tests (pinned "Ran N tests" + "OK").
+## Tests (unittest)
+
+Fake Runner; at least: launcher refuses in goose-serve cgroup; `--run` refuses
+outside a unit; global lock busy; each P1 precondition (labels incl.
+goose-hosts-ready, goose-major/ok, goose-config-ok, files, checks
+pending/failed, base, state); stale merge ref; noop refused/allowed; probe fail
+stops before merge; merged mismatch; dry-run issues no mutating command
+(assert none of: gh pr merge, switch-to-configuration switch, nix-env --set,
+goose-link set, systemctl restart/stop); quiet window: each signal blocks
+alone, all pass after 10 min unchanged max(id), unknown honk shape = not quiet,
+2 h give-up keeps `prepared`; D3 order and finally-release incl. timer restore
+on failure; dry-activate allowlist refusal; failure at D5/D6/D7/D8 each runs
+rollback with set-to-old (never `goose-link rollback`), restarts only what was
+restarted; control PONG fail => no revert PR, phase prepared; control pass =>
+revert PR with goose-revert label; rollback failure => exit 3; `--recover`
+from phase deploying; success writes deployed.json and notifies once. Gate in
+flake.nix with a pinned "Ran N tests" + "OK".
