@@ -89,6 +89,33 @@ Host devbox-tunnel
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
     RemoteForward 2850 127.0.0.1:2850
+
+# Chart tunnel: reaches devbox's loopback 4710, where \`oc-tags serve\` runs.
+# Reached on the Mac at http://127.0.0.1:4711. The socket-activated
+# \`devbox-chart-tunnel\` LaunchAgent (users/dev/home.darwin.nix) owns that
+# port and runs \`ssh -W\` through THIS host block on demand. Since \`-W\`
+# implies ClearAllForwardings, the LocalForward below is ignored on that
+# path; it is what makes the manual \`ssh -N devbox-chart\` fallback still work.
+#
+# Deliberately NOT a forward on the always-on \`devbox-tunnel\` block above --
+# not because that block is remote-only (it already has LocalForward 4000 etc.),
+# but because :4711 has plausible local colliders: a muscle-memory
+# \`ssh -N devbox-chart\` or another local forward. That block runs under
+# ExitOnForwardFailure=yes, so a bind clash there would kill the whole tunnel,
+# taking gclpr (2850), chatgpt-relay (3033), and the development forwards with it.
+# A separate agent contains the blast radius to the chart.
+#
+# No ForwardAgent here: this host exists only to carry the forward, and
+# omitting it means an interactive \`ssh devbox-chart\` run while debugging does
+# not hand this Mac's SSH agent to a remote VM.
+Host devbox-chart
+    HostName $DEVBOX_IP
+    User dev
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    ControlMaster no
+    ControlPath ~/.ssh/cm-devbox-chart-%r@%h:%p
+    LocalForward 4711 127.0.0.1:4710
 $DEVBOX_MARKER_END
 EOF
 

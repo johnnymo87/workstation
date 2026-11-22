@@ -17,8 +17,9 @@ session-tags which ses_abc123        # tag / source / root-id / kind, tab-separa
 session-tags sessions billing        # root session ids carrying a tag, one per line
 session-tags report --days 7
 session-tags serve                   # then, from the Mac, just open
-                                # http://127.0.0.1:4710 -- the socket-activated
-                                # cloudbox-chart-tunnel LaunchAgent connects on demand
+                                # http://127.0.0.1:4710 (cloudbox) or :4711 (devbox)
+                                # -- the socket-activated *-chart-tunnel
+                                # LaunchAgents connect on demand
 ```
 
 ### Goose spend source
