@@ -420,6 +420,13 @@ DEFAULT_GOOSE_DB = os.path.expanduser("~/.local/share/goose/sessions/sessions.db
 # them; this append-only JSONL is their only durable record.
 DEFAULT_LGTM_LEDGER = os.path.expanduser("~/.local/state/lgtm/goose-usage.jsonl")
 LGTM_LEDGER_TAG = "lgtm-runs"
+# eternal-machinery spend ledger (workstation-2wtm.6).
+# Appended by Letta proxy (:4318, :4319) and bench codex arms in monthly shards:
+# <dir>/spend-YYYY-MM.jsonl.
+DEFAULT_EM_LEDGER_DIR = os.environ.get(
+    "OC_TAGS_EM_LEDGER_DIR",
+    os.path.expanduser("~/.local/state/eternal-machinery/spend"),
+)
 
 # Rate table for pricing uncosted goose usage_ledger rows ($ per million tokens).
 # Source of truth: pkgs/oc-cost/oc_cost.py RATES.
@@ -447,6 +454,9 @@ GOOSE_MODEL_RATES: dict[str, object] = {
     "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 2.5},
     "claude-sonnet-5":   {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.30, "cache_write": 3.75},
+    # claude-haiku-5-5: standard Anthropic list price (below 100k context tier: 0.10/0.50, cache 0.01/0.125)
+    # matching pkgs/oc-cost/oc_cost.py
+    "claude-haiku-5-5":  {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
     "claude-fable-5":    {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.5},
     # Google Gemini
     "gemini-3.5-flash":  {"input": 1.5, "output": 9.0, "cache_read": 0.15, "cache_write": 1.5},
@@ -455,6 +465,13 @@ GOOSE_MODEL_RATES: dict[str, object] = {
     "gemini-3.8-flash":  GEMINI_FLASH_PHASES,
     "gemini-4-argon":    GEMINI_4_ARGON_PHASES,
     "gemini-4-hydrogen": GEMINI_4_HYDROGEN_PHASES,
+    # OpenAI / codex-lb subscription models (users/dev/opencode-config.nix lines 850-884)
+    "gpt-6-astra":       {"input": 10.0, "output": 50.0, "cache_read": 1.00, "cache_write": 12.5},
+    "gpt-6.1-sol":       {"input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 2.5},
+    "gpt-6-luna":        {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+    "gpt-5.6-sol":       {"input": 4.0, "output": 20.0, "cache_read": 0.40, "cache_write": 5.0},
+    "gpt-5.6-terra":     {"input": 2.0, "output": 12.0, "cache_read": 0.20, "cache_write": 2.5},
+    "gpt-5.6-luna":      {"input": 0.20, "output": 1.20, "cache_read": 0.02, "cache_write": 0.25},
 }
 
 
@@ -465,10 +482,15 @@ def goose_rate_for(model: str | None, day: str | None = None) -> dict[str, float
     entry = None
     if base in GOOSE_MODEL_RATES:
         entry = GOOSE_MODEL_RATES[base]
+    elif "/" in base and base.split("/", 1)[1] in GOOSE_MODEL_RATES:
+        entry = GOOSE_MODEL_RATES[base.split("/", 1)[1]]
     else:
         best: str | None = None
         for key in GOOSE_MODEL_RATES:
             if base.startswith(key):
+                if best is None or len(key) > len(best):
+                    best = key
+            elif "/" in base and base.split("/", 1)[1].startswith(key):
                 if best is None or len(key) > len(best):
                     best = key
         if best:
@@ -484,7 +506,9 @@ def goose_rate_for(model: str | None, day: str | None = None) -> dict[str, float
             else:
                 break
         return cur
-    return entry
+    if isinstance(entry, dict):
+        return entry
+    return None
 
 
 def compute_goose_cost(
@@ -575,6 +599,9 @@ class Aggregate:
     # notionalVertexCost, which covers Claude alone. See CLAUDE_PROVIDERS.
     claude_day: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    em_proxy_errors: int = 0
+    em_freshness: str | None = None
+    em_ledger_dir_exists: bool = False
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -597,8 +624,10 @@ def aggregate(
     now_ms: int | None = None,
     goose_db_path: str | None = None,
     lgtm_ledger_path: str | None = None,
+    em_ledger_path: str | None = None,
 ) -> Aggregate:
     agg = Aggregate()
+    now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     rows = []
     parents: dict[str, str | None] = {}
     dirs: dict[str, str | None] = {}
@@ -829,7 +858,31 @@ def aggregate(
         per_bucket[tag][key] += cost
         agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
 
-    now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    if em_ledger_path is None:
+        em_ledger_path = os.environ.get("OC_TAGS_EM_LEDGER_DIR", DEFAULT_EM_LEDGER_DIR)
+    if em_ledger_path and os.path.isdir(em_ledger_path):
+        agg.em_ledger_dir_exists = True
+        agg.em_freshness = format_em_freshness(
+            em_ledger_port_freshness(em_ledger_path),
+            now_ms=now_epoch_ms,
+        )
+        for root, tag, source, title, ts, cost, unpriced_model, toks, outcome in read_em_ledger(
+            em_ledger_path, since_ms, until_ms, session_tags, agg.warnings
+        ):
+            if root not in agg.root_meta:
+                agg.root_meta[root] = {"title": title, "directory": None, "tag": tag, "source": source}
+            agg.sources[tag] = source
+            if outcome == "proxy_error":
+                agg.em_proxy_errors += 1
+            if unpriced_model is not None:
+                u = agg.unpriced.setdefault(unpriced_model, {"messages": 0, "tokens": 0})
+                u["messages"] += 1
+                u["tokens"] += toks
+            key = bucket_key(ts, bucket)
+            newest_row_ms = max(newest_row_ms, ts)
+            per_bucket[tag][key] += cost
+            agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+
     # Enumerate THROUGH the newest observed row, not merely up to now, so a
     # message timestamped ahead of now still has a slot. Unioning its key in
     # instead would leave the intervening buckets missing and punch a gap in
@@ -984,6 +1037,239 @@ def read_lgtm_ledger(
         )
 
 
+def em_monthly_shards(directory: str, since_ms: int, until_ms: int) -> list[str]:
+    """Return paths of monthly shards in `directory` touched by [since_ms, until_ms)."""
+    if not directory or not os.path.isdir(directory):
+        return []
+    dt_since = datetime.datetime.fromtimestamp(since_ms / 1000, datetime.timezone.utc)
+    dt_until = datetime.datetime.fromtimestamp(max(since_ms, until_ms - 1) / 1000, datetime.timezone.utc)
+    cur_y = dt_since.year
+    cur_m = dt_since.month
+    end_y = dt_until.year
+    end_m = dt_until.month
+    shards = []
+    while (cur_y < end_y) or (cur_y == end_y and cur_m <= end_m):
+        fname = f"spend-{cur_y:04d}-{cur_m:02d}.jsonl"
+        shards.append(os.path.join(directory, fname))
+        cur_m += 1
+        if cur_m > 12:
+            cur_m = 1
+            cur_y += 1
+    return shards
+
+
+def read_em_ledger(
+    ledger_dir: str | None,
+    since_ms: int,
+    until_ms: int,
+    session_tags: dict[str, str],
+    warnings: list[str],
+):
+    """Yield (root, tag, source, title, ts, cost, unpriced_model, toks, outcome)
+    for each in-window row of the eternal-machinery spend ledger.
+
+    Streams line by line over only monthly shards the window touches.
+    """
+    if not ledger_dir or not os.path.isdir(ledger_dir):
+        return
+    shards = em_monthly_shards(ledger_dir, since_ms, until_ms)
+    rejected = 0
+    seen: set[str] = set()
+
+    def _num(row, name):
+        v = row.get(name)
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+    for shard_path in shards:
+        if not os.path.exists(shard_path):
+            continue
+        try:
+            with open(shard_path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        rejected += 1
+                        continue
+                    if not isinstance(row, dict):
+                        rejected += 1
+                        continue
+                    if row.get("v") != 1:
+                        rejected += 1
+                        continue
+                    at_val = row.get("at")
+                    ts = _iso_to_ms(at_val)
+                    if ts is None:
+                        rejected += 1
+                        continue
+                    key = row.get("key")
+                    if not isinstance(key, str) or not key:
+                        rejected += 1
+                        continue
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if ts < since_ms or ts >= until_ms:
+                        continue
+                    spend = row.get("spend")
+                    if not isinstance(spend, str) or not spend:
+                        rejected += 1
+                        continue
+                    root = f"em:{spend}"
+                    if spend.startswith("agents/"):
+                        name = spend[len("agents/"):]
+                        default_tag = f"em-agents:{name}"
+                    elif spend.startswith("bench/"):
+                        name = spend[len("bench/"):]
+                        default_tag = f"em-bench:{name}"
+                    else:
+                        default_tag = f"em:{spend}"
+                    if root in session_tags:
+                        tag = session_tags[root]
+                    else:
+                        tag = default_tag
+                    source = "manual"
+                    title = f"em:{spend}"
+
+                    inp = int(_num(row, "input"))
+                    out = int(_num(row, "output"))
+                    cread = int(_num(row, "cache_read"))
+                    cwrite = int(_num(row, "cache_write"))
+                    toks = inp + out + cread + cwrite
+                    outcome = row.get("outcome") if isinstance(row.get("outcome"), str) else None
+                    model = row.get("model") if isinstance(row.get("model"), str) else None
+
+                    cost = 0.0
+                    unpriced_model = None
+                    if toks > 0:
+                        inclusive_inp = inp + cread + cwrite
+                        day = datetime.datetime.fromtimestamp(ts / 1000, ET).strftime("%Y-%m-%d")
+                        c, is_unpriced = compute_goose_cost(model, inclusive_inp, out, cread, cwrite, None, day=day)
+                        if is_unpriced:
+                            cost = 0.0
+                            unpriced_model = model or "unknown"
+                        else:
+                            cost = c
+                    else:
+                        cost = 0.0
+                        unpriced_model = None
+
+                    yield root, tag, source, title, ts, float(cost), unpriced_model, toks, outcome
+        except OSError as e:
+            warnings.append(f"EM spend ledger unreadable: {e}")
+    if rejected:
+        warnings.append(
+            f"EM spend ledger: {rejected} row(s) not counted (invalid JSON, schema, or timestamp) in {ledger_dir}"
+        )
+
+
+def em_ledger_port_freshness(ledger_dir: str) -> dict[int, int]:
+    """Find the latest timestamp per port across all shards in `ledger_dir`."""
+    if not ledger_dir or not os.path.isdir(ledger_dir):
+        return {}
+    port_latest: dict[int, int] = {}
+    try:
+        entries = os.listdir(ledger_dir)
+    except OSError:
+        return {}
+    shard_files = sorted(
+        [f for f in entries if f.startswith("spend-") and f.endswith(".jsonl")],
+        reverse=True,
+    )
+    for fname in shard_files:
+        path = os.path.join(ledger_dir, fname)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or row.get("v") != 1:
+                        continue
+                    port = row.get("port")
+                    if not isinstance(port, int):
+                        continue
+                    ts = _iso_to_ms(row.get("at"))
+                    if ts is None:
+                        continue
+                    if port not in port_latest or ts > port_latest[port]:
+                        port_latest[port] = ts
+        except OSError:
+            continue
+    return port_latest
+
+
+def format_em_freshness(port_latest: dict[int, int], now_ms: int) -> str:
+    """Format per-port freshness as 'EM ledger: last row 2h ago (:4318), 5d ago (:4319)'."""
+    if not port_latest:
+        return "EM ledger: no rows"
+    parts = []
+    for port in sorted(port_latest.keys()):
+        diff_s = max(0, int((now_ms - port_latest[port]) / 1000))
+        if diff_s < 60:
+            ago = f"{diff_s}s ago"
+        elif diff_s < 3600:
+            ago = f"{diff_s // 60}m ago"
+        elif diff_s < 86400:
+            ago = f"{diff_s // 3600}h ago"
+        else:
+            ago = f"{diff_s // 86400}d ago"
+        parts.append(f"{ago} (:{port})")
+    return f"EM ledger: last row {', '.join(parts)}"
+
+
+def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -> Aggregate:
+    """Fold tags matching <prefix>:<x> into a single band named <prefix> before ranking."""
+    if not fold_prefixes:
+        return agg
+    prefixes = [p.strip() for p in fold_prefixes if p.strip()]
+    if not prefixes:
+        return agg
+
+    new_totals = dict(agg.totals)
+    new_series = {t: dict(s) for t, s in agg.series.items()}
+    new_sources = dict(agg.sources)
+
+    for prefix in prefixes:
+        pattern = f"{prefix}:"
+        matching_tags = [t for t in new_totals if t.startswith(pattern)]
+        if not matching_tags:
+            continue
+        folded_total = sum(new_totals[t] for t in matching_tags) + new_totals.get(prefix, 0.0)
+        folded_bucket_series = {}
+        for b in agg.buckets:
+            val = sum(new_series[t].get(b, 0.0) for t in matching_tags) + new_series.get(prefix, {}).get(b, 0.0)
+            folded_bucket_series[b] = val
+        folded_source = "manual" if any(new_sources.get(t) == "manual" for t in matching_tags) or new_sources.get(prefix) == "manual" else "auto"
+
+        for t in matching_tags:
+            new_totals.pop(t, None)
+            new_series.pop(t, None)
+            new_sources.pop(t, None)
+
+        new_totals[prefix] = folded_total
+        new_series[prefix] = folded_bucket_series
+        new_sources[prefix] = folded_source
+
+    sorted_totals = dict(
+        sorted(new_totals.items(), key=lambda item: (-item[1], item[0]))
+    )
+
+    import copy
+    new_agg = copy.copy(agg)
+    new_agg.totals = sorted_totals
+    new_agg.series = new_series
+    new_agg.sources = new_sources
+    return new_agg
+
+
 def calculate_window(days: int, now_ms: int | None = None) -> Window:
     if now_ms is None:
         raw_now = os.environ.get("OC_TAGS_NOW_MS")
@@ -1012,10 +1298,13 @@ def load_aggregate(
     now_ms: int | None = None,
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
+    em_ledger_dir: str | None = None,
 ) -> Aggregate:
     win = calculate_window(days, now_ms=now_ms)
     if lgtm_ledger is None:
         lgtm_ledger = DEFAULT_LGTM_LEDGER
+    if em_ledger_dir is None:
+        em_ledger_dir = os.environ.get("OC_TAGS_EM_LEDGER_DIR", DEFAULT_EM_LEDGER_DIR)
     s_tags = {}
     if os.path.exists(tags_db):
         with open_store(tags_db, readonly=True) as st:
@@ -1026,7 +1315,8 @@ def load_aggregate(
     has_opencode = os.path.exists(db_path)
     has_goose = bool(goose_db and os.path.exists(goose_db))
     has_ledger = bool(lgtm_ledger and os.path.exists(lgtm_ledger))
-    if not has_opencode and not has_goose and not has_ledger:
+    has_em_ledger = bool(em_ledger_dir and os.path.isdir(em_ledger_dir))
+    if not has_opencode and not has_goose and not has_ledger and not has_em_ledger:
         agg = Aggregate()
         agg.window = win
         return agg
@@ -1040,6 +1330,7 @@ def load_aggregate(
         now_ms=win.now_ms,
         goose_db_path=goose_db,
         lgtm_ledger_path=lgtm_ledger,
+        em_ledger_path=em_ledger_dir,
     )
     agg.window = win
     return agg
@@ -1242,12 +1533,16 @@ def render_svg(
     hide: frozenset[str] = frozenset(),
     top_n: int = 12,
     notional_by_day: dict[str, float] | None = None,
+    fold: list[str] | tuple[str, ...] = (),
 ) -> str:
     """Render a stacked-bar chart of list-price LLM consumption per tag as SVG.
 
     Pure function: no socket, no DB access, testable in a sandbox.
     \n\n    NOTE: the hover tooltips depend on CSS :hover inside the SVG document.\n    They work when this SVG is served as a top-level image/svg+xml document\n    (as handle_request does) or inlined into HTML. Wrapping it in <img src=...>\n    silently disables every tooltip -- no error, they just never appear."""
     import math
+
+    if fold:
+        agg = fold_aggregate(agg, fold)
 
     if isinstance(metered_by_day, CfpSpend):
         metered = metered_by_day.metered
@@ -1575,6 +1870,18 @@ def render_svg(
             svg_parts.append(
                 f'  <text x="{plot_x}" y="{footer_y}" class="drift" font-size="11" font-weight="600">⚠️ {html.escape(w)}</text>'
             )
+    if getattr(agg, "em_ledger_dir_exists", False):
+        em_footer_parts = []
+        if agg.em_freshness:
+            em_footer_parts.append(agg.em_freshness)
+        if agg.em_proxy_errors > 0:
+            err_msg = f"{agg.em_proxy_errors} EM proxy error{'s' if agg.em_proxy_errors != 1 else ''}, unpriced"
+            em_footer_parts.append(err_msg)
+        if em_footer_parts:
+            footer_y += 16
+            svg_parts.append(
+                f'  <text class="axl" x="{plot_x}" y="{footer_y}" font-size="11">{html.escape(" | ".join(em_footer_parts))}</text>'
+            )
 
     # Tooltips must be the last painted thing in the document, or the legend
     # (drawn at x >= 825) covers any tooltip near the right edge.
@@ -1595,6 +1902,7 @@ def handle_request(
     now_ms: int | None = None,
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
+    em_ledger_dir: str | None = None,
 ) -> tuple[int, str, str]:
     if path == "/healthz":
         return (200, "text/plain; charset=utf-8", "ok\n")
@@ -1660,6 +1968,14 @@ def handle_request(
                     hide_set.add(item)
     hide = frozenset(hide_set)
 
+    fold_list = []
+    if "fold" in params:
+        for val in params["fold"]:
+            for item in val.split(","):
+                item = item.strip()
+                if item and item not in fold_list:
+                    fold_list.append(item)
+
     top_n = 12
     if "top_n" in params:
         try:
@@ -1676,9 +1992,10 @@ def handle_request(
             now_ms=now_ms,
             goose_db=goose_db,
             lgtm_ledger=lgtm_ledger,
+            em_ledger_dir=em_ledger_dir,
         )
         spend = cfp_spend_by_day(cfp_dir)
-        svg = render_svg(agg, spend, hide=hide, top_n=top_n)
+        svg = render_svg(agg, spend, hide=hide, top_n=top_n, fold=fold_list)
         return (200, "image/svg+xml; charset=utf-8", svg)
     except sqlite3.OperationalError as e:
         return (503, "text/plain; charset=utf-8", f"Database error: {e}\n")
@@ -1690,6 +2007,7 @@ def make_handler(
     cfp_dir: str = CFP_DIR,
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
+    em_ledger_dir: str | None = None,
 ):
     class OcTagsHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -1702,6 +2020,7 @@ def make_handler(
                 cfp_dir=cfp_dir,
                 goose_db=goose_db,
                 lgtm_ledger=lgtm_ledger,
+                em_ledger_dir=em_ledger_dir,
             )
             body_bytes = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
@@ -1730,6 +2049,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             CFP_DIR,
             getattr(args, "goose_db", DEFAULT_GOOSE_DB),
             getattr(args, "lgtm_ledger", None),
+            getattr(args, "em_ledger_dir", None),
         ),
     )
     print(f"Serving oc-tags chart on http://{host}:{port}/ (Ctrl+C to stop)")
@@ -1771,6 +2091,11 @@ def _add_db_options(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="path to lgtm's goose-usage.jsonl",
     )
+    parser.add_argument(
+        "--em-ledger-dir",
+        default=argparse.SUPPRESS,
+        help="path to eternal-machinery spend ledger directory",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1786,6 +2111,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--lgtm-ledger",
         default=None,
         help="path to lgtm's goose-usage.jsonl (default ~/.local/state/lgtm/goose-usage.jsonl)",
+    )
+    p.add_argument(
+        "--em-ledger-dir",
+        default=None,
+        help="path to eternal-machinery spend ledger directory (default ~/.local/state/eternal-machinery/spend)",
     )
 
     sub = p.add_subparsers(dest="command", required=True)
@@ -1838,6 +2168,7 @@ def build_parser() -> argparse.ArgumentParser:
     # report
     rep = sub.add_parser("report", help="text table of dollars by tag by day")
     rep.add_argument("--days", type=int, default=14, help="number of days to report")
+    rep.add_argument("--fold", help="comma-separated tag prefixes to fold into one band (e.g. em-agents,em-bench)")
     _add_db_options(rep)
 
     # top
@@ -2016,6 +2347,26 @@ def cmd_which(args: argparse.Namespace) -> int:
 
     root_sid = target_sid
     directory: str | None = None
+    if target_sid.startswith("em:"):
+        # eternal-machinery spend ledger roots: em:<spend>
+        with open_store(args.tags_db, readonly=True) as st:
+            warn_retired_dir_tags(st)
+            s_tags = session_tags(st)
+        if target_sid in s_tags:
+            tag, kind = s_tags[target_sid], "session"
+        else:
+            spend = target_sid[len("em:"):]
+            if spend.startswith("agents/"):
+                name = spend[len("agents/"):]
+                tag = f"em-agents:{name}"
+            elif spend.startswith("bench/"):
+                name = spend[len("bench/"):]
+                tag = f"em-bench:{name}"
+            else:
+                tag = f"em:{spend}"
+            kind = "auto"
+        print(f"{tag}\tmanual\t{target_sid}\t{kind}")
+        return 0
     if target_sid.startswith("lgtm-goose:"):
         # lgtm's goose spend ledger roots: the chart bills them to lgtm-runs
         # unless tags.db names the root (read_lgtm_ledger).
@@ -2175,7 +2526,10 @@ def cmd_report(args: argparse.Namespace) -> int:
         days=args.days,
         goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
         lgtm_ledger=getattr(args, "lgtm_ledger", None),
+        em_ledger_dir=getattr(args, "em_ledger_dir", None),
     )
+    if getattr(args, "fold", None):
+        agg = fold_aggregate(agg, [x.strip() for x in args.fold.split(",") if x.strip()])
     for w in agg.warnings:
         sys.stderr.write(f"{w}\n")
 

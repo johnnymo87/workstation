@@ -49,6 +49,18 @@ lgtm's goose review turns and goose gather runs each run in a private `GOOSE_PAT
 - **Loud on schema drift**: a keyed row with an unknown `v`, `kind` or timestamp is not counted and is reported on stderr.
 - **Known gaps**: ledger spend, like goose-serve spend, is left out of the Claude-only cfp coverage and cap numerators even though goose traffic goes through cfp, so coverage reads low; `oc-cost` does not read the ledger. `--lgtm-ledger ""` turns the source off.
 
+### eternal-machinery spend source
+
+eternal-machinery (EM) runtime agent spend (port 4318) and benchmark spend (port 4319, codex port 2455) are recorded in monthly JSONL shards in `~/.local/state/eternal-machinery/spend/spend-YYYY-MM.jsonl` (override with `OC_TAGS_EM_LEDGER_DIR` or `--em-ledger-dir`).
+
+- **Tag**: `em-agents:<name>` for role agents, `em-bench:<name>` for role bench, unless `tags.db` names the root. Root IDs are `em:<spend>` (e.g. `em:agents/warrior_f`).
+- **Dedupe**: rows are deduped on `key`, first wins.
+- **Streaming**: streams line by line over only the monthly shards touched by the requested window.
+- **Cost**: calculated from model rates with goose cache semantics (`input + cache_read + cache_write` as inclusive input). Zero-token rows (`http_error`, `proxy_error`) cost $0 and do not show as unpriced. Unknown models appear under "Unpriced models".
+- **Footer**: displays EM proxy error count and per-port ledger freshness (`EM ledger: last row Nh ago (:4318), Nd ago (:4319)`).
+- **Chart folding**: `fold=<prefix>[,<prefix>]` query parameter (or `--fold` in `report`) sums `<prefix>:*` tags into a single band before ranking (e.g. `fold=em-agents,em-bench`).
+- **Claude cap/coverage**: EM rows do not enter `claude_day` or cfp coverage calculations.
+
 ### Directory rules (removed)
 
 Directory rules (`dir_tag`, `session-tags set --dir`) were removed; precedence is session tag > `auto:`. If `session-tags` warns about retired rules in `dir_tag`, convert each matching session to an explicit `session-tags set <tag> <session>` after snapshotting `tags.db`, then delete the rows:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -2436,6 +2437,11 @@ class TestGooseRateDrift(unittest.TestCase):
                     cost_rate = self.oc_cost.rate_for("google-vertex", model, day=d)
                 elif ("google-vertex-anthropic", model) in self.oc_cost.RATES:
                     cost_rate = self.oc_cost.rate_for("google-vertex-anthropic", model, day=d)
+                elif ("openai", model) in self.oc_cost.RATES:
+                    cost_rate = self.oc_cost.rate_for("openai", model, day=d)
+                elif model.startswith("gpt-"):
+                    # Codex models sourced from users/dev/opencode-config.nix
+                    continue
                 else:
                     cost_rate = self.oc_cost.rate_for("anthropic", model, day=d)
                 self.assertIsNotNone(cost_rate, f"oc-cost has no rate for {model} on {d}")
@@ -3314,5 +3320,328 @@ class TestLgtmGooseLedger(unittest.TestCase):
         self.assertAlmostEqual(agg.totals["lgtm-runs"], 1.25)
 
 
+def _em_row(**kw):
+    row = {
+        "v": 1,
+        "key": "test-key-1",
+        "at": "2026-09-08T13:00:00.123+00:00",
+        "port": 4318,
+        "spend": "agents/warrior_f",
+        "attributed": True,
+        "conflict": False,
+        "model": "claude-sonnet-5-5",
+        "status": 200,
+        "outcome": "ok",
+        "input": 12,
+        "output": 340,
+        "cache_read": 48210,
+        "cache_write": 340,
+        "max_context": 48562,
+    }
+    row.update(kw)
+    return row
+
+
+class TestEmSpendLedger(unittest.TestCase):
+    """eternal-machinery runtime spend ledger tests (workstation-2wtm.6)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.em_dir = os.path.join(self.td.name, "spend")
+        os.makedirs(self.em_dir, exist_ok=True)
+        self.opencode_db = os.path.join(self.td.name, "opencode.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        conn = sqlite3.connect(self.opencode_db)
+        conn.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def write_shard(self, month_str, *rows, raw_tail=""):
+        path = os.path.join(self.em_dir, f"spend-{month_str}.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            for r in rows:
+                if isinstance(r, str):
+                    fh.write(r + "\n")
+                else:
+                    fh.write(json.dumps(r) + "\n")
+            if raw_tail:
+                fh.write(raw_tail)
+
+    def write(self, *rows, raw_tail=""):
+        for r in rows:
+            if isinstance(r, dict) and "at" in r:
+                m = r["at"][:7]
+            else:
+                m = "2026-09"
+            self.write_shard(m, r)
+        if raw_tail:
+            self.write_shard("2026-09", raw_tail=raw_tail)
+
+    def agg(self, session_tags=None, since_ms=None, until_ms=None, em_dir=None):
+        return oc_tags.aggregate(
+            self.opencode_db,
+            since_ms=since_ms if since_ms is not None else FIXTURE_NOW_MS - 86400 * 1000,
+            until_ms=until_ms if until_ms is not None else FIXTURE_NOW_MS + 86400 * 1000,
+            bucket="day",
+            session_tags={} if session_tags is None else session_tags,
+            now_ms=FIXTURE_NOW_MS,
+            em_ledger_path=self.em_dir if em_dir is None else em_dir,
+        )
+
+    def test_read_em_ledger_attribution_and_tags(self):
+        self.write(
+            _em_row(key="k1", spend="agents/warrior_f", input=100, output=100, cache_read=0, cache_write=0),
+            _em_row(key="k2", spend="bench/social_rig", port=4319, input=100, output=100, cache_read=0, cache_write=0),
+        )
+        agg = self.agg()
+        self.assertIn("em-agents:warrior_f", agg.totals)
+        self.assertIn("em-bench:social_rig", agg.totals)
+        self.assertEqual(agg.sources["em-agents:warrior_f"], "manual")
+        self.assertEqual(agg.sources["em-bench:social_rig"], "manual")
+        self.assertIn("em:agents/warrior_f", agg.root_totals)
+        self.assertIn("em:bench/social_rig", agg.root_totals)
+
+        # tags.db override
+        agg_override = self.agg(session_tags={"em:agents/warrior_f": "custom-warrior"})
+        self.assertIn("custom-warrior", agg_override.totals)
+        self.assertNotIn("em-agents:warrior_f", agg_override.totals)
+        self.assertEqual(agg_override.sources["custom-warrior"], "manual")
+
+    def test_read_em_ledger_dedupes_on_key_first_wins(self):
+        self.write(
+            _em_row(key="dup-1", input=100, output=100, cache_read=0, cache_write=0),
+            _em_row(key="dup-1", input=99999, output=99999, cache_read=0, cache_write=0),
+        )
+        agg = self.agg()
+        # claude-sonnet-5-5: 2/10 -> (100*2 + 100*10)/1e6 = 1200/1e6 = 0.0012
+        self.assertAlmostEqual(agg.totals["em-agents:warrior_f"], 0.0012)
+
+    def test_read_em_ledger_schema_warning_incl_invalid_json(self):
+        self.write(
+            _em_row(key="valid-1", input=100, output=100, cache_read=0, cache_write=0),
+            _em_row(key="bad-v", v=2),
+            _em_row(key="bad-at", at="not-a-date"),
+            _em_row(key="naive-at", at="2026-09-08T13:00:00"),
+            _em_row(key="", spend="agents/warrior_f"),
+            {"no": "key"},
+            raw_tail='not json at all\n{"key": "torn\n',
+        )
+        agg = self.agg()
+        self.assertAlmostEqual(agg.totals["em-agents:warrior_f"], 0.0012)
+        # Exactly one warning with count of rejected rows (6 bad lines)
+        self.assertEqual(len(agg.warnings), 1)
+        self.assertIn("6 row(s) not counted", agg.warnings[0])
+        self.assertIn("EM spend ledger", agg.warnings[0])
+
+    def test_pricing_hand_computed(self):
+        # claude-sonnet-5-5: input=2.0, output=10.0, cache_read=0.10, cache_write=2.5 per Mtok
+        # ledger stores uncached input: input=100, output=50, cache_read=1000, cache_write=200
+        # inclusive input to goose: 100 + 1000 + 200 = 1300
+        # cost = (100 * 2.0 + 50 * 10.0 + 1000 * 0.10 + 200 * 2.5) / 1_000_000
+        #      = (200 + 500 + 100 + 500) / 1_000_000 = 1300 / 1_000_000 = 0.0013
+        self.write(_em_row(
+            key="hand-calc",
+            model="claude-sonnet-5-5",
+            input=100,
+            output=50,
+            cache_read=1000,
+            cache_write=200,
+        ))
+        agg = self.agg()
+        self.assertAlmostEqual(agg.totals["em-agents:warrior_f"], 0.0013)
+
+    def test_unpriced_unknown_model(self):
+        self.write(_em_row(
+            key="unknown-mod",
+            model="unknown-em-model-xyz",
+            input=500,
+            output=500,
+            cache_read=0,
+            cache_write=0,
+        ))
+        agg = self.agg()
+        self.assertEqual(agg.totals.get("em-agents:warrior_f", 0.0), 0.0)
+        self.assertIn("unknown-em-model-xyz", agg.unpriced)
+        self.assertEqual(agg.unpriced["unknown-em-model-xyz"]["messages"], 1)
+        self.assertEqual(agg.unpriced["unknown-em-model-xyz"]["tokens"], 1000)
+
+    def test_zero_token_rows_not_unpriced(self):
+        self.write(
+            _em_row(key="k-http", status=429, outcome="http_error", input=0, output=0, cache_read=0, cache_write=0),
+            _em_row(key="k-proxy", status=502, outcome="proxy_error", input=0, output=0, cache_read=0, cache_write=0),
+            # Price by tokens, never by status/outcome: status 200 with error outcome carries billed tokens
+            _em_row(key="k-err-tokens", status=200, outcome="error", input=100, output=100, cache_read=0, cache_write=0),
+        )
+        agg = self.agg()
+        self.assertEqual(agg.unpriced, {})
+        # k-err-tokens is priced: (100*2 + 100*10)/1e6 = 0.0012
+        self.assertAlmostEqual(agg.totals["em-agents:warrior_f"], 0.0012)
+
+    def test_proxy_error_footer_count(self):
+        self.write(
+            _em_row(key="pe-1", outcome="proxy_error", input=0, output=0, cache_read=0, cache_write=0),
+            _em_row(key="pe-2", outcome="proxy_error", input=0, output=0, cache_read=0, cache_write=0),
+            _em_row(key="ok-1", outcome="ok", input=100, output=100, cache_read=0, cache_write=0),
+        )
+        agg = self.agg()
+        self.assertEqual(agg.em_proxy_errors, 2)
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn("2 EM proxy errors, unpriced", svg)
+
+    def test_shard_selection_by_window(self):
+        # Shards in 2026-08, 2026-09, 2026-10
+        self.write_shard("2026-08", _em_row(key="k-aug", at="2026-08-15T12:00:00.000+00:00", input=100, output=100, cache_read=0, cache_write=0))
+        self.write_shard("2026-09", _em_row(key="k-sep", at="2026-09-08T12:00:00.000+00:00", input=200, output=200, cache_read=0, cache_write=0))
+        self.write_shard("2026-10", _em_row(key="k-oct", at="2026-10-15T12:00:00.000+00:00", input=300, output=300, cache_read=0, cache_write=0))
+
+        # Window covering only September 2026
+        dt_sep_since = int(datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        dt_sep_until = int(datetime.datetime(2026, 9, 30, tzinfo=datetime.timezone.utc).timestamp() * 1000)
+
+        agg = self.agg(since_ms=dt_sep_since, until_ms=dt_sep_until)
+        # Only September row counted: (200*2 + 200*10)/1e6 = 0.0024
+        self.assertAlmostEqual(agg.totals["em-agents:warrior_f"], 0.0024)
+
+    def test_em_ledger_freshness(self):
+        now_ms = FIXTURE_NOW_MS
+        ts_4318 = now_ms - 2 * 3600 * 1000  # 2h ago
+        ts_4319 = now_ms - 5 * 86400 * 1000  # 5d ago
+        dt_4318 = datetime.datetime.fromtimestamp(ts_4318 / 1000, datetime.timezone.utc).isoformat()
+        dt_4319 = datetime.datetime.fromtimestamp(ts_4319 / 1000, datetime.timezone.utc).isoformat()
+        self.write(
+            _em_row(key="f-4318", port=4318, at=dt_4318, spend="agents/warrior_f"),
+            _em_row(key="f-4319", port=4319, at=dt_4319, spend="bench/social"),
+        )
+        agg = self.agg()
+        self.assertEqual(agg.em_freshness, "EM ledger: last row 2h ago (:4318), 5d ago (:4319)")
+        svg = oc_tags.render_svg(agg, {})
+        self.assertIn("EM ledger: last row 2h ago (:4318), 5d ago (:4319)", svg)
+
+        # When ledger dir does not exist -> no freshness in footer
+        agg_no_em = self.agg(em_dir=os.path.join(self.td.name, "absent_dir"))
+        self.assertIsNone(agg_no_em.em_freshness)
+        svg_no_em = oc_tags.render_svg(agg_no_em, {})
+        self.assertNotIn("EM ledger:", svg_no_em)
+
+    def test_chart_fold(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.totals = {
+            "em-agents:warrior_f": 10.0,
+            "em-agents:scout_m": 5.0,
+            "em-bench:social": 20.0,
+            "em-bench:eval": 8.0,
+            "other-program": 12.0,
+        }
+        agg.series = {
+            "em-agents:warrior_f": {"2026-09-08": 10.0},
+            "em-agents:scout_m": {"2026-09-08": 5.0},
+            "em-bench:social": {"2026-09-08": 20.0},
+            "em-bench:eval": {"2026-09-08": 8.0},
+            "other-program": {"2026-09-08": 12.0},
+        }
+        agg.sources = {
+            "em-agents:warrior_f": "manual",
+            "em-agents:scout_m": "manual",
+            "em-bench:social": "manual",
+            "em-bench:eval": "manual",
+            "other-program": "manual",
+        }
+        folded = oc_tags.fold_aggregate(agg, ["em-agents", "em-bench"])
+        self.assertEqual(folded.totals, {
+            "em-bench": 28.0,
+            "em-agents": 15.0,
+            "other-program": 12.0,
+        })
+        self.assertEqual(folded.series["em-bench"], {"2026-09-08": 28.0})
+        self.assertEqual(folded.series["em-agents"], {"2026-09-08": 15.0})
+
+        # Test fold via handle_request query param
+        self.write(
+            _em_row(key="k-fold1", spend="agents/warrior_f", input=1000, output=1000, cache_read=0, cache_write=0),
+            _em_row(key="k-fold2", spend="agents/scout_m", input=1000, output=1000, cache_read=0, cache_write=0),
+        )
+        status, _, svg = oc_tags.handle_request(
+            "/", "days=1&fold=em-agents", db_path=self.opencode_db, tags_db=self.tags_db,
+            now_ms=FIXTURE_NOW_MS, em_ledger_dir=self.em_dir,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("em-agents", svg)
+        self.assertNotIn("em-agents:warrior_f", svg)
+        self.assertNotIn("em-agents:scout_m", svg)
+
+    def test_which_em_session(self):
+        root_agent = "em:agents/warrior_f"
+        root_bench = "em:bench/eval_1"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            oc_tags.main(["which", root_agent, "--tags-db", self.tags_db, "--db", self.opencode_db])
+        self.assertEqual(out.getvalue().strip().split("\t"), ["em-agents:warrior_f", "manual", root_agent, "auto"])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            oc_tags.main(["which", root_bench, "--tags-db", self.tags_db, "--db", self.opencode_db])
+        self.assertEqual(out.getvalue().strip().split("\t"), ["em-bench:eval_1", "manual", root_bench, "auto"])
+
+        # With tags.db tag
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, root_agent, "custom-tag")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            oc_tags.main(["which", root_agent, "--tags-db", self.tags_db, "--db", self.opencode_db])
+        self.assertEqual(out.getvalue().strip().split("\t"), ["custom-tag", "manual", root_agent, "session"])
+
+    def test_load_aggregate_early_return_counts_em_ledger(self):
+        self.write(_em_row(key="k-load", input=100, output=100, cache_read=0, cache_write=0))
+        agg = oc_tags.load_aggregate(
+            db_path=os.path.join(self.td.name, "none.db"),
+            tags_db=self.tags_db,
+            days=1,
+            now_ms=FIXTURE_NOW_MS,
+            goose_db=os.path.join(self.td.name, "none-goose.db"),
+            lgtm_ledger=os.path.join(self.td.name, "none-lgtm.jsonl"),
+            em_ledger_dir=self.em_dir,
+        )
+        self.assertIn("em-agents:warrior_f", agg.totals)
+
+    def test_not_counted_toward_claude_day_or_cap(self):
+        self.write(_em_row(key="k-cap", input=1000000, output=1000000, cache_read=0, cache_write=0))
+        agg = self.agg()
+        self.assertEqual(agg.claude_day, {})
+        self.assertEqual(agg.cap_hits, {})
+
+    def test_rates_added(self):
+        haiku_rate = oc_tags.goose_rate_for("claude-haiku-5-5")
+        self.assertIsNotNone(haiku_rate)
+        self.assertEqual(haiku_rate["input"], 0.10)
+        self.assertEqual(haiku_rate["output"], 0.50)
+        self.assertEqual(haiku_rate["cache_read"], 0.01)
+        self.assertEqual(haiku_rate["cache_write"], 0.125)
+
+        for mod, inp, out, cread, cwrite in [
+            ("gpt-6-astra", 10.0, 50.0, 1.0, 12.5),
+            ("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5),
+            ("gpt-6-luna", 0.10, 0.50, 0.01, 0.125),
+            ("gpt-5.6-sol", 4.0, 20.0, 0.40, 5.0),
+            ("gpt-5.6-terra", 2.0, 12.0, 0.20, 2.5),
+            ("gpt-5.6-luna", 0.20, 1.20, 0.02, 0.25),
+        ]:
+            r = oc_tags.goose_rate_for(mod)
+            self.assertIsNotNone(r, f"Missing rate for {mod}")
+            self.assertEqual(r["input"], inp, f"Mismatch input for {mod}")
+            self.assertEqual(r["output"], out, f"Mismatch output for {mod}")
+            self.assertEqual(r["cache_read"], cread, f"Mismatch cache_read for {mod}")
+            self.assertEqual(r["cache_write"], cwrite, f"Mismatch cache_write for {mod}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
