@@ -11,121 +11,80 @@
 # and a version gap between two writers of that DB is how a stale-schema panic
 # starts.
 #
-# THE PATCHES (fork branch patched/v1.54.0, on top of tag v1.54.0):
-#   1. GOOSE_HEADLESS_CACHE_TTL (5m|1h): lets a headless `goose run` opt out of
-#      upstream's clamp of the prompt-cache TTL to 5m. Upstream clamps because
-#      burst-only runs cannot idle; a standing session resumed by a timer every
-#      15+ minutes is the opposite case, and a 5m cache is always cold for it.
+# THE PATCHES (fork branch patched/v1.60.2, on top of tag v1.60.2; darwin stays on patched-1.54.0.18):
+#
+# CARRIED / REWRITTEN FOR v1.60.2:
 #   2. GCP_VERTEX_HOST / GCP_VERTEX_SESSION_HEADER: the gcp_vertex_ai provider's
 #      host was hard-coded to Google's endpoints. These point it at a local proxy
 #      speaking the Vertex paths (claude-failover-proxy) and name the session
-#      header that proxy keys stickiness on.
+#      header that proxy keys stickiness on (commit 99e868bbc).
 #   3. GCP_AUTH_SCOPES: the scopes goose requests when refreshing gcloud ADC
 #      credentials (upstream: cloud-platform only). A gateway that attributes
-#      requests by identity needs userinfo.email too.
-# Patches 1-3 are inert unless their variables are set.
-#   4. developer/shell: cancel, timeout and drop terminate the command's whole
-#      process group (SIGTERM, 2s grace, SIGKILL). Upstream killed only the
-#      direct child, so a cancelled `sleep`/build left orphans running.
+#      requests by identity needs userinfo.email too (commit c9153313f).
 #   5. acp-http GET /acp with `Acp-Takeover: 1` takes over a held SSE stream
-#      instead of answering 409 (HTTP transport only).
+#      instead of answering 409 (HTTP transport only, commit 69753852a).
 #   6. acp-http SSE event ids, a bounded per-stream replay ring, and
-#      Last-Event-ID resume (HTTP transport only). 5 and 6 are advertised in an
-#      `Acp-Stream-Features: takeover, replay` response header and only change
-#      behaviour for a client that sends those headers; the honk relay
-#      (johnnymo87/honk) depends on them. The WebSocket transport is unchanged.
+#      Last-Event-ID resume (HTTP transport only, commit 69753852a).
+#   1-misc. Apache-2.0 notices and Nix dev shell (bindgenHook, cmake, gemm-f16
+#      opt-level). Rusty V8 parts dropped: upstream #12952 replaced v8 with
+#      Boa (commit 945134d6e).
 #   7. A restored session keeps its stored prompt-cache TTL unless
-#      GOOSE_CACHE_TTL is set globally (upstream re-derived it from global
-#      config on every restore, so a session pinned to 1h fell back to 5m).
-#   8. ACP `_goose/unstable/session/settings/set {sessionId, cacheTtl?, recipe?}`
+#      GOOSE_CACHE_TTL is set globally (commit b3c32d5ed).
+#   8. ACP `_goose/unstable/session/settings/set {sessionId, cacheTtl?, recipe?, rollingMemory?}`
 #      pins a session's cache TTL and recipe (instructions + final_output),
-#      live and persisted; validated before anything changes; idempotent.
+#      live and persisted. Rewritten on state machine (R8, commits 9701f2b4b, 188b49116).
 #   9. ACP session/prompt `_meta.goose.maxTurns` bounds that run's agent loop
-#      (ACP otherwise always uses the global limit, default 1000).
-#   7-9 let a timer-driven coordinator run its standing recipe sessions through
-#   goose-serve (via honk) the way `goose run --recipe --resume` did. 8 and 9
-#   change nothing for a client that does not send them; 7 only matters for a
-#   session that stores a TTL (all such rows today are 1h coordinator sessions).
-#  10. ACP session/list sorts and limits on session ids before fetching full
-#      rows (recipe_json etc.), so a page takes ~0.01s instead of ~1.5s with
-#      500+ sessions. Same rows, same order.
+#      and ends with stopReason `max_turn_requests` (R9, commits 9701f2b4b, 80ed74c8c).
 #  11. self_compact_and_resume: an agent compacts its own context and continues
-#      the same run with a resume prompt it wrote (delivered as a steer-flagged
-#      user message, so ACP clients see one run). Off with GOOSE_SELF_COMPACT=false;
-#      never offered to recipe sessions (response schema/final_output or retry),
-#      subagents, or providers that manage their own context.
+#      the same run with a resume prompt it wrote. Rewritten as a state-machine
+#      Operation (R11, commit 8feb5d158).
 #  12. Rolling memory (off unless configured per session or by env): folds
-#      older history into a first-person memory at turn start.
+#      older history into a first-person memory at turn start. Rewritten as a
+#      pre-inference Operation (R12, commits f03cbbe2d, e2b5080dd).
 #  13. GOOSE_GLOBAL_SKILLS=false limits skill discovery to project skill dirs:
-#      it also drops the config dir's skills/ and user-scope plugin skill dirs.
-#      Any value other than true/false counts as false; unset is upstream
-#      behaviour. The maven-renovate lane relies on it.
+#      drops the config dir's skills/ and user-scope plugin skill dirs (commit 1c59ef7a2).
 #  14. MCP extension startup is bounded by GOOSE_EXTENSION_STARTUP_TIMEOUT
-#      (default 25s; upstream waited forever for `initialize`), a failed start
-#      kills the server's whole process group, and session/load starts stored
-#      extensions in parallel. honk's per-session `/mcp` (honk#18) relies on it:
-#      a hung server (e.g. mcp-remote waiting for OAuth) no longer freezes the
-#      session's tool calls or every later reload.
-#  15. ACP session/prompt reports a failed turn in `_meta.goose.turnError`
-#      {kind, message}: most provider failures otherwise end as assistant text
-#      with stopReason end_turn. honkd records it per session and the nvim
-#      pickers show the session as errored (honk-9qf.15.11.3). Absent on
-#      clean and cancelled turns; a client that ignores `_meta` sees no change.
-#  16. Subagent policy (inert unless set): GOOSE_SUBAGENT_ROLES_DIR is scanned
-#      first so repo files cannot shadow a role; a delegated recipe's declared
-#      extensions replace the parent's (port of upstream #12938, not in 1.54);
-#      GOOSE_SUBAGENT_DEFAULT_RECIPE scopes delegates that declare none (ad-hoc,
-#      agent .md) and fails closed; with it set, a subagent extension that fails
-#      to start fails the delegate. Used by users/dev/goose-roles.nix.
-#  17. A plugin's .mcp.json may declare streamable-HTTP servers (type "http" or
-#      "streamable-http", or a url with no command), and its entries are parsed
-#      one at a time: upstream dropped EVERY server in the plugin when one entry
-#      lacked a command. Project plugins (<cwd>/.agents/plugins) may only reach
-#      localhost/loopback urls, so a cloned repo cannot trigger goose's browser
-#      OAuth wait against a remote server; url and headers are never expanded.
-#  18. The provider's response stream is read on its own task while tools run.
-#      Upstream's legacy agent loop left the HTTP body unpolled during a tool,
-#      and reqwest's 600s read_timeout then failed the rest of an already-sent
-#      response: any tool call of 10+ minutes ended in "Network error: Stream
-#      decode error ... Please resend your message to try again."
+#      (default 25s) and a failed start kills the server's whole process group
+#      (R14, commits b72aa6410, d73dc1f00). Parallel extension start absorbed upstream #12775.
+#  15. ACP session/prompt reports failed turns with JSON-RPC -32603 `turn_failed`
+#      carrying `data.kind` and `data.message` (R15, commits 444cfee71, a6551d64c;
+#      adapted to upstream #13043 `data.reason: turn_failed`).
+#  16. Subagent policy: GOOSE_SUBAGENT_ROLES_DIR is scanned first so repo files
+#      cannot shadow a role; GOOSE_SUBAGENT_DEFAULT_RECIPE scopes delegates that
+#      declare none; strict extension start on lease. Rewritten on state machine
+#      (R16, commit 09c12e526; recipe extensions replacing parent absorbed upstream #12938).
 #  19. gcp_vertex_ai: GCP_VERTEX_GEMINI_HOST overrides the host for Gemini
-#      (Google-published) models only, so Claude can stay on GCP_VERTEX_HOST
-#      (cfp) while Gemini goes to aigateway; GCP_VERTEX_SESSION_HEADER takes a
-#      comma-separated list; GCP_VERTEX_PARENT_SESSION_HEADER sends a delegated
-#      subagent's parent session id. Used by goose-serve in hosts/cloudbox.
-#  20. The system prompt stays fixed after session start. A subdirectory
-#      AGENTS.md found mid-session (by reading a file under it) is delivered
-#      once as an assistant-audience message in the conversation, not by
-#      rewriting the system prompt, which invalidated the provider's prompt
-#      cache from the first token on every later turn. Delivered hints are
-#      re-queued if compaction or another history replacement drops them.
+#      models only; GCP_VERTEX_SESSION_HEADER takes a comma-separated list;
+#      GCP_VERTEX_PARENT_SESSION_HEADER sends a delegated subagent's parent
+#      session id (commit 908a0a75b).
+#  20. The system prompt stays fixed after session start. Subdirectory AGENTS.md
+#      hints are delivered once in tool responses rather than rewriting the
+#      system prompt, preserving cache; re-queued if dropped (R20, commit ab13c5fff).
 #  21. session/prompt accepts _meta.goose.messageId and stores the user message
 #      under it; _goose/unstable/session/conversation/truncate_from_message
-#      {sessionId, messageId} -> {found} deletes that message and everything
-#      after it (row boundary, no same-second hazard), refused while a run or
-#      live voice is active, and clears the session's stale context usage.
-#      Advertised as agentCapabilities._meta.goose.truncateFromMessage. honkd
-#      uses it for /undo in honk chat.
-#  22. Cache-miss breaker for Gemini delegates (port of opencode's
-#      cache-miss-breaker, workstation#840): 10 consecutive model calls at
-#      >=50K prompt tokens with zero cache reads stop the delegate, and the lead
-#      is told to re-dispatch it once. GOOSE_CACHE_MISS_BREAKER=off disables it;
-#      _STEPS / _MIN_CONTEXT override the thresholds (johnnymo87/goose#17).
+#      deletes that message and later history, refused while run active; clears
+#      stale context usage (R21, commits 99841a02c, b85106c4d). Used for /undo.
+#  22. Cache-miss breaker for Gemini delegates on the state machine: 10
+#      consecutive model calls at >=50K prompt tokens with zero cache reads stop
+#      the delegate with guidance to re-dispatch (R22, commits 573cf9377, d21fa7b08).
 #  23. A recipe's settings.thinking_effort (off|low|medium|high|max) overrides
-#      the effort a delegate would inherit from its lead session; recipes without
-#      it inherit as before. goose-roles sets high on every role, so a worker
-#      lead launched at medium (`honk launch --effort medium`) keeps its roles at
-#      high (johnnymo87/goose#18, workstation-6w7i.20).
-#  24. Claude requests carry thinking.display = "summarized" (backport of
-#      upstream #13029, in v1.57.0+). claude-opus-5-5 and other newer models
-#      otherwise omit the thinking text, so goose stored signature-only blocks
-#      and honk showed empty thinking (johnnymo87/goose#19,
-#      workstation-6w7i.24).
-#  25. Claude thinking streams as it is generated: the Anthropic SSE parser
-#      yields each thinking_delta instead of buffering the block to
-#      content_block_stop, so honk shows thinking before the reply instead of
-#      after ~10 s of silence. Storage still merges to one signed block per
-#      thinking block (johnnymo87/goose#20, workstation-6w7i.25).
+#      the effort a delegate would inherit from its lead session (commit a31606546).
+#  25. Claude thinking streams as it is generated: Anthropic SSE parser yields
+#      each thinking_delta immediately instead of buffering to content_block_stop
+#      (commits 1c7160156, 3e0fecf13, 747b7d452).
+#
+# DROPPED FROM 1.54 STACK:
+#   1. GOOSE_HEADLESS_CACHE_TTL: dropped, no live consumer found.
+#   4. developer/shell process-group kill: dropped in favor of upstream #12958
+#      (developer/shell_process.rs ProcessTree puts shell in own process group
+#      and sends kill(-pgid, SIGKILL) on cancel/timeout/drop).
+#  10. ACP session/list two-phase query: absorbed by upstream #12940 (commit
+#      22413aba4), which implements the same two-phase sort+limit query.
+#  17. plugin .mcp.json streamable-HTTP entries: dropped, no live consumer found.
+#  18. Provider stream polled during tool execution: dropped as obsolete on
+#      the state machine (inference drains provider stream before tools run).
+#  24. thinking.display="summarized" backport: absorbed by upstream #13029 (commit
+#      e970eea8a, in v1.57.0+).
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -163,6 +122,11 @@
 # schema change.
 # patched-1.54.0.18 (2026-11-21) adds patch 25 (johnnymo87/goose#20); no
 # schema change.
+# patched-1.60.2.0 (2026-11-22) ports the fork onto upstream v1.60.2 for Linux
+# (aarch64-linux and x86_64-linux); state machine agent loop, schema 18; drops
+# obsolete patches (1, 4, 10, 17, 18, 24); rewrites loop-bound patches (8, 9,
+# 11, 12, 14, 15, 16, 20, 21, 22). Darwin (aarch64-darwin) stays on
+# patched-1.54.0.18 until bead workstation-6w7i.26.15.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -184,9 +148,6 @@
 }:
 
 let
-  version = "1.54.0-patched.18";
-  tag = "patched-1.54.0.18";
-
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
   # against, and is what was already installed on both Linux hosts.
@@ -194,16 +155,25 @@ let
   # Both NixOS hosts here are aarch64, so the x86_64 entry builds nowhere
   # today. It is kept because the hash is verified and a wrong-arch throw at
   # eval time is a worse failure than a pinned line nobody uses.
+  #
+  # Darwin stays pinned to patched-1.54.0.18 while Linux moves to
+  # patched-1.60.2.0 (per-platform pin, bead workstation-6w7i.26.15 moves Mac).
   platforms = {
     "aarch64-linux" = {
+      version = "1.60.2-patched.0";
+      tag = "patched-1.60.2.0";
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-A5zUgC8dD2Qp5gIgB/+KYrlPk7yhNNIPpV82lsx5rkU=";
+      hash = "sha256-S4M3gQyu2LXkW5tuFTcW9Gfr+dGIouK9z4sMRmzT6Ww=";
     };
     "x86_64-linux" = {
+      version = "1.60.2-patched.0";
+      tag = "patched-1.60.2.0";
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-vpvTIQq8Gm7W4Qw8a/0+Yea05v2wFkA5kTpWD87u/zE=";
+      hash = "sha256-kNolPiM/Z22MboxH9V0nfhbqvdbtKhWyWSUb616xSQ4=";
     };
     "aarch64-darwin" = {
+      version = "1.54.0-patched.18";
+      tag = "patched-1.54.0.18";
       asset = "goose-aarch64-apple-darwin.tar.gz";
       hash = "sha256-aWynNerl2diIrrHp4c3UTN704NdP3gVxrotPR0jK1p4=";
     };
@@ -215,10 +185,10 @@ let
 in
 stdenv.mkDerivation {
   pname = "goose";
-  inherit version;
+  inherit (platformInfo) version;
 
   src = fetchurl {
-    url = "https://github.com/johnnymo87/goose/releases/download/${tag}/${platformInfo.asset}";
+    url = "https://github.com/johnnymo87/goose/releases/download/${platformInfo.tag}/${platformInfo.asset}";
     inherit (platformInfo) hash;
   };
 

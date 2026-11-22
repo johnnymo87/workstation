@@ -23,8 +23,12 @@
 { lib, runCommand, python3, ro-shell, goose, agentsDir,
   provider ? "gcp_vertex_ai",
   opusModel ? "claude-opus-5-5",
-  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-opus-5-5") }:
+  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-opus-5-5"),
+  includeSkills ? (lib.versionOlder goose.version "1.60") }:
 
+let
+  skillsFlag = if includeSkills then "--include-skills" else "--no-skills";
+in
 runCommand "goose-roles" {
   nativeBuildInputs = [ (python3.withPackages (ps: [ ps.pyyaml ])) goose ];
   meta = {
@@ -33,7 +37,7 @@ runCommand "goose-roles" {
 } ''
   python3 ${./gen_goose_roles.py} --agents-dir ${agentsDir} --out $out \
     --ro-shell-cmd ${ro-shell}/bin/ro-shell --provider ${provider} \
-    --opus-model ${opusModel} --sonnet-model ${sonnetModel}
+    --opus-model ${opusModel} --sonnet-model ${sonnetModel} ${skillsFlag}
   export HOME=$TMPDIR GOOSE_DISABLE_KEYRING=true
   for f in $out/roles/*.yaml $out/unscoped.yaml; do
     goose recipe validate "$f" || { echo "goose-roles: $f failed goose recipe validate" >&2; exit 1; }
