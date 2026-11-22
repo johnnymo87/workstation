@@ -16,19 +16,29 @@ check() { # name expected actual
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Fake store paths: <p>/bin/goose, executable, prints its own name.
+# Fake store paths: <p>/bin/goose is a real ELF executable (a copy of bash;
+# coreutils may be one multi-call binary that keys on its name), because
+# goose-link refuses anything that is not ELF.
+echo_elf="$(readlink -f "$(type -P bash)")"
 mkgoose() {
   mkdir -p "$tmp/store/$1/bin"
-  printf '#!/bin/sh\necho %s "$@"\n' "$1" > "$tmp/store/$1/bin/goose"
+  cp "$echo_elf" "$tmp/store/$1/bin/goose"
   chmod +x "$tmp/store/$1/bin/goose"
 }
 mkgoose g18
 mkgoose g60
 mkgoose g61
 mkdir -p "$tmp/store/notgoose"
+# What the profile's `goose` is after L6: a script exec'ing the link.
+mkdir -p "$tmp/store/wrapper/bin"
+printf '#!/bin/sh\nexec /var/lib/goose/current/bin/goose "$@"\n' > "$tmp/store/wrapper/bin/goose"
+chmod +x "$tmp/store/wrapper/bin/goose"
+mkgoose_outside() { mkdir -p "$tmp/elsewhere/bin"; cp "$echo_elf" "$tmp/elsewhere/bin/goose"; }
+mkgoose_outside
 
 export GOOSE_LINK_DIR="$tmp/var"
 export GOOSE_PINNED="$tmp/etc-pinned"
+export GOOSE_LINK_STORE="$tmp/store"
 mkdir -p "$GOOSE_LINK_DIR"
 L() { "$GOOSE_LINK_BIN" "$@"; }
 tgt() { readlink "$GOOSE_LINK_DIR/$1" 2>/dev/null || echo "<none>"; }
@@ -46,12 +56,20 @@ check "refused set leaves current unset" "<none>" "$(tgt current)"
 out="$(L set "relative/path" 2>&1)"; rc=$?
 check "set refuses a relative path" "2" "$rc"
 
+out="$(L set "$tmp/store/wrapper" 2>&1)"; rc=$?
+check "set refuses a wrapper script (would loop through the link)" "2" "$rc"
+grep -q 'not an ELF' <<<"$out" && ok "wrapper refusal says not an ELF" || bad "wrapper refusal says not an ELF ($out)"
+
+out="$(L set "$tmp/elsewhere" 2>&1)"; rc=$?
+check "set refuses a path outside the store" "2" "$rc"
+check "refusals leave current unset" "<none>" "$(tgt current)"
+
 # --- first set: current only, no previous ---
 L set "$tmp/store/g18" >/dev/null; rc=$?
 check "first set exits 0" "0" "$rc"
 check "first set points current" "$tmp/store/g18" "$(tgt current)"
 check "first set leaves no previous" "<none>" "$(tgt previous)"
-check "current/bin/goose execs through the link" "g18 --version" "$("$GOOSE_LINK_DIR/current/bin/goose" --version)"
+check "current/bin/goose execs through the link" "hello g18" "$("$GOOSE_LINK_DIR/current/bin/goose" -c 'echo hello g18')"
 
 # --- set to the same path: no-op, previous untouched ---
 out="$(L set "$tmp/store/g18" 2>&1)"; rc=$?

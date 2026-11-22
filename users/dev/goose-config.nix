@@ -22,12 +22,14 @@ let
   # keeps gooseCli itself (bead A10).
   #
   # The fallback to the pin is for a host whose SYSTEM config predates L6:
-  # pull-workstation switches home-manager every minute but never the system,
+  # pull-workstation switches home-manager on its timer but never the system,
   # and devbox has no system auto-upgrade, so this wrapper can land before
   # /var/lib/goose/current exists. Without the link, the serve is still the
   # pre-L6 unit exec'ing its own baked-in pin, and running the pin here is
   # exactly the pre-L6 behaviour. Once the system switch creates the link, the
-  # fallback never fires again.
+  # fallback never fires again. Until it does, a pin bump moves this host's CLI
+  # and not its serve: seed the link (a system switch while the pin still equals
+  # the running serve) on every NixOS goose host before a pin PR merges.
   gooseOnPath =
     if isDarwin then gooseCli
     else pkgs.writeShellScriptBin "goose" ''

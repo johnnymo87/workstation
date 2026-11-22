@@ -15,8 +15,9 @@
 #
 #   sudo goose-link rollback && sudo systemctl restart goose-serve
 #
-# A rollback that crosses a config change also wants the previous system and
-# home-manager generations (the cutover does both; see goose-link's header).
+# That moves the binary only: config the pin gates stays at the merged pin
+# until the pin PR's revert merges and is switched (goose-link's header says
+# why an older generation does not stick).
 #
 # /etc/goose/pinned is what the merged pin WANTS; `goose-link status` shows
 # whether it is what runs. Both link targets (current and previous) are indirect

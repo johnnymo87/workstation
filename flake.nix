@@ -2228,8 +2228,8 @@
         GOOSE_LINK_BIN = "${(localPkgsFor devboxSystem).goose-link}/bin/goose-link";
       } ''
         bash ${self}/pkgs/goose-link/test.sh | tee "$TMPDIR/out.txt"
-        grep -q '^goose-link: 37 passed, 0 failed$' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 37 goose-link assertions." >&2; exit 1; }
+        grep -q '^goose-link: 41 passed, 0 failed$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 41 goose-link assertions." >&2; exit 1; }
         touch $out
       '';
 
@@ -2270,7 +2270,12 @@
           "${name} HM: pinned goose not in home.packages" = !(builtins.elem pinned pkgPaths);
           "${name} HM: one goose wrapper in home.packages" = builtins.length gooseBins == 1;
         };
-        checks = hostChecks "devbox" "dev" // hostChecks "cloudbox" "cloudbox";
+        checks = hostChecks "devbox" "dev" // hostChecks "cloudbox" "cloudbox" // {
+          # lgtm's goose reviews: realpath of the link, not of the PATH wrapper.
+          "cloudbox: lgtm-run runs the linked goose" = builtins.elem
+            "LGTM_GOOSE_BIN=/var/lib/goose/current/bin/goose"
+            self.nixosConfigurations.cloudbox.config.systemd.services.lgtm-run.serviceConfig.Environment;
+        };
         failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
         script = h: self.nixosConfigurations.${h}.config.systemd.services.goose-serve.serviceConfig.ExecStart;
         wrapper = h: let

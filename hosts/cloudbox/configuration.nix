@@ -1430,6 +1430,13 @@ in
         # dispatching lgtm invocation without it throws, so this must be live
         # before that block merges.
         "LGTM_BOX=cloudbox"
+        # lgtm's goose review backend runs the APPROVED goose (L6,
+        # modules/goose-current.nix), not whatever `goose` PATH resolves to:
+        # through PATH it finds the profile's wrapper, whose store path keys
+        # lgtm's preflight cache and its per-turn gooseStorePath, and that path
+        # does not change when goose-link moves the link. realpath of this one
+        # does, so a cutover or rollback re-runs the preflight.
+        "LGTM_GOOSE_BIN=/var/lib/goose/current/bin/goose"
         # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
         # (lgtm-j6k). Those pinned the shared opencode.db for the run-era
         # detached `opencode run` children this service used to spawn. lgtm-a3r

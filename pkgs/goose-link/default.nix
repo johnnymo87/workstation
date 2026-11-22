@@ -14,9 +14,20 @@
 # L3a, does). Root only: /var/lib/goose is root's, which is what keeps a goose
 # session from moving its own binary.
 #
+# A rollback moves the BINARY only. Config that the pin gates (the version
+# asserts in users/dev/goose-config.nix, goose-roles validated against the pin)
+# stays at the merged pin until a revert of the pin PR merges and is switched:
+# switching to an older generation does not stick, because pull-workstation
+# re-applies origin/main on its timer (and cloudbox's hm-deploy-gate refuses a
+# stale generation). So a rollback is: flip, restart, then revert the pin PR.
+#
+# `set` takes only a /nix/store path whose bin/goose is an ELF binary, so it
+# cannot be pointed at the profile's wrapper (which execs this link: a loop
+# goose-serve's preflight passes and Restart=always never ends).
 # Each link is replaced atomically (a temp link renamed over it with mv -T), so
 # a goose starting mid-flip sees the old target or the new one, never none.
-# GOOSE_LINK_DIR and GOOSE_PINNED override the paths, for pkgs/goose-link/test.sh.
+# GOOSE_LINK_DIR, GOOSE_PINNED and GOOSE_LINK_STORE override the paths, for
+# pkgs/goose-link/test.sh.
 { writeShellApplication, coreutils }:
 
 writeShellApplication {
@@ -25,6 +36,7 @@ writeShellApplication {
   text = ''
     dir="''${GOOSE_LINK_DIR:-/var/lib/goose}"
     pinned_link="''${GOOSE_PINNED:-/etc/goose/pinned}"
+    store="''${GOOSE_LINK_STORE:-/nix/store}"
 
     usage() {
       echo "usage: goose-link status | set <store-path> | pinned | rollback" >&2
@@ -34,6 +46,9 @@ writeShellApplication {
     target() { readlink "$dir/$1" 2>/dev/null || echo "<none>"; }
 
     runnable() { [ -x "$1/bin/goose" ] && [ ! -d "$1/bin/goose" ]; }
+
+    # A real goose: a store path whose bin/goose is an ELF file, not a script.
+    is_elf() { [ "$(head -c4 "$1" 2>/dev/null | od -An -c | tr -d ' ')" = '177ELF' ]; }
 
     # Replace link $1 (a name in $dir) with a symlink to $2, atomically.
     put() {
@@ -50,8 +65,16 @@ writeShellApplication {
         *) echo "goose-link: $1 is not an absolute path" >&2; exit 2 ;;
       esac
       new="$(readlink -f "$1")" || { echo "goose-link: cannot resolve $1" >&2; exit 2; }
+      case "$new" in
+        "$store"/*) ;;
+        *) echo "goose-link: $new is not under $store; refusing" >&2; exit 2 ;;
+      esac
       if ! runnable "$new"; then
         echo "goose-link: $new/bin/goose is not an executable file; refusing" >&2
+        exit 2
+      fi
+      if ! is_elf "$new/bin/goose"; then
+        echo "goose-link: $new/bin/goose is not an ELF binary (a wrapper script?); refusing" >&2
         exit 2
       fi
       cur="$(target current)"
