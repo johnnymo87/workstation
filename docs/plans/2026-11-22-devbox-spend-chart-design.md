@@ -1,7 +1,7 @@
 # devbox spend chart, with eternal-machinery runtime spend
 
 Status: design, reviewed (adversarial-reviewer-opus, 2026-11-22: "proceed with
-changes"; changes folded in below). Bead epic: `bd search "devbox spend chart"`.
+changes"; changes folded in below). Bead epic: `workstation-2wtm` (children `.1`-`.12`).
 
 ## Goal
 
