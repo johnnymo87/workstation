@@ -111,6 +111,8 @@ let
       "OPENAI_BASE_URL"
       "OPENAI_ORG_ID"
       "OPENAI_PROJECT_ID"
+      # The bot API takes its key only as a FILE (below), never a value.
+      "CODEX_BOT_OPENAI_API_KEY"
     ];
     Restart = "on-failure";
     RestartPreventExitStatus = 2;
