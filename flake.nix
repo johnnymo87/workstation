@@ -694,8 +694,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-em-stack-monitor.sh 2>&1 | tee "$TMPDIR/s.txt"
-        grep -q '^ALL PASS (183 assertions)' "$TMPDIR/s.txt" || {
-          echo "GATE FAILURE: em-stack-monitor suite did not reach ALL PASS (183 assertions)." >&2
+        grep -q '^ALL PASS (189 assertions)' "$TMPDIR/s.txt" || {
+          echo "GATE FAILURE: em-stack-monitor suite did not reach ALL PASS (189 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }

@@ -226,10 +226,18 @@ check "idle close, nobody plays, more than an hour old: nothing" '[ "$(tgn)" -eq
 setup
 serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
 run; at 600; run
-check "idle close while an agent plays: an event naming when the agent last acted (a8gw1)" \
-  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: event" <<<"$m" && ! grep -q "problem" <<<"$m" && grep -q "the game logged out the idle character at 2027-01-15T07:59:00Z, 62 min after its agent last acted (2027-01-15T06:57Z)" <<<"$m"'
-check "idle close while an agent plays, quota fine: the agent stopped, not the stack" \
-  'grep -q "The agent stopped acting while the stack stayed up" <<<"$(tglast)" && [ "$(st ".keys | length")" = 0 ]'
+check "idle close while an agent plays: stands as an agent key, naming when the agent last acted (a8gw1)" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && head -n 1 <<<"$m" | grep -qx "EM agents: not acting (the stack is up)" && ! grep -q "problem" <<<"$m" && grep -q "the game logged out the idle character at 2027-01-15T07:59:00Z, 62 min after its agent last acted (2027-01-15T06:57Z)" <<<"$m"'
+check "idle close while an agent plays, quota fine: says to start it again" \
+  'grep -q "model quota is not spent now, so start the session again" <<<"$(tglast)" && [ "$(st ".keys[0]")" = idleout:jonathan ]'
+at 22300; run
+check "idle close while an agent plays: reminded while she stays out" '[ "$(tgn)" -eq 2 ] && head -n 1 <<<"$(tglast)" | grep -qx "EM agents: STILL not acting (the stack is up)"'
+serve 4002_v1_presence 200 "$fx/presence.json"; at 22900; run
+check "idle close while an agent plays: resolved once the session is back" '[ "$(tgn)" -eq 3 ] && grep -q "resolved" <<<"$(tglast)"'
+setup
+serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
+mkhealth "postgres FAIL refused"; run; at 600; run
+check "an agent key beside a stack failure: the stack header wins" 'head -n 1 <<<"$(tglast)" | grep -qx "EM stack: problem"'
 setup
 serve_jq 4002_v1_presence presence.json "$idle_close | del(.presence.jonathan.agent_driven)" --arg at 2027-01-15T07:59:00Z
 run; at 600; run
@@ -608,7 +616,7 @@ setup; mkquota "a 0.98 86400" "b 0.99 18000" "c 0.98 3600"; run
 check "quota: every account spent, first pass quiet (debounced)" '[ "$(tgn)" -eq 0 ] && [ "$(pend quota:pool)" = 1 ]'
 at 600; run
 check "quota: alerts on the second pass, naming the first account back and when" \
-  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$m" && grep -q "model quota is spent on all 3 teamclaude accounts, so no agent can act; the first back is c at 2027-01-15T09:00Z" <<<"$m" && ! grep -q "example.invalid" <<<"$m"'
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && head -n 1 <<<"$m" | grep -qx "EM agents: not acting (the stack is up)" && grep -q "model quota is spent on all 3 teamclaude accounts, so no agent can act; the first back is c at 2027-01-15T09:00Z" <<<"$m" && ! grep -q "example.invalid" <<<"$m"'
 touch "$S/quota_bad"; at 1200; run
 check "quota: an unreadable state carries the key, no resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | index(\"quota:pool\") != null")" = true ]'
 rm "$S/quota_bad"; mkquota "a 0.98 86400" "b 0.99 18000" "c 0.06 604800"; at 1800; run
@@ -621,17 +629,26 @@ setup; mkquota "a 0.5 86400"; export EM_STACK_QUOTA_FULL=0.4; run; at 600; run
 check "quota: EM_STACK_QUOTA_FULL sets the line" '[ "$(tgn)" -eq 1 ] && grep -q "all 1 teamclaude" <<<"$(tglast)"'
 setup; run; at 600; run
 check "quota: no teamclaude state here, nothing said" '[ "$(tgn)" -eq 0 ]'
+setup; mkquota "a 0.98 86400"
+jq '.quota += [{"name":"x@example.invalid","provider":"openai","quota":{"unified7d":0.01,"unified7dReset":null}}]' "$S/quota" >"$S/q2"; mv "$S/q2" "$S/quota"
+run; at 600; run
+check "quota: an account of another provider does not count" '[ "$(tgn)" -eq 1 ] && grep -q "all 1 teamclaude" <<<"$(tglast)"'
+setup; mkquota "a 0.975 86400"; run; at 600; run
+check "quota: under teamclaude's 0.98 is not spent" '[ "$(tgn)" -eq 0 ]'
 
 # 13b. The idle logout during a quota outage says so (the 1122a afternoon).
 setup; mkquota "a 0.98 86400" "b 0.99 18000"
 serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
-run
-check "idle close during a quota outage: an event blaming the quota, not the stack" \
-  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: event" <<<"$m" && grep -q "Model quota is spent on every account, so the agent could not act; the stack is fine" <<<"$m"'
+run; at 600; run
+check "idle close during a quota outage: one agents message, the quota named as the likely cause" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && head -n 1 <<<"$m" | grep -qx "EM agents: not acting (the stack is up)" && grep -q "so the agent likely could not act. Start the session again once quota is back" <<<"$m" && grep -q "model quota is spent on all 2" <<<"$m"'
+mkquota "a 0.98 86400" "b 0.06 604800"; at 1200; run
+check "quota back, character still out: not resolved, says to start it" \
+  'm=$(tglast); [ "$(tgn)" -eq 2 ] && ! grep -q resolved <<<"$m" && grep -q "model quota is not spent now, so start the session again" <<<"$m"'
 
 # 14. The footer says how far the checkout trails origin/main (a8gw1).
 setup; mkhealth "postgres FAIL refused"; run; at 600; run
-check "footer: no origin/main, staleness unknown" 'grep -q "@ $head_sha, the running stack.s checkout: how far it trails origin/main is unknown" <<<"$(tglast)"'
+check "footer: no origin/main, staleness unknown" 'grep -q "the checkout .* @ $head_sha, how far it trails origin/main is unknown" <<<"$(tglast)"'
 git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m y
 git -C "$repo" update-ref refs/remotes/origin/main HEAD
 git -C "$repo" update-ref refs/remotes/origin/main "$(git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit-tree -p HEAD -m z "$(git -C "$repo" rev-parse HEAD^{tree})")"
@@ -640,10 +657,10 @@ head_sha=$(git -C "$repo" rev-parse --short HEAD)
 touch -d @1799990000 "$repo/.git/FETCH_HEAD"
 setup; mkhealth "postgres FAIL refused"; run; at 600; run
 check "footer: commits behind origin/main as of the last fetch" \
-  'grep -q "@ $head_sha, the running stack.s checkout: 2 commits behind origin/main as of its last fetch, 2027-01-15T05:13Z" <<<"$(tglast)"'
+  'grep -q "the checkout .* @ $head_sha, 2 commits behind origin/main as of its last fetch, 2027-01-15T05:13Z" <<<"$(tglast)"'
 git -C "$repo" update-ref refs/remotes/origin/main HEAD
 setup; mkhealth "postgres FAIL refused"; run; at 600; run
-check "footer: level with origin/main" 'grep -q "checkout: level with origin/main as of its last fetch" <<<"$(tglast)"'
+check "footer: level with origin/main" 'grep -q "@ [0-9a-f]*, level with origin/main as of its last fetch" <<<"$(tglast)"'
 
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"

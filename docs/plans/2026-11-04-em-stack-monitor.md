@@ -96,6 +96,30 @@ rate window), so an AgentOS restart
 (new `boot_id`) never replays old events. Single recoveries stay quiet: they are the system
 fixing itself.
 
+### Agent keys: model quota and idled-out characters (EM bead a8gw1, 2026-11-22)
+
+On 2026-11-22 every teamclaude account sat at 98% weekly from about 17:07Z. The
+agents could not call the model, the game logged Decimian out for idling at
+17:40Z, and the only alert read "EM stack: problem ... nobody asked for it".
+
+- `quota:pool`: read from `~/.config/teamclaude.state.json` (never
+  `teamclaude.json`, which holds credentials). An Anthropic account is spent
+  while a window's utilization is at `EM_STACK_QUOTA_FULL` (0.98, teamclaude's
+  own switch threshold: keep the two equal) and that window's reset is still
+  ahead. When every account is spent the key stands, naming the first account
+  back and when. Debounced, reminded every 6 h, "resolved" when one returns.
+  Read only while a stack is up.
+- `idleout:<sid>`: the game's idle logout of an agent-driven session stands
+  until the session is back. It says when the agent last acted (the close less
+  the game's idle minutes) and the likely cause (quota spent, or an agent that
+  stopped). Nothing logs the character back in: until the agent can act, a
+  character in the world would only stand there unattended and be closed
+  again. The restart is a person's or the runner's.
+- When only agent keys stand, the header is "EM agents: not acting (the stack
+  is up)", not "EM stack: problem".
+- The footer says how far the stack-health checkout trails `origin/main` as
+  of its last fetch. The unit does not fetch.
+
 ## How it runs
 
 - `hosts/devbox/em-stack-monitor.nix` + `em-stack-monitor.sh`, bash + jq + curl, a

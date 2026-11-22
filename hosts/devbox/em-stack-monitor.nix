@@ -65,7 +65,8 @@ let
       EM_STACK_REMIND_H = "6";
       EM_STACK_GM_MIN = "20";
       EM_STACK_QUOTA_FILE = "/home/dev/.config/teamclaude.state.json";
-      EM_STACK_QUOTA_FULL = "0.97";
+      # teamclaude's switch threshold (its default); keep the two equal.
+      EM_STACK_QUOTA_FULL = "0.98";
       XDG_RUNTIME_DIR = "/run/user/${uid}";
     } // config.devbox.emAlerts.env // extraEnv;
     serviceConfig = {
