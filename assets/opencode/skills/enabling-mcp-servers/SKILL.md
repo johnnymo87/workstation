@@ -67,9 +67,11 @@ server's tools are usable from your next step (no need to end the turn).
   when posting is the task, and load `formatting-slack-messages` before you post. Turning one on
   replaces the other. In goose, honkd limits `slack-ro` to its read tools (search, history,
   replies, lists, attachment download). The server's channel join/leave/mark and user-group
-  edit tools are not offered to you. If `slack-ro` was turned on in your session before
-  2026-11-22 and you still see `slack-ro__conversations_join`, call `swarm__mcp_enable` on
-  `slack-ro` again to narrow it.
+  edit tools are not offered to you. If you can see `slack-ro__conversations_join` or another
+  slack-ro write tool anyway, your session got `slack-ro` before that limit applied: call
+  `swarm__mcp_enable` on `slack-ro` again to narrow it. If that answers "already on" and the
+  tool is still listed, honkd has not picked up the limit yet. Don't call the tool, and tell
+  the human.
 - **Grant late and narrow.** Turn a server on only when the task needs it, and turn it off when
   done if the session lives on.
 - **Coordinators:** a server you turn on stays on across your wakes, read or write. Turn off
