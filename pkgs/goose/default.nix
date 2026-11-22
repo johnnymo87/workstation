@@ -117,6 +117,11 @@
 #      otherwise omit the thinking text, so goose stored signature-only blocks
 #      and honk showed empty thinking (johnnymo87/goose#19,
 #      workstation-6w7i.24).
+#  25. Claude thinking streams as it is generated: the Anthropic SSE parser
+#      yields each thinking_delta instead of buffering the block to
+#      content_block_stop, so honk shows thinking before the reply instead of
+#      after ~10 s of silence. Storage still merges to one signed block per
+#      thinking block (johnnymo87/goose#20, workstation-6w7i.25).
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the
@@ -152,6 +157,8 @@
 # #18) and an aarch64-apple-darwin asset (#15, #16); no schema change.
 # patched-1.54.0.17 (2026-11-21) adds patch 24 (johnnymo87/goose#19); no
 # schema change.
+# patched-1.54.0.18 (2026-11-21) adds patch 25 (johnnymo87/goose#20); no
+# schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
@@ -173,8 +180,8 @@
 }:
 
 let
-  version = "1.54.0-patched.17";
-  tag = "patched-1.54.0.17";
+  version = "1.54.0-patched.18";
+  tag = "patched-1.54.0.18";
 
   # Upstream ships a bare `goose` binary at the archive root (not bin/goose).
   # gnu, not musl: the gnu asset is the one the integration was measured
@@ -186,15 +193,15 @@ let
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-4eI4YQqWAN+hIeYQMIcOeQNtbRiGVnBb3j8p1ej7HzI=";
+      hash = "sha256-A5zUgC8dD2Qp5gIgB/+KYrlPk7yhNNIPpV82lsx5rkU=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-dM2gI5pXOVlWNrW2dP6wx+Rdd07uSAqHzLVad8KiixA=";
+      hash = "sha256-vpvTIQq8Gm7W4Qw8a/0+Yea05v2wFkA5kTpWD87u/zE=";
     };
     "aarch64-darwin" = {
       asset = "goose-aarch64-apple-darwin.tar.gz";
-      hash = "sha256-3efoi5CMx+WWzpD9m8hk7Hln1IyagdJYeo1YFn8/TFY=";
+      hash = "sha256-aWynNerl2diIrrHp4c3UTN704NdP3gVxrotPR0jK1p4=";
     };
   };
 
