@@ -2000,6 +2000,14 @@ down and its silence means nothing. This host has no second leg.
         "HOME=${config.home.homeDirectory}"
         # Pin the config path so it never depends on XDG_CONFIG_HOME.
         "TEAMCLAUDE_CONFIG=${config.home.homeDirectory}/.config/teamclaude.json"
+        # Quota experiment (bead workstation-ynoq.1, johnnymo87/teamclaude#6).
+        # Sessions listed in this file (and their direct subagents) get a 1h
+        # prompt-cache TTL instead of 5m; hot-reloaded, missing file = off.
+        # Not a credentials file: safe to read and edit by hand.
+        "TEAMCLAUDE_CACHE_TTL_FILE=${config.home.homeDirectory}/.config/teamclaude-cache-ttl.json"
+        # One JSONL line per settled response (tokens by class incl. 5m/1h cache
+        # writes, this response's 7d/5h utilization) for the quota fit (ynoq.2).
+        "TEAMCLAUDE_USAGE_LOG=${config.home.homeDirectory}/.local/state/teamclaude/usage.jsonl"
         # A user service does not inherit the interactive login PATH; node is
         # already baked into the wrapper, but keep the standard set for parity.
         "PATH=/run/wrappers/bin:/run/current-system/sw/bin:${config.home.homeDirectory}/.nix-profile/bin"
@@ -2022,6 +2030,7 @@ down and its silence means nothing. This host has no second leg.
       # says why. The previous behaviour -- crash-loop to `failed` -- was loud
       # but wrong. `teamclaude accounts` is the check.
       ExecCondition = "${localPkgs.teamclaude}/bin/teamclaude-seeded";
+      ExecStartPre = "${pkgs.coreutils}/bin/mkdir -p ${config.home.homeDirectory}/.local/state/teamclaude";
       ExecStart = "${localPkgs.teamclaude}/bin/teamclaude server --headless";
       Restart = "always";
       RestartSec = 10;
