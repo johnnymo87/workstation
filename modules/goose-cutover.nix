@@ -19,7 +19,17 @@ in
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${goose-cutover}/bin/goose-cutover --run %i";
-      ExecStopPost = "${pkgs.util-linux}/bin/runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 ${pkgs.systemd}/bin/systemctl --user start stall-watch.timer stall-watch-wake.path";
+      ExecStopPost = "${pkgs.writeShellScript "goose-cutover-exec-stop-post" ''
+        set -u
+        # By the time ExecStopPost runs, our own goose-cutover process has already exited
+        # and released /var/lib/goose-cutover/run.lock. If run.lock is currently held,
+        # another goose-cutover instance is running and owns the locks and timer state.
+        if ! ${pkgs.util-linux}/bin/flock -n /var/lib/goose-cutover/run.lock true 2>/dev/null; then
+          echo "goose-cutover ExecStopPost: run.lock is held by another cutover instance; skipping stall-watch restore"
+          exit 0
+        fi
+        ${pkgs.util-linux}/bin/runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 ${pkgs.systemd}/bin/systemctl --user start stall-watch.timer stall-watch-wake.path
+      ''}";
       WorkingDirectory = "/var/lib/goose-cutover";
       PrivateTmp = false;
       TimeoutStartSec = "5h";
