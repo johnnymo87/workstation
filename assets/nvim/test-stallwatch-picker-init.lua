@@ -90,7 +90,15 @@ package.preload["telescope.previewers"] = function()
   return { new_buffer_previewer = function(o) return { stub = "previewer", define_preview = o.define_preview, title = o.title } end }
 end
 package.preload["telescope.config"] = function()
-  return { values = { generic_sorter = function() return { stub = "sorter" } end } }
+  -- scoring_function/highlighter make the stub wrappable by the id-mode
+  -- sorter (workstation-klqw); 0.77 is distinctive so delegation is provable.
+  return { values = { generic_sorter = function()
+    return {
+      stub = "sorter",
+      scoring_function = function() return 0.77 end,
+      highlighter = function() return { { start = 1, finish = 1 } } end,
+    }
+  end } }
 end
 package.preload["telescope.actions"] = function() return stub_actions end
 package.preload["telescope.actions.state"] = function() return stub_state end
@@ -891,6 +899,58 @@ do
   end
 
   init.PREVIEW_DEBOUNCE_MS = orig_debounce
+end
+
+-- ID SEARCH (workstation-klqw): typing a coordinator's id on Screen 1 finds its
+-- program; typing a worker's id on Screen 2 finds that worker. Matched in id
+-- mode (the switcher's wrapper), never by putting ids into the ordinal.
+do
+  local GSE = "gse_42ee2165-0000-4000-8000-00000000abcd"
+  local WGSE = "gse_77770000-0000-4000-8000-00000000beef"
+  local snap = vim.deepcopy(SNAP)
+  table.insert(snap.rows, { id = "goose:20990101_1", pigeon_session_id = GSE, title = "coord",
+    directory = "/fixture/coord", effective_state = "idle", dir_missing = false })
+  table.insert(snap.rows, { id = "goose:20990101_9", pigeon_session_id = WGSE, title = "goose worker",
+    directory = "/fixture/alpha/gw", effective_state = "idle", dir_missing = false })
+  snap.tagged.alpha = { "ses_fixture_t1", "goose:20990101_9" }
+
+  local before = #new_calls
+  init.open({ flow = ctrl, fetch = function(_o, cb) cb(snap, nil) end,
+    system = function() return { pid = 1, kill = function() end } end })
+  local p1 = new_calls[before + 1]
+  local sorter = p1.defaults.sorter
+  local results = p1.defaults.finder.results
+  local alpha_e = p1.defaults.finder.entry_maker(results[1])
+  local beta_e = p1.defaults.finder.entry_maker(results[2])
+  check(alpha_e.value.tag == "alpha" and beta_e.value.tag == "beta", "screen-1 entries are alpha, beta")
+  local function sc(prompt, e) return sorter.scoring_function(sorter, prompt, e.ordinal, e) end
+  check(sc(GSE, alpha_e) == 0, "Screen 1: the coordinator's whole gse_ id finds its program")
+  check(sc(GSE, beta_e) == ss_spec.ID_FILTERED, "Screen 1: ...and filters the other program")
+  check(sc("20990101_1", alpha_e) == 0, "Screen 1: the bare goose id finds the program")
+  check(sc("goose:20990101_1", alpha_e) == 0, "Screen 1: the goose: row id finds the program")
+  check(sc("alpha", alpha_e) == 0.77, "Screen 1: a tag prompt still goes to the base sorter")
+  check(sc("1", alpha_e) == 0.77, "Screen 1: a short digit prompt stays a title search")
+  check(not alpha_e.ordinal:find("2099", 1, true), "Screen 1: the ordinal still carries no id")
+
+  local prow = results[1]
+  local state = { snap = snap, prows = results, by_id = model.index_rows(snap.rows), opts = {},
+    controller = ctrl, client = "client_fixture" }
+  init.sessions(state, prow, "all")
+  local p2 = new_calls[#new_calls]
+  local s2 = p2.defaults.sorter
+  local gw_e, a1_e
+  for _, r in ipairs(p2.defaults.finder.results) do
+    local e = p2.defaults.finder.entry_maker(r)
+    if r.id == "goose:20990101_9" then gw_e = e elseif r.id == "ses_fixture_a1" then a1_e = e end
+  end
+  check(gw_e ~= nil and a1_e ~= nil, "Screen 2 all view lists the goose worker and an opencode worker")
+  local function sc2(prompt, e) return s2.scoring_function(s2, prompt, e.ordinal, e) end
+  check(sc2(WGSE, gw_e) == 0, "Screen 2: the worker's gse_ id finds it")
+  check(sc2(WGSE, a1_e) == ss_spec.ID_FILTERED, "Screen 2: ...and filters other workers")
+  check(sc2("20990101_9", gw_e) == 0, "Screen 2: the worker's bare goose id finds it")
+  check(sc2("ses_fixture_a1", a1_e) == 0, "Screen 2: an opencode worker's ses_ id finds it")
+  check(sc2("ses_fixture_a1", gw_e) == ss_spec.ID_FILTERED, "Screen 2: ...and not the goose worker")
+  check(sc2("A1", a1_e) == 0.77, "Screen 2: a title prompt still goes to the base sorter")
 end
 
 print("LUA_TEST_OK " .. N)

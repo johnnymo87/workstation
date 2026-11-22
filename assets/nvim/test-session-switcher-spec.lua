@@ -2719,6 +2719,74 @@ do
   stub_sorter_discarded = false
 end
 
+-- 79e. PIGEON ids (workstation-klqw). A goose session has a third name besides
+--      its row id (goose:<id>) and goose's own id: pigeon's `gse_<uuid>`, the
+--      one swarm messages and coordinator lookups print. oc-session-list
+--      already carries it on goose rows as `pigeon_session_id`.
+do
+  local GSE = "gse_42ee2165-0000-4000-8000-00000000abcd"
+  check(spec.id_query("gse_42ee") == "gse_42ee", "a gse_-prefixed prompt is an id query")
+  check(spec.id_query("  " .. GSE .. " ") == GSE, "a pasted whole gse_ id is trimmed into an id query")
+  check(spec.id_query("gse") == nil, "'gse' without the underscore stays a title search")
+  check(spec.id_query("GSE_42ee") == nil, "the gse_ trigger is case-sensitive like ses_")
+  check(spec.id_query("my gse_42") == nil, "'gse_' in the middle of a prompt does not flip the mode")
+
+  local goose_row = { id = "goose:20990101_7", pigeon_session_id = GSE, title = "G" }
+  local ids = spec.session_ids_of({ value = goose_row })
+  check(#ids == 2 and ids[1] == "goose:20990101_7" and ids[2] == GSE,
+    "session_ids_of lists the row id, then the pigeon id")
+  local oc = spec.session_ids_of({ value = { id = "ses_abc", pigeon_session_id = vim.NIL } })
+  check(#oc == 1 and oc[1] == "ses_abc", "vim.NIL pigeon id is ignored")
+  local dup = spec.session_ids_of({ id = "ses_abc", pigeon_session_id = "ses_abc" })
+  check(#dup == 1, "a pigeon id equal to the row id is listed once")
+  check(#spec.session_ids_of(nil) == 0, "nil entry has no ids")
+  check(#spec.session_ids_of({ value = { pigeon_session_id = GSE } }) == 1,
+    "a row with only a pigeon id still lists it")
+
+  check(spec.ids_score(ids, "gse_42ee") == 0, "ids_score matches the pigeon id")
+  check(spec.ids_score(ids, spec.id_query("20990101_7")) == 0, "ids_score still matches the goose id")
+  check(spec.ids_score(ids, "ses_") == spec.ID_FILTERED, "ses_ does not match a goose row's ids")
+  check(spec.ids_score({ "ses_xxxxxab", "ses_ab" }, "ses_ab") == 0, "ids_score takes the BEST id's score")
+  check(spec.ids_score({}, "gse_") == spec.ID_FILTERED, "no ids is filtered")
+  check(spec.ids_score(nil, "gse_") == spec.ID_FILTERED, "nil ids is filtered, never errors")
+
+  -- Wiring: the switcher's own sorter answers a gse_ prompt.
+  recorded_pickers_new = {}
+  sorter_calls = { scoring = {}, highlighter = {}, was_discarded = {}, mark_discarded = {} }
+  local oc_row = { id = "ses_f73a030f3ffePG2zTAA5vhy30d", title = "Alpha", directory = "/tmp/a" }
+  local fake_ctrl = flow.new({
+    fetch = function(opts, cb) cb({ rows = { oc_row, goose_row } }, nil) end,
+    locate = function(opts, cb) cb({}) end,
+  })
+  init_mod.open({ flow = fake_ctrl })
+  local sorter = recorded_pickers_new[1].defaults.sorter
+  check(sorter.scoring_function(sorter, "gse_42ee", "G x", { value = goose_row }) == 0,
+    "a gse_ prompt finds the goose row by its pigeon id")
+  check(sorter.scoring_function(sorter, "gse_42ee", "Alpha a", { value = oc_row }) == spec.ID_FILTERED,
+    "a gse_ prompt filters an opencode row")
+  check(sorter.scoring_function(sorter, "goose:2099", "G x", { value = goose_row }) == 0,
+    "goose: search still works through the generalised wrapper")
+  check(#sorter_calls.scoring == 0, "gse_ mode never reaches the base sorter")
+  check(sorter._was_discarded(sorter, "gse_42ee", "G x") == false, "gse_ mode bypasses the discard trap")
+end
+
+-- 79f. wrap_id_sorter with a caller-supplied ids_of: what the stall-watch
+--      picker uses for program rows, whose id is their coordinator's.
+do
+  local calls = 0
+  local base = {
+    scoring_function = function() calls = calls + 1; return 0.5 end,
+    highlighter = function() return { { start = 1, finish = 1 } } end,
+  }
+  local wrapped = spec.wrap_id_sorter(base, function(entry) return entry.ids end)
+  check(wrapped == base, "wrap_id_sorter wraps in place")
+  check(wrapped.scoring_function(wrapped, "gse_9", "line", { ids = { "gse_9f" } }) == 0, "custom ids_of is used")
+  check(wrapped.scoring_function(wrapped, "Alpha", "line", { ids = {} }) == 0.5 and calls == 1,
+    "a title prompt still delegates to the base scorer")
+  check(#wrapped.highlighter(wrapped, "gse_9", "disp") == 0, "id mode highlights nothing")
+  check(spec.wrap_id_sorter("not a table") == "not a table", "a non-table sorter is returned untouched")
+end
+
 -- =========================================================================
 -- 80-85. THE FETCH WINDOW FOLLOWS THE PROMPT (workstation-iplu)
 -- =========================================================================

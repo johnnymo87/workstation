@@ -330,4 +330,32 @@ do
   check(unres_lines[1]:find("state unknown", 1, true) ~= nil, "unresolved state header contains 'state unknown'")
 end
 
+-- ID SEARCH (workstation-klqw): what the id-mode sorter matches per row.
+do
+  local GSE = "gse_42ee2165-0000-4000-8000-00000000abcd"
+  local coord_row = { id = "goose:20990101_1", pigeon_session_id = GSE }
+  local live = { tag = "alpha", coord = { state = "live", goose_id = "20990101_1", row = coord_row } }
+  local ids = spec.program_ids(live)
+  check(#ids == 2 and ids[1] == "goose:20990101_1" and ids[2] == GSE,
+    "a program's ids are its coordinator's row id, then its pigeon id")
+  local unres = spec.program_ids({ tag = "a", coord = { state = "unresolved", goose_id = "20990101_1" } })
+  check(#unres == 1 and unres[1] == "goose:20990101_1", "an unresolved coordinator still has its goose id")
+  local gone = spec.program_ids({ tag = "a", coord = { state = "dir_missing", goose_id = "20990101_1", row = coord_row } })
+  check(#gone == 2, "a dir-missing coordinator is still findable by id")
+  check(#spec.program_ids({ tag = "a", coord = { state = "none" } }) == 0, "no coordinator, no ids")
+  check(#spec.program_ids({ tag = "a" }) == 0, "no coord field, no ids")
+  check(#spec.program_ids(nil) == 0, "nil prow, no ids")
+  check(#spec.program_ids({ coord = { state = "live", goose_id = vim.NIL } }) == 0, "vim.NIL goose id, no ids")
+
+  local srow = { id = "goose:20990101_9", pigeon_session_id = GSE, title = "W" }
+  local sids = spec.session_ids(srow)
+  check(#sids == 2 and sids[1] == "goose:20990101_9" and sids[2] == GSE, "a worker's ids: row id, pigeon id")
+  check(spec.session_ids({ id = "ses_x" })[1] == "ses_x", "an opencode worker's id is its ses_ id")
+
+  -- The ordinals are UNCHANGED: ids are matched in id mode, never fuzzily.
+  check(spec.program_ordinal(live) == "alpha", "program ordinal still the tag only (no id)")
+  check(not spec.session_ordinal(srow):find("gse_", 1, true) and not spec.session_ordinal(srow):find("goose:", 1, true),
+    "session ordinal carries no id")
+end
+
 print("LUA_TEST_OK " .. N)
