@@ -7,7 +7,8 @@
 # by goose-cutover (pkgs/goose-cutover). One PR per release tag, on its own branch, never
 # force-pushed: a PR labelled goose-cutover-ready must not change head under the probe that
 # passed it. A newer release closes the older auto PR as superseded. While any other open
-# goose-upgrade PR exists (a hand-made pin PR, such as the port's), this stands aside.
+# PR is labelled goose-upgrade or edits pkgs/goose/** (a hand-made pin PR, such as the
+# port's), this stands aside. Repo variable GOOSE_HOLD (non-empty) pauses it.
 name: Update goose
 
 on:
@@ -25,14 +26,22 @@ jobs:
     permissions:
       contents: read
     steps:
+      # No persisted GITHUB_TOKEN header: the push below authenticates with UPDATE_TOKEN.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Plan
         id: plan
         env:
           GH_TOKEN: ${{ github.token }}
+          GOOSE_HOLD: ${{ vars.GOOSE_HOLD }}
         run: |
-          python3 .github/scripts/test_update_goose_pin.py
+          if [ -n "$GOOSE_HOLD" ]; then
+            echo "GOOSE_HOLD is set (${GOOSE_HOLD}); not moving the goose pin."
+            exit 0
+          fi
+          PYTHONDONTWRITEBYTECODE=1 python3 .github/scripts/test_update_goose_pin.py
           gh api 'repos/johnnymo87/goose/releases?per_page=100' > /tmp/releases.json
           python3 .github/scripts/update-goose-pin.py plan /tmp/releases.json | tee -a "$GITHUB_OUTPUT"
 
@@ -48,10 +57,15 @@ jobs:
           set -euo pipefail
           branch="auto/goose-${TAG}"
 
-          others=$(gh pr list --state open --label goose-upgrade --json number,headRefName \
-            -q '[.[] | select(.headRefName | startswith("auto/goose-") | not) | .number] | join(" ")')
+          # Any other open PR that is a pin PR or edits pkgs/goose (the port's hand-made pin
+          # PR, before or after it is labelled) owns the pin; two would race the cutover.
+          others=$(gh pr list --state open --limit 100 --json number,headRefName,labels,files -q '
+            [.[] | select(.headRefName | startswith("auto/goose-") | not)
+                 | select((.labels | map(.name) | index("goose-upgrade"))
+                          or (.files | map(.path) | any(startswith("pkgs/goose/"))))
+                 | .number] | join(" ")')
           if [ -n "$others" ]; then
-            echo "Open goose-upgrade PR(s) not opened by this workflow: #${others}. Standing aside."
+            echo "Open PR(s) owning the goose pin, not opened by this workflow: #${others}. Standing aside."
             exit 0
           fi
           if [ -n "$(gh pr list --state all --head "$branch" --json number -q '.[].number')" ]; then
