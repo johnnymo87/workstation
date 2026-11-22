@@ -138,7 +138,7 @@
 # schema change.
 # patched-1.54.0.18 (2026-11-21) adds patch 25 (johnnymo87/goose#20); no
 # schema change.
-# patched-1.60.2.0 (2026-11-22) ports the fork onto upstream v1.60.2 for Linux
+# patched-1.60.2.x (2026-11-22) ports the fork onto upstream v1.60.2 for Linux
 # (aarch64-linux and x86_64-linux); state machine agent loop, schema 18; drops
 # obsolete patches (1, 4, 10, 17, 18, 24); rewrites loop-bound patches (8, 9,
 # 11, 12, 14, 15, 16, 20, 21, 22). Darwin (aarch64-darwin) stays on
@@ -173,20 +173,20 @@ let
   # eval time is a worse failure than a pinned line nobody uses.
   #
   # Darwin stays pinned to patched-1.54.0.18 while Linux moves to
-  # patched-1.60.2.0 (per-platform pin, bead workstation-6w7i.26.15 moves Mac).
-  version = "1.60.2-patched.0";
-  tag = "patched-1.60.2.0";
+  # patched-1.60.2.x (per-platform pin, bead workstation-6w7i.26.15 moves Mac).
+  version = "1.60.2-patched.1";
+  tag = "patched-1.60.2.1";
 
   # An entry carrying its own version/tag is held back (update-goose.yml leaves it alone);
   # the rest follow the top-level pin.
   platforms = {
     "aarch64-linux" = {
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-S4M3gQyu2LXkW5tuFTcW9Gfr+dGIouK9z4sMRmzT6Ww=";
+      hash = "sha256-NHDkNiqsys6FIxtEwnFnQ2x1qGC1psEJsp/hx10lSyY=";
     };
     "x86_64-linux" = {
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
-      hash = "sha256-kNolPiM/Z22MboxH9V0nfhbqvdbtKhWyWSUb616xSQ4=";
+      hash = "sha256-LFEt1C+9Nzu/76UHGng4YEF3ippfBvPFe3bnRL4KZ5U=";
     };
     "aarch64-darwin" = {
       version = "1.54.0-patched.18";
