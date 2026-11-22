@@ -1557,5 +1557,27 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+
+class RealRunnerDevEnvTest(unittest.TestCase):
+    def test_dev_commands_get_login_shell_and_system_path(self):
+        import subprocess as sp
+        seen = {}
+        orig = sp.run
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return sp.CompletedProcess(argv, 0, "", "")
+        sp.run = fake_run
+        try:
+            goose_cutover.RealRunner().run(["goose-upgrade-probe", "x"], user="dev", check=False)
+        finally:
+            sp.run = orig
+        argv = seen["argv"]
+        self.assertEqual(argv[:5], ["runuser", "--whitelist-environment=GH_TOKEN", "-u", "dev", "--"])
+        path = [a for a in argv if a.startswith("PATH=")]
+        self.assertEqual(len(path), 1)
+        # bash (goose's shell choice) and node (pigeon probes) live in the system profile.
+        self.assertIn("/run/current-system/sw/bin", path[0].split("=", 1)[1].split(":"))
+        self.assertEqual(argv[-2:], ["goose-upgrade-probe", "x"])
+
 if __name__ == "__main__":
     unittest.main()
