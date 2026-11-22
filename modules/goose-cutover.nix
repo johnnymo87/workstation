@@ -35,6 +35,7 @@ in
       TimeoutStartSec = "5h";
       TimeoutStopSec = "15min";
       MemoryMax = "16G"; # the probe peaked at 8G + 2.9G swap under an 8G cap (dry run 2026-11-22)
+      MemorySwapMax = "0"; # fail loudly (OnFailure) rather than thrash in swap for up to 5h
       StateDirectory = "goose-cutover";
     };
   };

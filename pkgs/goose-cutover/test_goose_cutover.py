@@ -1573,8 +1573,10 @@ class RealRunnerDevEnvTest(unittest.TestCase):
             sp.run = orig
         argv = seen["argv"]
         self.assertEqual(argv[:5], ["runuser", "--whitelist-environment=GH_TOKEN", "-u", "dev", "--"])
-        self.assertIn("SHELL=/run/current-system/sw/bin/bash", argv)
-        self.assertTrue(any(a.startswith("PATH=") and "/run/current-system/sw/bin" in a for a in argv))
+        path = [a for a in argv if a.startswith("PATH=")]
+        self.assertEqual(len(path), 1)
+        # bash (goose's shell choice) and node (pigeon probes) live in the system profile.
+        self.assertIn("/run/current-system/sw/bin", path[0].split("=", 1)[1].split(":"))
         self.assertEqual(argv[-2:], ["goose-upgrade-probe", "x"])
 
 if __name__ == "__main__":

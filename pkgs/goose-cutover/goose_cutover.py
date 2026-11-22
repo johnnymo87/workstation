@@ -16,19 +16,20 @@ from typing import Any, Optional
 STATE_PATH = "/var/lib/goose-cutover/state.json"
 RUN_LOCK_PATH = "/var/lib/goose-cutover/run.lock"
 
-# The environment dev's commands run with. The unit's own PATH is only the
-# package's runtimeInputs, and SHELL is unset there; goose renders SHELL into
-# its shell tool's description ("Commands run under `sh`"), so the probe's
-# rendered-surface check sees a schema change unless dev's login shell is set,
-# and the pigeon probes need node from the system profile.
+# The environment dev's commands run with, PATH in goose-serve's order. The
+# unit's own PATH is only the package's runtimeInputs plus the NixOS service
+# default, which has neither node (the probe's pigeon checks) nor bash: goose
+# picks its shell by `which bash` (it ignores $SHELL), so without bash on PATH
+# it renders "Commands run under `sh`" into the shell tool and the probe's
+# rendered-surface check reports a schema change for an unchanged binary.
 DEV_ENV = [
     "HOME=/home/dev",
     "USER=dev",
     "LOGNAME=dev",
     "SHELL=/run/current-system/sw/bin/bash",
     "XDG_RUNTIME_DIR=/run/user/1000",
-    "PATH=/home/dev/.nix-profile/bin:/etc/profiles/per-user/dev/bin:"
-    "/run/wrappers/bin:/run/current-system/sw/bin",
+    "PATH=/run/wrappers/bin:/run/current-system/sw/bin:/home/dev/.nix-profile/bin:"
+    "/etc/profiles/per-user/dev/bin:/home/dev/.local/bin",
 ]
 DEFAULT_HOST_REPORTS_DIR = "/var/lib/goose-cutover/host-reports"
 DEFAULT_CUTOVER_HOSTS = "devbox,mac"
