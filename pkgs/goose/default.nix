@@ -1,3 +1,4 @@
+# (goose-cutover no-op test PR: this comment line is the only change; do not merge.)
 # goose CLI, pinned to a release of the johnnymo87/goose fork: an upstream goose
 # release plus a few local patches, built by upstream's own Linux CLI workflow
 # (.github/workflows/patched-release.yml on the fork's patched/<version> branch).
