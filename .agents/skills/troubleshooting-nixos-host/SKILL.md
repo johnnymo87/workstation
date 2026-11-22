@@ -28,34 +28,43 @@ Port forwarding runs via **persistent SSH tunnel launchd agents** on macOS (alwa
 | `devbox-dev-tunnel` | `devbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay |
 | `cloudbox-dev-tunnel` | `cloudbox-tunnel` | Dev ports + gclpr + CDP + chatgpt-relay + Jenkins |
 | `cloudbox-chart-tunnel` | `cloudbox-chart` | `oc-tags serve` chart on 127.0.0.1:4710 (socket-activated) |
+| `devbox-chart-tunnel` | `devbox-chart` | `oc-tags serve` chart on 127.0.0.1:4711 (socket-activated) |
 
 Check tunnel status:
 ```bash
 launchctl list | grep tunnel
 ```
 
-`cloudbox-chart-tunnel` behaves differently from the other two, so don't debug
-it the same way. It is **socket-activated**: launchd owns :4710 and spawns one
-`ssh -W` per connection. Expect **no running process and no connection while
-nobody is viewing the chart** -- `launchctl list` showing it with no PID is the
-healthy idle state, not a fault. It also has no keepalive loop, so there is
-nothing to `kickstart`; forcing it to run just exits immediately (no socket on
-stdin).
+`cloudbox-chart-tunnel` (:4710) and `devbox-chart-tunnel` (:4711) behave
+differently from the dev tunnels, so don't debug them the same way. They are
+**socket-activated**: launchd owns the listening port (:4710 for cloudbox, :4711
+for devbox) and spawns one `ssh -W` per connection. Expect **no running process
+and no connection while nobody is viewing the chart** -- `launchctl list`
+showing either with no PID is the healthy idle state, not a fault. They also have
+no keepalive loop, so there is nothing to `kickstart`; forcing them to run just
+exits immediately (no socket on stdin).
 
-It is separate from `cloudbox-dev-tunnel` because :4710 binds on the *Mac* and
-can collide with a hand-run `ssh -N cloudbox-chart` or a local `oc-tags serve`.
-That block runs `ExitOnForwardFailure=yes`, where one bind clash aborts the
-whole ssh and would take gclpr, chatgpt-relay and Jenkins with it.
+They are separate from `cloudbox-dev-tunnel` / `devbox-dev-tunnel` because :4710
+and :4711 bind on the *Mac* and can collide with a hand-run `ssh -N
+cloudbox-chart` / `ssh -N devbox-chart` or a local `oc-tags serve`. Those blocks
+run `ExitOnForwardFailure=yes`, where one bind clash aborts the whole ssh and
+would take gclpr, chatgpt-relay, and dev ports with it.
 
-**A lost bind does not heal itself.** If something else held :4710 when the
+**A lost bind does not heal itself.** If something else held the port when the
 agent loaded, launchd failed the bind once and gave up -- unlike the keepalive
 tunnels, nothing retries. Killing the collider is necessary but not sufficient;
 you must also re-bootstrap:
 
 ```bash
+# Cloudbox (:4710)
 lsof -nP -iTCP:4710 -sTCP:LISTEN   # find and stop the collider first
 launchctl bootout gui/$UID/org.nix-community.home.cloudbox-chart-tunnel
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/org.nix-community.home.cloudbox-chart-tunnel.plist
+
+# Devbox (:4711)
+lsof -nP -iTCP:4711 -sTCP:LISTEN   # find and stop the collider first
+launchctl bootout gui/$UID/org.nix-community.home.devbox-chart-tunnel
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/org.nix-community.home.devbox-chart-tunnel.plist
 ```
 
 Re-running `home-switch` (no root) does the same thing if you prefer.
@@ -63,30 +72,36 @@ Re-running `home-switch` (no root) does the same thing if you prefer.
 Triage:
 
 ```bash
-netstat -an | grep '127.0.0.1.4710 ' | grep LISTEN   # is the listener up?
+# Check listener
+netstat -an | grep '127.0.0.1.4710 ' | grep LISTEN   # cloudbox
+netstat -an | grep '127.0.0.1.4711 ' | grep LISTEN   # devbox
+
+# Check logs
 tail ~/Library/Logs/cloudbox-chart-tunnel.err.log
+tail ~/Library/Logs/devbox-chart-tunnel.err.log
 ```
 
-Use `netstat`, **not** `lsof`, to check this listener. `launchd` holds the
-socket on the agent's behalf, and `lsof -iTCP:4710` reports *nothing* for it
-even when it is healthy and serving -- with or without `-sTCP:LISTEN`, and as
-your own user. `lsof` is still the right tool for asking who holds :4710 when
-you suspect a *collider* (a hand-run `ssh -N`, a local `oc-tags serve`), since
-those are ordinary processes and do show up.
+Use `netstat`, **not** `lsof`, to check these listeners. `launchd` holds the
+socket on the agent's behalf, and `lsof -iTCP:4710` / `lsof -iTCP:4711` reports
+*nothing* for it even when it is healthy and serving -- with or without
+`-sTCP:LISTEN`, and as your own user. `lsof` is still the right tool for asking
+who holds the port when you suspect a *collider* (a hand-run `ssh -N`, a local
+`oc-tags serve`), since those are ordinary processes and do show up.
 
 | Browser symptom | Means |
 |---|---|
-| Connection refused | launchd is not holding :4710 -- agent not loaded, or lost the bind to a collider |
-| Reset / empty response, **instantly** | Listener fine, reached cloudbox, but `oc-tags serve` is down there |
-| Reset / empty response after **~10s** | Could not reach cloudbox at all -- `ConnectTimeout=10` expired. Stale IP (re-run `scripts/update-ssh-config.sh`), or the box is down |
-| Reset / empty response, **fast, with a new err-log line** | Reached cloudbox, SSH refused: changed host key, or auth failed under `BatchMode=yes` |
-| Loads, but stale/wrong | Something *else* may own :4710 (stale manual ssh, local `oc-tags serve`) |
+| Connection refused | launchd is not holding the port (:4710/:4711) -- agent not loaded, or lost the bind to a collider |
+| Reset / empty response, **instantly** | Listener fine, reached host, but `oc-tags serve` is down there (port 4710) |
+| Reset / empty response after **~10s-30s** | Could not reach host at all -- `ConnectTimeout` expired. Stale IP (re-run `scripts/update-ssh-config.sh`), or host is down |
+| Reset / empty response, **fast, with a new err-log line** | Reached host, SSH refused: changed host key, or auth failed under `BatchMode=yes` |
+| Loads, but stale/wrong | Something *else* may own the port (stale manual ssh, local `oc-tags serve`) |
 
 Timing is the disambiguator, so notice it before theorising. The quickest
-cross-check: if `cloudbox-dev-tunnel` is also unhealthy, the problem is the box
-or its IP, not the chart plumbing. Auth is the same story -- this agent uses the
-same ssh binary and launchd credential context as the dev tunnels, so it cannot
-fail authentication alone.
+cross-check: if the corresponding dev tunnel (`cloudbox-dev-tunnel` or
+`devbox-dev-tunnel`) is also unhealthy, the problem is the host or its IP,
+not the chart plumbing. Auth is the same story -- these agents use the same ssh
+binary and launchd credential context as the dev tunnels, so they cannot fail
+authentication alone.
 
 A page load takes ~1.0s, about half of which is one SSH handshake -- that is
 normal for on-demand activation, not a symptom. During a load you will briefly

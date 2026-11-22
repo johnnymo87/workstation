@@ -20,18 +20,21 @@
 # and restart the unit -- so a switch alone now deploys.
 #
 # BIND + PRIVACY: 127.0.0.1 only, never a routable interface. It is reached
-# from the Mac through the on-demand `cloudbox-chart` SSH LocalForward (see
-# scripts/update-ssh-config.sh), not by opening a port. Port 4710 is
-# deliberately NOT in the always-on cloudbox-tunnel block, because that runs
-# under ExitOnForwardFailure=yes and a busy :4710 would tear down gclpr,
-# chatgpt-relay and the Jenkins forward with it.
+# from the Mac through the on-demand `cloudbox-chart` / `devbox-chart` SSH
+# LocalForwards (see scripts/update-ssh-config.sh), not by opening a port. Port
+# 4710 is deliberately NOT in the always-on tunnel blocks, because those run
+# under ExitOnForwardFailure=yes and a busy port would tear down gclpr,
+# chatgpt-relay and other forwards with it.
 #
 # It never addresses the opencode serve pool (:4096-4099) or the front door
 # (:4700) -- it is a dashboard, not a serve proxy -- which is what keeps the
 # front-door opacity guard disengaged.
-{ config, pkgs, lib, localPkgs, isCloudbox, ... }:
+{ config, pkgs, lib, localPkgs, isCloudbox, isDevbox, ... }:
 
-lib.mkIf isCloudbox {
+let
+  enableServe = isCloudbox || isDevbox;
+in
+lib.mkIf enableServe {
   systemd.user.services.oc-tags-serve = {
     Unit = {
       Description = "oc-tags chart server (per-tag LLM list-price consumption)";
@@ -62,7 +65,7 @@ lib.mkIf isCloudbox {
         # Python block-buffers stdout when it is not a tty, so the startup
         # banner would never reach the journal.
         "PYTHONUNBUFFERED=1"
-      ];
+      ] ++ lib.optional isDevbox "OC_TAGS_EM_LEDGER_EXPECTED=1";
       Restart = "always";
       RestartSec = 10;
       # 10s, then backing off to a 5min ceiling (systemd >= 254).
@@ -89,7 +92,7 @@ lib.mkIf isCloudbox {
   # the old process keeps the port and the old code. Nothing is logged, and
   # even `systemctl --user restart oc-tags-serve` would restart the transient
   # definition rather than cutting over.
-  home.activation.ocTagsServeStopTransient = lib.mkIf isCloudbox (
+  home.activation.ocTagsServeStopTransient = lib.mkIf enableServe (
     lib.hm.dag.entryBefore [ "reloadSystemd" ] ''
       if [ "$(${pkgs.systemd}/bin/systemctl --user show -p Transient --value oc-tags-serve.service 2>/dev/null)" = "yes" ]; then
         echo "ocTagsServeStopTransient: stopping hand-started transient oc-tags-serve so the declared unit can take over"

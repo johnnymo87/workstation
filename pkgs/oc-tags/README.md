@@ -17,8 +17,9 @@ session-tags which ses_abc123        # tag / source / root-id / kind, tab-separa
 session-tags sessions billing        # root session ids carrying a tag, one per line
 session-tags report --days 7
 session-tags serve                   # then, from the Mac, just open
-                                # http://127.0.0.1:4710 -- the socket-activated
-                                # cloudbox-chart-tunnel LaunchAgent connects on demand
+                                # http://127.0.0.1:4710 (cloudbox) or :4711 (devbox)
+                                # -- the socket-activated *-chart-tunnel
+                                # LaunchAgents connect on demand
 ```
 
 ### Goose spend source
@@ -48,6 +49,19 @@ lgtm's goose review turns and goose gather runs each run in a private `GOOSE_PAT
 - **Late rows**: lgtm can append a row days after the spend (a superseded review session's last turn, the one-shot gather backfill), so a finished day's bar can grow after the fact.
 - **Loud on schema drift**: a keyed row with an unknown `v`, `kind` or timestamp is not counted and is reported on stderr.
 - **Known gaps**: ledger spend, like goose-serve spend, is left out of the Claude-only cfp coverage and cap numerators even though goose traffic goes through cfp, so coverage reads low; `oc-cost` does not read the ledger. `--lgtm-ledger ""` turns the source off.
+
+### eternal-machinery spend source
+
+eternal-machinery (EM) runtime agent spend (port 4318) and benchmark spend (port 4319, codex port 2455) are recorded in monthly JSONL shards in `~/.local/state/eternal-machinery/spend/spend-YYYY-MM.jsonl` (override with `OC_TAGS_EM_LEDGER_DIR` or `--em-ledger-dir`).
+
+- **Tag**: `em-agents:<name>` for role agents, `em-bench:<name>` for role bench, unless `tags.db` names the root. Root IDs are `em:<spend>` (e.g. `em:agents/warrior_f`).
+- **Dedupe**: rows are deduped on `key`, first wins.
+- **Streaming**: streams line by line over only the monthly shards touched by the requested window.
+- **Cost**: calculated from model rates with goose cache semantics (`input + cache_read + cache_write` as inclusive input). Zero-token rows (`http_error`, `proxy_error`) cost $0 and do not show as unpriced. Unknown models appear under "Unpriced models".
+- **Footer**: displays EM proxy error count and per-port ledger freshness (`EM ledger: last row Nh ago (:4318), Nd ago (:4319)`).
+- **Missing directory**: by default, an absent ledger directory is silently ignored (normal on cloudbox). When `OC_TAGS_EM_LEDGER_EXPECTED=1` is set (enabled on devbox via `oc-tags-serve.nix`), a missing directory renders a footer line `EM ledger: <dir> missing` to expose a missing proxy or mount.
+- **Chart folding**: `fold=<prefix>[,<prefix>]` query parameter (or `--fold` in `report`) sums `<prefix>:*` tags into a single band before ranking (e.g. `fold=em-agents,em-bench`).
+- **Claude cap/coverage**: EM rows do not enter `claude_day` or cfp coverage calculations.
 
 ### Directory rules (removed)
 

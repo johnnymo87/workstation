@@ -913,6 +913,52 @@ lib.mkIf isDarwin {
       };
     };
 
+    # `oc-tags serve` chart, at http://127.0.0.1:4711 on this Mac (devbox twin of
+    # cloudbox-chart-tunnel on :4710).
+    #
+    # SOCKET-ACTIVATED: launchd owns :4711 and spawns one `ssh -W` per accepted
+    # connection, so nothing is connected while nobody is looking at the chart.
+    #
+    # Plain ssh to devbox is ~0.3s (direct Hetzner connection without gcloud/IAP
+    # ProxyCommand startup overhead), so unlike cloudbox-chart-tunnel this drops
+    # the ControlMaster/IAP dance. One direct `ssh -W` per connection is fast
+    # enough and needs no background master process.
+    #
+    # `-W` implies ClearAllForwardings, so the `LocalForward 4711` in the
+    # devbox-chart ssh block is ignored here and cannot fight launchd for the
+    # port. That block stays as the manual fallback (`ssh -N devbox-chart`).
+    #
+    # StandardErrorPath is load-bearing: in nowait inetd mode launchd hands the
+    # accepted socket to stdin, stdout AND stderr, so without this redirect ssh's
+    # chatter would corrupt the HTTP response stream.
+    devbox-chart-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.openssh}/bin/ssh"
+          "-o"
+          "BatchMode=yes"
+          "-o"
+          "ConnectTimeout=30"
+          "-o"
+          "IgnoreUnknown=UseKeychain"
+          "-W"
+          "127.0.0.1:4710"
+          "devbox-chart"
+        ];
+        inetdCompatibility = { Wait = false; };
+        Sockets = {
+          Listeners = {
+            SockNodeName = "127.0.0.1";
+            SockServiceName = "4711";
+            SockType = "stream";
+            SockFamily = "IPv4";
+          };
+        };
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/devbox-chart-tunnel.err.log";
+      };
+    };
+
     # gclpr clipboard server.
     # Exposes macOS pbcopy/pbpaste over signed TCP so remote sessions (via SSH
     # RemoteForward) can copy/paste to the local clipboard through mosh.
@@ -1793,10 +1839,10 @@ EOF
     rm -f ~/.bazelrc 2>/dev/null || true
   '';
 
-  # cloudbox-chart-tunnel is deliberately NOT in this list: it is socket-
-  # activated, so launchd starts it when something connects to :4710. Kick-
-  # starting it would force-run an `ssh -W` with no accepted socket on stdin,
-  # which just exits.
+  # cloudbox-chart-tunnel and devbox-chart-tunnel are deliberately NOT in this
+  # list: they are socket-activated, so launchd starts them when something
+  # connects to :4710 / :4711. Kick-starting them would force-run an `ssh -W`
+  # with no accepted socket on stdin, which just exits.
   #
   # The `timeout` is load-bearing, not defensive dressing. `kickstart -k` kills
   # the instance and then BLOCKS until launchd restarts it. On the first switch
