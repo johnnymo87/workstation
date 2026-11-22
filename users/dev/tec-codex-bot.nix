@@ -5,7 +5,8 @@
 # slash-command bot over the TEC wiki and forum, offered to the unofficial TEC
 # Discord. "Bot only, by construction": the bot talks to its OWN API process
 # (127.0.0.1:4012, read-only DB, wiki+forum allowlist, its own 0600 query log,
-# no AI-provider key), never the agents' live :4010.
+# hybrid search with an OpenAI key FILE configured for it), never the agents'
+# live :4010.
 #
 # INERT UNTIL THE TOKEN EXISTS. This module does NOT declare the sops secret:
 # that is Jonathan's (tec-codex-toi.9.6). Until /run/secrets/discord_bot_token
@@ -49,9 +50,17 @@
 #   or logs). Non-secret settings (CODEX_BOT_GUILD_IDS, a comma-separated list
 #   of guild ids, required: the bot exits 2 without it) go in the optional
 #   ~/.config/tec-codex/bot.env, which this module does not create.
-# - No AI-provider key reaches either process (UnsetEnvironment), and the
-#   agents' query log is disabled (CODEX_QUERY_LOG_PATH="") as a backstop: the
-#   bot API writes only CODEX_BOT_QUERY_LOG_PATH.
+# - No AI-provider key reaches either process through the ENVIRONMENT
+#   (UnsetEnvironment), and the agents' query log is disabled
+#   (CODEX_QUERY_LOG_PATH="") as a backstop: the bot API writes only
+#   CODEX_BOT_QUERY_LOG_PATH. The bot API alone gets a key FILE,
+#   CODEX_BOT_OPENAI_API_KEY_FILE, for hybrid search: it embeds each member
+#   search with OpenAI (Jonathan allowed hosted models, tec-codex-toi.9.27;
+#   the privacy page names OpenAI). It points at the agents' sops key until
+#   tec-codex-toi.9.30 gives the bot its own project key with a spend cap;
+#   meanwhile the API logs a warning and /health says "key": "shared". The
+#   bot process and the prune timer get no key. A rotated key file needs
+#   `systemctl --user restart tec-codex-bot-api`.
 # - MemoryMax caps: devbox is short of memory, and a runaway must not touch
 #   the live stack. Logs go to the journal:
 #   journalctl --user -u tec-codex-bot -u tec-codex-bot-api
@@ -73,6 +82,8 @@
 
 let
   tokenPath = "/run/secrets/discord_bot_token";
+  # The agents' key until tec-codex-toi.9.30 adds a bot-only secret.
+  botOpenaiKeyFile = "/run/secrets/openai_api_key";
   checkout = "${config.home.homeDirectory}/projects/tec-codex";
   apiPort = 4012;
   uvRun = "${pkgs.uv}/bin/uv run --frozen --no-sync";
@@ -96,6 +107,12 @@ let
       "CODEX_GEMINI_API_KEY"
       "GEMINI_API_KEY"
       "DISCORD_TOKEN"
+      # The OpenAI SDK would silently pick these up.
+      "OPENAI_BASE_URL"
+      "OPENAI_ORG_ID"
+      "OPENAI_PROJECT_ID"
+      # The bot API takes its key only as a FILE (below), never a value.
+      "CODEX_BOT_OPENAI_API_KEY"
     ];
     Restart = "on-failure";
     RestartPreventExitStatus = 2;
@@ -127,6 +144,7 @@ lib.mkIf isDevbox {
       Environment = [
         "CODEX_BOT_HOST=127.0.0.1"
         "CODEX_BOT_PORT=${toString apiPort}"
+        "CODEX_BOT_OPENAI_API_KEY_FILE=${botOpenaiKeyFile}"
         "CODEX_QUERY_LOG_PATH="
         "UV_PYTHON_DOWNLOADS=never"
       ];
