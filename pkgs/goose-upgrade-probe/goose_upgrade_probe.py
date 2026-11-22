@@ -22,6 +22,7 @@ import pathlib
 import re
 import secrets
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -58,6 +59,10 @@ SURFACE_RECIPE, SURFACE_FIXTURE = "maven-renovate.yaml", "fixtures-rendered-surf
 
 class ProbeError(Exception):
     pass
+
+
+class Abort(BaseException):
+    """Isolation breach: stop every check, not just the current one."""
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -131,6 +136,20 @@ def neutralize_extension_data(raw: str | None) -> str | None:
     ee = d.get("enabled_extensions.v0")
     if isinstance(ee, dict) and isinstance(ee.get("extensions"), list):
         ee["extensions"] = [e for e in ee["extensions"] if isinstance(e, dict) and e.get("type") in ("platform", "builtin")]
+    return json.dumps(d)
+
+
+def neutralize_recipe_json(raw: str | None) -> str | None:
+    """A stored recipe's extensions minus every non-bundled one (production rows carry
+    slack-mcp-server, atlassian-mcp, ro-shell). .18 does not start them on load; a candidate might."""
+    if not raw:
+        return raw
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return raw
+    if isinstance(d, dict) and isinstance(d.get("extensions"), list):
+        d["extensions"] = [e for e in d["extensions"] if isinstance(e, dict) and e.get("type") in ("platform", "builtin")]
     return json.dumps(d)
 
 
@@ -284,14 +303,19 @@ def tail(text: str, n=15) -> str:
 class Unit:
     """A transient systemd --user service: own cgroup, killed as a whole on stop."""
 
-    def __init__(self, name: str, argv: list[str], env_file: pathlib.Path, cwd: pathlib.Path, log: pathlib.Path):
+    def __init__(self, name: str, argv: list[str], env_file: pathlib.Path, cwd: pathlib.Path, log: pathlib.Path,
+                 inaccessible: list[str] | None = None):
         self.name, self.argv, self.env_file, self.cwd, self.log = name, argv, env_file, cwd, log
+        self.inaccessible = inaccessible or []
 
     def start(self):
         env = dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{os.getuid()}")
         cmd = [
             "systemd-run", "--user", f"--unit={self.name}", "--collect", "--quiet",
             "--expand-environment=no", "-p", "MemoryMax=6G", "-p", "MemorySwapMax=0",
+            # Backstop if the cleanup path never runs (SIGKILL): the unit dies on its own.
+            "-p", "RuntimeMaxSec=3h",
+            *[x for p in self.inaccessible for x in ("-p", f"InaccessiblePaths={p}")],
             "-p", f"EnvironmentFile={self.env_file}", "-p", f"WorkingDirectory={self.cwd}",
             "-p", f"StandardOutput=append:{self.log}", "-p", "StandardError=inherit",
             f"--setenv=PATH={os.environ.get('PATH', '')}", "--", *self.argv,
@@ -492,6 +516,7 @@ class Probe:
         self.honk_token: pathlib.Path | None = None
         self.versions: dict[str, str] = {}
         self.goose_shell = ""
+        self.replayed_kinds: dict[str, set] = {}
 
     def say(self, msg):
         print(f"[probe] {msg}", file=sys.stderr, flush=True)
@@ -519,9 +544,9 @@ class Probe:
         src.close()
         # The copy must not be able to start any session's stored MCP servers.
         with dst:
-            rows = dst.execute("select id, extension_data from sessions").fetchall()
-            dst.executemany("update sessions set extension_data=? where id=?",
-                            [(neutralize_extension_data(e), i) for i, e in rows])
+            rows = dst.execute("select id, extension_data, recipe_json from sessions").fetchall()
+            dst.executemany("update sessions set extension_data=?, recipe_json=? where id=?",
+                            [(neutralize_extension_data(e), neutralize_recipe_json(r), i) for i, e, r in rows])
         dst.close()
 
     def serve_env(self, root: Root) -> dict:
@@ -558,12 +583,16 @@ class Probe:
         self.stop_serve()
         envf = self.root / f"{label}.env"
         write_env_file(envf, self.serve_env(root))
+        # Production's goose state is not even visible to a probe serve: a candidate that
+        # ignored GOOSE_PATH_ROOT fails to open its DB instead of opening production's.
         u = Unit(f"goose-probe-{self.id}-{label}", [binary, "serve", "--host", "127.0.0.1", "--port", str(self.port)],
-                 envf, self.cwd, self.logs / f"{label}-serve.log")
+                 envf, self.cwd, self.logs / f"{label}-serve.log",
+                 inaccessible=[str(PROD_SESSIONS_DB.parent.parent), str(PROD_CONFIG.parent)])
         self.units.append(u)
         u.start()
         self.serve, self.serve_bin = u, binary
         wait_port(self.port, u)
+        self.assert_not_on_production()
         self.say(f"{label}: {binary} on :{self.port} root={root.name} ({u.name})")
 
         async def init():
@@ -576,6 +605,24 @@ class Probe:
         self.versions[binary] = want
         if got != want:
             raise ProbeError(f"{label}: serve reports version {got!r}, {binary} --version says {want!r}")
+
+    def assert_not_on_production(self):
+        """Abort the WHOLE run if any process in the serve's unit holds a file in production's
+        goose data or config directory open."""
+        prod = [str(PROD_SESSIONS_DB.parent.parent.resolve()), str(PROD_CONFIG.parent.resolve())]
+        for pid in unit_pids(self.serve.name):
+            try:
+                fds = os.listdir(f"/proc/{pid}/fd")
+            except OSError:
+                continue
+            for fd in fds:
+                try:
+                    target = os.readlink(f"/proc/{pid}/fd/{fd}")
+                except OSError:
+                    continue
+                if any(target == p or target.startswith(p + "/") for p in prod):
+                    self.serve.stop()
+                    raise Abort(f"{self.serve.name} pid {pid} has production file {target} open")
 
     def stop_serve(self):
         if self.serve:
@@ -614,7 +661,9 @@ class Probe:
         before = len(a.updates_for(sid))
         cwd = cwd if cwd and os.path.isdir(cwd) else str(self.cwd)
         await a.req("session/load", {"sessionId": sid, "cwd": cwd, "mcpServers": []}, timeout=180)
-        return len(a.updates_for(sid)) - before
+        new = a.updates_for(sid)[before:]
+        self.replayed_kinds[sid] = {(u.get("update") or {}).get("sessionUpdate", "") for u in new}
+        return len(new)
 
     def load_all(self, sids: list[tuple[str, str | None]]) -> dict:
         async def go():
@@ -753,14 +802,14 @@ class Probe:
             self.start_serve(self.cand, self.copy, "cand")
 
     def check_pigeon(self):
-        """pigeon's three goose probes, from a throwaway worktree at pigeon's origin/main (the
-        shared checkout is never touched), reusing that checkout's node_modules."""
+        """pigeon's three goose probes, from a throwaway worktree at the deployed checkout's HEAD
+        (the shared checkout is never touched), reusing that checkout's node_modules."""
         scripts = ["goose-launch-probe.ts", "goose-runner-probe.ts", "goose-id-split-probe.ts"]
         if not (PIGEON_DIR / "node_modules/.bin/tsx").exists():
             return self.results.failed("pigeon", f"{PIGEON_DIR}/node_modules/.bin/tsx missing (npm ci there)")
         wt = self.root / "pigeon"
-        run(["git", "-C", str(PIGEON_DIR), "fetch", "-q", "origin"], timeout=120)
-        rc, out = run(["git", "-C", str(PIGEON_DIR), "worktree", "add", "--detach", str(wt), "origin/main"], timeout=120)
+        # The checkout pigeon is deployed from, at its HEAD: test the pigeon that runs.
+        rc, out = run(["git", "-C", str(PIGEON_DIR), "worktree", "add", "--detach", str(wt), "HEAD"], timeout=120)
         if rc != 0:
             return self.results.failed("pigeon", f"pigeon worktree: {tail(out)}")
         try:
@@ -983,6 +1032,11 @@ class Probe:
                if not (isinstance(v, int) and (v >= 1 or self.copy.message_count(k) == 0))}
         if rich not in loaded:
             problems.append("rich session was not loaded")
+        else:
+            want = {"tool_call", "agent_message_chunk", "user_message_chunk"}
+            got = self.replayed_kinds.get(rich, set())
+            if not want <= got:
+                problems.append(f"old binary's replay of the rich session lacks {sorted(want - got)} (got {sorted(got)})")
         if bad:
             problems.append(f"session/load failed or replayed nothing on old: {bad}")
         if self.honkd:
@@ -1017,6 +1071,7 @@ class Probe:
 
     def main(self) -> int:
         try:
+            cleanup_stale(self.root)
             self.prepare()
             if self.want("versions"):
                 self.results.passed("versions", f"candidate {bin_version(self.cand)} ({self.cand}), old {bin_version(self.old)} ({self.old})")
@@ -1031,9 +1086,12 @@ class Probe:
             self.guarded("stall-watch", self.check_stall_watch)
             self.guarded("rendered-surface", self.check_surface)
             self.guarded("rollback", self.check_rollback)
-        except Exception as e:
+        except (Exception, Abort, KeyboardInterrupt) as e:
             traceback.print_exc(file=sys.stderr)
-            self.say(f"aborted: {e}")
+            self.say(f"aborted: {e!r}")
+            if isinstance(e, Abort):
+                for n in self.only:
+                    self.results.failed(n, f"ABORTED, isolation breach: {e}")
         finally:
             self.teardown()
         if self.want("production-untouched"):
@@ -1050,6 +1108,10 @@ class Probe:
         for line in self.results.lines():
             print(line)
         ok = self.results.ok()
+        if ok and self.only != CHECKS:
+            # A subset can never green a cutover.
+            print("RESULT PARTIAL (--only): not a gate result")
+            return 3
         print("RESULT PASS" if ok else "RESULT FAIL")
         return 0 if ok else 1
 
@@ -1070,6 +1132,31 @@ res = honk_transport.run_honk(
     rolling_memory=False, swarm_tools=False, timeout_s=300)
 print("SWRESULT " + json.dumps({"text": json.dumps(res, default=str)}))
 '''
+
+
+def _sigterm(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
+def cleanup_stale(current: pathlib.Path):
+    """Leftovers of a probe that was killed before its teardown: units, worktrees, DB copies."""
+    env = dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{os.getuid()}")
+    _, out = run(["systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "goose-probe-*"], env=env, timeout=30)
+    for line in out.splitlines():
+        name = line.split()[0] if line.split() else ""
+        # Only the probe's own units (goose-probe-<id>-<role>.service); the run lock below
+        # guarantees no other probe is alive to own them.
+        if re.fullmatch(r"goose-probe-[a-z0-9]+-(old-synth|cand-fresh|cand-synth|cand|old|honkd)\.service", name):
+            run(["systemctl", "--user", "stop", name], env=env, timeout=60)
+    for repo in (HONK_REPO, PIGEON_DIR):
+        _, wl = run(["git", "-C", str(repo), "worktree", "list", "--porcelain"], timeout=30)
+        for m in re.findall(r"^worktree (/var/tmp/goose-probe\.[^\n]+)$", wl, re.M):
+            if not m.startswith(str(current)):
+                run(["git", "-C", str(repo), "worktree", "remove", "--force", m], timeout=120)
+    for old in pathlib.Path("/var/tmp").glob("goose-probe.*"):
+        if old != current:
+            for p in old.rglob("sessions.db*"):
+                p.unlink(missing_ok=True)
 
 
 def production_goose_shell() -> str:
@@ -1123,6 +1210,16 @@ def main(argv=None) -> int:
     only = [c.strip() for c in a.only.split(",")] if a.only else None
     if only and set(only) - set(CHECKS):
         print(f"FAIL setup -- unknown checks {set(only) - set(CHECKS)}")
+        return 1
+    signal.signal(signal.SIGTERM, _sigterm)
+    signal.signal(signal.SIGHUP, _sigterm)
+    import fcntl
+
+    lock = open(f"/run/user/{os.getuid()}/goose-upgrade-probe.lock", "a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("FAIL setup -- another goose-upgrade-probe is running")
         return 1
     return Probe(cand, old, a.keep, only).main()
 

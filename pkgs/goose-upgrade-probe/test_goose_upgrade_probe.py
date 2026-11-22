@@ -126,6 +126,21 @@ class ExtensionData(unittest.TestCase):
         self.assertEqual(probe.neutralize_extension_data(""), "")
 
 
+class RecipeJson(unittest.TestCase):
+    def test_strips_stdio_from_stored_recipe(self):
+        raw = json.dumps({"title": "t", "extensions": [
+            {"type": "stdio", "name": "slack", "cmd": "slack-mcp-server"},
+            {"type": "builtin", "name": "developer"}]})
+        out = json.loads(probe.neutralize_recipe_json(raw))
+        self.assertEqual(out["extensions"], [{"type": "builtin", "name": "developer"}])
+        self.assertEqual(out["title"], "t")
+
+    def test_none_garbage_and_no_extensions(self):
+        self.assertIsNone(probe.neutralize_recipe_json(None))
+        self.assertEqual(probe.neutralize_recipe_json("not json"), "not json")
+        self.assertEqual(json.loads(probe.neutralize_recipe_json('{"title": "x"}')), {"title": "x"})
+
+
 class Settled(unittest.TestCase):
     def test_assistant_text_is_settled(self):
         self.assertTrue(probe.is_settled("assistant", json.dumps([{"type": "text", "text": "hi"}])))
