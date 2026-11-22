@@ -1029,6 +1029,13 @@ class TestGooseCutover(unittest.TestCase):
         self.assertFalse(any(c["argv"][:2] == ["systemctl", "restart"] for c in runner.calls))
         self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
 
+    def test_quiet_reason_kind_drops_ids(self):
+        k = goose_cutover.quiet_reason_kind
+        self.assertEqual(k("honk session 20261122_12 is busy (running=True)"),
+                         k("honk session 20261121_3 is busy (running=True)"))
+        self.assertNotEqual(k("goose-serve PID 12 has oom_score_adj=500 >= 500"),
+                            k("sessions.db max(id)=9 unchanged for only 30s < 600s"))
+
     def test_d3_stall_watch_wait_timeout_is_pre_d5_failure(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
