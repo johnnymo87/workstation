@@ -73,10 +73,17 @@ P1. **Preconditions.** hostname `cloudbox`; `goose-link status` exit 0; no
     - **files changed only `pkgs/goose/**`** unless labelled `goose-config-ok`
       (a rollback then runs the old binary under the new config; the probe did
       not test that combination);
-    - label **`goose-hosts-ready`** required (human-applied) until devbox and
-      the Mac can report `goose-link status`: a merge moves devbox's CLI
-      (fallback to the pin while it has no link) and schedules an unprobed Mac
-      restart on its next home-switch (A10).
+    - **hosts-ready check** (mechanical, no human label; W1's ask): every
+      goose host's link exists and devbox and the Mac run the consumer
+      versions the candidate needs (honk/honkd A6-capable). cloudbox is read
+      locally; devbox and the Mac are read from a per-host report
+      (`goose-link status` + consumer versions) published on a channel
+      cloudbox can read (bead workstation-6w7i.27.12). A missing or stale
+      report (> 26 h) fails closed with `hosts-not-ready: <host>`. When the
+      check passes, the script applies label `goose-hosts-ready` to the PR as
+      a record. The only human-applied label is `goose-major-ok`.
+      Why: a merge moves devbox's CLI (fallback to the pin while it has no
+      link) and schedules an unprobed Mac restart on its next home-switch.
 P2. **Candidate.** As dev: fetch `origin` and `refs/pull/<pr>/merge`; require
     the merge ref's first parent == current `origin/main` (else fail
     `stale-merge-ref`: GitHub has not recomputed it; rerun later). Throwaway
@@ -192,8 +199,8 @@ that changes only a comment in pkgs/goose (candidate == current).
 ## Tests (unittest)
 
 Fake Runner; at least: launcher refuses in goose-serve cgroup; `--run` refuses
-outside a unit; global lock busy; each P1 precondition (labels incl.
-goose-hosts-ready, goose-major/ok, goose-config-ok, files, checks
+outside a unit; global lock busy; each P1 precondition (hosts-ready check:
+missing/stale/old-consumer report fails closed, pass applies the label; goose-major/ok, goose-config-ok, files, checks
 pending/failed, base, state); stale merge ref; noop refused/allowed; probe fail
 stops before merge; merged mismatch; dry-run issues no mutating command
 (assert none of: gh pr merge, switch-to-configuration switch, nix-env --set,
