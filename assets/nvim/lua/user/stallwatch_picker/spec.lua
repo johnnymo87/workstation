@@ -105,6 +105,32 @@ function M.program_ordinal(prow)
   return (type(prow) == "table" and nonempty(prow.tag)) or ""
 end
 
+--- Ids a program row answers to in id mode (workstation-klqw): its
+--- coordinator's -- `goose:<id>` (a bare goose id is normalised to that by
+--- the switcher's id_query) and pigeon's `gse_...` id when oc-session-list
+--- returned the coordinator row. Ids are NEVER put in the ordinal: they are
+--- matched only by a prompt that is an id (ss_spec.id_query), so a short
+--- digit string still cannot match a badge, a count or an id.
+function M.program_ids(prow)
+  local c = type(prow) == "table" and prow.coord
+  if type(c) ~= "table" or type(c.goose_id) ~= "string" or c.goose_id == "" then
+    return {}
+  end
+  if type(c.row) == "table" then
+    local ids = ss_spec.session_ids_of(c.row)
+    if #ids > 0 then
+      return ids
+    end
+  end
+  return { "goose:" .. c.goose_id }
+end
+
+--- Ids a Screen 2 row answers to: the switcher's own rule (row id, then
+--- pigeon id), so both pickers find a session by the same names.
+function M.session_ids(row)
+  return ss_spec.session_ids_of(row)
+end
+
 --- `[kind]` for a flagged row, "" for an unflagged (all-view) row.
 function M.badge(row)
   local k = type(row) == "table" and nonempty(row.badge_kind)

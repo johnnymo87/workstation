@@ -218,6 +218,12 @@ M.SESSION_ID_PREFIX = "ses_"
 --- whole prompt has that shape (8 digits, `_`, digits): nothing else a person
 --- types into a title search looks like it.
 M.GOOSE_ID_PREFIX = "goose:"
+
+--- pigeon's id for a goose session, `gse_<uuid>` (workstation-klqw): what
+--- swarm messages, `swarm_list` and stall-watch's `sw peers` print. A goose
+--- row carries it as `pigeon_session_id` (oc-session-list reads it from
+--- pigeon's own registry, the routing DB), so matching it costs no fetch.
+M.PIGEON_ID_PREFIX = "gse_"
 local BARE_GOOSE_ID = "^%d%d%d%d%d%d%d%d_%d*$"
 
 --- Telescope's "filter this entry out" sentinel. Any score < 0 is dropped.
@@ -243,6 +249,9 @@ function M.id_query(prompt)
     return trimmed
   end
   if trimmed:sub(1, #M.GOOSE_ID_PREFIX) == M.GOOSE_ID_PREFIX then
+    return trimmed
+  end
+  if trimmed:sub(1, #M.PIGEON_ID_PREFIX) == M.PIGEON_ID_PREFIX then
     return trimmed
   end
   if trimmed:match(BARE_GOOSE_ID) then
@@ -301,6 +310,131 @@ function M.id_score(id, query)
     score = 0.999
   end
   return score
+end
+
+--- Every id a row answers to in id mode: its row id (`ses_...` or
+--- `goose:<id>`), then pigeon's `gse_...` id when the row carries one.
+--- Never errors; returns {} for anything without a usable id.
+---
+--- @param entry table|nil a telescope entry or a bare row
+--- @return string[]
+function M.session_ids_of(entry)
+  local out = {}
+  if type(entry) ~= "table" then
+    return out
+  end
+  local row = type(entry.value) == "table" and entry.value or entry
+  local id = M.session_id_of(row)
+  if id then
+    table.insert(out, id)
+  end
+  local pid = row.pigeon_session_id
+  if type(pid) == "string" and pid ~= "" and pid ~= id then
+    table.insert(out, pid)
+  end
+  return out
+end
+
+--- Best id_score over a list of ids (lower is better); ID_FILTERED when none
+--- match or there are none.
+function M.ids_score(ids, query)
+  local best = M.ID_FILTERED
+  for _, id in ipairs(type(ids) == "table" and ids or {}) do
+    local sc = M.id_score(id, query)
+    if sc >= 0 and (best < 0 or sc < best) then
+      best = sc
+    end
+  end
+  return best
+end
+
+--- Make a telescope sorter answer id prompts (see M.id_query) with the ids
+--- `ids_of(entry)` returns (default M.session_ids_of). Wraps IN PLACE and
+--- returns the sorter; anything that is not a table is returned untouched.
+---
+--- WHY A SORTER WRAPPER, and not the two alternatives:
+---
+--- - NOT the ordinal. M.SESSION_ID_PREFIX documents why: the id would
+---   swamp title search on every row, exactly as the unread badge would.
+---
+--- - NOT `on_input_filter_cb`. That hook rewrites the prompt before sorting,
+---   but the thing being sorted is still the ordinal -- and the ordinal has no
+---   id in it, so no prompt rewrite can make an id match. The only way to use
+---   it would be to swap in a different finder per keystroke (`updated_finder`),
+---   which rebuilds entries and resets picker state on every character.
+---
+--- - A wrapper keeps the ORDINARY PATH BYTE FOR BYTE: a non-id prompt is
+---   handed to the very same function object, on the very same sorter, with
+---   the same arguments, and its return value is passed back untouched. There
+---   is no second implementation of title matching to drift.
+---
+--- THE DISCARD TRAP, which is why `scoring_function` alone is not enough:
+--- telescope's get_fzy_sorter sets `discard = true`, and `Sorter:score`
+--- consults `_was_discarded` BEFORE `scoring_function`. Typing `ses_` means
+--- passing through prompts "s", "se", "ses" -- each of which filters nearly
+--- every row and records it by ordinal -- and "ses_" only EXTENDS that prompt,
+--- so `_start` does not reset the discard set. Without the bypass below, the
+--- feature scores nothing at all the moment it is typed by hand, while passing
+--- every test that calls scoring_function directly.
+---
+--- Pure: takes and returns a table, requires nothing. It lives here (not in
+--- init.lua) so the stall-watch picker shares it (workstation-klqw).
+function M.wrap_id_sorter(sorter, ids_of)
+  if type(sorter) ~= "table" then
+    return sorter
+  end
+  ids_of = ids_of or M.session_ids_of
+
+  local base_scoring = sorter.scoring_function
+  local base_highlighter = sorter.highlighter
+  -- These two resolve through Sorter's metatable, not the instance; assigning
+  -- shadows them for this sorter only (it is freshly built per picker).
+  local base_was_discarded = sorter._was_discarded
+  local base_mark_discarded = sorter._mark_discarded
+
+  if type(base_scoring) == "function" then
+    sorter.scoring_function = function(self, prompt, line, entry, ...)
+      local query = M.id_query(prompt)
+      if query then
+        return M.ids_score(ids_of(entry), query)
+      end
+      return base_scoring(self, prompt, line, entry, ...)
+    end
+  end
+
+  if type(base_highlighter) == "function" then
+    sorter.highlighter = function(self, prompt, display, ...)
+      -- The id is not in the displayed text, so base positions computed from
+      -- an id prompt would underline arbitrary columns of the title.
+      if M.id_query(prompt) then
+        return {}
+      end
+      return base_highlighter(self, prompt, display, ...)
+    end
+  end
+
+  if type(base_was_discarded) == "function" then
+    sorter._was_discarded = function(self, prompt, ordinal, ...)
+      if M.id_query(prompt) then
+        return false
+      end
+      return base_was_discarded(self, prompt, ordinal, ...)
+    end
+  end
+
+  if type(base_mark_discarded) == "function" then
+    sorter._mark_discarded = function(self, prompt, ordinal, ...)
+      -- Symmetry with the bypass above: an id-mode miss must not poison the
+      -- discard set keyed by ordinal, or a later title prompt would inherit
+      -- rows filtered for having the wrong ID.
+      if M.id_query(prompt) then
+        return
+      end
+      return base_mark_discarded(self, prompt, ordinal, ...)
+    end
+  end
+
+  return sorter
 end
 
 --- How many root trees the picker asks the CLI for, per mode.

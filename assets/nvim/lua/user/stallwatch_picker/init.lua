@@ -30,6 +30,7 @@ local action_state = require("telescope.actions.state")
 local switcher = require("user.session_switcher")
 local exec = require("user.session_switcher.exec")
 local flow = require("user.session_switcher.flow")
+local ss_spec = require("user.session_switcher.spec")
 
 local model = require("user.stallwatch_picker.model")
 local spec = require("user.stallwatch_picker.spec")
@@ -206,7 +207,9 @@ function M.programs(state, select_tag)
         return { value = p, display = spec.program_display(p, now), ordinal = spec.program_ordinal(p) }
       end,
     }),
-    sorter = conf.generic_sorter(state.opts),
+    sorter = ss_spec.wrap_id_sorter(conf.generic_sorter(state.opts), function(entry)
+      return spec.program_ids(type(entry) == "table" and entry.value or nil)
+    end),
     previewer = previewers.new_buffer_previewer({
       title = "Open items",
       define_preview = function(self, entry)
@@ -300,7 +303,9 @@ function M.sessions(state, prow, view)
   local picker_opts = vim.tbl_extend("force", spec.sessions_picker_opts(), {
     prompt_title = spec.sessions_title(prow.tag, view, state.snap.warnings),
     finder = session_finder(session_rows(state, prow, view)),
-    sorter = conf.generic_sorter(state.opts),
+    sorter = ss_spec.wrap_id_sorter(conf.generic_sorter(state.opts), function(entry)
+      return spec.session_ids(type(entry) == "table" and entry.value or nil)
+    end),
     previewer = previewers.new_buffer_previewer({
       title = "Items naming this session",
       define_preview = function(self, entry)
