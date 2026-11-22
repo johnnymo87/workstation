@@ -1631,6 +1631,11 @@ class RealRunnerHoldDevLockTest(unittest.TestCase):
         self.assertEqual(argv[:6], ["runuser", "-u", "dev", "--", "env", "HOME=/home/dev"])
         self.assertTrue(any(a.startswith("PATH=") and "/run/current-system/sw/bin" in a for a in argv))
 
+    def test_runuser_error_rc1_is_not_busy(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._hold(1, "runuser: user dev does not exist")
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+
     def test_exec_failure_is_not_busy(self):
         with self.assertRaises(RuntimeError) as cm:
             self._hold(69, "flock: failed to execute sh: No such file or directory")
