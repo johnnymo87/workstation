@@ -602,6 +602,7 @@ class Aggregate:
     em_proxy_errors: int = 0
     em_freshness: str | None = None
     em_ledger_dir_exists: bool = False
+    em_missing_msg: str | None = None
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -882,6 +883,8 @@ def aggregate(
             newest_row_ms = max(newest_row_ms, ts)
             per_bucket[tag][key] += cost
             agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+    elif os.environ.get("OC_TAGS_EM_LEDGER_EXPECTED") == "1":
+        agg.em_missing_msg = f"EM ledger: {em_ledger_path} missing"
 
     # Enumerate THROUGH the newest observed row, not merely up to now, so a
     # message timestamped ahead of now still has a slot. Unioning its key in
@@ -1167,7 +1170,7 @@ def read_em_ledger(
 
 
 def em_ledger_port_freshness(ledger_dir: str) -> dict[int, int]:
-    """Find the latest timestamp per port across all shards in `ledger_dir`."""
+    """Find the latest timestamp per port across at most 2 newest shards in `ledger_dir`."""
     if not ledger_dir or not os.path.isdir(ledger_dir):
         return {}
     port_latest: dict[int, int] = {}
@@ -1179,7 +1182,9 @@ def em_ledger_port_freshness(ledger_dir: str) -> dict[int, int]:
         [f for f in entries if f.startswith("spend-") and f.endswith(".jsonl")],
         reverse=True,
     )
-    for fname in shard_files:
+    for idx, fname in enumerate(shard_files[:2]):
+        if idx > 0 and {4318, 4319}.issubset(port_latest.keys()):
+            break
         path = os.path.join(ledger_dir, fname)
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -1195,6 +1200,8 @@ def em_ledger_port_freshness(ledger_dir: str) -> dict[int, int]:
                         continue
                     port = row.get("port")
                     if not isinstance(port, int):
+                        continue
+                    if idx > 0 and port in port_latest:
                         continue
                     ts = _iso_to_ms(row.get("at"))
                     if ts is None:
@@ -1553,12 +1560,16 @@ def render_svg(
 
     visible_tags = [t for t in agg.totals if t not in hide]
     if not visible_tags or not agg.buckets:
+        extra_lines = []
+        if getattr(agg, "em_missing_msg", None):
+            extra_lines.append(f'  <text class="axl" x="550" y="230" text-anchor="middle" font-size="12">{html.escape(agg.em_missing_msg or "")}</text>\n')
         return (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 400" width="100%" height="400">\n'
             + _style_block()
             + '  <rect class="bg" width="1100" height="400"/>\n'
             '  <text class="axl" x="550" y="200" text-anchor="middle" font-size="18">No data in window</text>\n'
-            '</svg>\n'
+            + "".join(extra_lines)
+            + '</svg>\n'
         )
 
     # Top-N partitioning
@@ -1882,6 +1893,11 @@ def render_svg(
             svg_parts.append(
                 f'  <text class="axl" x="{plot_x}" y="{footer_y}" font-size="11">{html.escape(" | ".join(em_footer_parts))}</text>'
             )
+    elif getattr(agg, "em_missing_msg", None):
+        footer_y += 16
+        svg_parts.append(
+            f'  <text class="axl" x="{plot_x}" y="{footer_y}" font-size="11">{html.escape(agg.em_missing_msg or "")}</text>'
+        )
 
     # Tooltips must be the last painted thing in the document, or the legend
     # (drawn at x >= 825) covers any tooltip near the right edge.

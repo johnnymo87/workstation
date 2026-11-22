@@ -59,6 +59,7 @@ eternal-machinery (EM) runtime agent spend (port 4318) and benchmark spend (port
 - **Streaming**: streams line by line over only the monthly shards touched by the requested window.
 - **Cost**: calculated from model rates with goose cache semantics (`input + cache_read + cache_write` as inclusive input). Zero-token rows (`http_error`, `proxy_error`) cost $0 and do not show as unpriced. Unknown models appear under "Unpriced models".
 - **Footer**: displays EM proxy error count and per-port ledger freshness (`EM ledger: last row Nh ago (:4318), Nd ago (:4319)`).
+- **Missing directory**: by default, an absent ledger directory is silently ignored (normal on cloudbox). When `OC_TAGS_EM_LEDGER_EXPECTED=1` is set (enabled on devbox via `oc-tags-serve.nix`), a missing directory renders a footer line `EM ledger: <dir> missing` to expose a missing proxy or mount.
 - **Chart folding**: `fold=<prefix>[,<prefix>]` query parameter (or `--fold` in `report`) sums `<prefix>:*` tags into a single band before ranking (e.g. `fold=em-agents,em-bench`).
 - **Claude cap/coverage**: EM rows do not enter `claude_day` or cfp coverage calculations.
 

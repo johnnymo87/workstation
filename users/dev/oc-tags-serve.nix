@@ -65,7 +65,7 @@ lib.mkIf enableServe {
         # Python block-buffers stdout when it is not a tty, so the startup
         # banner would never reach the journal.
         "PYTHONUNBUFFERED=1"
-      ];
+      ] ++ lib.optional isDevbox "OC_TAGS_EM_LEDGER_EXPECTED=1";
       Restart = "always";
       RestartSec = 10;
       # 10s, then backing off to a 5min ceiling (systemd >= 254).

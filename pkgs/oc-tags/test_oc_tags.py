@@ -3531,6 +3531,60 @@ class TestEmSpendLedger(unittest.TestCase):
         svg_no_em = oc_tags.render_svg(agg_no_em, {})
         self.assertNotIn("EM ledger:", svg_no_em)
 
+    def test_em_ledger_freshness_bounds_shard_walk(self):
+        # 3 shards: 2026-09 (newest), 2026-08, 2026-07 (3 months back)
+        now_ms = FIXTURE_NOW_MS
+        ts_4318 = now_ms - 2 * 3600 * 1000
+        ts_4319 = now_ms - 30 * 86400 * 1000
+        ts_4320 = now_ms - 60 * 86400 * 1000
+        dt_4318 = datetime.datetime.fromtimestamp(ts_4318 / 1000, datetime.timezone.utc).isoformat()
+        dt_4319 = datetime.datetime.fromtimestamp(ts_4319 / 1000, datetime.timezone.utc).isoformat()
+        dt_4320 = datetime.datetime.fromtimestamp(ts_4320 / 1000, datetime.timezone.utc).isoformat()
+
+        self.write_shard("2026-09", _em_row(key="k-sep", port=4318, at=dt_4318))
+        self.write_shard("2026-08", _em_row(key="k-aug", port=4319, at=dt_4319))
+        self.write_shard("2026-07", _em_row(key="k-jul", port=4320, at=dt_4320))
+
+        real_open = open
+        opened_files = []
+
+        def spy_open(file, *args, **kwargs):
+            opened_files.append(str(file))
+            return real_open(file, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=spy_open):
+            port_fresh = oc_tags.em_ledger_port_freshness(self.em_dir)
+
+        # At most 2 shards opened
+        self.assertIn(4318, port_fresh)
+        self.assertIn(4319, port_fresh)
+        self.assertNotIn(4320, port_fresh)
+        jul_shard = os.path.join(self.em_dir, "spend-2026-07.jsonl")
+        self.assertNotIn(jul_shard, opened_files)
+
+    def test_em_ledger_expected_footer_when_dir_missing(self):
+        absent_dir = os.path.join(self.td.name, "absent_dir")
+        conn = sqlite3.connect(self.opencode_db)
+        conn.execute("INSERT INTO session VALUES ('ses_dev', NULL, '/home/dev/projects/workstation', 'dev')")
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_dev', ?, ?)",
+            (FIXTURE_NOW_MS - 3_600_000, json.dumps({"role": "assistant", "cost": 1.0, "modelID": "claude-sonnet-5-5", "providerID": "anthropic"})),
+        )
+        conn.commit()
+        conn.close()
+
+        # When OC_TAGS_EM_LEDGER_EXPECTED is not set -> no footer line
+        with mock.patch.dict(os.environ, {}, clear=True):
+            agg = self.agg(em_dir=absent_dir)
+            svg = oc_tags.render_svg(agg, {})
+            self.assertNotIn("EM ledger:", svg)
+
+        # When OC_TAGS_EM_LEDGER_EXPECTED=1 -> shows "EM ledger: <dir> missing"
+        with mock.patch.dict(os.environ, {"OC_TAGS_EM_LEDGER_EXPECTED": "1"}):
+            agg = self.agg(em_dir=absent_dir)
+            svg = oc_tags.render_svg(agg, {})
+            self.assertIn(f"EM ledger: {absent_dir} missing", svg)
+
     def test_chart_fold(self):
         agg = oc_tags.Aggregate()
         agg.buckets = ["2026-09-08"]
