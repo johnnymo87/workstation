@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -20,7 +21,13 @@ assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-REAL = mod.NIX.read_text()
+# The live file may hold darwin back (its own version/tag) or not; the tests derive both
+# states from it so they pass either way.
+REAL = re.sub(
+    r'(\n    "aarch64-darwin" = \{\n)(      version = "[^"]*";\n)?(      tag = "[^"]*";\n)?',
+    r"\1",
+    mod.NIX.read_text(),
+)
 HELD = REAL.replace(
     '    "aarch64-darwin" = {\n      asset',
     '    "aarch64-darwin" = {\n      tag = "patched-1.54.0.18";\n      asset',
