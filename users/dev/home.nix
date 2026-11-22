@@ -11,6 +11,7 @@
     ./disk-cleanup.nix
     ./em-drift-detector.nix
     ./em-test-postgres.nix
+    ./tec-codex-bot.nix
     ./em-skill-curator.nix
     ./hm-deploy-gate.nix
     ./hm-atomic-profile.nix
