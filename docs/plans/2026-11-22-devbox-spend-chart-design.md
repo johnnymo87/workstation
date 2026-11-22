@@ -110,6 +110,13 @@ malformed value records as `<port-role>/invalid`.
   `input` is uncached input. `max_context` = the largest per-iteration
   input+read+write, kept so long-context tiers (Haiku 5.5 bills 5× above 100k)
   can be priced later; v1 pricing ignores it.
+- `outcome` values: for a 200, `ok`, `error` (error event after the 200 —
+  tokens still billed, so price it), `incomplete` (no `message_stop`) or
+  `unparsed`; a non-200 writes a zero-token row with `outcome:"http_error"` and
+  the code in `status` (unbilled, prices to $0, makes a 429 storm visible).
+  Readers price by tokens, never by `status`/`outcome`, and skip (and count in
+  the schema warning) any line that is not valid JSON — a short write on a full
+  disk can glue two rows.
 - Upstream exception → 502: write a zero-token row with `outcome:"proxy_error"`
   so the call is counted, if not priced. Proxy shutdown mid-call
   (`CancelledError`) writes nothing; stated undercount.
@@ -209,6 +216,7 @@ tags into one band `<prefix>` before ranking. Default stays per-persona/per-suit
 | role/port disagree | port wins, `conflict:true` |
 | row schema drift | one oc-tags warning with count |
 | unknown model | unpriced entry |
+| upstream non-200 (429, 529…) | zero-token `http_error` row with `status` |
 | proxy 502 | zero-token `proxy_error` row, footer count |
 | proxy shutdown mid-call / codex ambiguous call | no row; documented undercount |
 
