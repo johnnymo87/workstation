@@ -1459,12 +1459,12 @@
         # THIS MANY things. T10 emits one assertion per command in a 7-element
         # loop, so editing that list moves the count -- which is exactly when a
         # human should re-read this.
-        grep -q '^==== 45 passed, 0 failed ====$' "$TMPDIR/sweeper.txt" || {
-          echo "GATE FAILURE: sweeper suite did not reach its 45-passed banner." >&2
+        grep -q '^==== 47 passed, 0 failed ====$' "$TMPDIR/sweeper.txt" || {
+          echo "GATE FAILURE: sweeper suite did not reach its 47-passed banner." >&2
           exit 1
         }
-        [ "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")" = 45 ] || {
-          echo "GATE FAILURE: expected 45 '  PASS: ' lines, got" \
+        [ "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")" = 47 ] || {
+          echo "GATE FAILURE: expected 47 '  PASS: ' lines, got" \
                "$(grep -c '^  PASS: ' "$TMPDIR/sweeper.txt")." >&2
           exit 1
         }
