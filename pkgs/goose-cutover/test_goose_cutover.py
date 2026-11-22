@@ -200,7 +200,8 @@ def setup_standard_runner() -> FakeRunner:
                     "mergeable": "MERGEABLE",
                     "files": [{"path": "pkgs/goose/default.nix"}],
                     "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
-                    "mergeCommit": {"oid": "mergesha123"},
+                    "mergeCommit": ({"oid": getattr(runner, "merge_commit", "mergesha123")}
+                                    if getattr(runner, "merge_commit", "mergesha123") else None),
                 }))
             if argv[1:3] == ["pr", "merge"]:
                 runner.pr_state = "MERGED"
@@ -689,6 +690,15 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(state["phase"], "prepared")
         self.assertEqual(state["merge_sha"], "mergesha123")
         self.assertFalse(any("pr" in c["argv"] and "merge" in c["argv"] for c in runner.calls))
+
+    def test_resume_merged_refuses_without_merge_commit(self):
+        runner = setup_standard_runner()
+        runner.pr_state = "MERGED"
+        runner.merge_commit = None
+        rc = goose_cutover.main(["--run", "prepare-resume-902"], runner=runner)
+        self.assertNotEqual(rc, 0)
+        state = json.loads(runner.files.get("/var/lib/goose-cutover/state.json") or "{}")
+        self.assertNotEqual(state.get("phase"), "prepared")
 
     def test_resume_merged_refuses_if_failed_step_not_merged_mismatch(self):
         runner = setup_standard_runner()

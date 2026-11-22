@@ -2266,7 +2266,7 @@
       } ''
         cd ${self}
         python3 pkgs/goose-cutover/test_goose_cutover.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q 'Ran 69 tests' "$TMPDIR/out.txt" || {
+        grep -q 'Ran 70 tests' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: expected pinned 69 goose-cutover tests." >&2
           exit 1
         }

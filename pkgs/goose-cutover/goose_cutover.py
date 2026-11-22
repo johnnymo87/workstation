@@ -601,7 +601,9 @@ def run_prepare(
         log("P2", "Resuming merged PR: building candidate + toplevel + HM from origin/main")
         runner.run(["git", "-C", WORKSTATION_PATH, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], user="dev", check=True)
         new_main_sha = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
-        merge_sha = pr_data.get("mergeCommit", {}).get("oid") or new_main_sha
+        merge_sha = (pr_data.get("mergeCommit") or {}).get("oid") or ""
+        if not merge_sha:
+            raise RuntimeError("PR has no mergeCommit oid; refusing to guess the pin commit")
 
         wt_main = f"/tmp/goose-cutover-resume-{pr}-{int(runner.now())}"
         runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "add", "--detach", wt_main, "origin/main"], user="dev", check=True)
@@ -764,7 +766,7 @@ def run_prepare(
     runner.run(["git", "-C", WORKSTATION_PATH, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], user="dev", check=True)
     new_main_sha = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
     if not merge_sha:
-        merge_sha = new_main_sha
+        raise RuntimeError("PR has no mergeCommit oid after merge; refusing to guess the pin commit")
 
     # Build candidate, toplevel, HM from origin/main
     log("P4", "Building candidate + toplevel + HM from origin/main")
