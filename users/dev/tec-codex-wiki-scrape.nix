@@ -20,10 +20,12 @@
 # starts tec-codex-wiki-ingest.service (OnSuccess), which runs
 # scripts/auto_ingest_wiki.py. It ingests the archive named in the scrape's
 # published.json into the LIVE codex_dev once, and does nothing on a week with
-# no new archive. It waits (exit 75, retried every 30 min) for the opt-in hold
+# no new archive. It waits (exit 75, retried every 30 min, re-checked after the
+# backup) for the opt-in hold
 # file ~/.local/state/tec-codex/ingest-hold, Postgres not accepting
 # connections on :5434, a running bin/devenv-up or bin/shutdown-all, or another
-# heavy codex DB job; refuses (exit 8, not retried, alerts) an archive that
+# heavy codex DB job (a deploy touches the hold file: tec-codex running
+# skill); refuses (exit 8, not retried, alerts) an archive that
 # fails its sha256 or has under 80% of last time's pages; backs up first
 # (backup_db.sh keeps 2 dumps); then ingests, checks /health/db and sends the
 # result to the eternal-machinery coordinator over pigeon. It never starts or
@@ -95,6 +97,12 @@ lib.mkIf isDevbox {
       TimeoutStartSec = "30min";
       Restart = "on-failure";
       RestartSec = "30min";
+      # direct: a retry does not count as a failure, so OnFailure (the alert)
+      # fires once retries are exhausted, not on every attempt, and OnSuccess
+      # (the ingest) only after the run that worked. Measured on devbox
+      # 2026-11-22 (systemd 258): with the default RestartMode=normal,
+      # OnFailure ran after each of 3 failed attempts; with direct, once.
+      RestartMode = "direct";
       RestartPreventExitStatus = 1;
       NoNewPrivileges = true;
       MemoryMax = "1G";
@@ -143,8 +151,12 @@ lib.mkIf isDevbox {
       TimeoutStartSec = "90min";
       Restart = "on-failure";
       RestartSec = "30min";
-      # 2 = usage, 8 = archive refused: retrying cannot help; alert instead.
-      RestartPreventExitStatus = "2 8";
+      RestartMode = "direct"; # see the scrape unit: alert once, not per retry
+      # Retried: only 75 (a guard held). Not retried, alert at once: 2 usage,
+      # 6 ingest failed, 7 backup failed, 8 archive refused. A retry after 6
+      # or 7 would take another 12-min dump, and the dump rotation (keep 2)
+      # would evict the real pre-ingest one.
+      RestartPreventExitStatus = "2 6 7 8";
       NoNewPrivileges = true;
       # Measured 2026-11-22: the 533-page ingest ran in ~140 s; the pg_dump
       # child is streaming. 3G leaves headroom on a short-memory box.
