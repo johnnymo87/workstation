@@ -65,9 +65,13 @@ server's tools are usable from your next step (no need to end the turn).
   on — especially a `!` one.
 - **Prefer `slack-ro`.** `slack` can post messages under the human's own name. Grant it only
   when posting is the task, and load `formatting-slack-messages` before you post. Turning one on
-  replaces the other. `slack-ro` cannot post, but it is not inert: it can still join, leave,
-  and mark channels, and create or update user groups. goose runs tools without asking, so
-  don't call those unless that is the task.
+  replaces the other. In goose, honkd limits `slack-ro` to its read tools (search, history,
+  replies, lists, attachment download). The server's channel join/leave/mark and user-group
+  edit tools are not offered to you. If you can see `slack-ro__conversations_join` or another
+  slack-ro write tool anyway, your session got `slack-ro` before that limit applied: call
+  `swarm__mcp_enable` on `slack-ro` again to narrow it. If that answers "already on" and the
+  tool is still listed, honkd has not picked up the limit yet. Don't call the tool, and tell
+  the human.
 - **Grant late and narrow.** Turn a server on only when the task needs it, and turn it off when
   done if the session lives on.
 - **Coordinators:** a server you turn on stays on across your wakes, read or write. Turn off
