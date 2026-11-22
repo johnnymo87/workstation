@@ -4,6 +4,7 @@
 from contextlib import contextmanager
 import fcntl
 import json
+import re
 import os
 import signal
 import subprocess
@@ -372,6 +373,11 @@ def get_acp_version(runner: Runner, port: int = 4080, secret_file: str = "/run/s
             runner.run(["rm", "-f", hdr_file], check=False)
         except Exception:
             pass
+
+
+def quiet_reason_kind(reason: str) -> str:
+    """Collapse a check_quiet reason to its signal, dropping ids and counts."""
+    return re.sub(r"\s+", " ", re.sub(r"[0-9_]+|\(.*?\)|=\S+", "", reason.split(":")[0])).strip()
 
 
 def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tuple[bool, str]:
@@ -910,14 +916,22 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
 
     # Main quiet & lock acquisition loop
     try:
+        blockers: dict[str, int] = {}
+        last_kind = None
         while True:
             if runner.now() - start_wait > 7200:
-                log("D2", "quiet window timed out after 2h")
-                notify(runner, "warning", "goose-cutover: quiet window timed out after 2h; deploy remains prepared", instance="deploy-1", event="quiet-timeout")
+                summary = ", ".join(f"{k}: {v}" for k, v in sorted(blockers.items(), key=lambda kv: -kv[1])) or "none"
+                log("D2", f"quiet window timed out after 2h; blocking polls by reason: {summary}")
+                notify(runner, "warning", f"goose-cutover: quiet window timed out after 2h; deploy remains prepared (blockers: {summary})", instance="deploy-1", event="quiet-timeout")
                 return 0
 
             q, reason = check_quiet(runner, unit_start)
             if not q:
+                kind = quiet_reason_kind(reason)
+                blockers[kind] = blockers.get(kind, 0) + 1
+                if kind != last_kind:
+                    log("D2", f"not quiet: {reason}")
+                    last_kind = kind
                 if "less than 60 min of TimeoutStartSec remaining" in reason:
                     log("D2", f"refusing deploy: {reason}")
                     notify(runner, "warning", f"goose-cutover: {reason}; deploy remains prepared", instance="deploy-1", event="timeout-refusal")
