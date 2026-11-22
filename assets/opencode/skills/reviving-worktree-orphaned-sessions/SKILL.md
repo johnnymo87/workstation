@@ -1,6 +1,6 @@
 ---
 name: reviving-worktree-orphaned-sessions
-description: Diagnoses and revives an opencode session whose working directory was deleted. Use when a session stops answering swarm messages or shepherd wakes, when lgtm-shepherd logs "(human: worktree-gone)" or "dir_exists=no" for a PR, when pigeon logs "TargetUnavailableError ... working directory missing", when assistant turns finish instantly with zero output, or when the serve log shows "prompt_async failed ... FileSystem.realPath ... ENOENT". Also use before deleting or pruning any worktree that a live session may be sitting in.
+description: 'Diagnoses and revives an opencode session whose working directory was deleted. Use when a session stops answering swarm messages or shepherd wakes, when lgtm-shepherd logs "(human: worktree-gone)" or "dir_exists=no" for a PR, when pigeon logs "TargetUnavailableError ... working directory missing", when assistant turns finish instantly with zero output, or when the serve log shows "prompt_async failed ... FileSystem.realPath ... ENOENT". Also use before deleting or pruning any worktree that a live session may be sitting in.'
 ---
 
 # Reviving Worktree-Orphaned Sessions
