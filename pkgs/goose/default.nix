@@ -1,4 +1,4 @@
-# (goose-cutover no-op test PR: this comment line is the only change; do not merge.)
+# Moving this pin onto the running goose is goose-cutover's job (pkgs/goose-cutover; no-op rehearsal 2026-11-22).
 # goose CLI, pinned to a release of the johnnymo87/goose fork: an upstream goose
 # release plus a few local patches, built by upstream's own Linux CLI workflow
 # (.github/workflows/patched-release.yml on the fork's patched/<version> branch).
