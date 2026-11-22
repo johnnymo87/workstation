@@ -34,7 +34,7 @@ in
       PrivateTmp = false;
       TimeoutStartSec = "5h";
       TimeoutStopSec = "15min";
-      MemoryMax = "8G";
+      MemoryMax = "16G"; # the probe peaked at 8G + 2.9G swap under an 8G cap (dry run 2026-11-22)
       StateDirectory = "goose-cutover";
     };
   };

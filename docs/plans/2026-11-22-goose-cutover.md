@@ -68,7 +68,7 @@ Unit (`modules/goose-cutover.nix`, cloudbox only):
 `systemd.services."goose-cutover@"`: root oneshot, `ExecStart=goose-cutover
 --run %i`, **`restartIfChanged=false`, `stopIfChanged=false`** (deploy activates
 a system config itself), `PrivateTmp=false`, `TimeoutStartSec=5h`,
-`TimeoutStopSec=15min`, `MemoryMax=8G` (the probe builds/runs things),
+`TimeoutStopSec=15min`, `MemoryMax=16G` (the probe builds/runs things; it peaked above 8G),
 `WorkingDirectory=/var/lib/goose-cutover`, `StateDirectory=goose-cutover`,
 `ExecStopPost=runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user start stall-watch.timer stall-watch-wake.path`
 (restores stall-watch even on SIGKILL), `OnFailure=goose-cutover-failed.service`
