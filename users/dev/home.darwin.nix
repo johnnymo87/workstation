@@ -609,6 +609,7 @@ lib.mkIf isDarwin {
               --turn-hook-url http://127.0.0.1:4731/goose/turn-event \
               --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json \
               --mcp-no-confirm slack-ro,figma \
+              ${import ./honk-mcp-allow-tools.nix { inherit lib; }} \
               --mcp-self-grant \
               --swarm-default \
               --project-mcp \

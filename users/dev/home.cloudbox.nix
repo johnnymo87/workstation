@@ -1173,7 +1173,10 @@ lib.mkIf isCloudbox {
   #   goose session. honkd reads the generated opencode.json `mcp` block fresh on every request
   #   (one source of truth; secrets stay {file:} refs, read by the server's wrapper at spawn).
   #   Every server needs a confirming `/mcp enable <name>!` except the --mcp-no-confirm list
-  #   (slack-ro cannot post; figma is read-only). `--mcp-self-grant` lets goose agents turn
+  #   (slack-ro cannot post; figma is read-only). `--mcp-allow-tools` (honk-mcp-allow-tools.nix)
+  #   holds slack-ro to its read tools in goose, hiding the channel join/leave/mark and
+  #   user-group edit tools that slack-mcp-server registers ungated (workstation-5q5l).
+  #   `--mcp-self-grant` lets goose agents turn
   #   servers on/off for themselves through swarm's `mcp_list`/`mcp_enable`/`mcp_disable` tools
   #   (honk#24; reason required for `!` servers; removing the flag + restart hides the tools
   #   from newly spawned swarm servers). Needs honk with honk#24: an older honkd refuses
@@ -1202,7 +1205,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma ${import ./honk-mcp-allow-tools.nix { inherit lib; }} --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
