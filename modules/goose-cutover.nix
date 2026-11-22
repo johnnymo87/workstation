@@ -41,6 +41,7 @@ in
 
   systemd.tmpfiles.rules = [
     "d /var/lib/goose-cutover 0755 root root - -"
+    "f /var/lib/goose-cutover/run.lock 0644 root root - -"
     "d /var/lib/goose-cutover/gcroots 0755 dev users - -"
     "d /var/lib/goose-cutover/backups 0755 dev users - -"
     "d /var/lib/goose-cutover/host-reports 0755 dev users - -"

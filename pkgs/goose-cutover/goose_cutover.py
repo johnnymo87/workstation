@@ -760,7 +760,7 @@ def run_prepare(
 
     # Fetch mergeCommit oid
     res = runner.run(["gh", "pr", "view", str(pr), "-R", WORKSTATION_REPO, "--json", "mergeCommit"], user="dev", check=True)
-    merge_sha = json.loads(res.stdout).get("mergeCommit", {}).get("oid", "")
+    merge_sha = (json.loads(res.stdout).get("mergeCommit") or {}).get("oid") or ""
 
     # Fetch origin/main
     runner.run(["git", "-C", WORKSTATION_PATH, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], user="dev", check=True)
@@ -1491,10 +1491,14 @@ def main(argv: Optional[list[str]] = None, runner: Optional[Runner] = None) -> i
             log("launcher", f"Note: could not read /proc/self/cgroup: {e}")
 
         # Check run.lock before starting unit
+        # flock -n exits 1 only when the lock is held; any other non-zero
+        # (e.g. the lock file cannot be opened yet) is not "a cutover is running".
         res_lock = runner.run(["flock", "-n", RUN_LOCK_PATH, "true"], check=False)
-        if res_lock.rc != 0:
+        if res_lock.rc == 1:
             print("refusing: a cutover is running (/var/lib/goose-cutover/run.lock busy)", file=sys.stderr)
             return 2
+        if res_lock.rc != 0:
+            log("launcher", f"Note: run.lock probe rc={res_lock.rc}; the unit takes the lock itself")
 
         if cmd == "prepare":
             if len(argv) < 2:

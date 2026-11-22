@@ -363,6 +363,18 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
 
+    def test_launcher_proceeds_when_run_lock_unopenable(self):
+        # Fresh host: run.lock absent and not creatable by the caller (flock rc 66).
+        runner = setup_standard_runner()
+        runner.files["/proc/self/cgroup"] = "0::/user.slice/user-1000.slice/session-1.scope\n"
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[:3] == ["flock", "-n", "/var/lib/goose-cutover/run.lock"],
+            lambda a, u, e, c: RunResult(66, "", "cannot open lock file: Permission denied")
+        ))
+        rc = goose_cutover.main(["prepare", "902", "--dry-run", "--allow-noop"], runner=runner)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("systemctl" in c["argv"] for c in runner.calls))
+
     def test_launcher_starts_systemd_unit(self):
         runner = setup_standard_runner()
         runner.files["/proc/self/cgroup"] = "0::/user.slice/user-1000.slice/session-1.scope\n"
