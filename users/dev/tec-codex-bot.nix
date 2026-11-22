@@ -60,7 +60,8 @@
 #   (tec-codex-toi.9.30): a restricted service-account key in OpenAI project
 #   tec-codex-bot, which allows only text-embedding-3-small, has a $5/month
 #   enforced hard limit and 60 RPM / 60k TPM, so /health says "key": "own".
-#   The agents' openai_api_key is untouched. The bot process and the prune timer get no key. A rotated key file needs
+#   The agents' openai_api_key is untouched. The bot process and the prune
+#   timer get no key. A rotated key file needs
 #   `systemctl --user restart tec-codex-bot-api`.
 # - MemoryMax caps: devbox is short of memory, and a runaway must not touch
 #   the live stack. Logs go to the journal:
