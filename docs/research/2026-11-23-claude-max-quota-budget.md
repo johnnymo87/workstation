@@ -2,6 +2,12 @@
 
 Bead: `workstation-ciyl`. This is analysis only; nothing here has been built.
 
+> **Correction (11-23): devbox goose does use the Max pool.** It goes through
+> cfp-shaper to teamclaude, not codex-lb as stated below. That adds about 0.4
+> account-weeks a week or more to devbox, which makes devbox about 4.2 and
+> cloudbox about 2.8. The total stays about 7.0. Details and follow-ups:
+> `docs/plans/2026-11-23-claude-max-quota-followups.md`.
+
 ## Bottom line
 
 - **The pool is oversubscribed.** devbox and cloudbox share the same five
