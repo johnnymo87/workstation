@@ -113,16 +113,9 @@ let
   # Same rationale as above — callPackage pkgs/opencode-frontdoor directly here.
   opencode-frontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
 
-  # goose: the agent CLI, pinned to the patched release the pigeon ACP integration
-  # was measured against (pkgs/goose). The user's `goose` is the same package
-  # (home.cloudbox.nix). Same callPackage rationale as above.
-  #
-  # NAME COLLISION, and it is a silent one: `pkgs.goose` in nixpkgs is the
-  # pressly/goose DATABASE MIGRATION TOOL, not this. With overlays = [] in
-  # flake.nix, writing pkgs.goose here would resolve to that binary and
-  # goose-serve would exec a migration tool as an ACP server. Bind it to a
-  # distinct name so the mistake cannot be made by editing nearby code.
-  goose-cli = pkgs.callPackage ../../pkgs/goose { };
+  # goose itself is NOT bound here: goose-serve runs /var/lib/goose/current,
+  # the approved binary (modules/goose-current.nix, which also carries the
+  # pkgs.goose name-collision warning).
 
   # Shared shell resolver for the opencode serve HTTP Basic credential
   # (workstation-km5f). Sourced by the serve canary and the frontdoor canary so
@@ -623,7 +616,9 @@ in
   # name, same GOOSE_MODE -- with three deliberate differences, all of which
   # devbox and macOS should eventually adopt (tracked separately):
   #
-  #  1. It runs the PACKAGED goose (pkgs/goose), not /home/dev/.local/bin/goose.
+  #  1. It runs the PACKAGED goose (pkgs/goose), not /home/dev/.local/bin/goose
+  #     -- since L6, the approved one at /var/lib/goose/current, which a pin
+  #     bump does not move (modules/goose-current.nix).
   #     The upstream asset is byte-identical to the hand-installed binary
   #     (sha256 a261d5b7...0830, verified on cloudbox 2026-09-21), so this
   #     changes provenance rather than behaviour, while turning two invisible
@@ -891,7 +886,17 @@ in
           exit 1
         fi
 
-        exec ${goose-cli}/bin/goose serve --port 4080
+        # The APPROVED goose, not the pin: /var/lib/goose/current (L6,
+        # modules/goose-current.nix). A merged pkgs/goose bump does not reach
+        # this serve until goose-link moves the link (the cutover, or
+        # `sudo goose-link rollback`), so a nightly or crash restart reruns the
+        # binary that was running. `goose-link status` compares it to the pin.
+        goose=/var/lib/goose/current/bin/goose
+        if [ ! -x "$goose" ]; then
+          echo "goose-serve: $goose missing or not executable (see modules/goose-current.nix; sudo goose-link status)" >&2
+          exit 1
+        fi
+        exec "$goose" serve --port 4080
       ''}";
       Restart = "always";
       RestartSec = 5;
@@ -1425,6 +1430,13 @@ in
         # dispatching lgtm invocation without it throws, so this must be live
         # before that block merges.
         "LGTM_BOX=cloudbox"
+        # lgtm's goose review backend runs the APPROVED goose (L6,
+        # modules/goose-current.nix), not whatever `goose` PATH resolves to:
+        # through PATH it finds the profile's wrapper, whose store path keys
+        # lgtm's preflight cache and its per-turn gooseStorePath, and that path
+        # does not change when goose-link moves the link. realpath of this one
+        # does, so a cutover or rollback re-runs the preflight.
+        "LGTM_GOOSE_BIN=/var/lib/goose/current/bin/goose"
         # NB: OPENCODE_DB / OPENCODE_DISABLE_CHANNEL_DB intentionally omitted
         # (lgtm-j6k). Those pinned the shared opencode.db for the run-era
         # detached `opencode run` children this service used to spawn. lgtm-a3r
