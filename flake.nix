@@ -148,6 +148,7 @@
       };
       goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
       goose-tool-shell = p.callPackage ./pkgs/goose-tool-shell { };
+      goose-link = p.callPackage ./pkgs/goose-link { };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -2221,6 +2222,88 @@
         touch $out
       '';
 
+      # The approved-binary link's flip/rollback tool (workstation-6w7i.27.2, L6).
+      goose-link = devboxPkgs.runCommand "goose-link-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnugrep devboxPkgs.findutils ];
+        GOOSE_LINK_BIN = "${(localPkgsFor devboxSystem).goose-link}/bin/goose-link";
+      } ''
+        bash ${self}/pkgs/goose-link/test.sh | tee "$TMPDIR/out.txt"
+        grep -q '^goose-link: 37 passed, 0 failed$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 37 goose-link assertions." >&2; exit 1; }
+        touch $out
+      '';
+
+      # L6 (workstation-6w7i.27.2): on the NixOS hosts every goose -- goose-serve
+      # and the user's CLI -- runs /var/lib/goose/current, and only goose-link
+      # (the cutover, or a manual rollback) moves that link. So a merged pin,
+      # the nightly restart, a crash restart or pull-workstation cannot change
+      # which goose writes sessions.db. What this pins: the serve's start script
+      # never names the pinned store path, and the CLI wrapper names it only as
+      # its pre-L6 fallback (taken when the link is absent); the
+      # link is created only-if-absent (`L`, never `L+`, which would re-point it
+      # on every switch and undo the whole point); both link targets are GC
+      # roots; /etc/goose/pinned says what the pin wants.
+      goose-approved-binary = let
+        lib = devboxPkgs.lib;
+        pinned = builtins.unsafeDiscardStringContext
+          "${(localPkgsFor devboxSystem).goose}";
+        hostChecks = name: hmName: let
+          cfg = self.nixosConfigurations.${name}.config;
+          hm = self.homeConfigurations.${hmName}.config;
+          rules = cfg.systemd.tmpfiles.rules;
+          pkgPaths = map (p: builtins.unsafeDiscardStringContext p.outPath) hm.home.packages;
+          gooseBins = builtins.filter (p: (p.meta.mainProgram or p.name or "") == "goose" || (p.name or "") == "goose") hm.home.packages;
+        in {
+          "${name}: link created only if absent, at the pin" =
+            builtins.elem "L /var/lib/goose/current - - - - ${pinned}" rules;
+          "${name}: no L+ on the link" =
+            !(builtins.any (r: lib.hasPrefix "L+ /var/lib/goose/current" r) rules);
+          "${name}: current is a GC root" =
+            builtins.elem "L+ /nix/var/nix/gcroots/goose-current - - - - /var/lib/goose/current" rules;
+          "${name}: previous is a GC root" =
+            builtins.elem "L+ /nix/var/nix/gcroots/goose-previous - - - - /var/lib/goose/previous" rules;
+          "${name}: /etc/goose/pinned is the pin" =
+            cfg.environment.etc ? "goose/pinned"
+            && builtins.unsafeDiscardStringContext "${cfg.environment.etc."goose/pinned".source}" == pinned;
+          "${name}: goose-link installed" =
+            builtins.any (p: (p.pname or p.name or "") == "goose-link") cfg.environment.systemPackages;
+          "${name} HM: pinned goose not in home.packages" = !(builtins.elem pinned pkgPaths);
+          "${name} HM: one goose wrapper in home.packages" = builtins.length gooseBins == 1;
+        };
+        checks = hostChecks "devbox" "dev" // hostChecks "cloudbox" "cloudbox";
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+        script = h: self.nixosConfigurations.${h}.config.systemd.services.goose-serve.serviceConfig.ExecStart;
+        wrapper = h: let
+          ps = builtins.filter (p: (p.name or "") == "goose") self.homeConfigurations.${h}.config.home.packages;
+        in if ps == [ ] then "/nonexistent" else "${builtins.head ps}/bin/goose";
+        g = "${devboxPkgs.gnugrep}/bin/grep";
+      in
+        assert lib.assertMsg (failed == [ ]) "goose-approved-binary failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "goose-approved-binary" { } ''
+          for s in ${script "devbox"} ${script "cloudbox"}; do
+            if ${g} -qF '${pinned}' "$s"; then
+              echo "GATE FAILURE: $s names the pinned goose ${pinned}; it must exec /var/lib/goose/current" >&2; exit 1
+            fi
+            ${g} -qF 'goose=/var/lib/goose/current/bin/goose' "$s" || {
+              echo "GATE FAILURE: $s does not resolve goose through /var/lib/goose/current" >&2; exit 1; }
+            ${g} -qF 'exec "$goose" serve --port 4080' "$s" || {
+              echo "GATE FAILURE: $s does not exec the linked goose" >&2; exit 1; }
+          done
+          # The CLI wrapper may name the pin ONLY as the pre-L6 fallback, taken
+          # when the link is absent; with the link present it runs the link.
+          for s in ${wrapper "dev"} ${wrapper "cloudbox"}; do
+            ${g} -qF 'goose=/var/lib/goose/current/bin/goose' "$s" || {
+              echo "GATE FAILURE: $s does not resolve goose through /var/lib/goose/current" >&2; exit 1; }
+            ${g} -qF 'if [ ! -e /var/lib/goose/current ]; then' "$s" || {
+              echo "GATE FAILURE: $s falls back to the pin on some condition other than an absent link" >&2; exit 1; }
+            [ "$(${g} -c '${pinned}' "$s")" = 1 ] || {
+              echo "GATE FAILURE: $s names the pin outside its single fallback line" >&2; exit 1; }
+            ${g} -qF 'exec "$goose" "$@"' "$s" || {
+              echo "GATE FAILURE: $s does not exec the resolved goose with its args" >&2; exit 1; }
+          done
+          echo "goose-approved-binary: ${toString (builtins.length (builtins.attrNames checks))} eval + 14 script checks passed" > $out
+        '';
+
       oc-scoped-shell = devboxPkgs.runCommand "oc-scoped-shell-tests" {
         nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils ];
         WRAPPER_BIN = "${(localPkgsFor devboxSystem).oc-scoped-shell}/bin/oc-scoped-shell";
@@ -3217,6 +3300,7 @@
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         ./hosts/devbox/configuration.nix
+        ./modules/goose-current.nix
         ./hosts/devbox/hardware.nix
         ./hosts/devbox/disko.nix
         ./hosts/devbox/em-ci.nix
@@ -3237,6 +3321,7 @@
         disko.nixosModules.disko
         sops-nix.nixosModules.sops
         ./hosts/cloudbox/configuration.nix
+        ./modules/goose-current.nix
         ./hosts/cloudbox/hardware.nix
         ./hosts/cloudbox/disko.nix
         ./hosts/cloudbox/lgtm-sample-network.nix

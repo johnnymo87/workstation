@@ -15,10 +15,8 @@ let
   servePool = (import ../../users/dev/serve-pool.nix).forHost.devbox;
   routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
 
-  # NAME COLLISION, and it is a silent one: `pkgs.goose` in nixpkgs is the
-  # pressly/goose DATABASE MIGRATION TOOL, not this. Bind it to goose-cli
-  # matching hosts/cloudbox/configuration.nix.
-  goose-cli = pkgs.callPackage ../../pkgs/goose { };
+  # goose itself is NOT bound here: goose-serve runs /var/lib/goose/current,
+  # the approved binary (modules/goose-current.nix).
   agent-secret-env-sh = pkgs.callPackage ../../pkgs/agent-secret-env-sh { };
   # GOOSE_SHELL for goose-serve's tool shells (workstation-pp9r.4).
   goose-tool-shell = pkgs.callPackage ../../pkgs/goose-tool-shell { };
@@ -693,7 +691,17 @@ in
           exit 1
         fi
 
-        exec ${goose-cli}/bin/goose serve --port 4080
+        # The APPROVED goose, not the pin: /var/lib/goose/current (L6,
+        # modules/goose-current.nix). A merged pkgs/goose bump does not reach
+        # this serve until goose-link moves the link (the cutover, or
+        # `sudo goose-link rollback`), so a nightly or crash restart reruns the
+        # binary that was running. `goose-link status` compares it to the pin.
+        goose=/var/lib/goose/current/bin/goose
+        if [ ! -x "$goose" ]; then
+          echo "goose-serve: $goose missing or not executable (see modules/goose-current.nix; sudo goose-link status)" >&2
+          exit 1
+        fi
+        exec "$goose" serve --port 4080
       ''}";
       Restart = "always";
       RestartSec = 5;

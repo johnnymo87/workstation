@@ -1,8 +1,11 @@
 # goose CLI, pinned to a release of the johnnymo87/goose fork: an upstream goose
 # release plus a few local patches, built by upstream's own Linux CLI workflow
 # (.github/workflows/patched-release.yml on the fork's patched/<version> branch).
-# Every goose on cloudbox runs THIS binary: the goose-serve unit below in
-# hosts/cloudbox, and the user's `goose` via home.cloudbox.nix. One binary,
+# This is the PIN: what the next cutover approves. On the NixOS hosts nothing
+# runs it directly; goose-serve and the user's `goose` both exec
+# /var/lib/goose/current, which only goose-link moves (L6,
+# modules/goose-current.nix), so merging a bump here changes no running goose.
+# One binary,
 # because the serve and the CLI share ~/.local/share/goose/sessions/sessions.db,
 # and a version gap between two writers of that DB is how a stale-schema panic
 # starts.

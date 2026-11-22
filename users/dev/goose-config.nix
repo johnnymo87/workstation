@@ -13,6 +13,32 @@ let
   # its own name: `pkgs.goose` in nixpkgs is the pressly/goose DATABASE MIGRATION TOOL.
   gooseCli = pkgs.callPackage ../../pkgs/goose { };
 
+  # On the NixOS hosts the profile's `goose` is NOT gooseCli but a wrapper
+  # exec'ing /var/lib/goose/current, the approved binary goose-serve also runs
+  # (L6, modules/goose-current.nix). So this switch never changes which goose
+  # the CLI runs, and the CLI and the serve cannot split: only goose-link moves
+  # the link. gooseCli above is still the PIN, which the version asserts below
+  # gate the config on, and which the cutover approves after its probe. The Mac
+  # keeps gooseCli itself (bead A10).
+  #
+  # The fallback to the pin is for a host whose SYSTEM config predates L6:
+  # pull-workstation switches home-manager every minute but never the system,
+  # and devbox has no system auto-upgrade, so this wrapper can land before
+  # /var/lib/goose/current exists. Without the link, the serve is still the
+  # pre-L6 unit exec'ing its own baked-in pin, and running the pin here is
+  # exactly the pre-L6 behaviour. Once the system switch creates the link, the
+  # fallback never fires again.
+  gooseOnPath =
+    if isDarwin then gooseCli
+    else pkgs.writeShellScriptBin "goose" ''
+      goose=/var/lib/goose/current/bin/goose
+      if [ ! -e /var/lib/goose/current ]; then
+        echo "goose: /var/lib/goose/current absent (system config predates L6; sudo nixos-rebuild switch); running the pin" >&2
+        goose=${gooseCli}/bin/goose
+      fi
+      exec "$goose" "$@"
+    '';
+
   # goose's default extension set, for any session that does not name its own
   # extensions (`_meta.enabledExtensions` in the ACP initialize request).
   #
@@ -108,7 +134,7 @@ let
   gooseConfigEnforce = pkgs.callPackage ../../pkgs/goose-config-enforce { };
 in
 lib.mkIf isGooseHost {
-  home.packages = [ gooseCli ];
+  home.packages = [ gooseOnPath ];
 
   # One goose on this host (see gooseCli above). Login and interactive shells put
   # ~/.local/bin AHEAD of the profile, so a hand-installed copy there (upstream's
