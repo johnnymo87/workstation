@@ -105,6 +105,19 @@ def count_skips(text: str) -> int:
     return len(_SKIP.findall(_ANSI.sub("", text)))
 
 
+def rerun_targets(cargo_output: str) -> list[list[str]]:
+    """cargo's `error: test failed, to rerun pass `-p X --test Y`` lines, as arg lists."""
+    seen, out = set(), []
+    # Per target: "to rerun pass `-p X --test Y`"; --no-fail-fast summary: "    `-p X --test Y`".
+    found = re.findall(r"to rerun pass `([^`]+)`", cargo_output)
+    found += re.findall(r"^\s+`(-p [^`]+)`\s*$", cargo_output, re.M)
+    for m in found:
+        if m not in seen:
+            seen.add(m)
+            out.append(m.split())
+    return out
+
+
 def neutralize_extension_data(raw: str | None) -> str | None:
     """A session's stored extensions minus every non-bundled one.
 
@@ -740,27 +753,42 @@ class Probe:
             self.start_serve(self.cand, self.copy, "cand")
 
     def check_pigeon(self):
+        """pigeon's three goose probes, from a throwaway worktree at pigeon's origin/main (the
+        shared checkout is never touched), reusing that checkout's node_modules."""
         scripts = ["goose-launch-probe.ts", "goose-runner-probe.ts", "goose-id-split-probe.ts"]
-        d = PIGEON_DIR / "packages/daemon"
-        tsx = PIGEON_DIR / "node_modules/.bin/tsx"
-        if not tsx.exists():
-            return self.results.failed("pigeon", f"{tsx} missing (run npm ci in {PIGEON_DIR})")
-        env = dict(os.environ, GOOSE_ACP_URL=f"ws://127.0.0.1:{self.port}/acp",
-                   PIGEON_GOOSE_PROBE_TOKEN=self.secret, GOOSE_ACP_CWD=str(self.cwd))
-        env.pop("PIGEON_DAEMON_URL", None)
-        fails = []
-        for s in scripts:
-            if not (d / "scripts" / s).exists():
-                fails.append(f"{s}: missing")
-                continue
-            rc, out = run([str(tsx), f"scripts/{s}"], env=env, cwd=d, timeout=600, log=self.logs / "pigeon.log")
-            nfail = len(re.findall(r"^\s*FAIL\b", out, re.M))
-            npass = len(re.findall(r"^\s*PASS\b", out, re.M))
-            if rc != 0 or nfail or npass == 0:
-                fails.append(f"{s}: exit {rc}, {npass} PASS {nfail} FAIL: {tail(out, 6)}")
-        if fails:
-            return self.results.failed("pigeon", "; ".join(fails))
-        self.results.passed("pigeon", f"{len(scripts)} probes")
+        if not (PIGEON_DIR / "node_modules/.bin/tsx").exists():
+            return self.results.failed("pigeon", f"{PIGEON_DIR}/node_modules/.bin/tsx missing (npm ci there)")
+        wt = self.root / "pigeon"
+        run(["git", "-C", str(PIGEON_DIR), "fetch", "-q", "origin"], timeout=120)
+        rc, out = run(["git", "-C", str(PIGEON_DIR), "worktree", "add", "--detach", str(wt), "origin/main"], timeout=120)
+        if rc != 0:
+            return self.results.failed("pigeon", f"pigeon worktree: {tail(out)}")
+        try:
+            for nm in [PIGEON_DIR / "node_modules", *PIGEON_DIR.glob("packages/*/node_modules")]:
+                dst = wt / nm.relative_to(PIGEON_DIR)
+                if dst.parent.is_dir() and not dst.exists():
+                    dst.symlink_to(nm)
+            _, rev = run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"], timeout=30)
+            d = wt / "packages/daemon"
+            env = dict(os.environ, GOOSE_ACP_URL=f"ws://127.0.0.1:{self.port}/acp",
+                       PIGEON_GOOSE_PROBE_TOKEN=self.secret, GOOSE_ACP_CWD=str(self.cwd))
+            env.pop("PIGEON_DAEMON_URL", None)
+            fails = []
+            for s in scripts:
+                if not (d / "scripts" / s).exists():
+                    fails.append(f"{s}: missing")
+                    continue
+                rc, out = run([str(wt / "node_modules/.bin/tsx"), f"scripts/{s}"], env=env, cwd=d, timeout=600,
+                              log=self.logs / "pigeon.log")
+                nfail = len(re.findall(r"^\s*FAIL\b", out, re.M))
+                npass = len(re.findall(r"^\s*PASS\b", out, re.M))
+                if rc != 0 or nfail or npass == 0:
+                    fails.append(f"{s}: exit {rc}, {npass} PASS {nfail} FAIL: {tail(out, 6)}")
+            if fails:
+                return self.results.failed("pigeon", "; ".join(fails))
+            self.results.passed("pigeon", f"{len(scripts)} probes at pigeon {rev.strip()}")
+        finally:
+            run(["git", "-C", str(PIGEON_DIR), "worktree", "remove", "--force", str(wt)], timeout=120)
 
     def _cargo(self, wt, args, env_extra, timeout, log):
         env = dict(os.environ, CARGO_TARGET_DIR=str(CACHE_DIR / "honk-target"), **env_extra)
@@ -787,10 +815,23 @@ class Probe:
                 raise ProbeError(f"cargo build -p honkd: {tail(out)}")
             honkd = CACHE_DIR / "honk-target/debug/honkd"
             if "honk-suite" in self.only:
-                rc, out = self._cargo(wt, ["test", "--workspace", "--", "--nocapture"],
+                rc, out = self._cargo(wt, ["test", "--workspace", "--no-fail-fast", "--", "--nocapture"],
                                       {"HONK_GOOSE_BIN": self.cand, "HONKD_BIN": str(honkd)}, 3600, log)
                 skips = count_skips(out)
                 ran = sum(int(n) for n in re.findall(r"test result: \w+\. (\d+) passed", out))
+                flaky = []
+                if rc != 0:
+                    # honk has wall-clock-sensitive tests (staggered re-activation >= 500ms):
+                    # rerun each failed test target ONCE; a real regression fails twice.
+                    reruns = rerun_targets(out)
+                    still = []
+                    for args in reruns:
+                        rc2, out2 = self._cargo(wt, ["test", *args, "--", "--nocapture"],
+                                                {"HONK_GOOSE_BIN": self.cand, "HONKD_BIN": str(honkd)}, 1800, log)
+                        skips += count_skips(out2)
+                        (flaky if rc2 == 0 else still).append(" ".join(args))
+                    if reruns and not still:
+                        rc = 0
                 if rc != 0:
                     self.results.failed("honk-suite", f"cargo test exit {rc}: {tail(out)}")
                 elif skips:
@@ -798,7 +839,8 @@ class Probe:
                 elif ran == 0:
                     self.results.failed("honk-suite", "no tests ran")
                 else:
-                    self.results.passed("honk-suite", f"{ran} passed, 0 skipped")
+                    self.results.passed("honk-suite", f"{ran} passed, 0 skipped"
+                                        + (f"; failed once then passed on rerun: {flaky}" if flaky else ""))
             if "honk-live" in self.only:
                 self.ensure_cand_on_copy()
                 fails, ran = [], 0

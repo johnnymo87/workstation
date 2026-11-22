@@ -94,6 +94,21 @@ class CountSkips(unittest.TestCase):
         self.assertEqual(probe.count_skips("test a::b ... skipping stub goose: unset\nok\n"), 1)
 
 
+class Rerun(unittest.TestCase):
+    def test_parses_and_dedupes(self):
+        out = ("error: test failed, to rerun pass `-p honkd --test goose_restart`\n"
+               "error: test failed, to rerun pass `-p honk --lib`\n"
+               "error: test failed, to rerun pass `-p honkd --test goose_restart`\n")
+        self.assertEqual(probe.rerun_targets(out), [["-p", "honkd", "--test", "goose_restart"], ["-p", "honk", "--lib"]])
+
+    def test_none(self):
+        self.assertEqual(probe.rerun_targets("test result: ok."), [])
+
+    def test_no_fail_fast_summary(self):
+        out = "error: 2 targets failed:\n    `-p honkd --test prompt_e2e`\n    `-p honk --lib`\n"
+        self.assertEqual(probe.rerun_targets(out), [["-p", "honkd", "--test", "prompt_e2e"], ["-p", "honk", "--lib"]])
+
+
 class ExtensionData(unittest.TestCase):
     def test_strips_stdio_keeps_bundled(self):
         raw = json.dumps({"enabled_extensions.v0": {"extensions": [

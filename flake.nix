@@ -1671,8 +1671,8 @@
         cd ${self}
         export HOME="$TMPDIR"
         python3 pkgs/goose-upgrade-probe/test_goose_upgrade_probe.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q '^Ran 34 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 34 tests'. If you added or removed" >&2
+        grep -q '^Ran 37 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 37 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
