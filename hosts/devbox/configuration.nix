@@ -115,6 +115,16 @@ in
         group = "dev";
         mode = "0400";
       };
+      # Bot token of the tec-codex Discord bot "TEC Lookup" (app
+      # 1574119633336795317; private, no privileged intents, installed only in
+      # Jonathan's private test server). Its appearance at
+      # /run/secrets/discord_bot_token starts tec-codex-bot.path ->
+      # tec-codex-bot (users/dev/tec-codex-bot.nix). tec-codex-toi.9.6.
+      discord_bot_token = {
+        owner = "dev";
+        group = "dev";
+        mode = "0400";
+      };
       # Google Gemini API key for OpenCode (direct API, not enterprise/Code Assist)
       gemini_api_key = {
         owner = "dev";
