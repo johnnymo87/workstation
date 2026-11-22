@@ -1009,6 +1009,26 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(state["phase"], "prepared")
         self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
 
+    def test_d3_dev_lock_helper_error_fails_loud_and_stays_prepared(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
+        })
+        for f in ("cand", "top", "hm"):
+            runner.files[f"/nix/store/{f}"] = f
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+        def broken(path):
+            raise RuntimeError("Dev lock helper failed (rc=69): flock: failed to execute sh")
+        runner.hold_dev_lock = broken
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertNotEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any(c["argv"][:2] == ["systemctl", "restart"] for c in runner.calls))
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
+
     def test_d3_stall_watch_wait_timeout_is_pre_d5_failure(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
@@ -1578,6 +1598,49 @@ class RealRunnerDevEnvTest(unittest.TestCase):
         # bash (goose's shell choice) and node (pigeon probes) live in the system profile.
         self.assertIn("/run/current-system/sw/bin", path[0].split("=", 1)[1].split(":"))
         self.assertEqual(argv[-2:], ["goose-upgrade-probe", "x"])
+
+
+class RealRunnerHoldDevLockTest(unittest.TestCase):
+    def _popen(self, rc, out, err):
+        import io
+        class P:
+            def __init__(self, argv, **kw):
+                self.argv = argv; self.returncode = rc; self.pid = 0
+                self.stdout = io.StringIO(out); self.stderr = io.StringIO(err)
+                RealRunnerHoldDevLockTest.seen = argv
+            def poll(self):
+                return self.returncode
+            def wait(self, timeout=None):
+                return self.returncode
+        return P
+
+    def _hold(self, rc, err):
+        import subprocess as sp
+        orig = sp.Popen
+        sp.Popen = self._popen(rc, "", err)
+        try:
+            with goose_cutover.RealRunner().hold_dev_lock("/run/user/1000/pull-workstation.lock"):
+                pass
+        finally:
+            sp.Popen = orig
+
+    def test_helper_runs_with_dev_path(self):
+        with self.assertRaises(BlockingIOError):
+            self._hold(1, "")
+        argv = RealRunnerHoldDevLockTest.seen
+        self.assertEqual(argv[:6], ["runuser", "-u", "dev", "--", "env", "HOME=/home/dev"])
+        self.assertTrue(any(a.startswith("PATH=") and "/run/current-system/sw/bin" in a for a in argv))
+
+    def test_runuser_error_rc1_is_not_busy(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._hold(1, "runuser: user dev does not exist")
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+
+    def test_exec_failure_is_not_busy(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self._hold(69, "flock: failed to execute sh: No such file or directory")
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+        self.assertIn("rc=69", str(cm.exception))
 
 if __name__ == "__main__":
     unittest.main()

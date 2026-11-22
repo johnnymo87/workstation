@@ -241,6 +241,8 @@ class RealRunner(Runner):
             "-u",
             "dev",
             "--",
+            "env",
+        ] + DEV_ENV + [
             "flock",
             "-n",
             "-o",
@@ -262,7 +264,14 @@ class RealRunner(Runner):
             while time.time() - start < 10:
                 if proc.poll() is not None:
                     err = proc.stderr.read() if proc.stderr else ""
-                    raise BlockingIOError(f"Dev lock {path} busy (exited rc={proc.returncode}): {err}")
+                    # flock -n exits 1 only when the lock is held. Anything else
+                    # (e.g. 69: could not exec the command) is a real error, not
+                    # "busy" -- treating it as busy hid a missing `sh` for 2 h.
+                    # runuser also exits 1 on its own errors (PAM, unknown user);
+                    # flock -n reports a held lock silently, so busy = rc 1 and no stderr.
+                    if proc.returncode == 1 and not err.strip():
+                        raise BlockingIOError(f"Dev lock {path} busy: {err.strip()}")
+                    raise RuntimeError(f"Dev lock {path} helper failed (rc={proc.returncode}): {err.strip()[:300]}")
                 line = proc.stdout.readline() if proc.stdout else ""
                 if "locked" in line:
                     acquired = True
