@@ -152,6 +152,7 @@
       goose-link = p.callPackage ./pkgs/goose-link { };
       goose-cutover = p.callPackage ./pkgs/goose-cutover {
         inherit goose-link;
+        driftAlert = p.callPackage ./pkgs/opencode-drift-alert { };
       };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
@@ -2265,8 +2266,8 @@
       } ''
         cd ${self}
         python3 pkgs/goose-cutover/test_goose_cutover.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q 'Ran 49 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected pinned 49 goose-cutover tests." >&2
+        grep -q 'Ran 65 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected pinned 65 goose-cutover tests." >&2
           exit 1
         }
         grep -q 'OK' "$TMPDIR/out.txt" || {
