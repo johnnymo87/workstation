@@ -154,6 +154,7 @@ def setup_standard_runner() -> FakeRunner:
     runner.env["INVOCATION_ID"] = "test-invocation-123"
     runner.env["GOOSE_HOST_REPORTS_DIR"] = "/var/lib/goose-cutover/host-reports"
     runner.env["GOOSE_CUTOVER_HOSTS"] = "devbox,mac"
+    runner.env["HONK_BIN"] = "/home/dev/.nix-profile/bin/honk"
     runner.files["/run/secrets/github_api_token"] = "gh-secret-token\n"
     runner.files["/run/secrets/pigeon_goose_acp_token"] = "acp-secret-token\n"
     runner.files["/home/dev/.nix-profile/bin/goose-upgrade-probe"] = "binary"
@@ -238,7 +239,8 @@ def setup_standard_runner() -> FakeRunner:
         if "goose-upgrade-probe" in cmd:
             return RunResult(0, "All probe checks passed\n")
 
-        if "honk" in cmd:
+        honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
+        if cmd == honk_bin:
             if argv[1:3] == ["list", "--json"]:
                 return RunResult(0, json.dumps([]))
             if argv[1] == "launch":
@@ -247,7 +249,7 @@ def setup_standard_runner() -> FakeRunner:
                 return RunResult(0, "honk 0.5.0\n")
 
         if cmd == "timeout":
-            if any("honk" in a for a in argv) and "tail" in argv:
+            if any(honk_bin in a for a in argv) and "tail" in argv:
                 return RunResult(0, "Turn complete: PONG\n")
 
         if cmd == "sqlite3":
@@ -303,6 +305,10 @@ def setup_standard_runner() -> FakeRunner:
             if argv[1:3] == ["systemctl", "start"]:
                 return RunResult(0, "")
 
+        if cmd == "flock":
+            if argv[1:3] == ["-n", "/var/lib/goose-cutover/run.lock"]:
+                return RunResult(0, "")
+
         if cmd == "readlink":
             if argv[-1] == "/nix/var/nix/profiles/system":
                 return RunResult(0, "/nix/store/old-system-toplevel\n")
@@ -342,6 +348,16 @@ class TestGooseCutover(unittest.TestCase):
     def test_launcher_refuses_in_goose_serve_cgroup(self):
         runner = setup_standard_runner()
         runner.files["/proc/self/cgroup"] = "0::/system.slice/goose-serve.service\n"
+        rc = goose_cutover.main(["prepare", "902"], runner=runner)
+        self.assertEqual(rc, 2)
+        self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
+
+    def test_launcher_refuses_when_run_lock_busy(self):
+        runner = setup_standard_runner()
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[:3] == ["flock", "-n", "/var/lib/goose-cutover/run.lock"],
+            lambda a, u, e, c: RunResult(1, "", "resource busy")
+        ))
         rc = goose_cutover.main(["prepare", "902"], runner=runner)
         self.assertEqual(rc, 2)
         self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
@@ -401,7 +417,7 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_p1_state_already_failed_refuses(self):
         runner = setup_standard_runner()
-        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({"phase": "failed", "pr": 901})
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({"phase": "failed", "pr": 901, "step": "probe"})
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
@@ -634,7 +650,6 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_p4_merged_mismatch_fails(self):
         runner = setup_standard_runner()
-        # In P4 rebuild from origin/main, candidate store path differs from P2
         build_count = 0
         def nix_handler(a, u, e, c):
             nonlocal build_count
@@ -644,7 +659,6 @@ class TestGooseCutover(unittest.TestCase):
                     if arg == "--out-link":
                         link = a[i + 1]
                         if "candidate" in link:
-                            # 1st build is in P2, 2nd build is in P4
                             if build_count > 1:
                                 runner.links[link] = "/nix/store/different-candidate"
                             else:
@@ -653,7 +667,8 @@ class TestGooseCutover(unittest.TestCase):
                             runner.links[link] = "/nix/store/toplevel-123"
                         elif "hm" in link:
                             runner.links[link] = "/nix/store/hm-123"
-            return RunResult(0, "")
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected nix command: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[:2] == ["nix", "build"], nix_handler))
 
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -661,6 +676,28 @@ class TestGooseCutover(unittest.TestCase):
         state = json.loads(runner.files.get("/var/lib/goose-cutover/state.json", "{}"))
         self.assertEqual(state.get("phase"), "failed")
         self.assertEqual(state.get("step"), "merged-mismatch")
+
+    def test_resume_merged_on_merged_mismatch(self):
+        runner = setup_standard_runner()
+        runner.pr_state = "MERGED"
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "failed", "step": "merged-mismatch", "pr": 902,
+        })
+        rc = goose_cutover.main(["--run", "prepare-resume-902"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertEqual(state["merge_sha"], "mergesha123")
+        self.assertFalse(any("pr" in c["argv"] and "merge" in c["argv"] for c in runner.calls))
+
+    def test_resume_merged_refuses_if_failed_step_not_merged_mismatch(self):
+        runner = setup_standard_runner()
+        runner.pr_state = "MERGED"
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "failed", "step": "probe", "pr": 902,
+        })
+        rc = goose_cutover.main(["--run", "prepare-resume-902"], runner=runner)
+        self.assertNotEqual(rc, 0)
 
     def test_prepare_dry_run_issues_no_mutations(self):
         runner = setup_standard_runner()
@@ -686,21 +723,30 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(state["phase"], "prepared")
         self.assertEqual(state["pr"], 902)
         self.assertEqual(state["candidate"], "/nix/store/cand-goose-1.54.0-patched.19")
+        self.assertEqual(state["merge_sha"], "mergesha123")
+        self.assertEqual(state["built_from"], "mainsha123")
 
-    def test_d1_reconcile_rebuilds_if_main_moved(self):
+    def test_d1_refuses_if_phase_failed(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "failed", "pr": 902,
+        })
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertNotEqual(rc, 0)
+
+    def test_d3_reconcile_rebuilds_when_main_moved(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top-old", "hm_package": "/nix/store/hm-old",
-            "old_target": "/nix/store/old-goose", "merge_sha": "oldmainsha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "oldmainsha", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top-old"] = "top"
         runner.files["/nix/store/hm-old"] = "hm"
 
-        # origin/main returns new main sha
         def git_handler(a, u, e, c):
-            if a[:3] == ["git", "-C", "/home/dev/projects/workstation"] and "rev-parse" in a:
+            if "rev-parse" in a:
                 return RunResult(0, "newmainsha\n")
             if "fetch" in a or "worktree" in a:
                 return RunResult(0, "")
@@ -722,22 +768,39 @@ class TestGooseCutover(unittest.TestCase):
             raise AssertionError(f"unexpected nix command: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "nix", nix_handler))
 
-        # Advance quiet
+        ts_count = 1000
+        def sys_handler(a, u, e, c):
+            nonlocal ts_count
+            if "ExecMainStartTimestampMonotonic" in " ".join(a):
+                ts_count += 50
+                return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
+            if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
+                return RunResult(0, "MainPID=555\n")
+            if "ExecStart" in " ".join(a):
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
+            if "is-active" in a:
+                return RunResult(3, "inactive\n")
+            return RunResult(0, "")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
+
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        rc = goose_cutover.main(["--run", "deploy-dry-1"], runner=runner)
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 0)
         state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
-        self.assertEqual(state["merge_sha"], "newmainsha")
+        self.assertEqual(state["built_from"], "newmainsha")
+        self.assertEqual(state["merge_sha"], "mergesha123")  # merge_sha never overwritten!
         self.assertEqual(state["toplevel"], "/nix/store/top-new")
 
-    def test_d1_reconcile_fails_if_candidate_changed(self):
+    def test_d3_reconcile_fails_if_candidate_changed(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top-old", "hm_package": "/nix/store/hm-old",
-            "old_target": "/nix/store/old-goose", "merge_sha": "oldmainsha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "oldmainsha", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top-old"] = "top"
@@ -746,7 +809,9 @@ class TestGooseCutover(unittest.TestCase):
         def git_handler(a, u, e, c):
             if "rev-parse" in a:
                 return RunResult(0, "newmainsha\n")
-            return RunResult(0, "")
+            if "fetch" in a or "worktree" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected git command: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "git", git_handler))
 
         def nix_handler(a, u, e, c):
@@ -764,18 +829,14 @@ class TestGooseCutover(unittest.TestCase):
             raise AssertionError(f"unexpected nix command: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "nix", nix_handler))
 
-        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
-        self.assertEqual(rc, 0)  # Pre-D5 clean refusal exit 0
-        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
-        self.assertEqual(state["phase"], "prepared")  # Remains prepared
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
 
-    def test_d1_refuses_if_phase_failed(self):
-        runner = setup_standard_runner()
-        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
-            "phase": "failed", "pr": 902,
-        })
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
-        self.assertNotEqual(rc, 0)
+        self.assertEqual(rc, 1)  # candidate changed is fatal exit 1
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "failed")
+        self.assertEqual(state["step"], "merged-mismatch")
 
     def test_d2_stall_watch_active_or_activating_blocks(self):
         runner = setup_standard_runner()
@@ -832,8 +893,9 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
+        honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
         runner.cmd_handlers.insert(0, (
-            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, c: a[:3] == [honk_bin, "list", "--json"],
             lambda a, u, e, c: RunResult(0, json.dumps([{"sessionId": "s1", "running": True, "pendingRequests": 0}]))
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
@@ -844,8 +906,9 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
+        honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
         runner.cmd_handlers.insert(0, (
-            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, c: a[:3] == [honk_bin, "list", "--json"],
             lambda a, u, e, c: RunResult(0, json.dumps([{"sessionId": "s1", "running": False, "pendingRequests": 2}]))
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
@@ -856,8 +919,9 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
+        honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
         runner.cmd_handlers.insert(0, (
-            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, c: a[:3] == [honk_bin, "list", "--json"],
             lambda a, u, e, c: RunResult(0, "Not JSON at all")
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
@@ -875,7 +939,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -893,12 +957,11 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        # 4.5 hours elapsed
         runner.env["GOOSE_CUTOVER_START_TIME"] = str(runner.now() - 4.5 * 3600)
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 0)
@@ -909,7 +972,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -917,7 +980,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # Lock busy
         runner.flock_busy.add("/tmp/reset-workspace.lock")
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 0)
@@ -929,7 +991,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -937,7 +999,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # After stop, stall-watch.service stays activating
         active_calls = 0
         def act_handler(a, u, e, c):
             nonlocal active_calls
@@ -957,7 +1018,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -965,7 +1026,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # dry-activate outputs to STDERR
         runner.cmd_handlers.insert(0, (
             lambda a, u, c: "switch-to-configuration" in a[0] and "dry-activate" in a,
             lambda a, u, e, c: RunResult(0, "", "would stop the following units: rogue.service\n")
@@ -980,7 +1040,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1002,7 +1062,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1010,7 +1070,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # Backup failure
         runner.cmd_handlers.insert(0, (
             lambda a, u, c: a[0] == "sqlite3" and ".backup" in " ".join(a),
             lambda a, u, e, c: RunResult(1, "", "sqlite disk error")
@@ -1025,7 +1084,7 @@ class TestGooseCutover(unittest.TestCase):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1045,7 +1104,7 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1065,7 +1124,7 @@ class TestGooseCutover(unittest.TestCase):
                     return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
-                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
@@ -1086,7 +1145,7 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1094,7 +1153,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # honkd running exe differs from new ExecStart path
         runner.links["/proc/777/exe"] = "/nix/store/cand-old-goose/bin/goose"
 
         ts_count = 1000
@@ -1108,7 +1166,7 @@ class TestGooseCutover(unittest.TestCase):
                     return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
-                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
@@ -1124,7 +1182,6 @@ class TestGooseCutover(unittest.TestCase):
 
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 0)
-        # Check honkd was restarted
         honkd_restarts = [c["argv"] for c in runner.calls if "restart" in c["argv"] and "honkd" in c["argv"]]
         self.assertEqual(len(honkd_restarts), 1)
 
@@ -1133,7 +1190,7 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1152,7 +1209,7 @@ class TestGooseCutover(unittest.TestCase):
                     return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
-                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
@@ -1168,7 +1225,7 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1176,14 +1233,12 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # D5 failure: switch-to-configuration switch fails
         runner.cmd_handlers.insert(0, (
             lambda a, u, c: "switch-to-configuration" in a[0] and "switch" in a,
             lambda a, u, e, c: RunResult(1, "", "switch failed")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # Rollback sets old target
         goose_link_calls = [c["argv"] for c in runner.calls if c["argv"][:2] == ["goose-link", "set"]]
         self.assertTrue(any("/nix/store/old-goose" in cmd for cmd in goose_link_calls))
         self.assertFalse(any(c["argv"][:2] == ["goose-link", "rollback"] for c in runner.calls))
@@ -1193,7 +1248,7 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1201,7 +1256,6 @@ class TestGooseCutover(unittest.TestCase):
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # D6 failure: goose-link status does not match candidate
         runner.cmd_handlers.insert(0, (
             lambda a, u, c: a[:2] == ["goose-link", "status"],
             lambda a, u, e, c: RunResult(0, "current=/nix/store/mismatched\nprevious=<none>\npinned=/nix/store/pinned\n")
@@ -1210,39 +1264,51 @@ class TestGooseCutover(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertTrue(any(c["argv"][:3] == ["goose-link", "set", "/nix/store/old-goose"] for c in runner.calls))
 
-    def test_failure_at_d7_runs_rollback_restarts_goose_serve(self):
+    def test_failure_at_d7_runs_rollback_restarts_goose_serve_and_polls_status(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
+        runner.links["/proc/555/exe"] = "/nix/store/old-goose/bin/goose"
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # D7: goose restart curl status fails
-        runner.cmd_handlers.insert(0, (
-            lambda a, u, c: a[0] == "curl" and "/status" in a[-1],
-            lambda a, u, e, c: RunResult(1, "", "connection refused")
-        ))
+        # D7: restart curl fails on candidate, slow bind on rollback (fails twice then ok)
+        curl_calls = 0
+        def curl_handler(a, u, e, c):
+            nonlocal curl_calls
+            if "/status" in a[-1]:
+                curl_calls += 1
+                if curl_calls in (1, 2, 3):
+                    return RunResult(1, "", "connection refused")
+                return RunResult(0, '{"status":"ok"}\n')
+            if any("/acp" in x for x in a):
+                return RunResult(0, json.dumps({"id": 1, "jsonrpc": "2.0", "result": {"agentInfo": {"name": "goose", "version": "1.54.0"}}}))
+            raise AssertionError(f"unexpected curl command: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "curl", curl_handler))
+
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
         restarts = [c["argv"] for c in runner.calls if c["argv"][:3] == ["systemctl", "restart", "goose-serve"]]
         self.assertGreaterEqual(len(restarts), 2)
+        self.assertGreaterEqual(curl_calls, 4)
 
     def test_failure_at_d8_control_pong_fails_environmental(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
+        runner.links["/proc/555/exe"] = "/nix/store/old-goose/bin/goose"
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
@@ -1257,10 +1323,12 @@ class TestGooseCutover(unittest.TestCase):
                     return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
-                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
-            return RunResult(0, "")
+            if "start" in a or "stop" in a or "restart" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected systemctl: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
 
         # PONG always fails
@@ -1274,18 +1342,29 @@ class TestGooseCutover(unittest.TestCase):
         state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
         self.assertEqual(state["phase"], "prepared")
 
-    def test_failure_at_d8_control_pong_passes_creates_revert_pr(self):
+    def test_merge_sha_never_overwritten_revert_uses_squash_sha(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "pr_squash_commit_sha_999",
+            "built_from": "oldmainsha", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
+        runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
+
+        # Main moved to futuremainsha
+        def git_handler(a, u, e, c):
+            if "rev-parse" in a:
+                return RunResult(0, "futuremainsha\n")
+            if "fetch" in a or "worktree" in a or "revert" in a or "push" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected git command: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "git", git_handler))
 
         ts_count = 1000
         def sys_handler(a, u, e, c):
@@ -1298,10 +1377,15 @@ class TestGooseCutover(unittest.TestCase):
                     return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
-                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
-            return RunResult(0, "")
+            if a[:3] == ["systemctl", "restart", "goose-serve"]:
+                runner.links["/proc/555/exe"] = runner.current_link_target + "/bin/goose"
+                return RunResult(0, "")
+            if "start" in a or "stop" in a or "restart" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected systemctl: {a}")
         runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
 
         # Candidate PONG fails, control PONG passes
@@ -1316,18 +1400,76 @@ class TestGooseCutover(unittest.TestCase):
 
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        pr_creates = [c["argv"] for c in runner.calls if c["argv"][:3] == ["gh", "pr", "create"]]
+        # Verify revert command specifically reverts the squash SHA, NOT futuremainsha
+        revert_calls = [c["argv"] for c in runner.calls if "revert" in c["argv"]]
+        self.assertEqual(len(revert_calls), 1)
+        self.assertIn("pr_squash_commit_sha_999", revert_calls[0])
+        self.assertNotIn("futuremainsha", revert_calls[0])
+
+    def test_revert_pr_created_with_head_and_base_and_cwd(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
+            "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        ts_count = 1000
+        def sys_handler(a, u, e, c):
+            nonlocal ts_count
+            if "ExecMainStartTimestampMonotonic" in " ".join(a):
+                ts_count += 50
+                return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
+            if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
+                return RunResult(0, "MainPID=555\n")
+            if "ExecStart" in " ".join(a):
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
+            if "is-active" in a:
+                return RunResult(3, "inactive\n")
+            if a[:3] == ["systemctl", "restart", "goose-serve"]:
+                runner.links["/proc/555/exe"] = runner.current_link_target + "/bin/goose"
+                return RunResult(0, "")
+            if "start" in a or "stop" in a or "restart" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected systemctl: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
+
+        tail_count = 0
+        def timeout_handler(a, u, e, c):
+            nonlocal tail_count
+            tail_count += 1
+            if tail_count == 1:
+                return RunResult(0, "CRASH\n")
+            return RunResult(0, "PONG\n")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "timeout" and "tail" in a, timeout_handler))
+
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertNotEqual(rc, 0)
+        pr_creates = [c for c in runner.calls if c["argv"][:3] == ["gh", "pr", "create"]]
         self.assertEqual(len(pr_creates), 1)
-        self.assertTrue(any("goose-revert" in cmd for cmd in pr_creates))
-        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
-        self.assertEqual(state["phase"], "rolled-back")
+        pr_call = pr_creates[0]
+        argv = pr_call["argv"]
+        self.assertIn("--base", argv)
+        self.assertIn("main", argv)
+        self.assertIn("--head", argv)
+        self.assertIn("goose-cutover-revert-902", argv)
+        self.assertIsNotNone(pr_call["cwd"])
+        self.assertIn("/tmp/goose-revert-worktree-902", pr_call["cwd"])
 
     def test_rollback_failure_exits_3(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -1355,12 +1497,13 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "deploying", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mergesha123", "built_from": "mainsha123", "head_sha": "hsha",
             "step": "restart"
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
+        runner.links["/proc/555/exe"] = "/nix/store/old-goose/bin/goose"
 
         rc = goose_cutover.main(["--run", "deploy-recover-1"], runner=runner)
         self.assertNotEqual(rc, 0)
@@ -1376,12 +1519,10 @@ class TestGooseCutover(unittest.TestCase):
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertEqual(rc, 0)
 
-        # 1. Assert planted_token is NEVER in any argv call
         for call in runner.calls:
             cmd_line = " ".join(call["argv"])
             self.assertNotIn(planted_token, cmd_line)
 
-        # 2. Assert planted_token is redacted from state.json
         state_text = runner.files.get("/var/lib/goose-cutover/state.json", "")
         self.assertNotIn(planted_token, state_text)
 

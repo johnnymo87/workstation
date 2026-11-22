@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -179,7 +180,8 @@ class RealRunner(Runner):
         parent = os.path.dirname(os.path.abspath(path))
         os.makedirs(parent, exist_ok=True)
         tmp = f"{path}.tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp, path)
 
@@ -227,24 +229,47 @@ class RealRunner(Runner):
             "--",
             "flock",
             "-n",
+            "-o",
             path,
-            "sleep",
-            "infinity",
+            "sh",
+            "-c",
+            "echo locked; exec sleep infinity",
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            time.sleep(0.05)
-            if proc.poll() is not None:
-                err = proc.stderr.read().decode() if proc.stderr else ""
-                raise BlockingIOError(f"Dev lock {path} busy or failed: {err}")
+            start = time.time()
+            acquired = False
+            while time.time() - start < 10:
+                if proc.poll() is not None:
+                    err = proc.stderr.read() if proc.stderr else ""
+                    raise BlockingIOError(f"Dev lock {path} busy (exited rc={proc.returncode}): {err}")
+                line = proc.stdout.readline() if proc.stdout else ""
+                if "locked" in line:
+                    acquired = True
+                    break
+                time.sleep(0.05)
+            if not acquired:
+                raise BlockingIOError(f"Dev lock {path} timed out waiting for locked signal")
             yield proc
         finally:
             if proc.poll() is None:
-                proc.terminate()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except OSError:
+                    pass
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except OSError:
+                        pass
 
     def get_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         return os.environ.get(key, default)
@@ -269,7 +294,7 @@ def notify(
     sig = f"goose-cutover:{inst}:{ev}:{int(runner.now())}"
     alert_bin = runner.get_env("GOOSE_CUTOVER_ALERT") or "opencode-drift-alert"
     try:
-        runner.run([alert_bin, state_file, sig, redacted_msg, "0"], check=False)
+        runner.run([alert_bin, state_file, sig, f"[{level.upper()}] {redacted_msg}", "0"], check=False)
     except Exception as e:
         log("notify", f"opencode-drift-alert could not be run: {e}")
 
@@ -292,7 +317,7 @@ def get_acp_version(runner: Runner, port: int = 4080, secret_file: str = "/run/s
         token = runner.read_file(secret_file).strip()
         register_secret(token)
 
-    hdr_file = f"/tmp/goose-acp-header-{int(runner.now())}.txt"
+    hdr_file = f"/var/lib/goose-cutover/acp-header-{int(runner.now())}-{os.getpid()}.txt"
     runner.write_file(hdr_file, f"X-Secret-Key: {token}\n")
 
     try:
@@ -398,9 +423,10 @@ def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tu
         except Exception as e:
             return False, f"failed checking goose-serve cgroup procs: {e}"
 
-    # 4. honk list --json
+    # 4. honk list --json via HONK_BIN
+    honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
     try:
-        res = runner.run(["honk", "list", "--json"], user="dev", check=False)
+        res = runner.run([honk_bin, "list", "--json"], user="dev", check=False)
         try:
             sessions = json.loads(res.stdout)
             if not isinstance(sessions, list):
@@ -446,13 +472,20 @@ def run_prepare(
     if current_link == "<none>":
         raise RuntimeError("Precondition failed: goose-link current is <none>")
 
-    # P1.3 State file not in prepared, deploying, or failed
+    # P1.3 State file check
     if runner.exists(STATE_PATH):
         try:
             st = json.loads(runner.read_file(STATE_PATH))
             phase = st.get("phase")
-            if phase in ("prepared", "deploying", "failed"):
-                raise RuntimeError(f"Precondition failed: state.json already in phase {phase}")
+            step = st.get("step")
+            if resume_merged:
+                if phase == "failed" and step != "merged-mismatch":
+                    raise RuntimeError(f"Precondition failed: state.json is failed at {step}, not merged-mismatch")
+                elif phase in ("deploying",):
+                    raise RuntimeError(f"Precondition failed: state.json already in phase {phase}")
+            else:
+                if phase in ("prepared", "deploying", "failed"):
+                    raise RuntimeError(f"Precondition failed: state.json already in phase {phase}")
         except json.JSONDecodeError:
             pass
 
@@ -465,7 +498,7 @@ def run_prepare(
         "-R",
         WORKSTATION_REPO,
         "--json",
-        "state,baseRefName,labels,headRefOid,files,statusCheckRollup,mergeable",
+        "state,baseRefName,labels,headRefOid,files,statusCheckRollup,mergeable,mergeCommit",
     ], user="dev", check=True)
     pr_data = json.loads(res.stdout)
 
@@ -559,6 +592,81 @@ def run_prepare(
     else:
         log("P1", "dry-run: would apply label goose-hosts-ready")
 
+    head_sha = pr_data.get("headRefOid", "")
+    cand_link = f"{GCROOTS_DIR}/candidate-{pr}"
+    top_link = f"{GCROOTS_DIR}/toplevel-{pr}"
+    hm_link = f"{GCROOTS_DIR}/hm-{pr}"
+
+    if resume_merged:
+        log("P2", "Resuming merged PR: building candidate + toplevel + HM from origin/main")
+        runner.run(["git", "-C", WORKSTATION_PATH, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], user="dev", check=True)
+        new_main_sha = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
+        merge_sha = pr_data.get("mergeCommit", {}).get("oid") or new_main_sha
+
+        wt_main = f"/tmp/goose-cutover-resume-{pr}-{int(runner.now())}"
+        runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "add", "--detach", wt_main, "origin/main"], user="dev", check=True)
+        try:
+            runner.run([
+                "nix",
+                "build",
+                f"{wt_main}#nixosConfigurations.cloudbox.config.environment.etc.\"goose/pinned\".source",
+                "--out-link",
+                cand_link,
+            ], user="dev", check=True)
+            runner.run([
+                "nix",
+                "build",
+                f"{wt_main}#nixosConfigurations.cloudbox.config.system.build.toplevel",
+                "--out-link",
+                top_link,
+            ], user="dev", check=True)
+            runner.run([
+                "nix",
+                "build",
+                f"{wt_main}#homeConfigurations.cloudbox.activationPackage",
+                "--out-link",
+                hm_link,
+            ], user="dev", check=True)
+
+            candidate_path = runner.readlink(cand_link)
+            toplevel_path = runner.readlink(top_link)
+            hm_package = runner.readlink(hm_link)
+        finally:
+            runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "remove", "--force", wt_main], user="dev", check=False)
+
+        # Probe candidate built from origin/main
+        log("P3", "Running goose-upgrade-probe against candidate")
+        res = runner.run([
+            probe_bin,
+            f"{candidate_path}/bin/goose",
+            "--old-bin",
+            "/var/lib/goose/current/bin/goose",
+        ], user="dev", check=False)
+        if res.rc != 0:
+            lines = (res.stdout + "\n" + res.stderr).splitlines()[-40:]
+            log("P3", f"Probe failed (exit {res.rc}):\n" + "\n".join(lines))
+            raise RuntimeError(f"probe failed (exit {res.rc})")
+
+        # P5 Persist
+        state_data = {
+            "phase": "prepared",
+            "pr": pr,
+            "head_sha": head_sha,
+            "merge_sha": merge_sha,
+            "built_from": new_main_sha,
+            "old_target": current_link,
+            "candidate": candidate_path,
+            "toplevel": toplevel_path,
+            "hm_package": hm_package,
+            "old_system": "",
+            "started_at": int(runner.now()),
+            "step": "prepared",
+        }
+        runner.write_file(STATE_PATH, json.dumps(state_data))
+        notify(runner, "info", f"goose-cutover: PR #{pr} resumed and prepared; deploy pending", instance=f"prepare-{pr}", event="prepared")
+        return 0
+
+    # Normal Prepare:
     # P2. Candidate - Build ONLY candidate goose from merge ref for probe
     log("P2", "Fetching candidate from merge ref")
     runner.run([
@@ -601,7 +709,6 @@ def run_prepare(
     ], user="dev", check=True)
 
     candidate_path = ""
-    cand_link = f"{GCROOTS_DIR}/candidate-{pr}"
     try:
         runner.run([
             "nix",
@@ -636,7 +743,6 @@ def run_prepare(
         return 0
 
     log("P4", f"Merging PR #{pr}")
-    head_sha = pr_data.get("headRefOid", "")
     runner.run(["gh", "pr", "merge", str(pr), "-R", WORKSTATION_REPO, "--squash", "--match-head-commit", head_sha], user="dev", check=True)
 
     # Poll until MERGED
@@ -650,18 +756,21 @@ def run_prepare(
     if not merged:
         raise RuntimeError(f"Timed out waiting for PR #{pr} to be MERGED")
 
+    # Fetch mergeCommit oid
+    res = runner.run(["gh", "pr", "view", str(pr), "-R", WORKSTATION_REPO, "--json", "mergeCommit"], user="dev", check=True)
+    merge_sha = json.loads(res.stdout).get("mergeCommit", {}).get("oid", "")
+
     # Fetch origin/main
     runner.run(["git", "-C", WORKSTATION_PATH, "fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"], user="dev", check=True)
     new_main_sha = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
+    if not merge_sha:
+        merge_sha = new_main_sha
 
     # Build candidate, toplevel, HM from origin/main
     log("P4", "Building candidate + toplevel + HM from origin/main")
     wt_main = f"/tmp/goose-cutover-main-{pr}-{int(runner.now())}"
     runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "add", "--detach", wt_main, "origin/main"], user="dev", check=True)
 
-    cand_link = f"{GCROOTS_DIR}/candidate-{pr}"
-    top_link = f"{GCROOTS_DIR}/toplevel-{pr}"
-    hm_link = f"{GCROOTS_DIR}/hm-{pr}"
     try:
         runner.run([
             "nix",
@@ -709,7 +818,8 @@ def run_prepare(
         "phase": "prepared",
         "pr": pr,
         "head_sha": head_sha,
-        "merge_sha": new_main_sha,
+        "merge_sha": merge_sha,
+        "built_from": new_main_sha,
         "old_target": current_link,
         "candidate": candidate_path,
         "toplevel": toplevel_path,
@@ -749,65 +859,10 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
     cand = state["candidate"]
     top = state["toplevel"]
     hm = state["hm_package"]
+    pr_num = state["pr"]
     for p in (cand, top, hm):
         if not p or not runner.exists(p):
             raise RuntimeError(f"GC-rooted path missing: {p}")
-
-    # Reconcile origin/main
-    pr_num = state["pr"]
-    runner.run([
-        "git",
-        "-C",
-        WORKSTATION_PATH,
-        "fetch",
-        "origin",
-        "+refs/heads/main:refs/remotes/origin/main",
-    ], user="dev", check=True)
-    current_main = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
-    if current_main != state.get("merge_sha"):
-        log("D1", f"origin/main moved ({state.get('merge_sha')} -> {current_main}), rebuilding at origin/main")
-        wt_main = f"/tmp/goose-cutover-deploy-{pr_num}-{int(runner.now())}"
-        runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "add", "--detach", wt_main, "origin/main"], user="dev", check=True)
-        cand_link = f"{GCROOTS_DIR}/candidate-{pr_num}"
-        top_link = f"{GCROOTS_DIR}/toplevel-{pr_num}"
-        hm_link = f"{GCROOTS_DIR}/hm-{pr_num}"
-        try:
-            runner.run([
-                "nix",
-                "build",
-                f"{wt_main}#nixosConfigurations.cloudbox.config.environment.etc.\"goose/pinned\".source",
-                "--out-link",
-                cand_link,
-            ], user="dev", check=True)
-            runner.run([
-                "nix",
-                "build",
-                f"{wt_main}#nixosConfigurations.cloudbox.config.system.build.toplevel",
-                "--out-link",
-                top_link,
-            ], user="dev", check=True)
-            runner.run([
-                "nix",
-                "build",
-                f"{wt_main}#homeConfigurations.cloudbox.activationPackage",
-                "--out-link",
-                hm_link,
-            ], user="dev", check=True)
-            new_cand = runner.readlink(cand_link)
-            new_top = runner.readlink(top_link)
-            new_hm = runner.readlink(hm_link)
-            if new_cand != cand:
-                log("D1", f"origin/main candidate changed ({cand} -> {new_cand}); aborting deploy")
-                notify(runner, "warning", f"goose-cutover: origin/main candidate changed since prepare; deploy remains prepared")
-                return 0
-            state["toplevel"] = new_top
-            state["hm_package"] = new_hm
-            state["merge_sha"] = current_main
-            top = new_top
-            hm = new_hm
-            runner.write_file(STATE_PATH, json.dumps(state))
-        finally:
-            runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "remove", "--force", wt_main], user="dev", check=False)
 
     # D2. Quiet window
     log("D2", "Checking quiet window")
@@ -850,83 +905,142 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
                 with runner.flock("/tmp/reset-workspace.lock", shared=True, nonblocking=True):
                     try:
                         with runner.hold_dev_lock("/run/user/1000/pull-workstation.lock"):
-                            runner.run(["systemctl", "--user", "stop", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=True)
-
-                            # Wait until inactive
-                            stopped = False
-                            for _ in range(300):
-                                res = runner.run(["systemctl", "--user", "is-active", "stall-watch.service"], user="dev", check=False)
-                                if res.stdout.strip() not in ("active", "activating", "reloading"):
-                                    stopped = True
-                                    break
-                                runner.sleep(2)
-
-                            if not stopped:
-                                log("D3", "stall-watch.service failed to stop within 10 min; pre-D5 clean refusal")
-                                runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
-                                notify(runner, "warning", "goose-cutover: stall-watch failed to stop; deploy remains prepared", instance="deploy-1", event="stall-watch-timeout")
-                                return 0
-
-                            q, reason = check_quiet(runner, unit_start)
-                            if not q:
-                                log("D3", f"quiet re-check failed after locking ({reason}); returning to D2 polling")
-                                runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
-                                runner.sleep(30)
-                                continue
-
-                            # Update state to deploying
-                            state["phase"] = "deploying"
-                            state["step"] = "deploying"
-                            runner.write_file(STATE_PATH, json.dumps(state))
-
-                            # D4. Gate + backup
-                            log("D4", "Gate + backup")
-                            res = runner.run([f"{top}/bin/switch-to-configuration", "dry-activate"], check=True)
-                            out_text = f"{res.stdout}\n{res.stderr}"
-                            for line in out_text.splitlines():
-                                if "would stop" in line or "would restart" in line:
-                                    for unit in line.split()[5:]:
-                                        u = unit.strip(",.")
-                                        if u and u not in ("systemd-tmpfiles-resetup.service", "systemd-tmpfiles-setup.service"):
-                                            if u == "lgtm-run.service":
-                                                for _ in range(150):
-                                                    c = runner.run(["systemctl", "is-active", "lgtm-run.service"], check=False)
-                                                    if c.stdout.strip() != "active":
-                                                        break
-                                                    runner.sleep(2)
-                                            else:
-                                                log("D4", f"dry-activate would stop/restart unallowed unit: {u}; pre-D5 refusal")
-                                                runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
-                                                state["phase"] = "prepared"
-                                                runner.write_file(STATE_PATH, json.dumps(state))
-                                                notify(runner, "warning", f"goose-cutover: dry-activate refused unit {u}; deploy remains prepared", instance="deploy-1", event="gate-refusal")
-                                                return 0
-
-                            # SQLite backup
-                            utc_ts = int(runner.now())
-                            backup_file = f"{BACKUPS_DIR}/sessions-{utc_ts}-pr{pr_num}.db"
                             try:
-                                runner.run(["sqlite3", "/home/dev/.local/share/goose/sessions/sessions.db", f".backup {backup_file}"], check=True)
-                            except Exception as e:
-                                log("D4", f"backup failed: {e}; pre-D5 refusal")
-                                runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
+                                runner.run(["systemctl", "--user", "stop", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=True)
+
+                                # Wait until inactive (fails if active/activating/reloading after 10 min)
+                                stopped = False
+                                for _ in range(300):
+                                    res = runner.run(["systemctl", "--user", "is-active", "stall-watch.service"], user="dev", check=False)
+                                    if res.stdout.strip() not in ("active", "activating", "reloading"):
+                                        stopped = True
+                                        break
+                                    runner.sleep(2)
+
+                                if not stopped:
+                                    log("D3", "stall-watch.service failed to stop within 10 min; pre-D5 clean refusal")
+                                    notify(runner, "warning", "goose-cutover: stall-watch failed to stop; deploy remains prepared", instance="deploy-1", event="stall-watch-timeout")
+                                    return 0
+
+                                # D3 Reconcile main
+                                runner.run([
+                                    "git",
+                                    "-C",
+                                    WORKSTATION_PATH,
+                                    "fetch",
+                                    "origin",
+                                    "+refs/heads/main:refs/remotes/origin/main",
+                                ], user="dev", check=True)
+                                current_main = runner.run(["git", "-C", WORKSTATION_PATH, "rev-parse", "origin/main"], user="dev", check=True).stdout.strip()
+                                built_from = state.get("built_from") or state.get("merge_sha")
+                                if current_main != built_from:
+                                    log("D3", f"origin/main moved ({built_from} -> {current_main}), rebuilding at origin/main")
+                                    wt_main = f"/tmp/goose-cutover-deploy-{pr_num}-{int(runner.now())}"
+                                    runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "add", "--detach", wt_main, "origin/main"], user="dev", check=True)
+                                    cand_link = f"{GCROOTS_DIR}/candidate-{pr_num}"
+                                    top_link = f"{GCROOTS_DIR}/toplevel-{pr_num}"
+                                    hm_link = f"{GCROOTS_DIR}/hm-{pr_num}"
+                                    try:
+                                        runner.run([
+                                            "nix",
+                                            "build",
+                                            f"{wt_main}#nixosConfigurations.cloudbox.config.environment.etc.\"goose/pinned\".source",
+                                            "--out-link",
+                                            cand_link,
+                                        ], user="dev", check=True)
+                                        runner.run([
+                                            "nix",
+                                            "build",
+                                            f"{wt_main}#nixosConfigurations.cloudbox.config.system.build.toplevel",
+                                            "--out-link",
+                                            top_link,
+                                        ], user="dev", check=True)
+                                        runner.run([
+                                            "nix",
+                                            "build",
+                                            f"{wt_main}#homeConfigurations.cloudbox.activationPackage",
+                                            "--out-link",
+                                            hm_link,
+                                        ], user="dev", check=True)
+                                        new_cand = runner.readlink(cand_link)
+                                        new_top = runner.readlink(top_link)
+                                        new_hm = runner.readlink(hm_link)
+                                        if new_cand != cand:
+                                            log("D3", f"origin/main candidate changed ({cand} -> {new_cand}); setting phase=failed step=merged-mismatch")
+                                            state["phase"] = "failed"
+                                            state["step"] = "merged-mismatch"
+                                            runner.write_file(STATE_PATH, json.dumps(state))
+                                            notify(runner, "error", f"goose-cutover: candidate changed on origin/main; deploy aborted (use prepare --resume-merged)", instance="deploy-1", event="merged-mismatch")
+                                            return 1
+                                        state["toplevel"] = new_top
+                                        state["hm_package"] = new_hm
+                                        state["built_from"] = current_main
+                                        top = new_top
+                                        hm = new_hm
+                                        runner.write_file(STATE_PATH, json.dumps(state))
+                                    finally:
+                                        runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "remove", "--force", wt_main], user="dev", check=False)
+
+                                q, reason = check_quiet(runner, unit_start)
+                                if not q:
+                                    log("D3", f"quiet re-check failed after locking ({reason}); returning to D2 polling")
+                                    runner.sleep(30)
+                                    continue
+
+                                # D4. Gate + backup
+                                log("D4", "Gate + backup")
+                                res = runner.run([f"{top}/bin/switch-to-configuration", "dry-activate"], check=True)
+                                out_text = f"{res.stdout}\n{res.stderr}"
+                                for line in out_text.splitlines():
+                                    if "would stop" in line or "would restart" in line:
+                                        for unit in line.split()[5:]:
+                                            u = unit.strip(",.")
+                                            if u and u not in ("systemd-tmpfiles-resetup.service", "systemd-tmpfiles-setup.service"):
+                                                if u == "lgtm-run.service":
+                                                    for _ in range(150):
+                                                        c = runner.run(["systemctl", "is-active", "lgtm-run.service"], check=False)
+                                                        if c.stdout.strip() not in ("active", "activating", "reloading"):
+                                                            break
+                                                        runner.sleep(2)
+                                                else:
+                                                    log("D4", f"dry-activate would stop/restart unallowed unit: {u}; pre-D5 refusal")
+                                                    notify(runner, "warning", f"goose-cutover: dry-activate refused unit {u}; deploy remains prepared", instance="deploy-1", event="gate-refusal")
+                                                    return 0
+
+                                # Backup sessions.db
+                                utc_ts = int(runner.now())
+                                backup_file = f"{BACKUPS_DIR}/sessions-{utc_ts}-pr{pr_num}.db"
+                                try:
+                                    runner.run(["sqlite3", "/home/dev/.local/share/goose/sessions/sessions.db", f".backup {backup_file}"], check=True)
+                                except Exception as e:
+                                    log("D4", f"backup failed: {e}; pre-D5 refusal")
+                                    notify(runner, "warning", "goose-cutover: sessions.db backup failed; deploy remains prepared", instance="deploy-1", event="backup-failed")
+                                    return 0
+
+                                # Keep newest 5
+                                existing = runner.listdir(BACKUPS_DIR)
+                                db_backups = sorted([f for f in existing if f.startswith("sessions-") and f.endswith(".db")])
+                                if len(db_backups) > 5:
+                                    for old_b in db_backups[:-5]:
+                                        try:
+                                            runner.run(["rm", "-f", f"{BACKUPS_DIR}/{old_b}"], check=False)
+                                        except Exception:
+                                            pass
+
+                                old_sys = runner.run(["readlink", "-f", "/nix/var/nix/profiles/system"], check=True).stdout.strip()
+                                state["old_system"] = old_sys
+                                runner.write_file(STATE_PATH, json.dumps(state))
+
+                            except (Exception, SigtermException) as e:
+                                log("D3/D4", f"pre-D5 failure: {e}; restoring prepared state")
                                 state["phase"] = "prepared"
                                 runner.write_file(STATE_PATH, json.dumps(state))
-                                notify(runner, "warning", "goose-cutover: sessions.db backup failed; deploy remains prepared", instance="deploy-1", event="backup-failed")
+                                notify(runner, "warning", f"goose-cutover: pre-D5 failure ({e}); deploy remains prepared", instance="deploy-1", event="pre-d5-failure")
                                 return 0
 
-                            # Keep newest 5
-                            existing = runner.listdir(BACKUPS_DIR)
-                            db_backups = sorted([f for f in existing if f.startswith("sessions-") and f.endswith(".db")])
-                            if len(db_backups) > 5:
-                                for old_b in db_backups[:-5]:
-                                    try:
-                                        runner.run(["rm", "-f", f"{BACKUPS_DIR}/{old_b}"], check=False)
-                                    except Exception:
-                                        pass
-
-                            old_sys = runner.run(["readlink", "-f", "/nix/var/nix/profiles/system"], check=True).stdout.strip()
-                            state["old_system"] = old_sys
+                            # Immediately before D5: write phase=deploying
+                            state["phase"] = "deploying"
+                            state["step"] = "deploying"
                             runner.write_file(STATE_PATH, json.dumps(state))
 
                             # Execution D5-D8 (any failure past this point triggers rollback)
@@ -963,10 +1077,11 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
                                     if "ExecMainStartTimestampMonotonic=" in line:
                                         old_mono = int(line.split("=", 1)[1].strip())
 
+                                restarted_goose_time = runner.now()
                                 restarted_goose = True
                                 runner.run(["systemctl", "restart", "goose-serve"], check=True)
 
-                                # Poll curl /status
+                                # Poll curl /status up to 60s
                                 ok_status = False
                                 for _ in range(60):
                                     res = runner.run(["curl", "-sf", "http://127.0.0.1:4080/status"], check=False)
@@ -1079,6 +1194,37 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
                                 # (b) restart stall-watch.timer and stall-watch-wake.path
                                 runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=True)
 
+                                # Wait <= 10 min for first tick JSON line with ts (ms epoch) > goose_restart_time
+                                goose_restart_ms = int(restarted_goose_time * 1000)
+                                tick_found = False
+                                start_sw_wait = runner.now()
+                                while runner.now() - start_sw_wait <= 600:
+                                    res_j = runner.run(
+                                        ["journalctl", "_SYSTEMD_USER_UNIT=stall-watch.service", "_UID=1000", "--since", "-10min", "-o", "cat"],
+                                        check=False,
+                                    )
+                                    for line in res_j.stdout.splitlines():
+                                        line = line.strip()
+                                        if line.startswith('{"ts"'):
+                                            try:
+                                                data = json.loads(line)
+                                                ts = data.get("ts", 0)
+                                                if ts > goose_restart_ms:
+                                                    if not data.get("ok"):
+                                                        raise RuntimeError(f"stall-watch tick after restart reported ok=false: {line}")
+                                                    coord_runs = data.get("coordinator", {}).get("runs", 0)
+                                                    log("D8", f"stall-watch post-restart tick ok=true (coordinator.runs={coord_runs})")
+                                                    tick_found = True
+                                                    break
+                                            except json.JSONDecodeError:
+                                                pass
+                                    if tick_found:
+                                        break
+                                    runner.sleep(3)
+
+                                if not tick_found:
+                                    raise RuntimeError("timed out waiting for stall-watch tick after goose restart")
+
                                 # D9. Success
                                 log("D9", "Cutover successful")
                                 state["phase"] = "deployed"
@@ -1100,6 +1246,11 @@ def run_deploy(runner: Runner, dry_run: bool = False, recover: bool = False) -> 
                                 log("deploy", f"Deploy failed during {state.get('step')}: {e}")
                                 return run_rollback(runner, state, state.get("step", "unknown"), str(e), restarted_goose, restarted_honkd)
 
+                    except BlockingIOError:
+                        log("D3", "pull-workstation.lock busy; returning to D2 polling loop")
+                        runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
+                        runner.sleep(30)
+                        continue
                     finally:
                         runner.run(["systemctl", "--user", "start", "stall-watch.timer", "stall-watch-wake.path"], user="dev", check=False)
 
@@ -1135,7 +1286,27 @@ def run_rollback(
         if restarted_goose:
             restarted_goose = True
             runner.run(["systemctl", "restart", "goose-serve"], check=True)
-            res = runner.run(["curl", "-sf", "http://127.0.0.1:4080/status"], check=True)
+            # Poll /status up to 60s
+            ok_status = False
+            for _ in range(60):
+                res = runner.run(["curl", "-sf", "http://127.0.0.1:4080/status"], check=False)
+                if res.rc == 0:
+                    ok_status = True
+                    break
+                runner.sleep(1)
+            if not ok_status:
+                raise RuntimeError("goose-serve failed to answer /status after rollback restart")
+
+            # Verify MainPID argv0 and exe link
+            res_pid = runner.run(["systemctl", "show", "-p", "MainPID", "goose-serve"], check=True)
+            main_pid = res_pid.stdout.split("=", 1)[1].strip()
+            cmdline = runner.read_file(f"/proc/{main_pid}/cmdline")
+            argv0 = cmdline.split("\0")[0]
+            if argv0 != "/var/lib/goose/current/bin/goose":
+                raise RuntimeError(f"MainPID {main_pid} argv0={argv0} != /var/lib/goose/current/bin/goose")
+            exe = runner.readlink(f"/proc/{main_pid}/exe")
+            if exe != f"{old_target}/bin/goose":
+                raise RuntimeError(f"MainPID {main_pid} exe={exe} != {old_target}/bin/goose")
 
         if restarted_honkd:
             runner.run(["systemctl", "--user", "restart", "honkd"], user="dev", check=False)
@@ -1200,13 +1371,17 @@ def run_rollback(
                 "create",
                 "-R",
                 WORKSTATION_REPO,
+                "--base",
+                "main",
+                "--head",
+                branch,
                 "--label",
                 "goose-revert",
                 "--title",
                 f"Revert PR #{pr}",
                 "--body",
                 body,
-            ], user="dev", check=True)
+            ], user="dev", check=True, cwd=wt_dir)
             revert_url = res.stdout.strip()
         finally:
             runner.run(["git", "-C", WORKSTATION_PATH, "worktree", "remove", "--force", wt_dir], user="dev", check=False)
@@ -1312,6 +1487,12 @@ def main(argv: Optional[list[str]] = None, runner: Optional[Runner] = None) -> i
                 return 2
         except Exception as e:
             log("launcher", f"Note: could not read /proc/self/cgroup: {e}")
+
+        # Check run.lock before starting unit
+        res_lock = runner.run(["flock", "-n", RUN_LOCK_PATH, "true"], check=False)
+        if res_lock.rc != 0:
+            print("refusing: a cutover is running (/var/lib/goose-cutover/run.lock busy)", file=sys.stderr)
+            return 2
 
         if cmd == "prepare":
             if len(argv) < 2:
