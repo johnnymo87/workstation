@@ -760,6 +760,9 @@ in
         # started with, so removing this affects new sessions only. Live at the
         # next goose-serve restart (restartIfChanged = false).
         "GOOSE_THINKING_EFFORT=high"
+        # Preserve 1.54 auto-compact threshold (0.8 * 1M context = 800k tokens on Opus)
+        # instead of 1.60's default 225k limit. Inert on 1.54.
+        "GOOSE_AUTO_COMPACT_TOKEN_LIMIT=800000"
         # GCP_VERTEX_GEMINI_HOST (Gemini-only host override) is set in ExecStart
         # from the aigateway intent flag, like opencode's gemini baseURL.
         # cfp's Vertex leg goes through a gateway that attributes each request by the

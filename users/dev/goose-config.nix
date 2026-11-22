@@ -41,6 +41,8 @@ let
       exec "$goose" "$@"
     '';
 
+  isGoose160 = lib.versionAtLeast gooseCli.version "1.60";
+
   # goose's default extension set, for any session that does not name its own
   # extensions (`_meta.enabledExtensions` in the ACP initialize request).
   #
@@ -53,30 +55,36 @@ let
   # Why each is off: eng-agent-platform
   # docs/plans/2026-09-22-goose-extension-defaults-design.md §3/§4 (a cautious
   # default, revisited in the honk extension tour, bead honk-9qf.20).
+  # On goose >= 1.60, orchestrator (#12729) and skills (#13574) were removed upstream.
   gooseExtensionsEnabled = {
     developer = true;
     analyze = true;
     todo = true;
-    skills = true;
     chatrecall = true; # honk-9qf.20: read-only past-session search
     summon = true; # subagent roles, honk-9qf.19; requires goose >= patched-1.54.0.10 and the settings below
     code_execution = false;
     tom = false;
-    orchestrator = false;
     summarize = false;
     apps = false;
     extensionmanager = false;
     scheduler = false;
+  } // lib.optionalAttrs (!isGoose160) {
+    skills = true;
+    orchestrator = false;
   };
 
-  # The platform-extension keys goose 1.54 knows (PLATFORM_EXTENSIONS in
+  # The platform-extension keys goose knows (PLATFORM_EXTENSIONS in
   # crates/goose/src/agents/platform_extensions/mod.rs). goose ignores an
   # unknown key, and several of these default to ON when absent, so a typo
   # above would silently leave the real extension on: fail evaluation instead.
+  # On goose >= 1.60, orchestrator (#12729) and skills (#13574) were removed upstream.
   # A goose bump that adds or renames one should update this list.
   gooseKnownExtensionKeys = [
     "analyze" "apps" "chatrecall" "code_execution" "developer" "extensionmanager"
-    "orchestrator" "scheduler" "skills" "summarize" "summon" "todo" "tom"
+  ] ++ lib.optionals (!isGoose160) [ "orchestrator" ] ++ [
+    "scheduler"
+  ] ++ lib.optionals (!isGoose160) [ "skills" ] ++ [
+    "summarize" "summon" "todo" "tom"
   ];
 
   # Deploy path for goose subagent roles (users/dev/goose-roles.nix deploys to
@@ -86,6 +94,10 @@ let
   gooseConfigSettings = {
     GOOSE_SUBAGENT_ROLES_DIR = "${config.home.homeDirectory}/${gooseRolesDeployPath}/roles";
     GOOSE_SUBAGENT_DEFAULT_RECIPE = "${config.home.homeDirectory}/${gooseRolesDeployPath}/unscoped.yaml";
+    # Upstream 1.60 defaults auto-compact to 225k tokens (min(0.8, limit/context)).
+    # Preserve 1.54 behaviour (0.8 x 1M = 800k on Opus 1M) for long sessions.
+    # Inert on 1.54 (which read GOOSE_AUTO_COMPACT_THRESHOLD instead).
+    GOOSE_AUTO_COMPACT_TOKEN_LIMIT = "800000";
   } // lib.optionalAttrs isCloudbox {
     # Every goose here that is NOT goose-serve (the interactive CLI, honk's
     # sandbox serve) reads these from config.yaml. Without the Gemini host the
@@ -198,7 +210,8 @@ lib.mkIf isGooseHost {
       johnnymo87/goose#9); GOOSE_SUBAGENT_ROLES_DIR points at five generated role
       recipes (pkgs/goose-roles) scanned first so repo files cannot shadow them;
       GOOSE_SUBAGENT_DEFAULT_RECIPE gives delegates with no role the read-only set
-      (developer limited to tree/read_image, analyze, skills, ro-shell), failing
+      (developer limited to tree/read_image, analyze, ro-shell; on goose 1.54 also
+      skills, which R16 drops on 1.60+ where skills is built-in), failing
       closed; both keys are also enforced by goose-config-enforce on every switch;
       needs goose >= .10 (older binaries ignore the keys); pigeon and the lane name
       their own extensions and are unaffected.

@@ -635,6 +635,9 @@ in
         # Goose requires a non-empty key; cfp-shaper discards it and TeamClaude
         # injects the OAuth token from the active personal Max account.
         "ANTHROPIC_API_KEY=teamclaude-managed"
+        # Preserve 1.54 auto-compact threshold (0.8 * 1M context = 800k tokens on Opus)
+        # instead of 1.60's default 225k limit. Inert on 1.54.
+        "GOOSE_AUTO_COMPACT_TOKEN_LIMIT=800000"
 
         # Tool-shell environment (non-interactive git defaults), matching cloudbox.
         "GIT_EDITOR=:"
