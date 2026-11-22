@@ -1536,6 +1536,24 @@
       # entry, and the first symptom is an exec-format respawn loop on a Mac.
       # The suite's real-default.nix fixture is also what catches a reformat of
       # that file breaking the block anchor, so it must run somewhere.
+      # The goose pin auto-bump (.github/workflows/update-goose.yml). Gated because a
+      # rewrite that hands an entry another asset's hash, or moves a held entry, verifies
+      # nowhere else before a host fetches it. The real pkgs/goose/default.nix is one of
+      # the fixtures, so a reformat that breaks the rewrite fails here first.
+      update-goose-pin-tests = devboxPkgs.runCommand "update-goose-pin-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        python3 .github/scripts/test_update_goose_pin.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 8 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 8 tests'; update the count with the suite." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || { echo "GATE FAILURE: suite not OK." >&2; exit 1; }
+        touch $out
+      '';
+
       update-cfp-sources-tests = devboxPkgs.runCommand "update-cfp-sources-tests" {
         nativeBuildInputs = [ devboxPkgs.python3 ];
       } ''
