@@ -155,6 +155,13 @@ check "exit 0"              "$RC" 0
 check "reports 1 finalized" "$(printf '%s' "$OUT" | grep -c 'finalized 1 orphaned message(s)')" 1
 check "completed set"       "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.time.completed') IS NOT NULL FROM message WHERE id='msg_orphan';")" 1
 check "error name"          "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.name') FROM message WHERE id='msg_orphan';")" MessageAbortedError
+# stall-watch (eng-agent-platform stallwatch/sessionstate.py SWEEPER_PREFIX)
+# classifies a swept row by this prefix; changing it silently reclassifies every
+# swept session as a user abort.
+check "message keeps the stall-watch prefix" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.data.message') LIKE 'Aborted (phantom-busy sweeper%' FROM message WHERE id='msg_orphan';")" 1
+# The text must say the sweeper labels a dead turn rather than stopping it
+# (2026-11-22: the old wording was read as a 30-minute silence timeout).
+check "message says it did not stop the turn" "$("$SQLITE" "$DB" "SELECT json_extract(data,'\$.error.data.message') LIKE '%did not stop the turn)' FROM message WHERE id='msg_orphan';")" 1
 
 echo "== T3: idempotence -- a second sweep does not re-touch a finalized row =="
 # HONEST SCOPE, do not read more into this than it proves. The second run

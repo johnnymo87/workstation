@@ -1758,6 +1758,23 @@ down and its silence means nothing. This host has no second leg.
         [ "$MAX_ETIMES" -eq 0 ] && CUTOFF=$NOW
         echo "sweeper: db=$DB max_etimes=$MAX_ETIMES cutoff=$CUTOFF now=$NOW dry=$DRY"
 
+        # The abort text names the restart that orphaned the row and says the
+        # sweeper did not stop the turn. The old text ("in-flight row predates
+        # all live serves, silent >30min") was read as "the sweeper killed a
+        # turn for being silent 30 min" (2026-11-22, a session whose turn and
+        # subagent died in the 08:00Z nightly reset and were labelled at
+        # 08:30Z), and workers began backgrounding long steps to dodge a
+        # timeout that never applies to a live serve's turn. Keep the
+        # "Aborted (phantom-busy sweeper" prefix: stall-watch matches on it.
+        # The interpolated text is digits, letters, ':', '-', spaces; no quote
+        # can reach the SQL or JSON below.
+        if [ "$MAX_ETIMES" -eq 0 ]; then
+          CAUSE="no pool serve is running, so the serve that ran this turn is gone"
+        else
+          CAUSE="the serve that ran this turn stopped before $(date -u -d "@$CUTOFF" +%Y-%m-%dT%H:%M:%SZ), when the oldest live serve booted"
+        fi
+        LABEL="Aborted (phantom-busy sweeper: $CAUSE; this labels the orphaned row 30+ min later, it did not stop the turn)"
+
         # PHASE 1 — find candidates on a READ-ONLY connection.
         #
         # The scan was never the problem; holding the WAL write lock while doing
@@ -1851,7 +1868,7 @@ down and its silence means nothing. This host has no second leg.
           if got=$(sqlite3 -init /dev/null -list -noheader -cmd ".timeout 10000" "$DB" "
             UPDATE message SET data = json_set(data,
                 '\$.time.completed', CAST(strftime('%s','now') AS INTEGER)*1000,
-                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"Aborted (phantom-busy sweeper: in-flight row predates all live serves, silent >30min)\"}}'))
+                '\$.error', json('{\"name\":\"MessageAbortedError\",\"data\":{\"message\":\"$LABEL\"}}'))
             WHERE id IN ($chunk)
               AND json_extract(data, '\$.role') = 'assistant'
               AND json_extract(data, '\$.time.completed') IS NULL

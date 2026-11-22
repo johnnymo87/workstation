@@ -98,6 +98,16 @@ incident. If serves are live and you are running this by hand, add the gate.
 The 30-min gate leaves headroom for long silent tool calls; a false positive
 self-heals (the owning serve's completion write lands last).
 
+**A sweeper abort is a post-mortem, not the cause of death.** The boot-time
+gate means it never finalizes a row that a live serve created, however long
+that turn has been silent. A row it labels was orphaned when its serve stopped,
+usually by the nightly reset, sometimes by a canary restart, OOM or deploy.
+Look for the cause at the serve restart, not at the sweep 30+ minutes later.
+Long tool calls do not need to be backgrounded to avoid the sweeper. Measured
+2026-11-22 (bead `workstation-yvxh.16`): every devbox sweep in 31 days (138
+rows) traces to a pool restart, and 0 of 129 swept rows got a part written
+after the sweep.
+
 Both timers additionally gate on the oldest live serve's boot time and support
 `--dry-run`; prefer running the shipped unit over hand-SQL. Tests:
 `hosts/cloudbox/test-phantom-busy-sweeper.sh` and
