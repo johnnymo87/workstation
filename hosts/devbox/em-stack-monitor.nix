@@ -11,6 +11,8 @@
 #   - GET :4002/v1/sessions/<sid>/status: a GM halt unanswered for 20+ min;
 #   - GET :4400/em/quiescence: a quarantined agent, and one-off events
 #     (child_restart_failed, flapping recoveries).
+#   - ~/.config/teamclaude.state.json (never teamclaude.json, the credentials):
+#     every model account spent, so no agent can act (EM bead a8gw1).
 # Problems go to #em-alerts in the devbox Slack workspace through the em-alerts
 # app's incoming webhook (em-alerts.nix), one message per pass. A standing problem set is
 # announced once, repeated every 6 h, and followed by "resolved" when it clears;
@@ -62,6 +64,8 @@ let
       EM_STACK_RUNBOOK = "eternal-machinery docs/runbooks/stack-health.md";
       EM_STACK_REMIND_H = "6";
       EM_STACK_GM_MIN = "20";
+      EM_STACK_QUOTA_FILE = "/home/dev/.config/teamclaude.state.json";
+      EM_STACK_QUOTA_FULL = "0.97";
       XDG_RUNTIME_DIR = "/run/user/${uid}";
     } // config.devbox.emAlerts.env // extraEnv;
     serviceConfig = {

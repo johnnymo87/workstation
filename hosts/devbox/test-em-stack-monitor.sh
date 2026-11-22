@@ -46,6 +46,10 @@ EOF
   printf '#!%s\n[ ! -e "%s/nostack" ]\n' "$bash_bin" "$S" >"$S/gate"
   printf '#!%s\ncat "%s/mode" 2>/dev/null || true\n' "$bash_bin" "$S" >"$S/mode_cmd"
   printf '#!%s\ncat "%s/health"\n' "$bash_bin" "$S" >"$S/health_cmd"
+  # teamclaude's state: none here (exit 3) unless a case writes $S/quota;
+  # $S/quota_bad makes it unreadable.
+  printf '#!%s\n[ ! -e "%s/quota_bad" ] || exit 1\n[ -e "%s/quota" ] || exit 3\ncat "%s/quota"\n' \
+    "$bash_bin" "$S" "$S" "$S" >"$S/quota_cmd"
   # Slack stub: fails (records nothing) while tg_down exists.
   cat >"$S/tg_cmd" <<EOF
 #!$bash_bin
@@ -53,9 +57,10 @@ if [ -e "$S/tg_down" ]; then cat >/dev/null; exit 7; fi
 n=\$(ls "$S/tg" | wc -l)
 cat >"$S/tg/\$n"
 EOF
-  chmod +x "$S/fetch" "$S/gate" "$S/mode_cmd" "$S/health_cmd" "$S/tg_cmd"
+  chmod +x "$S/fetch" "$S/gate" "$S/mode_cmd" "$S/health_cmd" "$S/tg_cmd" "$S/quota_cmd"
   export EM_STACK_FETCH_CMD=$S/fetch EM_STACK_GATE_CMD=$S/gate EM_STACK_MODE_CMD=$S/mode_cmd \
-         EM_STACK_HEALTH_CMD=$S/health_cmd EM_STACK_SLACK_CMD=$S/tg_cmd
+         EM_STACK_HEALTH_CMD=$S/health_cmd EM_STACK_SLACK_CMD=$S/tg_cmd EM_STACK_QUOTA_CMD=$S/quota_cmd
+  unset EM_STACK_QUOTA_FULL
   echo manual-live >"$S/mode"
   cat "$fx/stack-health.txt" >"$S/health"
   serve 4002_v1_presence 200 "$fx/presence.json"
@@ -221,8 +226,10 @@ check "idle close, nobody plays, more than an hour old: nothing" '[ "$(tgn)" -eq
 setup
 serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
 run; at 600; run
-check "idle close while an agent plays: a problem" \
-  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$m" && grep -q "session jonathan is offline" <<<"$m"'
+check "idle close while an agent plays: an event naming when the agent last acted (a8gw1)" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: event" <<<"$m" && ! grep -q "problem" <<<"$m" && grep -q "the game logged out the idle character at 2027-01-15T07:59:00Z, 62 min after its agent last acted (2027-01-15T06:57Z)" <<<"$m"'
+check "idle close while an agent plays, quota fine: the agent stopped, not the stack" \
+  'grep -q "The agent stopped acting while the stack stayed up" <<<"$(tglast)" && [ "$(st ".keys | length")" = 0 ]'
 setup
 serve_jq 4002_v1_presence presence.json "$idle_close | del(.presence.jonathan.agent_driven)" --arg at 2027-01-15T07:59:00Z
 run; at 600; run
@@ -585,6 +592,58 @@ touch "$S/tg_down"; mkhealth "postgres FAIL refused"; prun; at 600; prun
 check "dead-man ping: /fail when delivery fails" '[ "$rc" -ne 0 ] && grep -q "ping/abc/fail" "$S/curl.in" && [ "$(grep -c "ping/abc/fail" "$S/curl.in")" -eq 1 ]'
 setup; fake_curl; prun
 check "no hc_ping_url credential: no ping at all" '[ ! -e "$S/curl.args" ]'
+
+# 13. Model quota (eternal-machinery a8gw1). teamclaude's state file, shaped as
+# the live one (2026-11-22): reset times are epoch milliseconds.
+mkquota() { # each arg: "name u7 reset7_offset_s" (offset from T0; "-" = null)
+  local acc=() n u r
+  for a in "$@"; do
+    read -r n u r <<<"$a"
+    if [ "$r" = - ]; then r=null; else r=$(( (T0 + r) * 1000 )); fi
+    acc+=("{\"name\":\"$n@example.invalid\",\"quota\":{\"unified5h\":0,\"unified5hReset\":null,\"unified7d\":$u,\"unified7dReset\":$r}}")
+  done
+  local IFS=,; printf '{"clients":{},"quota":[%s]}\n' "${acc[*]}" >"$S/quota"
+}
+setup; mkquota "a 0.98 86400" "b 0.99 18000" "c 0.98 3600"; run
+check "quota: every account spent, first pass quiet (debounced)" '[ "$(tgn)" -eq 0 ] && [ "$(pend quota:pool)" = 1 ]'
+at 600; run
+check "quota: alerts on the second pass, naming the first account back and when" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: problem" <<<"$m" && grep -q "model quota is spent on all 3 teamclaude accounts, so no agent can act; the first back is c at 2027-01-15T09:00Z" <<<"$m" && ! grep -q "example.invalid" <<<"$m"'
+touch "$S/quota_bad"; at 1200; run
+check "quota: an unreadable state carries the key, no resolved" '[ "$(tgn)" -eq 1 ] && [ "$(st ".keys | index(\"quota:pool\") != null")" = true ]'
+rm "$S/quota_bad"; mkquota "a 0.98 86400" "b 0.99 18000" "c 0.06 604800"; at 1800; run
+check "quota: one account back clears it with resolved" '[ "$(tgn)" -eq 2 ] && grep -q "resolved" <<<"$(tglast)"'
+setup; mkquota "a 0.98 86400" "b 0.99 -1"; run; at 600; run
+check "quota: a reset already past is a usable account (stale number)" '[ "$(tgn)" -eq 0 ]'
+setup; mkquota "a 0.98 86400" "b 0.99 -"; run; at 600; run
+check "quota: an unknown reset is not counted spent" '[ "$(tgn)" -eq 0 ]'
+setup; mkquota "a 0.5 86400"; export EM_STACK_QUOTA_FULL=0.4; run; at 600; run
+check "quota: EM_STACK_QUOTA_FULL sets the line" '[ "$(tgn)" -eq 1 ] && grep -q "all 1 teamclaude" <<<"$(tglast)"'
+setup; run; at 600; run
+check "quota: no teamclaude state here, nothing said" '[ "$(tgn)" -eq 0 ]'
+
+# 13b. The idle logout during a quota outage says so (the 1122a afternoon).
+setup; mkquota "a 0.98 86400" "b 0.99 18000"
+serve_jq 4002_v1_presence presence.json "$idle_close | .presence.jonathan.agent_driven = true" --arg at 2027-01-15T07:59:00Z
+run
+check "idle close during a quota outage: an event blaming the quota, not the stack" \
+  'm=$(tglast); [ "$(tgn)" -eq 1 ] && grep -q "^EM stack: event" <<<"$m" && grep -q "Model quota is spent on every account, so the agent could not act; the stack is fine" <<<"$m"'
+
+# 14. The footer says how far the checkout trails origin/main (a8gw1).
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+check "footer: no origin/main, staleness unknown" 'grep -q "@ $head_sha, the running stack.s checkout: how far it trails origin/main is unknown" <<<"$(tglast)"'
+git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m y
+git -C "$repo" update-ref refs/remotes/origin/main HEAD
+git -C "$repo" update-ref refs/remotes/origin/main "$(git -C "$repo" -c user.name=t -c user.email=t@example.invalid commit-tree -p HEAD -m z "$(git -C "$repo" rev-parse HEAD^{tree})")"
+git -C "$repo" reset -q --hard HEAD~1
+head_sha=$(git -C "$repo" rev-parse --short HEAD)
+touch -d @1799990000 "$repo/.git/FETCH_HEAD"
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+check "footer: commits behind origin/main as of the last fetch" \
+  'grep -q "@ $head_sha, the running stack.s checkout: 2 commits behind origin/main as of its last fetch, 2027-01-15T05:13Z" <<<"$(tglast)"'
+git -C "$repo" update-ref refs/remotes/origin/main HEAD
+setup; mkhealth "postgres FAIL refused"; run; at 600; run
+check "footer: level with origin/main" 'grep -q "checkout: level with origin/main as of its last fetch" <<<"$(tglast)"'
 
 [ "$fail" -eq 0 ] || { echo "FAILED $fail"; exit 1; }
 echo "ALL PASS ($pass assertions)"
