@@ -1,0 +1,90 @@
+# Opens the goose pin PR when the johnnymo87/goose fork publishes a newer complete
+# patched release (upgrade lane, workstation-6w7i.27, L1 .27.4). The fork watcher tags
+# patched-X.Y.Z.N; patched-release.yml publishes the assets; this polls for them (no
+# cross-repo dispatch token).
+#
+# Unlike update-opencode-patched.yml this NEVER merges: a goose-upgrade PR is merged only
+# by goose-cutover (pkgs/goose-cutover). One PR per release tag, on its own branch, never
+# force-pushed: a PR labelled goose-cutover-ready must not change head under the probe that
+# passed it. A newer release closes the older auto PR as superseded. While any other open
+# goose-upgrade PR exists (a hand-made pin PR, such as the port's), this stands aside.
+name: Update goose
+
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: update-goose
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/test_update_goose_pin.py
+          gh api 'repos/johnnymo87/goose/releases?per_page=100' > /tmp/releases.json
+          python3 .github/scripts/update-goose-pin.py plan /tmp/releases.json | tee -a "$GITHUB_OUTPUT"
+
+      - name: Open the pin PR
+        if: steps.plan.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          MAJOR: ${{ steps.plan.outputs.major }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+        run: |
+          set -euo pipefail
+          branch="auto/goose-${TAG}"
+
+          others=$(gh pr list --state open --label goose-upgrade --json number,headRefName \
+            -q '[.[] | select(.headRefName | startswith("auto/goose-") | not) | .number] | join(" ")')
+          if [ -n "$others" ]; then
+            echo "Open goose-upgrade PR(s) not opened by this workflow: #${others}. Standing aside."
+            exit 0
+          fi
+          if [ -n "$(gh pr list --state all --head "$branch" --json number -q '.[].number')" ]; then
+            echo "A PR for ${branch} already exists (open, merged or closed); nothing to do."
+            exit 0
+          fi
+
+          mkdir -p /tmp/rel && cd /tmp/rel
+          gh release download "$TAG" -R johnnymo87/goose -p 'goose-*.tar.gz' -p SHA256SUMS
+          sha256sum -c --ignore-missing --strict SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          python3 .github/scripts/update-goose-pin.py rewrite "$TAG" /tmp/rel/SHA256SUMS
+          git diff --stat
+          test -z "$(git status --porcelain | grep -v ' pkgs/goose/default.nix$')"
+
+          git checkout -b "$branch"
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -qam "goose: pin ${TAG}"
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
+
+          labels="goose-upgrade"
+          [ "$MAJOR" = "true" ] && labels="goose-upgrade,goose-major"
+          {
+            echo "Moves the goose pin from \`${CURRENT}\` to [\`${TAG}\`](https://github.com/johnnymo87/goose/releases/tag/${TAG}) (hashes from its SHA256SUMS, verified against the downloaded assets)."
+            echo
+            echo "**Do not merge by hand.** \`goose-upgrade\` PRs are merged only by \`goose-cutover\`, after the upgrade worker runs \`goose-upgrade-probe\` on this head, updates the patch comment in \`pkgs/goose/default.nix\` and labels it \`goose-cutover-ready\`. Worker brief: [docs/fork/UPGRADING.md](https://github.com/johnnymo87/goose/blob/fork-main/docs/fork/UPGRADING.md)."
+            [ "$MAJOR" = "true" ] && echo && echo "This crosses a **major** version: cutover also needs a human-applied \`goose-major-ok\`."
+          } > /tmp/body.md
+          url=$(gh pr create --head "$branch" --base main --title "goose: pin ${TAG}" --body-file /tmp/body.md --label "$labels")
+          echo "Opened $url"
+
+          for n in $(gh pr list --state open --label goose-upgrade --json number,headRefName \
+                       -q ".[] | select(.headRefName | startswith(\"auto/goose-\")) | select(.headRefName != \"${branch}\") | .number"); do
+            gh pr close "$n" --comment "Superseded by ${url}." --delete-branch
+          done
