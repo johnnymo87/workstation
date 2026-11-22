@@ -3,10 +3,10 @@
 
 let
   goose-link = pkgs.callPackage ../pkgs/goose-link { };
-  goose-cutover = pkgs.callPackage ../pkgs/goose-cutover {
-    inherit goose-link;
-  };
   driftAlert = pkgs.callPackage ../pkgs/opencode-drift-alert { };
+  goose-cutover = pkgs.callPackage ../pkgs/goose-cutover {
+    inherit goose-link driftAlert;
+  };
 in
 {
   environment.systemPackages = [ goose-cutover ];
@@ -19,12 +19,22 @@ in
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${goose-cutover}/bin/goose-cutover --run %i";
+      ExecStopPost = "${pkgs.util-linux}/bin/runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 ${pkgs.systemd}/bin/systemctl --user start stall-watch.timer stall-watch-wake.path";
+      WorkingDirectory = "/var/lib/goose-cutover";
       PrivateTmp = false;
       TimeoutStartSec = "5h";
+      TimeoutStopSec = "15min";
       MemoryMax = "8G";
       StateDirectory = "goose-cutover";
     };
   };
+
+  systemd.tmpfiles.rules = [
+    "d /var/lib/goose-cutover 0755 root root - -"
+    "d /var/lib/goose-cutover/gcroots 0755 dev users - -"
+    "d /var/lib/goose-cutover/backups 0755 dev users - -"
+    "d /var/lib/goose-cutover/host-reports 0755 dev users - -"
+  ];
 
   systemd.services.goose-cutover-failed = {
     description = "goose-cutover failure notification";
@@ -41,7 +51,8 @@ in
         FAILED_UNIT=$(systemctl list-units 'goose-cutover@*' --state=failed --no-legend 2>/dev/null | awk '{print $1}' | head -n1)
         [ -z "$FAILED_UNIT" ] && FAILED_UNIT="goose-cutover"
         MSG="$FAILED_UNIT died; state.json phase=$PHASE, goose-serve may need \`goose-cutover deploy --recover\`"
-        ${driftAlert} "/var/lib/goose-cutover/alert-failed.state" "goose-cutover:failed" "$MSG" 0
+        SIG="goose-cutover-failed:$FAILED_UNIT:$(date +%s)"
+        ${driftAlert} "/var/lib/goose-cutover/alert-failed.state" "$SIG" "$MSG" 0
       ''}";
     };
   };
