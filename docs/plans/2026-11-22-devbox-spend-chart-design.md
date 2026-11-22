@@ -43,23 +43,16 @@ the caller.
 
 ## Design (approach A: proxy ledger + attribution header)
 
-### 0. Price devbox's opencode Claude rows (workstation, oc-tags)
+### 0. devbox's dev-session Claude rows are already priced (no change)
 
-On devbox, opencode's `anthropic` provider runs through
-`@ex-machina/opencode-anthropic-auth` in oauth mode, which **zeroes every
-model's cost** ("zero out cost for max plan"; relied on at
-`opencode-config.nix:2576-2580`). oc-tags puts `cost == 0 && tokens > 0` rows in
-the unpriced footer (`oc_tags.py:741-745`). Without a fix the chart would show
-list-priced EM bands beside $0 for the biggest Max consumer, the Opus/Sonnet dev
-sessions — wrong in exactly the direction that matters.
-
-Fix: in `aggregate`, reprice rows with provider `anthropic`, cost 0 and tokens
-present, from the rate table. **Verify on devbox first**: whether opencode's
-`tokens.input` excludes cache read/write (pick the formula from data, not from
-`compute_goose_cost`'s goose semantics), and whether goose's `usage_ledger.cost`
-there is `0.0` rather than NULL — `compute_goose_cost` returns `(0.0, False)`
-for a non-None zero (`oc_tags.py:507-508`), which is silently $0 and not even
-listed as unpriced. Reprice that too if so.
+The first draft assumed devbox's oauth `anthropic` provider zeroes cost, as
+`opencode-config.nix:2576-2580` suggests. Measured on devbox 2026-11-22 (bead
+`workstation-2wtm.4`): it does not. Over 7 days, 44,208 of 46,512 assistant
+messages carry a nonzero cost; the only zeros have no output. goose's
+`usage_ledger.cost` is always populated (`cost_source=estimated`), and
+`session-tags report --days 4` there already totals $3,804. opencode's
+`tokens.input` excludes cache; goose's includes it. The repricing step was
+dropped (`workstation-2wtm.5` closed).
 
 ### 1. Attribution (EM repo)
 
@@ -231,7 +224,7 @@ tags into one band `<prefix>` before ranking. Default stays per-persona/per-suit
   client headers leave `request_hash` and `transport_sha256` unchanged; codex row
   for every returned outcome, no double subtraction; `/health` gate and override.
 - oc-tags: reader fixtures (dedupe, schema warning, pricing, unpriced,
-  proxy_error, shard selection by window, freshness), anthropic $0 repricing,
+  proxy_error, shard selection by window, freshness),
   `fold=`, `which em:…`.
 - devbox: unit active, `curl 127.0.0.1:4710/healthz`; Mac:
   `curl 127.0.0.1:4711/?days=4` renders with EM bands.
