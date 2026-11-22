@@ -158,16 +158,17 @@ let
   #
   # Darwin stays pinned to patched-1.54.0.18 while Linux moves to
   # patched-1.60.2.0 (per-platform pin, bead workstation-6w7i.26.15 moves Mac).
+  version = "1.60.2-patched.0";
+  tag = "patched-1.60.2.0";
+
+  # An entry carrying its own version/tag is held back (update-goose.yml leaves it alone);
+  # the rest follow the top-level pin.
   platforms = {
     "aarch64-linux" = {
-      version = "1.60.2-patched.0";
-      tag = "patched-1.60.2.0";
       asset = "goose-aarch64-unknown-linux-gnu.tar.gz";
       hash = "sha256-S4M3gQyu2LXkW5tuFTcW9Gfr+dGIouK9z4sMRmzT6Ww=";
     };
     "x86_64-linux" = {
-      version = "1.60.2-patched.0";
-      tag = "patched-1.60.2.0";
       asset = "goose-x86_64-unknown-linux-gnu.tar.gz";
       hash = "sha256-kNolPiM/Z22MboxH9V0nfhbqvdbtKhWyWSUb616xSQ4=";
     };
@@ -180,7 +181,8 @@ let
   };
 
   platformInfo =
-    platforms.${stdenv.hostPlatform.system}
+    { inherit version tag; }
+    // platforms.${stdenv.hostPlatform.system}
       or (throw "goose: no pinned release asset for ${stdenv.hostPlatform.system}");
 in
 stdenv.mkDerivation {
