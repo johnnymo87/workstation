@@ -96,6 +96,7 @@
     localPkgsFor = system: let
       p = pkgsFor system;
       goose = p.callPackage ./pkgs/goose { };
+      goose-link = p.callPackage ./pkgs/goose-link { };
       ro-shell = p.callPackage ./pkgs/ro-shell { };
       cfp = p.callPackage ./pkgs/claude-failover-proxy { };
     in {
@@ -149,6 +150,10 @@
       goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
       goose-tool-shell = p.callPackage ./pkgs/goose-tool-shell { };
       goose-link = p.callPackage ./pkgs/goose-link { };
+      goose-cutover = p.callPackage ./pkgs/goose-cutover {
+        inherit goose-link;
+        driftAlert = p.callPackage ./pkgs/opencode-drift-alert { };
+      };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -2252,6 +2257,23 @@
         bash ${self}/pkgs/goose-link/test.sh | tee "$TMPDIR/out.txt"
         grep -q '^goose-link: 41 passed, 0 failed$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: expected 41 goose-link assertions." >&2; exit 1; }
+        touch $out
+      '';
+
+      # L3a (workstation-6w7i.27.3): goose-cutover unit tests.
+      goose-cutover = devboxPkgs.runCommand "goose-cutover-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        python3 pkgs/goose-cutover/test_goose_cutover.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q 'Ran 71 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected pinned 71 goose-cutover tests." >&2
+          exit 1
+        }
+        grep -q 'OK' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: goose-cutover suite did not pass with OK." >&2
+          exit 1
+        }
         touch $out
       '';
 

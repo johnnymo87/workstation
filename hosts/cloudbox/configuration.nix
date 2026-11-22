@@ -188,6 +188,10 @@ let
     (builtins.readFile ../../pkgs/hm-deploy-canary-sh/canary.sh);
 in
 {
+  imports = [
+    ../../modules/goose-cutover.nix
+  ];
+
   # Guard: abort activation if applying the wrong host's config.
   # Devbox and cloudbox share arch and user — applying the wrong flake target
   # overwrites system identity, secrets paths, and service configs.
