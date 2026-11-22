@@ -94,6 +94,10 @@ let
   gooseConfigSettings = {
     GOOSE_SUBAGENT_ROLES_DIR = "${config.home.homeDirectory}/${gooseRolesDeployPath}/roles";
     GOOSE_SUBAGENT_DEFAULT_RECIPE = "${config.home.homeDirectory}/${gooseRolesDeployPath}/unscoped.yaml";
+    # Upstream 1.60 defaults auto-compact to 225k tokens (min(0.8, limit/context)).
+    # Preserve 1.54 behaviour (0.8 x 1M = 800k on Opus 1M) for long sessions.
+    # Inert on 1.54 (which read GOOSE_AUTO_COMPACT_THRESHOLD instead).
+    GOOSE_AUTO_COMPACT_TOKEN_LIMIT = "800000";
   } // lib.optionalAttrs isCloudbox {
     # Every goose here that is NOT goose-serve (the interactive CLI, honk's
     # sandbox serve) reads these from config.yaml. Without the Gemini host the
@@ -206,7 +210,8 @@ lib.mkIf isGooseHost {
       johnnymo87/goose#9); GOOSE_SUBAGENT_ROLES_DIR points at five generated role
       recipes (pkgs/goose-roles) scanned first so repo files cannot shadow them;
       GOOSE_SUBAGENT_DEFAULT_RECIPE gives delegates with no role the read-only set
-      (developer limited to tree/read_image, analyze, skills, ro-shell), failing
+      (developer limited to tree/read_image, analyze, ro-shell; on goose 1.54 also
+      skills, which R16 drops on 1.60+ where skills is built-in), failing
       closed; both keys are also enforced by goose-config-enforce on every switch;
       needs goose >= .10 (older binaries ignore the keys); pigeon and the lane name
       their own extensions and are unaffected.

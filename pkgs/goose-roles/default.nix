@@ -20,15 +20,17 @@
 # anthropic via cfp-shaper -> TeamClaude, so users/dev/goose-roles.nix overrides
 # this to "anthropic" there. The model ids are the same bare claude-* names on
 # both providers.
+#
+# TODO: remove skills platform extension from role recipes and unscoped.yaml in
+# the A10 PR (bead workstation-6w7i.26.15) once every goose host is >= 1.60.
+# While /var/lib/goose/current still runs 1.54 on NixOS hosts, roles must keep
+# declaring skills so still-running 1.54 delegates keep skills; goose 1.60
+# validates recipes with unknown platform extensions cleanly and R16 drops them.
 { lib, runCommand, python3, ro-shell, goose, agentsDir,
   provider ? "gcp_vertex_ai",
   opusModel ? "claude-opus-5-5",
-  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-opus-5-5"),
-  includeSkills ? (lib.versionOlder goose.version "1.60") }:
+  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-opus-5-5") }:
 
-let
-  skillsFlag = if includeSkills then "--include-skills" else "--no-skills";
-in
 runCommand "goose-roles" {
   nativeBuildInputs = [ (python3.withPackages (ps: [ ps.pyyaml ])) goose ];
   meta = {
@@ -37,7 +39,7 @@ runCommand "goose-roles" {
 } ''
   python3 ${./gen_goose_roles.py} --agents-dir ${agentsDir} --out $out \
     --ro-shell-cmd ${ro-shell}/bin/ro-shell --provider ${provider} \
-    --opus-model ${opusModel} --sonnet-model ${sonnetModel} ${skillsFlag}
+    --opus-model ${opusModel} --sonnet-model ${sonnetModel}
   export HOME=$TMPDIR GOOSE_DISABLE_KEYRING=true
   for f in $out/roles/*.yaml $out/unscoped.yaml; do
     goose recipe validate "$f" || { echo "goose-roles: $f failed goose recipe validate" >&2; exit 1; }

@@ -56,16 +56,12 @@ class GenTest(unittest.TestCase):
         self.assertIn("read-only", r["instructions"])
         self.assertIn("throwaway repos you create under $TMPDIR (your private scratch dir) are unrestricted, except pushing to non-local remotes", r["instructions"])
         self.assertIn("environment limitation, not as a test failure", r["instructions"])
-        r160 = g.build_role("oracle", RO, include_skills=False, **KW)
-        self.assertEqual(set(e["name"] for e in r160["extensions"]), {"developer", "analyze", "ro-shell"})
 
     def test_implementer_role(self):
         r = g.build_role("implementer", RW, **KW)
         exts = {e["name"]: e for e in r["extensions"]}
         self.assertEqual(set(exts), {"developer", "analyze", "skills"})
         self.assertNotIn("available_tools", exts["developer"])
-        r160 = g.build_role("implementer", RW, include_skills=False, **KW)
-        self.assertEqual(set(e["name"] for e in r160["extensions"]), {"developer", "analyze"})
 
     def test_max_turns_per_role(self):
         # goose's subagent default is 25 turns; every real SDD run on 2026-11-16 took more.
@@ -114,37 +110,23 @@ class GenTest(unittest.TestCase):
     def test_unscoped_recipe_is_read_only_set(self):
         u = g.build_unscoped(KW["ro_shell_cmd"])
         self.assertEqual(sorted(e["name"] for e in u["extensions"]), ["analyze", "developer", "ro-shell", "skills"])
-        u160 = g.build_unscoped(KW["ro_shell_cmd"], include_skills=False)
-        self.assertEqual(sorted(e["name"] for e in u160["extensions"]), ["analyze", "developer", "ro-shell"])
 
     def test_real_assets(self):
         agents = os.environ.get("GOOSE_ROLES_AGENTS_DIR")
         if not agents:
             self.skipTest("set GOOSE_ROLES_AGENTS_DIR")
-        for inc_skills in (True, False):
-            out = tempfile.mkdtemp()
-            g.generate(agents, out, g.ROLES, include_skills=inc_skills, **KW)
-            files = sorted(os.listdir(os.path.join(out, "roles")))
-            self.assertEqual(files, sorted(f"{r}.yaml" for r in g.ROLES))
-            for role in g.ROLES:
-                with open(os.path.join(out, "roles", f"{role}.yaml")) as fh:
-                    r = yaml.safe_load(fh)
-                ext_names = [e["name"] for e in r["extensions"]]
-                ro = "ro-shell" in ext_names
-                self.assertEqual(ro, role != "implementer", role)
-                self.assertEqual(r["settings"]["max_turns"], 80 if ro else 250, role)
-                self.assertEqual(r["settings"]["thinking_effort"], "high", role)
-                if inc_skills:
-                    self.assertIn("skills", ext_names)
-                else:
-                    self.assertNotIn("skills", ext_names)
-            with open(os.path.join(out, "unscoped.yaml")) as fh:
-                u = yaml.safe_load(fh)
-            u_exts = [e["name"] for e in u["extensions"]]
-            if inc_skills:
-                self.assertIn("skills", u_exts)
-            else:
-                self.assertNotIn("skills", u_exts)
+        out = tempfile.mkdtemp()
+        g.generate(agents, out, g.ROLES, **KW)
+        files = sorted(os.listdir(os.path.join(out, "roles")))
+        self.assertEqual(files, sorted(f"{r}.yaml" for r in g.ROLES))
+        for role in g.ROLES:
+            with open(os.path.join(out, "roles", f"{role}.yaml")) as fh:
+                r = yaml.safe_load(fh)
+            ro = "ro-shell" in [e["name"] for e in r["extensions"]]
+            self.assertEqual(ro, role != "implementer", role)
+            self.assertEqual(r["settings"]["max_turns"], 80 if ro else 250, role)
+            self.assertEqual(r["settings"]["thinking_effort"], "high", role)
+        self.assertTrue(os.path.isfile(os.path.join(out, "unscoped.yaml")))
 
     def test_unreachable_provider_rejected(self):
         # The recipe provider outranks every fallback, so a typo must fail the build.
@@ -185,11 +167,6 @@ class GenTest(unittest.TestCase):
                     with open(os.path.join(roles_dir, f"{role}.yaml")) as fh:
                         r = yaml.safe_load(fh)
                     self.assertEqual(r["settings"]["goose_provider"], provider)
-                    ext_names = [e["name"] for e in r["extensions"]]
-                    self.assertNotIn("skills", ext_names)
-            with open(os.path.join(os.environ[var], "unscoped.yaml")) as fh:
-                u = yaml.safe_load(fh)
-            self.assertNotIn("skills", [e["name"] for e in u["extensions"]])
 
 
 if __name__ == "__main__":

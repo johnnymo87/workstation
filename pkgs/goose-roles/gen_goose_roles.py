@@ -100,25 +100,19 @@ def clean_description(desc):
     return d
 
 
-def ro_extensions(ro_shell_cmd, include_skills=True):
-    exts = [
+def ro_extensions(ro_shell_cmd):
+    return [
         {"type": "platform", "name": "developer", "available_tools": ["tree", "read_image"]},
         {"type": "platform", "name": "analyze"},
+        {"type": "platform", "name": "skills"},
+        # timeout: 600 matches ro_shell.py MAX_TIMEOUT=540 (gives 60s headroom for clean timeout)
+        {"type": "stdio", "name": "ro-shell", "cmd": ro_shell_cmd, "args": [], "timeout": 600,
+         "description": "Read-only shell", "available_tools": ["shell"]},
     ]
-    if include_skills:
-        exts.append({"type": "platform", "name": "skills"})
-    exts.append({
-        "type": "stdio", "name": "ro-shell", "cmd": ro_shell_cmd, "args": [], "timeout": 600,
-        "description": "Read-only shell", "available_tools": ["shell"],
-    })
-    return exts
 
 
-def rw_extensions(include_skills=True):
-    names = ["developer", "analyze"]
-    if include_skills:
-        names.append("skills")
-    return [{"type": "platform", "name": n} for n in names]
+def rw_extensions():
+    return [{"type": "platform", "name": n} for n in ("developer", "analyze", "skills")]
 
 
 def _assert_extensions(exts):
@@ -129,13 +123,13 @@ def _assert_extensions(exts):
             raise GenError("roles must not get summon")
 
 
-def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model, include_skills=True):
+def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model):
     fm, body = split_frontmatter(text)
     for tok in ("{{", "{%", "{#"):
         if tok in body:
             raise GenError(f"{role}: body contains template syntax {tok!r}")
     ro = is_read_only(fm)
-    exts = ro_extensions(ro_shell_cmd, include_skills=include_skills) if ro else rw_extensions(include_skills=include_skills)
+    exts = ro_extensions(ro_shell_cmd) if ro else rw_extensions()
     _assert_extensions(exts)
     return {
         "version": "1.0.0",
@@ -150,8 +144,8 @@ def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model, 
     }
 
 
-def build_unscoped(ro_shell_cmd, include_skills=True):
-    exts = ro_extensions(ro_shell_cmd, include_skills=include_skills)
+def build_unscoped(ro_shell_cmd):
+    exts = ro_extensions(ro_shell_cmd)
     _assert_extensions(exts)
     return {
         "version": "1.0.0",
@@ -173,7 +167,7 @@ def generate(agents_dir, out_dir, roles, **kw):
         with open(os.path.join(agents_dir, f"{role}.md")) as fh:
             recipe = build_role(role, fh.read(), **kw)
         _dump(recipe, os.path.join(out_dir, "roles", f"{role}.yaml"))
-    _dump(build_unscoped(kw["ro_shell_cmd"], include_skills=kw.get("include_skills", True)), os.path.join(out_dir, "unscoped.yaml"))
+    _dump(build_unscoped(kw["ro_shell_cmd"]), os.path.join(out_dir, "unscoped.yaml"))
 
 
 def main():
@@ -186,14 +180,10 @@ def main():
     p.add_argument("--provider", default="gcp_vertex_ai", choices=["gcp_vertex_ai", "anthropic"])
     p.add_argument("--opus-model", required=True)
     p.add_argument("--sonnet-model", required=True)
-    p.add_argument("--include-skills", dest="include_skills", action="store_true", default=True,
-                   help="Include skills platform extension (for goose < 1.60)")
-    p.add_argument("--no-skills", dest="include_skills", action="store_false",
-                   help="Omit skills platform extension (for goose >= 1.60)")
     a = p.parse_args()
     try:
         generate(a.agents_dir, a.out, ROLES, ro_shell_cmd=a.ro_shell_cmd, provider=a.provider,
-                 opus_model=a.opus_model, sonnet_model=a.sonnet_model, include_skills=a.include_skills)
+                 opus_model=a.opus_model, sonnet_model=a.sonnet_model)
     except GenError as e:
         sys.exit(f"gen_goose_roles: {e}")
 

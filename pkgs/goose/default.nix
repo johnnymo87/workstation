@@ -5,7 +5,9 @@
 # This is the PIN: what the next cutover approves. On the NixOS hosts nothing
 # runs it directly; goose-serve and the user's `goose` both exec
 # /var/lib/goose/current, which only goose-link moves (L6,
-# modules/goose-current.nix), so merging a bump here changes no running goose.
+# modules/goose-current.nix), so merging a bump here changes no running goose
+# binary on NixOS hosts (config files do change on the next home-manager switch
+# after merge).
 # One binary,
 # because the serve and the CLI share ~/.local/share/goose/sessions/sessions.db,
 # and a version gap between two writers of that DB is how a stale-schema panic
@@ -37,7 +39,8 @@
 #      and ends with stopReason `max_turn_requests` (R9, commits 9701f2b4b, 80ed74c8c).
 #  11. self_compact_and_resume: an agent compacts its own context and continues
 #      the same run with a resume prompt it wrote. Rewritten as a state-machine
-#      Operation (R11, commit 8feb5d158).
+#      Operation (R11, commit 8feb5d158); GOOSE_SELF_COMPACT=false still read
+#      to opt out; never offered to recipe sessions or subagents.
 #  12. Rolling memory (off unless configured per session or by env): folds
 #      older history into a first-person memory at turn start. Rewritten as a
 #      pre-inference Operation (R12, commits f03cbbe2d, e2b5080dd).
@@ -59,14 +62,17 @@
 #      session id (commit 908a0a75b).
 #  20. The system prompt stays fixed after session start. Subdirectory AGENTS.md
 #      hints are delivered once in tool responses rather than rewriting the
-#      system prompt, preserving cache; re-queued if dropped (R20, commit ab13c5fff).
+#      system prompt, preserving cache; if compaction drops earlier tool results,
+#      a hint returns with the first call into its directory (R20, commit ab13c5fff).
 #  21. session/prompt accepts _meta.goose.messageId and stores the user message
 #      under it; _goose/unstable/session/conversation/truncate_from_message
 #      deletes that message and later history, refused while run active; clears
 #      stale context usage (R21, commits 99841a02c, b85106c4d). Used for /undo.
 #  22. Cache-miss breaker for Gemini delegates on the state machine: 10
 #      consecutive model calls at >=50K prompt tokens with zero cache reads stop
-#      the delegate with guidance to re-dispatch (R22, commits 573cf9377, d21fa7b08).
+#      the delegate with guidance to re-dispatch (R22, commits 573cf9377, d21fa7b08);
+#      GOOSE_CACHE_MISS_BREAKER=off disables it, and GOOSE_CACHE_MISS_BREAKER_STEPS
+#      and _MIN_CONTEXT knobs are still read.
 #  23. A recipe's settings.thinking_effort (off|low|medium|high|max) overrides
 #      the effort a delegate would inherit from its lead session (commit a31606546).
 #  25. Claude thinking streams as it is generated: Anthropic SSE parser yields
@@ -85,6 +91,16 @@
 #      the state machine (inference drains provider stream before tools run).
 #  24. thinking.display="summarized" backport: absorbed by upstream #13029 (commit
 #      e970eea8a, in v1.57.0+).
+#
+# AUTO-COMPACT TOKEN LIMIT DECISION:
+#   Upstream v1.60.2 introduced DEFAULT_AUTO_COMPACT_TOKEN_LIMIT = 225,000 (#12790),
+#   capping auto-compaction threshold at min(0.8, GOOSE_AUTO_COMPACT_TOKEN_LIMIT/limit).
+#   For 1M context models (Opus 5.5), 1.54 compacted at 0.8 * 1M = 800k tokens; 225k
+#   would compact ~3.5x earlier for long sessions. 1.54 does not read
+#   GOOSE_AUTO_COMPACT_TOKEN_LIMIT (it read GOOSE_AUTO_COMPACT_THRESHOLD instead).
+#   To preserve 1.54 behaviour, GOOSE_AUTO_COMPACT_TOKEN_LIMIT = "800000" is set in
+#   gooseConfigSettings in users/dev/goose-config.nix (enforced in ~/.config/goose/config.yaml
+#   for CLI and serve across all hosts) and in goose-serve Environment.
 #
 # WHY A PINNED RELEASE AND NO AUTO-BUMP. The pigeon goose runner depends on
 # measured facts about the ACP server: the /acp path, ?token= auth, the

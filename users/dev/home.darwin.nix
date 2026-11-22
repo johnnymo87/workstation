@@ -530,6 +530,9 @@ lib.mkIf isDarwin {
           # Thinking parity with opencode's SDD agents (bead workstation-6w7i.18;
           # rationale in hosts/cloudbox). Serve-wide, not in config.yaml.
           GOOSE_THINKING_EFFORT = "high";
+          # Preserve 1.54 auto-compact threshold (0.8 * 1M context = 800k tokens on Opus)
+          # instead of 1.60's default 225k limit. Inert on 1.54.
+          GOOSE_AUTO_COMPACT_TOKEN_LIMIT = "800000";
           GCP_AUTH_SCOPES = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email";
           # Tool shells: no editor or pager can hang an unattended turn.
           GIT_EDITOR = ":";
