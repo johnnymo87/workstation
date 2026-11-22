@@ -153,6 +153,14 @@ def neutralize_recipe_json(raw: str | None) -> str | None:
     return json.dumps(d)
 
 
+def fixture_versions(doc: dict) -> set:
+    """goose versions a rendered-surface fixture approves: L8's {"versions": {...}} map, or the
+    legacy single entry's goose_version."""
+    if isinstance(doc.get("versions"), dict):
+        return set(doc["versions"])
+    return {doc["goose_version"]} if doc.get("goose_version") else set()
+
+
 def is_settled(last_role: str, last_content_json: str) -> bool:
     """A conversation that ended on assistant text: nothing pending for load to resume."""
     if last_role != "assistant":
@@ -859,13 +867,16 @@ class Probe:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             log = self.logs / "honk.log"
-            rc, out = self._cargo(wt, ["build", "-p", "honkd"], {}, 3600, log)
+            rc, out = self._cargo(wt, ["build", "-p", "honkd", "-p", "honk"], {}, 3600, log)
             if rc != 0:
-                raise ProbeError(f"cargo build -p honkd: {tail(out)}")
+                raise ProbeError(f"cargo build -p honkd -p honk: {tail(out)}")
             honkd = CACHE_DIR / "honk-target/debug/honkd"
+            # The suite looks for honk under ./target, which CARGO_TARGET_DIR moves: name both.
+            bins = {"HONK_GOOSE_BIN": self.cand, "HONKD_BIN": str(honkd),
+                    "HONK_BIN": str(CACHE_DIR / "honk-target/debug/honk")}
             if "honk-suite" in self.only:
                 rc, out = self._cargo(wt, ["test", "--workspace", "--no-fail-fast", "--", "--nocapture"],
-                                      {"HONK_GOOSE_BIN": self.cand, "HONKD_BIN": str(honkd)}, 3600, log)
+                                      bins, 3600, log)
                 skips = count_skips(out)
                 ran = sum(int(n) for n in re.findall(r"test result: \w+\. (\d+) passed", out))
                 flaky = []
@@ -876,7 +887,7 @@ class Probe:
                     still = []
                     for args in reruns:
                         rc2, out2 = self._cargo(wt, ["test", *args, "--", "--nocapture"],
-                                                {"HONK_GOOSE_BIN": self.cand, "HONKD_BIN": str(honkd)}, 1800, log)
+                                                bins, 1800, log)
                         skips += count_skips(out2)
                         (flaky if rc2 == 0 else still).append(" ".join(args))
                     if reruns and not still:
@@ -982,7 +993,7 @@ class Probe:
         if not LANE_HOME.is_dir():
             return self.results.failed("rendered-surface", f"lane home {LANE_HOME} missing")
         want = bin_version(self.cand)
-        fixture = json.loads((lanes / SURFACE_FIXTURE).read_text())
+        approved = fixture_versions(json.loads((lanes / SURFACE_FIXTURE).read_text()))
         surf = self.root / "surface.json"
         rc, out = run(["python3", str(lanes / "capture-rendered-surface.py"), "--recipe", str(lanes / SURFACE_RECIPE),
                        "--cwd", str(LANE_HOME), "--params", "repo=food-truck/mono", "--params", "tracker_issue=probe-000"],
@@ -1004,11 +1015,12 @@ class Probe:
                       env=env, cwd=EAP_DIR, timeout=120, log=self.logs / "surface.log")
         if rc != 0:
             return self.results.failed("rendered-surface", f"MISMATCH: {tail(out, 8)} (full report {self.logs}/surface.log)")
-        if fixture.get("goose_version") != want:
-            # The checker only NOTES a version change; for a gate, an unreviewed version is a FAIL.
+        if want not in approved:
+            # Belt and braces: the per-version checker (L8) already refuses an unblessed version;
+            # a legacy single-entry fixture only NOTED a version change.
             return self.results.failed("rendered-surface",
-                                       f"content matches but the fixture is approved for goose {fixture.get('goose_version')!r}, "
-                                       f"not {want!r}: re-approve it in eng-agent-platform (C3/L8) first")
+                                       f"content matches but the fixture has no entry approved for goose {want!r} "
+                                       f"(approved: {sorted(approved)}): bless it in eng-agent-platform first")
         self.results.passed("rendered-surface", f"maven-renovate surface matches the fixture approved for {want}")
 
     def check_rollback(self):

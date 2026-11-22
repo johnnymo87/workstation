@@ -150,15 +150,12 @@ Every check is either PASS or FAIL, and a check that did not run counts as a FAI
     something; an empty one only has to load.
   - One `run_honk` turn goes through the SAME isolated honkd that served the candidate,
     so honkd survives the switch.
-- **rendered-surface** (maven-renovate only; the dependabot recipes are out of scope).
-  - The capture must report the candidate's version, or the PATH is wrong.
-  - The checker must exit 0.
-  - The fixture's `goose_version` must equal the candidate's. The checker only *notes* a
-    version change, but for a gate an unapproved version is a FAIL. So a 1.60 candidate
-    FAILs here until C3 (eng-agent-platform) re-approves the fixture for 1.60.
-  - A self-test of .18 passes against today's fixture. After C3 it will not, until L8
-    keys the fixture by version. **L8 must update this check** to select its entry by
-    version.
+- **rendered-surface** (maven-renovate only; the dependabot recipes are out of scope). The
+  capture must report the candidate's version, so a wrong PATH is caught. The checker must
+  exit 0, and the fixture must have an entry approved for that version. L8
+  (eng-agent-platform#461) already keys the fixture by version, so it judges by that entry
+  and refuses a version it has none for. The probe checks this independently anyway. So a
+  1.60 candidate FAILs here until someone blesses a 1.60 entry (C3). It never blesses one.
 - **production-untouched** reads production's `max(schema_version)` read-only before and
   after the run. Any change is a FAIL.
 - **stall-watch** calls `run_honk`, the production code path, through the isolated
@@ -207,3 +204,24 @@ Every check is either PASS or FAIL, and a check that did not run counts as a FAI
   patched-1.54.0.18 has `CURRENT_SCHEMA_VERSION` 16. A 1.60-based goose
   therefore touched the real DB. This was reported to the planner,
   ses_dff463191ffeT6iVOqbTfqgzUP.
+
+### Hardening after the diff review
+
+- **What the copy's sessions can still start.** Each session's stored recipe is cut down
+  to bundled extensions only, and so is its `extension_data`. Production rows' recipes
+  carry slack, atlassian and ro-shell, so this matters.
+- **Production files are out of reach.** Every probe serve runs with
+  `InaccessiblePaths=` on production's goose data dir and config dir. After each start,
+  the probe checks every open fd in the unit. If any resolves under those dirs, it stops
+  the whole run.
+- **Cleanup when the probe is killed.**
+  - SIGTERM and SIGHUP run the same teardown as a normal exit.
+  - Units carry `RuntimeMaxSec=3h`.
+  - A run lock in `$XDG_RUNTIME_DIR` allows one probe at a time.
+  - Each start cleans up a previous probe's units, worktrees and DB copies.
+- **The rollback replay check is stricter.** The rich session the old binary replays
+  must include `tool_call`, `agent_message_chunk` and `user_message_chunk`.
+- **Which pigeon is tested.** The pigeon probes run at the deployed checkout's HEAD,
+  not origin/main.
+- **`--only` never gates.** A run with `--only` that passes ends with
+  `RESULT PARTIAL` and exits 3.

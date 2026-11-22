@@ -141,6 +141,15 @@ class RecipeJson(unittest.TestCase):
         self.assertEqual(json.loads(probe.neutralize_recipe_json('{"title": "x"}')), {"title": "x"})
 
 
+class FixtureVersions(unittest.TestCase):
+    def test_per_version_map(self):
+        self.assertEqual(probe.fixture_versions({"versions": {"1.54.0": {}, "1.60.2": {}}}), {"1.54.0", "1.60.2"})
+
+    def test_legacy_and_empty(self):
+        self.assertEqual(probe.fixture_versions({"goose_version": "1.54.0"}), {"1.54.0"})
+        self.assertEqual(probe.fixture_versions({}), set())
+
+
 class Settled(unittest.TestCase):
     def test_assistant_text_is_settled(self):
         self.assertTrue(probe.is_settled("assistant", json.dumps([{"type": "text", "text": "hi"}])))
