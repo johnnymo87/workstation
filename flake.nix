@@ -166,6 +166,8 @@
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       oc-tags = p.callPackage ./pkgs/oc-tags { };
       worker-scorecard = p.callPackage ./pkgs/worker-scorecard { };
+      # The honk rev the probe tests is the honk this flake deploys.
+      goose-upgrade-probe = p.callPackage ./pkgs/goose-upgrade-probe { honkRev = honk.rev; };
       oc-throwaway-serve = p.callPackage ./pkgs/oc-throwaway-serve { };
       opencode-frontdoor = p.callPackage ./pkgs/opencode-frontdoor { };
       # NOTE: `opencode-frontdoor-route-gate` is deliberately NOT exposed here.
@@ -1656,6 +1658,26 @@
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: worker-scorecard suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # goose-upgrade-probe (bead workstation-6w7i.27.1): the pure parts whose failure would
+      # be a false green (skip counting, result aggregation, isolation guards). Count PINNED.
+      goose-upgrade-probe-tests = devboxPkgs.runCommand "goose-upgrade-probe-tests" {
+        nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.pyyaml ps.websockets ])) ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        python3 pkgs/goose-upgrade-probe/test_goose_upgrade_probe.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 41 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 41 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: goose-upgrade-probe suite did not report OK." >&2
           exit 1
         }
         touch $out
