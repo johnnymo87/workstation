@@ -1,12 +1,14 @@
-"""Tests for goose-cutover (L3a, bead workstation-6w7i.27.3)."""
+"""Strict tests for goose-cutover (L3a, bead workstation-6w7i.27.3)."""
 
+from contextlib import contextmanager
 import json
 import os
+from pathlib import Path
 import sys
 import unittest
 from typing import Any, Callable, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import goose_cutover
 
 
@@ -42,13 +44,20 @@ class FakeFlockContext:
         self.runner.lock_events.append(("release", self.path))
 
 
-class FakeRunner:
+class FakeRunner(goose_cutover.Runner):
+    """STRICT FakeRunner: raises AssertionError on unexpected commands."""
+
     def __init__(self):
         self.files: dict[str, str] = {}
         self.links: dict[str, str] = {}
         self.env: dict[str, str] = {}
         self.calls: list[dict[str, Any]] = []
-        self.cmd_handlers: list[tuple[Callable[[list[str]], bool], Callable[[list[str], Optional[str], Optional[dict[str, str]]], RunResult]]] = []
+        self.cmd_handlers: list[
+            tuple[
+                Callable[[list[str], Optional[str], Optional[str]], bool],
+                Callable[[list[str], Optional[str], Optional[dict[str, str]], Optional[str]], RunResult],
+            ]
+        ] = []
         self.sleep_calls: list[float] = []
         self.current_time: float = 1700000000.0
         self.locks_held: set[str] = set()
@@ -56,6 +65,8 @@ class FakeRunner:
         self.lock_events: list[tuple[str, str]] = []
         self.current_link_target = "/nix/store/old-goose"
         self.pr_state = "OPEN"
+        self.honkd_pid = "777"
+        self.goose_pid = "555"
 
     def run(
         self,
@@ -64,6 +75,7 @@ class FakeRunner:
         env: Optional[dict[str, str]] = None,
         check: bool = True,
         timeout: Optional[float] = None,
+        cwd: Optional[str] = None,
     ) -> RunResult:
         self.calls.append({
             "argv": list(argv),
@@ -71,15 +83,16 @@ class FakeRunner:
             "env": dict(env) if env else None,
             "check": check,
             "timeout": timeout,
+            "cwd": cwd,
         })
         for pred, handler in self.cmd_handlers:
-            if pred(argv):
-                res = handler(argv, user, env)
+            if pred(argv, user, cwd):
+                res = handler(argv, user, env, cwd)
                 if check and res.rc != 0:
-                    raise RuntimeError(f"Command failed with rc {res.rc}: {' '.join(argv)}\n{res.stderr}")
+                    prog = argv[0] if argv else "command"
+                    raise RuntimeError(f"{prog} failed (exit {res.rc}): {res.stderr.strip()[:1000]}")
                 return res
-        # Default fallback
-        return RunResult(0, "", "")
+        raise AssertionError(f"FakeRunner: unexpected command: {argv!r} (user={user}, cwd={cwd})")
 
     def read_file(self, path: str) -> str:
         if path not in self.files:
@@ -117,6 +130,19 @@ class FakeRunner:
     def flock(self, path: str, shared: bool = False, nonblocking: bool = True):
         return FakeFlockContext(self, path, shared, nonblocking)
 
+    @contextmanager
+    def hold_dev_lock(self, path: str):
+        if path in self.flock_busy or path in self.locks_held:
+            raise BlockingIOError(f"Dev lock {path} busy")
+        self.locks_held.add(path)
+        self.lock_events.append(("acquire_dev", path))
+        try:
+            yield
+        finally:
+            if path in self.locks_held:
+                self.locks_held.remove(path)
+            self.lock_events.append(("release_dev", path))
+
     def get_env(self, key: str, default: Optional[str] = None) -> Optional[str]:
         return self.env.get(key, default)
 
@@ -124,6 +150,7 @@ class FakeRunner:
 def setup_standard_runner() -> FakeRunner:
     runner = FakeRunner()
     runner.files["/proc/self/cgroup"] = "0::/system.slice/goose-cutover@prepare-902.service\n"
+    runner.files["/proc/sys/kernel/hostname"] = "cloudbox\n"
     runner.env["INVOCATION_ID"] = "test-invocation-123"
     runner.env["GOOSE_HOST_REPORTS_DIR"] = "/var/lib/goose-cutover/host-reports"
     runner.env["GOOSE_CUTOVER_HOSTS"] = "devbox,mac"
@@ -131,6 +158,10 @@ def setup_standard_runner() -> FakeRunner:
     runner.files["/run/secrets/pigeon_goose_acp_token"] = "acp-secret-token\n"
     runner.files["/home/dev/.nix-profile/bin/goose-upgrade-probe"] = "binary"
     runner.files["/home/dev/.nix-profile/bin/honk"] = "binary"
+
+    runner.files["/proc/555/cmdline"] = "/var/lib/goose/current/bin/goose\0"
+    runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
+    runner.links["/proc/777/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
 
     # Host reports
     runner.files["/var/lib/goose-cutover/host-reports/devbox.json"] = json.dumps({
@@ -146,20 +177,20 @@ def setup_standard_runner() -> FakeRunner:
         "honk_version": "0.5.0",
     })
 
-    # Default handlers
-    def handler(argv, user, env):
+    # Standard handlers
+    def std_handler(argv: list[str], user: Optional[str], env: Optional[dict[str, str]], cwd: Optional[str]) -> RunResult:
         cmd = argv[0]
-        if cmd == "hostname":
-            return RunResult(0, "cloudbox\n")
+
         if cmd == "goose-link":
-            if argv[1] == "status":
+            sub = argv[1]
+            if sub == "status":
                 return RunResult(0, f"current={runner.current_link_target}\nprevious=<none>\npinned=/nix/store/old-goose\npinned_is_current=yes\n")
-            if argv[1] == "set":
+            if sub == "set":
                 runner.current_link_target = argv[2]
                 return RunResult(0, f"goose-link: current={runner.current_link_target}\n")
+
         if cmd == "gh":
             if argv[1:3] == ["pr", "view"]:
-                # PR view json
                 return RunResult(0, json.dumps({
                     "state": runner.pr_state,
                     "baseRefName": "main",
@@ -177,21 +208,22 @@ def setup_standard_runner() -> FakeRunner:
                 return RunResult(0, "Updated\n")
             if argv[1:3] == ["pr", "create"]:
                 return RunResult(0, "https://github.com/johnnymo87/workstation/pull/999\n")
+
         if cmd == "git":
             if "rev-parse" in argv:
-                if "refs/pull/902/merge^1" in argv:
-                    return RunResult(0, "mainsha123\n")
                 if "origin/main" in argv:
                     return RunResult(0, "mainsha123\n")
-            if "worktree" in argv:
-                return RunResult(0, "")
+                if "refs/remotes/origin/pr/902/merge^1" in argv:
+                    return RunResult(0, "mainsha123\n")
             if "fetch" in argv:
+                return RunResult(0, "")
+            if "worktree" in argv:
                 return RunResult(0, "")
             if "revert" in argv or "push" in argv:
                 return RunResult(0, "")
+
         if cmd == "nix":
             if argv[1] == "build":
-                # find out-link
                 for i, a in enumerate(argv):
                     if a == "--out-link":
                         target = argv[i + 1]
@@ -202,15 +234,35 @@ def setup_standard_runner() -> FakeRunner:
                         elif "hm" in target:
                             runner.links[target] = "/nix/store/hm-123"
                 return RunResult(0, "")
-        if cmd == "honk":
+
+        if "goose-upgrade-probe" in cmd:
+            return RunResult(0, "All probe checks passed\n")
+
+        if "honk" in cmd:
             if argv[1:3] == ["list", "--json"]:
                 return RunResult(0, json.dumps([]))
             if argv[1] == "launch":
                 return RunResult(0, "native=sess_123 gse=123 tag=goose-upgrade prompt=PONG\n")
-            if argv[1] == "tail":
-                return RunResult(0, "PONG\n")
             if argv[1] == "--version":
                 return RunResult(0, "honk 0.5.0\n")
+
+        if cmd == "timeout":
+            if any("honk" in a for a in argv) and "tail" in argv:
+                return RunResult(0, "Turn complete: PONG\n")
+
+        if cmd == "sqlite3":
+            if "SELECT max(id)" in " ".join(argv):
+                return RunResult(0, "100\n")
+            if ".backup" in " ".join(argv):
+                return RunResult(0, "")
+
+        if cmd == "journalctl":
+            if "stall-watch" in " ".join(argv):
+                ts_ms = int(runner.current_time * 1000)
+                return RunResult(0, json.dumps({"ts": ts_ms, "ok": True, "runs": 0, "coordinator": {"runs": 0}}) + "\n")
+            if "honkd" in " ".join(argv):
+                return RunResult(0, "Upstream control connection re-initialized successfully\n")
+
         if cmd == "curl":
             if "/status" in argv[-1]:
                 return RunResult(0, '{"status":"ok"}\n')
@@ -218,47 +270,80 @@ def setup_standard_runner() -> FakeRunner:
                 return RunResult(0, json.dumps({
                     "id": 1,
                     "jsonrpc": "2.0",
-                    "result": {
-                        "agentInfo": {"name": "goose", "version": "1.54.0"}
-                    }
+                    "result": {"agentInfo": {"name": "goose", "version": "1.54.0"}}
                 }))
+
         if cmd == "systemctl":
-            if "show" in argv:
-                if "ExecMainStartTimestampMonotonic" in " ".join(argv):
-                    return RunResult(0, "ExecMainStartTimestampMonotonic=1000\n")
-                if "MainPID" in " ".join(argv):
-                    return RunResult(0, "MainPID=555\n")
-                if "ExecStart" in " ".join(argv):
-                    return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
             if "is-active" in argv:
                 return RunResult(3, "inactive\n")
-            return RunResult(0, "")
-        if cmd == "journalctl":
-            return RunResult(0, json.dumps({"ts": runner.current_time, "ok": True, "runs": 0, "coordinator": {"runs": 0}}) + "\n")
+            if "show" in argv:
+                full = " ".join(argv)
+                if "ExecMainStartTimestampMonotonic" in full:
+                    return RunResult(0, "ExecMainStartTimestampMonotonic=1000\n")
+                if "MainPID" in full:
+                    if "honkd" in full:
+                        return RunResult(0, "MainPID=777\n")
+                    return RunResult(0, "MainPID=555\n")
+                if "ExecStart" in full:
+                    return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose ; argv_0=goose }\n")
+            if argv[1] == "start":
+                return RunResult(0, "")
+            if argv[1] == "stop":
+                return RunResult(0, "")
+            if argv[1] == "restart":
+                return RunResult(0, "")
+            if argv[1:3] == ["--user", "stop"]:
+                return RunResult(0, "")
+            if argv[1:3] == ["--user", "start"]:
+                return RunResult(0, "")
+            if argv[1:3] == ["--user", "restart"]:
+                return RunResult(0, "")
+
+        if cmd == "sudo":
+            if argv[1:3] == ["systemctl", "start"]:
+                return RunResult(0, "")
+
         if cmd == "readlink":
             if argv[-1] == "/nix/var/nix/profiles/system":
                 return RunResult(0, "/nix/store/old-system-toplevel\n")
             if argv[-1] == "/proc/555/exe":
                 return RunResult(0, "/nix/store/cand-goose-1.54.0-patched.19/bin/goose\n")
+            if argv[-1] == "/proc/777/exe":
+                return RunResult(0, "/nix/store/cand-goose-1.54.0-patched.19/bin/goose\n")
+
         if "switch-to-configuration" in cmd:
             return RunResult(0, "")
+
         if cmd == "nix-env":
             return RunResult(0, "")
-        if "goose-upgrade-probe" in cmd:
-            return RunResult(0, "All tests passed\n")
-        return RunResult(0, "", "")
 
-    runner.cmd_handlers.append((lambda argv: True, handler))
+        if "activate" in cmd:
+            return RunResult(0, "")
+
+        if "opencode-drift-alert" in cmd:
+            return RunResult(0, "")
+
+        if cmd == "rm":
+            return RunResult(0, "")
+
+        raise AssertionError(f"Unhandled command in std_handler: {argv!r}")
+
+    runner.cmd_handlers.append((lambda a, u, c: True, std_handler))
     return runner
 
 
 class TestGooseCutover(unittest.TestCase):
+    def test_strict_fakerunner_raises_on_unhandled_command(self):
+        runner = FakeRunner()
+        with self.assertRaises(AssertionError) as cm:
+            runner.run(["unhandled-command", "foo"])
+        self.assertIn("unhandled-command", str(cm.exception))
+
     def test_launcher_refuses_in_goose_serve_cgroup(self):
         runner = setup_standard_runner()
         runner.files["/proc/self/cgroup"] = "0::/system.slice/goose-serve.service\n"
         rc = goose_cutover.main(["prepare", "902"], runner=runner)
         self.assertEqual(rc, 2)
-        # Check no systemctl was started
         self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
 
     def test_launcher_starts_systemd_unit(self):
@@ -289,13 +374,16 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_p1_hostname_not_cloudbox_fails(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "hostname", lambda a, u, e: RunResult(0, "devbox\n")))
+        runner.files["/proc/sys/kernel/hostname"] = "devbox\n"
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
     def test_p1_goose_link_status_fails(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[:2] == ["goose-link", "status"], lambda a, u, e: RunResult(1, "", "failed")))
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[:2] == ["goose-link", "status"],
+            lambda a, u, e, c: RunResult(1, "", "failed")
+        ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
@@ -311,17 +399,23 @@ class TestGooseCutover(unittest.TestCase):
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
+    def test_p1_state_already_failed_refuses(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({"phase": "failed", "pr": 901})
+        rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
+        self.assertNotEqual(rc, 0)
+
     def test_p1_pr_not_open_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "CLOSED",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}],
                 "headRefOid": "h",
                 "files": [{"path": "pkgs/goose/default.nix"}],
-                "statusCheckRollup": [],
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
             }))
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -330,14 +424,14 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_pr_base_not_main_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "feature-branch",
                 "labels": [{"name": "goose-upgrade"}],
                 "headRefOid": "h",
                 "files": [{"path": "pkgs/goose/default.nix"}],
-                "statusCheckRollup": [],
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
             }))
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -346,14 +440,14 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_pr_missing_goose_upgrade_label_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "other-label"}],
                 "headRefOid": "h",
                 "files": [{"path": "pkgs/goose/default.nix"}],
-                "statusCheckRollup": [],
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
             }))
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -362,14 +456,14 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_goose_major_without_major_ok_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}, {"name": "goose-major"}],
                 "headRefOid": "h",
                 "files": [{"path": "pkgs/goose/default.nix"}],
-                "statusCheckRollup": [],
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
             }))
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -378,8 +472,8 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_goose_major_with_major_ok_passes(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}, {"name": "goose-major"}, {"name": "goose-major-ok"}],
@@ -396,14 +490,14 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_files_outside_pkgs_goose_without_config_ok_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}],
                 "headRefOid": "h",
                 "files": [{"path": "pkgs/goose/default.nix"}, {"path": "modules/goose-cutover.nix"}],
-                "statusCheckRollup": [],
+                "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
             }))
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
@@ -412,8 +506,8 @@ class TestGooseCutover(unittest.TestCase):
     def test_p1_files_outside_pkgs_goose_with_config_ok_passes(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}, {"name": "goose-config-ok"}],
@@ -427,11 +521,27 @@ class TestGooseCutover(unittest.TestCase):
         rc = goose_cutover.main(["--run", "prepare-dry-902"], runner=runner)
         self.assertEqual(rc, 0)
 
+    def test_p1_empty_status_check_rollup_fails(self):
+        runner = setup_standard_runner()
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
+                "state": "OPEN",
+                "baseRefName": "main",
+                "labels": [{"name": "goose-upgrade"}],
+                "headRefOid": "h",
+                "files": [{"path": "pkgs/goose/default.nix"}],
+                "statusCheckRollup": [],
+            }))
+        ))
+        rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
+        self.assertNotEqual(rc, 0)
+
     def test_p1_checks_pending_or_failed_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["gh", "pr", "view"],
-            lambda a, u, e: RunResult(0, json.dumps({
+            lambda a, u, c: a[:3] == ["gh", "pr", "view"],
+            lambda a, u, e, c: RunResult(0, json.dumps({
                 "state": "OPEN",
                 "baseRefName": "main",
                 "labels": [{"name": "goose-upgrade"}],
@@ -471,26 +581,37 @@ class TestGooseCutover(unittest.TestCase):
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
-    def test_p1_hosts_ready_pass_applies_label(self):
+    def test_p1_hosts_ready_version_below_min_fails_closed(self):
+        runner = setup_standard_runner()
+        runner.env["GOOSE_MIN_HONK_VERSION"] = "0.6.0"
+        rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
+        self.assertNotEqual(rc, 0)
+
+    def test_p1_hosts_ready_pass_applies_label_in_normal_run(self):
         runner = setup_standard_runner()
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertEqual(rc, 0)
-        # Check that gh pr edit was called with --add-label goose-hosts-ready
         label_calls = [c["argv"] for c in runner.calls if "pr" in c["argv"] and "edit" in c["argv"]]
         self.assertTrue(any("goose-hosts-ready" in cmd for cmd in label_calls))
+
+    def test_p1_hosts_ready_pass_dry_run_does_not_apply_label(self):
+        runner = setup_standard_runner()
+        rc = goose_cutover.main(["--run", "prepare-dry-902"], runner=runner)
+        self.assertEqual(rc, 0)
+        label_calls = [c["argv"] for c in runner.calls if "pr" in c["argv"] and "edit" in c["argv"]]
+        self.assertEqual(len(label_calls), 0)
 
     def test_p2_stale_merge_ref_fails(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["git", "rev-parse", "refs/pull/902/merge^1"],
-            lambda a, u, e: RunResult(0, "oldparentsha\n")
+            lambda a, u, c: "refs/remotes/origin/pr/902/merge^1" in a,
+            lambda a, u, e, c: RunResult(0, "oldparentsha\n")
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
 
     def test_p2_noop_refused_without_allow_noop(self):
         runner = setup_standard_runner()
-        # Candidate == current target
         runner.current_link_target = "/nix/store/cand-goose-1.54.0-patched.19"
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
@@ -504,52 +625,18 @@ class TestGooseCutover(unittest.TestCase):
     def test_p3_probe_fail_stops_before_merge(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: "goose-upgrade-probe" in a[0],
-            lambda a, u, e: RunResult(1, "", "probe failed badly")
+            lambda a, u, c: "goose-upgrade-probe" in a[0],
+            lambda a, u, e, c: RunResult(1, "", "probe failed badly")
         ))
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # Ensure merge was not attempted
         self.assertFalse(any("merge" in c["argv"] for c in runner.calls))
 
     def test_p4_merged_mismatch_fails(self):
         runner = setup_standard_runner()
-        # In P4, after merge, origin/main moved past merge commit
-        merge_called = False
-        def git_handler(a, u, e):
-            nonlocal merge_called
-            if a[:3] == ["git", "rev-parse", "origin/main"]:
-                if merge_called:
-                    return RunResult(0, "futuremainsha\n")
-                return RunResult(0, "mainsha123\n")
-            if a[:3] == ["git", "rev-parse", "refs/pull/902/merge^1"]:
-                return RunResult(0, "mainsha123\n")
-            return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "git", git_handler))
-
-        def gh_handler(a, u, e):
-            nonlocal merge_called
-            if a[1:3] == ["pr", "merge"]:
-                merge_called = True
-                runner.pr_state = "MERGED"
-                return RunResult(0, "Merged\n")
-            if a[1:3] == ["pr", "view"]:
-                return RunResult(0, json.dumps({
-                    "state": runner.pr_state,
-                    "baseRefName": "main",
-                    "labels": [{"name": "goose-upgrade"}],
-                    "headRefOid": "headsha123",
-                    "mergeable": "MERGEABLE",
-                    "files": [{"path": "pkgs/goose/default.nix"}],
-                    "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}],
-                    "mergeCommit": {"oid": "mergesha123"},
-                }))
-            return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "gh", gh_handler))
-
-        # Rebuilt candidate differs
+        # In P4 rebuild from origin/main, candidate store path differs from P2
         build_count = 0
-        def nix_handler(a, u, e):
+        def nix_handler(a, u, e, c):
             nonlocal build_count
             if a[:2] == ["nix", "build"]:
                 build_count += 1
@@ -557,7 +644,8 @@ class TestGooseCutover(unittest.TestCase):
                     if arg == "--out-link":
                         link = a[i + 1]
                         if "candidate" in link:
-                            if build_count > 3:
+                            # 1st build is in P2, 2nd build is in P4
+                            if build_count > 1:
                                 runner.links[link] = "/nix/store/different-candidate"
                             else:
                                 runner.links[link] = "/nix/store/cand-goose-1.54.0-patched.19"
@@ -566,7 +654,7 @@ class TestGooseCutover(unittest.TestCase):
                         elif "hm" in link:
                             runner.links[link] = "/nix/store/hm-123"
             return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "nix", nix_handler))
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[:2] == ["nix", "build"], nix_handler))
 
         rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
         self.assertNotEqual(rc, 0)
@@ -586,6 +674,7 @@ class TestGooseCutover(unittest.TestCase):
             self.assertFalse("goose-link set" in cmd_str)
             self.assertFalse("systemctl restart" in cmd_str)
             self.assertFalse("systemctl stop" in cmd_str)
+            self.assertFalse("gh pr edit" in cmd_str)
 
     def test_prepare_success_persists_state_and_notifies(self):
         runner = setup_standard_runner()
@@ -598,28 +687,121 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(state["pr"], 902)
         self.assertEqual(state["candidate"], "/nix/store/cand-goose-1.54.0-patched.19")
 
-    def test_d2_stall_watch_active_blocks(self):
+    def test_d1_reconcile_rebuilds_if_main_moved(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
-            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
+            "toplevel": "/nix/store/top-old", "hm_package": "/nix/store/hm-old",
+            "old_target": "/nix/store/old-goose", "merge_sha": "oldmainsha", "head_sha": "hsha",
         })
-        runner.files["/nix/store/cand"] = "cand"
-        runner.files["/nix/store/top"] = "top"
-        runner.files["/nix/store/hm"] = "hm"
+        runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
+        runner.files["/nix/store/top-old"] = "top"
+        runner.files["/nix/store/hm-old"] = "hm"
+
+        # origin/main returns new main sha
+        def git_handler(a, u, e, c):
+            if a[:3] == ["git", "-C", "/home/dev/projects/workstation"] and "rev-parse" in a:
+                return RunResult(0, "newmainsha\n")
+            if "fetch" in a or "worktree" in a:
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected git command: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "git", git_handler))
+
+        def nix_handler(a, u, e, c):
+            if a[:2] == ["nix", "build"]:
+                for i, arg in enumerate(a):
+                    if arg == "--out-link":
+                        link = a[i + 1]
+                        if "candidate" in link:
+                            runner.links[link] = "/nix/store/cand-goose-1.54.0-patched.19"
+                        elif "toplevel" in link:
+                            runner.links[link] = "/nix/store/top-new"
+                        elif "hm" in link:
+                            runner.links[link] = "/nix/store/hm-new"
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected nix command: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "nix", nix_handler))
+
+        # Advance quiet
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        rc = goose_cutover.main(["--run", "deploy-dry-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["merge_sha"], "newmainsha")
+        self.assertEqual(state["toplevel"], "/nix/store/top-new")
+
+    def test_d1_reconcile_fails_if_candidate_changed(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
+            "toplevel": "/nix/store/top-old", "hm_package": "/nix/store/hm-old",
+            "old_target": "/nix/store/old-goose", "merge_sha": "oldmainsha", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
+        runner.files["/nix/store/top-old"] = "top"
+        runner.files["/nix/store/hm-old"] = "hm"
+
+        def git_handler(a, u, e, c):
+            if "rev-parse" in a:
+                return RunResult(0, "newmainsha\n")
+            return RunResult(0, "")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "git", git_handler))
+
+        def nix_handler(a, u, e, c):
+            if a[:2] == ["nix", "build"]:
+                for i, arg in enumerate(a):
+                    if arg == "--out-link":
+                        link = a[i + 1]
+                        if "candidate" in link:
+                            runner.links[link] = "/nix/store/cand-different"
+                        elif "toplevel" in link:
+                            runner.links[link] = "/nix/store/top-new"
+                        elif "hm" in link:
+                            runner.links[link] = "/nix/store/hm-new"
+                return RunResult(0, "")
+            raise AssertionError(f"unexpected nix command: {a}")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "nix", nix_handler))
+
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)  # Pre-D5 clean refusal exit 0
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")  # Remains prepared
+
+    def test_d1_refuses_if_phase_failed(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "failed", "pr": 902,
+        })
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertNotEqual(rc, 0)
+
+    def test_d2_stall_watch_active_or_activating_blocks(self):
+        runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["systemctl", "--user", "is-active"],
-            lambda a, u, e: RunResult(0, "active\n")
+            lambda a, u, c: a[:3] == ["systemctl", "--user", "is-active"],
+            lambda a, u, e, c: RunResult(0, "activating\n")
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
-        self.assertIn("stall-watch", reason)
+        self.assertIn("activating", reason)
+
+    def test_d2_missing_stall_watch_tick_blocks(self):
+        runner = setup_standard_runner()
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[0] == "journalctl",
+            lambda a, u, e, c: RunResult(0, "plain text without json\n")
+        ))
+        quiet, reason = goose_cutover.check_quiet(runner)
+        self.assertFalse(quiet)
+        self.assertIn("no stall-watch tick found", reason)
 
     def test_d2_coordinator_runs_blocks(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a: a[0] == "journalctl",
-            lambda a, u, e: RunResult(0, json.dumps({"ts": runner.current_time, "coordinator": {"runs": 1}}) + "\n")
+            lambda a, u, c: a[0] == "journalctl",
+            lambda a, u, e, c: RunResult(0, json.dumps({"ts": int(runner.current_time * 1000), "coordinator": {"runs": 1}}) + "\n")
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
@@ -628,20 +810,18 @@ class TestGooseCutover(unittest.TestCase):
     def test_d2_sessions_db_changing_blocks(self):
         runner = setup_standard_runner()
         val = 100
-        def sqlite_handler(a, u, e):
+        def sqlite_handler(a, u, e, c):
             nonlocal val
             val += 1
             return RunResult(0, f"{val}\n")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", sqlite_handler))
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "sqlite3", sqlite_handler))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
 
     def test_d2_cgroup_oom_score_adj_blocks(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
-
         runner.files["/sys/fs/cgroup/system.slice/goose-serve.service/cgroup.procs"] = "1234\n"
         runner.files["/proc/1234/oom_score_adj"] = "600\n"
         quiet, reason = goose_cutover.check_quiet(runner)
@@ -650,13 +830,11 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_d2_honk_running_blocks(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
-
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["honk", "list", "--json"],
-            lambda a, u, e: RunResult(0, json.dumps([{"sessionId": "s1", "running": True, "pendingRequests": 0}]))
+            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, e, c: RunResult(0, json.dumps([{"sessionId": "s1", "running": True, "pendingRequests": 0}]))
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
@@ -664,13 +842,11 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_d2_honk_pending_requests_blocks(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
-
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["honk", "list", "--json"],
-            lambda a, u, e: RunResult(0, json.dumps([{"sessionId": "s1", "running": False, "pendingRequests": 2}]))
+            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, e, c: RunResult(0, json.dumps([{"sessionId": "s1", "running": False, "pendingRequests": 2}]))
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
@@ -678,13 +854,11 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_d2_honk_unknown_shape_blocks(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
-
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["honk", "list", "--json"],
-            lambda a, u, e: RunResult(0, "Not JSON at all")
+            lambda a, u, c: a[:3] == ["honk", "list", "--json"],
+            lambda a, u, e, c: RunResult(0, "Not JSON at all")
         ))
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
@@ -692,84 +866,166 @@ class TestGooseCutover(unittest.TestCase):
 
     def test_d2_all_quiet_passes_after_10min(self):
         runner = setup_standard_runner()
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
-        # First observation sets baseline
         goose_cutover.check_quiet(runner)
         runner.current_time += 601
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertTrue(quiet, f"Expected quiet but got: {reason}")
 
-    def test_d2_timeout_2h_keeps_prepared(self):
+    def test_d2_timeout_2h_keeps_prepared_and_exits_0(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        # Always not quiet
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:3] == ["systemctl", "--user", "is-active"],
-            lambda a, u, e: RunResult(0, "active\n")
+            lambda a, u, c: a[:3] == ["systemctl", "--user", "is-active"],
+            lambda a, u, e, c: RunResult(0, "active\n")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
         state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
         self.assertEqual(state["phase"], "prepared")
 
-    def test_d3_locks_order_and_finally_release_on_failure(self):
+    def test_d2_refuses_with_less_than_60min_left(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
-        goose_cutover.check_quiet(runner)
-        runner.current_time += 650
-
-        # Simulate failure in D4 dry-activate
-        runner.cmd_handlers.insert(0, (
-            lambda a: "switch-to-configuration" in a[0] and "dry-activate" in a,
-            lambda a, u, e: RunResult(1, "error", "error")
-        ))
+        # 4.5 hours elapsed
+        runner.env["GOOSE_CUTOVER_START_TIME"] = str(runner.now() - 4.5 * 3600)
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
-        self.assertNotEqual(rc, 0)
-        # Check locks were released
-        self.assertEqual(len(runner.locks_held), 0)
-        # Check stall-watch.timer was restored
-        timer_started = any("start" in c["argv"] and "stall-watch.timer" in c["argv"] for c in runner.calls)
-        self.assertTrue(timer_started)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
 
-    def test_d4_dry_activate_allowlist_refusal(self):
+    def test_d3_lock_busy_returns_to_d2_polling(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # dry-activate says it would stop unallowed unit
+        # Lock busy
+        runner.flock_busy.add("/tmp/reset-workspace.lock")
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
+
+    def test_d3_stall_watch_wait_timeout_is_pre_d5_failure(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        # After stop, stall-watch.service stays activating
+        active_calls = 0
+        def act_handler(a, u, e, c):
+            nonlocal active_calls
+            active_calls += 1
+            if active_calls > 1:
+                return RunResult(0, "activating\n")
+            return RunResult(3, "inactive\n")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[:3] == ["systemctl", "--user", "is-active"], act_handler))
+
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
+
+    def test_d4_dry_activate_stderr_parsing(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        # dry-activate outputs to STDERR
         runner.cmd_handlers.insert(0, (
-            lambda a: "switch-to-configuration" in a[0] and "dry-activate" in a,
-            lambda a, u, e: RunResult(0, "would stop the following units: unexpected.service\n")
+            lambda a, u, c: "switch-to-configuration" in a[0] and "dry-activate" in a,
+            lambda a, u, e, c: RunResult(0, "", "would stop the following units: rogue.service\n")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
-        self.assertNotEqual(rc, 0)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
+
+    def test_d4_dry_activate_allowlist_refusal_exits_0_no_rollback(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: "switch-to-configuration" in a[0] and "dry-activate" in a,
+            lambda a, u, e, c: RunResult(0, "would restart the following units: unexpected.service\n", "")
+        ))
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
+
+    def test_d4_backup_failure_is_fatal_pre_d5(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        # Backup failure
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[0] == "sqlite3" and ".backup" in " ".join(a),
+            lambda a, u, e, c: RunResult(1, "", "sqlite disk error")
+        ))
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
+        self.assertEqual(state["phase"], "prepared")
+        self.assertFalse(any("revert" in c["argv"] for c in runner.calls))
 
     def test_deploy_dry_run_issues_no_mutating_commands(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand", "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand"] = "cand"
         runner.files["/nix/store/top"] = "top"
@@ -789,34 +1045,31 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.files["/proc/555/cmdline"] = "/var/lib/goose/current/bin/goose\0"
-        runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
 
-        # Advance quiet window
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # Monotonic timestamp increases on restart
         ts_count = 1000
-        def sys_handler(a, u, e):
+        def sys_handler(a, u, e, c):
             nonlocal ts_count
             if "ExecMainStartTimestampMonotonic" in " ".join(a):
                 ts_count += 50
                 return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
             if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
                 return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "systemctl", sys_handler))
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
 
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 0)
@@ -828,31 +1081,111 @@ class TestGooseCutover(unittest.TestCase):
         state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
         self.assertEqual(state["phase"], "deployed")
 
+    def test_honkd_restart_when_binary_changed(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
+            "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        # honkd running exe differs from new ExecStart path
+        runner.links["/proc/777/exe"] = "/nix/store/cand-old-goose/bin/goose"
+
+        ts_count = 1000
+        def sys_handler(a, u, e, c):
+            nonlocal ts_count
+            if "ExecMainStartTimestampMonotonic" in " ".join(a):
+                ts_count += 50
+                return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
+            if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
+                return RunResult(0, "MainPID=555\n")
+            if "ExecStart" in " ".join(a):
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+            if "is-active" in a:
+                return RunResult(3, "inactive\n")
+            return RunResult(0, "")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
+
+        def j_handler(a, u, e, c):
+            if "honkd" in " ".join(a):
+                return RunResult(0, "listening on :4081\n")
+            if "stall-watch" in " ".join(a):
+                return RunResult(0, json.dumps({"ts": int(runner.current_time * 1000), "ok": True, "runs": 0}) + "\n")
+            return RunResult(0, "")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "journalctl", j_handler))
+
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        # Check honkd was restarted
+        honkd_restarts = [c["argv"] for c in runner.calls if "restart" in c["argv"] and "honkd" in c["argv"]]
+        self.assertEqual(len(honkd_restarts), 1)
+
+    def test_honkd_no_restart_when_same_binary(self):
+        runner = setup_standard_runner()
+        runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
+            "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
+            "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
+        })
+        runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
+        runner.files["/nix/store/top"] = "top"
+        runner.files["/nix/store/hm"] = "hm"
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 650
+
+        ts_count = 1000
+        def sys_handler(a, u, e, c):
+            nonlocal ts_count
+            if "ExecMainStartTimestampMonotonic" in " ".join(a):
+                ts_count += 50
+                return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
+            if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
+                return RunResult(0, "MainPID=555\n")
+            if "ExecStart" in " ".join(a):
+                return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
+            if "is-active" in a:
+                return RunResult(3, "inactive\n")
+            return RunResult(0, "")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
+
+        rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
+        self.assertEqual(rc, 0)
+        honkd_restarts = [c["argv"] for c in runner.calls if "restart" in c["argv"] and "honkd" in c["argv"]]
+        self.assertEqual(len(honkd_restarts), 0)
+
     def test_failure_at_d5_runs_rollback_set_to_old(self):
         runner = setup_standard_runner()
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
         # D5 failure: switch-to-configuration switch fails
         runner.cmd_handlers.insert(0, (
-            lambda a: "switch-to-configuration" in a[0] and "switch" in a,
-            lambda a, u, e: RunResult(1, "", "switch failed")
+            lambda a, u, c: "switch-to-configuration" in a[0] and "switch" in a,
+            lambda a, u, e, c: RunResult(1, "", "switch failed")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
         # Rollback sets old target
         goose_link_calls = [c["argv"] for c in runner.calls if c["argv"][:2] == ["goose-link", "set"]]
         self.assertTrue(any("/nix/store/old-goose" in cmd for cmd in goose_link_calls))
-        # Never calls `goose-link rollback`
         self.assertFalse(any(c["argv"][:2] == ["goose-link", "rollback"] for c in runner.calls))
 
     def test_failure_at_d6_runs_rollback_set_to_old(self):
@@ -860,23 +1193,21 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
         # D6 failure: goose-link status does not match candidate
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:2] == ["goose-link", "status"],
-            lambda a, u, e: RunResult(0, "current=/nix/store/mismatched\nprevious=<none>\npinned=/nix/store/pinned\n")
+            lambda a, u, c: a[:2] == ["goose-link", "status"],
+            lambda a, u, e, c: RunResult(0, "current=/nix/store/mismatched\nprevious=<none>\npinned=/nix/store/pinned\n")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # Rollback sets old target
         self.assertTrue(any(c["argv"][:3] == ["goose-link", "set", "/nix/store/old-goose"] for c in runner.calls))
 
     def test_failure_at_d7_runs_rollback_restarts_goose_serve(self):
@@ -884,32 +1215,21 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
-        # D7: goose restart curl status fails on first attempt, but succeeds during rollback restart
-        curl_calls = 0
-        def curl_handler(a, u, e):
-            nonlocal curl_calls
-            if "/status" in a[-1]:
-                curl_calls += 1
-                if curl_calls == 1:
-                    return RunResult(1, "", "connection refused")
-                return RunResult(0, '{"status":"ok"}\n')
-            if any("/acp" in x for x in a):
-                return RunResult(0, json.dumps({"id": 1, "jsonrpc": "2.0", "result": {"agentInfo": {"name": "goose", "version": "1.54.0"}}}))
-            return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "curl", curl_handler))
-
+        # D7: goose restart curl status fails
+        runner.cmd_handlers.insert(0, (
+            lambda a, u, c: a[0] == "curl" and "/status" in a[-1],
+            lambda a, u, e, c: RunResult(1, "", "connection refused")
+        ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # Rollback restarted goose-serve
         restarts = [c["argv"] for c in runner.calls if c["argv"][:3] == ["systemctl", "restart", "goose-serve"]]
         self.assertGreaterEqual(len(restarts), 2)
 
@@ -918,42 +1238,39 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.files["/proc/555/cmdline"] = "/var/lib/goose/current/bin/goose\0"
-        runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
         ts_count = 1000
-        def sys_handler(a, u, e):
+        def sys_handler(a, u, e, c):
             nonlocal ts_count
             if "ExecMainStartTimestampMonotonic" in " ".join(a):
                 ts_count += 50
                 return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
             if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
                 return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "systemctl", sys_handler))
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
 
-        # PONG always fails (both candidate and control)
+        # PONG always fails
         runner.cmd_handlers.insert(0, (
-            lambda a: a[0] == "honk" and a[1] == "tail",
-            lambda a, u, e: RunResult(0, "ERROR: model timeout\n")
+            lambda a, u, c: a[0] == "timeout" and "tail" in a,
+            lambda a, u, e, c: RunResult(0, "ERROR: model timeout\n")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # No revert PR created
         self.assertFalse(any(c["argv"][:3] == ["gh", "pr", "create"] for c in runner.calls))
-        # State stays prepared
         state = json.loads(runner.files["/var/lib/goose-cutover/state.json"])
         self.assertEqual(state["phase"], "prepared")
 
@@ -962,51 +1279,43 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.files["/proc/555/cmdline"] = "/var/lib/goose/current/bin/goose\0"
-        runner.links["/proc/555/exe"] = "/nix/store/cand-goose-1.54.0-patched.19/bin/goose"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
         ts_count = 1000
-        def sys_handler(a, u, e):
+        def sys_handler(a, u, e, c):
             nonlocal ts_count
             if "ExecMainStartTimestampMonotonic" in " ".join(a):
                 ts_count += 50
                 return RunResult(0, f"ExecMainStartTimestampMonotonic={ts_count}\n")
             if "MainPID" in " ".join(a):
+                if "honkd" in " ".join(a):
+                    return RunResult(0, "MainPID=777\n")
                 return RunResult(0, "MainPID=555\n")
             if "ExecStart" in " ".join(a):
                 return RunResult(0, "ExecStart={ path=/nix/store/cand-goose-1.54.0-patched.19/bin/goose }\n")
             if "is-active" in a:
                 return RunResult(3, "inactive\n")
             return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "systemctl", sys_handler))
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "systemctl", sys_handler))
 
         # Candidate PONG fails, control PONG passes
         tail_count = 0
-        def honk_handler(a, u, e):
+        def timeout_handler(a, u, e, c):
             nonlocal tail_count
-            if a[1:3] == ["list", "--json"]:
-                return RunResult(0, "[]")
-            if a[1] == "tail":
-                tail_count += 1
-                if tail_count == 1:
-                    return RunResult(0, "CRASH\n")
-                return RunResult(0, "PONG\n")
-            if a[1] == "launch":
-                return RunResult(0, "native=sess_123 gse=123 tag=goose-upgrade prompt=PONG\n")
-            return RunResult(0, "")
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "honk", honk_handler))
+            tail_count += 1
+            if tail_count == 1:
+                return RunResult(0, "CRASH\n")
+            return RunResult(0, "PONG\n")
+        runner.cmd_handlers.insert(0, (lambda a, u, c: a[0] == "timeout" and "tail" in a, timeout_handler))
 
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # Revert PR created
         pr_creates = [c["argv"] for c in runner.calls if c["argv"][:3] == ["gh", "pr", "create"]]
         self.assertEqual(len(pr_creates), 1)
         self.assertTrue(any("goose-revert" in cmd for cmd in pr_creates))
@@ -1018,24 +1327,23 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "prepared", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.cmd_handlers.insert(0, (lambda a: a[0] == "sqlite3", lambda a, u, e: RunResult(0, "50\n")))
         goose_cutover.check_quiet(runner)
         runner.current_time += 650
 
         # D5 switch fails, triggering rollback
         runner.cmd_handlers.insert(0, (
-            lambda a: "switch-to-configuration" in a[0] and "switch" in a,
-            lambda a, u, e: RunResult(1, "", "switch failed")
+            lambda a, u, c: "switch-to-configuration" in a[0] and "switch" in a,
+            lambda a, u, e, c: RunResult(1, "", "switch failed")
         ))
         # Rollback goose-link set ALSO fails
         runner.cmd_handlers.insert(0, (
-            lambda a: a[:2] == ["goose-link", "set"],
-            lambda a, u, e: RunResult(1, "", "disk error")
+            lambda a, u, c: a[:2] == ["goose-link", "set"],
+            lambda a, u, e, c: RunResult(1, "", "disk error")
         ))
         rc = goose_cutover.main(["--run", "deploy-1"], runner=runner)
         self.assertEqual(rc, 3)
@@ -1047,19 +1355,35 @@ class TestGooseCutover(unittest.TestCase):
         runner.files["/var/lib/goose-cutover/state.json"] = json.dumps({
             "phase": "deploying", "pr": 902, "candidate": "/nix/store/cand-goose-1.54.0-patched.19",
             "toplevel": "/nix/store/top", "hm_package": "/nix/store/hm",
-            "old_target": "/nix/store/old-goose", "merge_sha": "msha", "head_sha": "hsha",
+            "old_target": "/nix/store/old-goose", "merge_sha": "mainsha123", "head_sha": "hsha",
             "step": "restart"
         })
         runner.files["/nix/store/cand-goose-1.54.0-patched.19"] = "cand"
         runner.files["/nix/store/top"] = "top"
         runner.files["/nix/store/hm"] = "hm"
-        runner.files["/proc/555/cmdline"] = "/var/lib/goose/current/bin/goose\0"
-        runner.links["/proc/555/exe"] = "/nix/store/old-goose/bin/goose"
 
         rc = goose_cutover.main(["--run", "deploy-recover-1"], runner=runner)
         self.assertNotEqual(rc, 0)
-        # goose-link set old-target called
         self.assertTrue(any(c["argv"][:3] == ["goose-link", "set", "/nix/store/old-goose"] for c in runner.calls))
+
+    def test_secrets_never_in_argv_and_redacted(self):
+        runner = setup_standard_runner()
+        planted_token = "PLANTED_SUPER_SECRET_TOKEN_99999"
+        runner.files["/run/secrets/github_api_token"] = f"{planted_token}\n"
+        runner.files["/run/secrets/pigeon_goose_acp_token"] = f"{planted_token}\n"
+        goose_cutover.register_secret(planted_token)
+
+        rc = goose_cutover.main(["--run", "prepare-902"], runner=runner)
+        self.assertEqual(rc, 0)
+
+        # 1. Assert planted_token is NEVER in any argv call
+        for call in runner.calls:
+            cmd_line = " ".join(call["argv"])
+            self.assertNotIn(planted_token, cmd_line)
+
+        # 2. Assert planted_token is redacted from state.json
+        state_text = runner.files.get("/var/lib/goose-cutover/state.json", "")
+        self.assertNotIn(planted_token, state_text)
 
     def test_status_command(self):
         runner = setup_standard_runner()

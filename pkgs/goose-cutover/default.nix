@@ -8,7 +8,9 @@
 , util-linux
 , systemd
 , sqlite
+, openssh
 , goose-link
+, driftAlert ? null
 }:
 
 writeShellApplication {
@@ -23,9 +25,11 @@ writeShellApplication {
     util-linux
     systemd
     sqlite
+    openssh
     goose-link
   ];
   text = ''
+    ${if driftAlert != null then ''export GOOSE_CUTOVER_ALERT="${driftAlert}"'' else ""}
     exec ${python3}/bin/python3 ${./goose_cutover.py} "$@"
   '';
 }
