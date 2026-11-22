@@ -114,6 +114,70 @@ the pure parts: config stripping, the port guard, skip counting, result
 aggregation (SKIP and missing both count as FAIL), arg defaults, and the
 GOOSE_PATH_ROOT assertion.
 
+## As built (after the plan-time adversarial review, 2026-11-22)
+
+Checks, in output order: `versions`, `migration`, `forward-migration`, `pigeon`, `honk-suite`,
+`honk-live`, `stall-watch`, `rendered-surface`, `rollback`, `production-untouched`.
+Every check is either PASS or FAIL, and a check that did not run counts as a FAIL.
+
+- **The copy cannot start stored MCP servers.** `session/load` starts the extensions each
+  session STORED, whatever the config file says. In production those include
+  `honk swarm-mcp` with pigeon's real token, plus ro-shell and slack. So the copy's
+  `sessions.extension_data` is rewritten to platform/builtin only. Check 1 also loads only
+  *settled* sessions, meaning the last message is assistant text, so nothing pending can
+  resume. After the loads, it FAILs if any process other than the serve is in the serve's
+  cgroup.
+- **The isolated honkd runs WITHOUT `--allow-unpatched-upstream`.** So a candidate that
+  lost takeover/replay is refused, just as production's honkd would refuse it.
+- **Versions.** Every serve start checks that `initialize`'s `agentInfo.version` equals
+  `<bin> --version`. `--old-bin` defaults to `/var/lib/goose/current` (L6), then
+  goose-serve's `/proc/<MainPID>/exe`, then PATH.
+- **migration** (production copy) compares schema SHAPE with what the candidate creates
+  on an empty root. The shape is per table: the set of (column, type, notnull, default,
+  pk) and the index names, independent of order.
+  - Missing items are a FAIL.
+  - Extra items are only reported, because they come from a newer writer: production
+    has been v18 since 2026-11-22.
+- **forward-migration** tests a real migration. The OLD binary writes a rich session on
+  an empty root. The candidate then opens that DB, and its schema must equal the fresh
+  schema exactly. The candidate must also load the old binary's rich session.
+- **Rich session.** It has a shell tool call, a thinking prompt, a `/compact` and one
+  more turn. The DB must then hold `toolRequest`, `toolResponse`, `thinking` and a
+  `userVisible:false` message (the compaction). This was confirmed on .18 with haiku-4-5.
+- **rollback.** The old binary runs on the copy after the candidate, on the same port.
+  - It writes a turn.
+  - It loads every session the candidate created. A session with messages must replay
+    something; an empty one only has to load.
+  - One `run_honk` turn goes through the SAME isolated honkd that served the candidate,
+    so honkd survives the switch.
+- **rendered-surface** (maven-renovate only; the dependabot recipes are out of scope).
+  - The capture must report the candidate's version, or the PATH is wrong.
+  - The checker must exit 0.
+  - The fixture's `goose_version` must equal the candidate's. The checker only *notes* a
+    version change, but for a gate an unapproved version is a FAIL. So a 1.60 candidate
+    FAILs here until C3 (eng-agent-platform) re-approves the fixture for 1.60.
+  - A self-test of .18 passes against today's fixture. After C3 it will not, until L8
+    keys the fixture by version. **L8 must update this check** to select its entry by
+    version.
+- **production-untouched** reads production's `max(schema_version)` read-only before and
+  after the run. Any change is a FAIL.
+- **stall-watch** calls `run_honk`, the production code path, through the isolated
+  honkd. It passes `db_path` explicitly and uses a scratch `SessionCtx.home`. stall-watch
+  needed no change for this: the kwargs plus an in-process repoint of `config.HONK_URL`
+  are the override.
+
+### Not covered by L2 (owned elsewhere)
+
+- **A7's host-level rollback:** flipping `/var/lib/goose/current` and the system/HM
+  generations back. That belongs to L3a/A7. L2 proves only that the old binary works on
+  the migrated data.
+- **The -32603 `turn_failed` path** (A6/C2). There is no reliable way to force it from
+  outside.
+- **Tool shells run with the real HOME.** The probe's prompts are fixed and harmless,
+  but `~/.config/gh` and similar files are readable from those shells.
+- **Spend attribution.** Probe turns go through cfp :8789 and land as untagged spend.
+  The model is pinned to haiku-4-5 to keep it small.
+
 ## Research notes (2026-11-22)
 
 - Pigeon probes take env `GOOSE_ACP_URL` / `PIGEON_GOOSE_PROBE_TOKEN` /

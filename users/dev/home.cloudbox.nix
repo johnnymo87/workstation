@@ -395,6 +395,10 @@ lib.mkIf isCloudbox {
 
     # Operator CLI for lgtm goose review units (status, stop, stop-all, logs)
     localPkgs.lgtm-review
+
+    # Downstream gate for a goose binary before cutover (bead workstation-6w7i.27.1):
+    # isolated serve + honkd on a sessions.db copy; read-only to production.
+    localPkgs.goose-upgrade-probe
   ];
 
   # GCP project: read from sops in initExtra below (org-identifying, not in public source)
