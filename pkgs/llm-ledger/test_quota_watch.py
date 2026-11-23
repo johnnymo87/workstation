@@ -295,6 +295,21 @@ class TestMetricsAndForecast(unittest.TestCase):
         val = sum_buckets(buckets, T=900_000, W=900_000)
         self.assertEqual(val, 1.0 + 2.0 + 4.0)
 
+    def test_forecast_path_length_and_monotone(self):
+        """forecast appends 289 points starting at (T, H0), monotone non-increasing absent refills."""
+        T = 1700000000000
+        H0 = 2.5
+        B = 0.1
+        path: list[tuple[int, float]] = []
+        zero_h, vertex_usd, next_refill = forecast(H0, B, refills=[], k=None, T=T, path=path)
+        self.assertEqual(len(path), 289)
+        self.assertEqual(path[0], (T, H0))
+        # Monotone non-increasing absent refills
+        for i in range(1, len(path)):
+            self.assertLessEqual(path[i][1], path[i - 1][1])
+            self.assertEqual(path[i][0], T + i * STEP_MS)
+        self.assertEqual(path[-1][0], T + HORIZON_MS)
+
     def test_forecast_and_refills(self):
         """Forecast simulates 24h forward in 5-min steps and applies refills in order."""
         t0 = 100000000
@@ -1037,6 +1052,134 @@ class TestLiveAndReplay(unittest.TestCase):
             f"Pool-dry must clear between 18:00 and 18:30 ET, got: {[datetime.datetime.fromtimestamp(e.ts/1000, E).strftime('%Y-%m-%d %H:%M') for e in dry_clears]}",
         )
 
+    def test_record_run_creates_tables_and_replaces_path(self):
+        """record_run creates tables, inserts run row, and replaces forecast path."""
+        db_path = os.path.join(self.tmp_dir.name, "record_run_test.db")
+        T1 = 1700000000000
+        path1: list[tuple[int, float]] = []
+        forecast(2.0, 0.1, [], None, T1, path=path1)
+        row1 = {
+            "ts": T1,
+            "h0": 2.0,
+            "burn_h": 0.1,
+            "burn_6h": 0.05,
+            "burn_24h": 0.2,
+            "spill_6h": 0.0,
+            "spill_24h": 0.0,
+            "k": 100.0,
+            "zero_h": 0.0,
+            "vertex_usd": 0.0,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "pool_n": 5,
+            "source": "live",
+        }
+        quota_watch.record_run(db_path, row1, path1)
+
+        conn = sqlite3.connect(db_path)
+        runs = conn.execute("SELECT * FROM quota_watch_runs").fetchall()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][0], T1)
+        self.assertEqual(runs[0][1], 2.0)
+        self.assertEqual(runs[0][-1], "live")
+
+        fc = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
+        self.assertEqual(len(fc), 289)
+        self.assertTrue(all(r[2] == T1 for r in fc))
+        conn.close()
+
+        # Second call with T2 replaces the path
+        T2 = T1 + 300000
+        path2: list[tuple[int, float]] = []
+        forecast(1.9, 0.1, [], None, T2, path=path2)
+        row2 = dict(row1, ts=T2, h0=1.9)
+        quota_watch.record_run(db_path, row2, path2)
+
+        conn = sqlite3.connect(db_path)
+        runs = conn.execute("SELECT * FROM quota_watch_runs ORDER BY ts").fetchall()
+        self.assertEqual(len(runs), 2)
+
+        fc = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
+        self.assertEqual(len(fc), 289)
+        self.assertTrue(all(r[2] == T2 for r in fc))
+        conn.close()
+
+    def test_record_run_readonly_db_warns_and_does_not_raise(self):
+        """record_run on a read-only DB file warns on stderr and does not raise."""
+        ro_db = os.path.join(self.tmp_dir.name, "readonly.db")
+        conn = sqlite3.connect(ro_db)
+        conn.execute("CREATE TABLE dummy (x INT)")
+        conn.commit()
+        conn.close()
+        os.chmod(ro_db, 0o444)
+
+        row = {
+            "ts": 1700000000000,
+            "h0": 1.0,
+            "burn_h": 0.1,
+            "burn_6h": 0.0,
+            "burn_24h": 0.0,
+            "spill_6h": 0.0,
+            "spill_24h": 0.0,
+            "k": None,
+            "zero_h": 0.0,
+            "vertex_usd": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "pool_n": 3,
+            "source": "live",
+        }
+        import io
+        stderr_cap = io.StringIO()
+        orig_stderr = sys.stderr
+        try:
+            sys.stderr = stderr_cap
+            quota_watch.record_run(ro_db, row, [(1700000000000, 1.0)])
+        finally:
+            sys.stderr = orig_stderr
+            os.chmod(ro_db, 0o644)
+
+        err = stderr_cap.getvalue()
+        self.assertIn("quota-watch: could not record run:", err)
+
+    def test_run_live_recording_failure_still_succeeds(self):
+        """run_live against a DB where record_run fails still returns 0 and prints summary."""
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        for d in range(7):
+            ts = t0 - (7 - d) * 86400 * 1000
+            conn.execute(
+                "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                (ts, "acct1", 0.50, ts + 86400 * 1000),
+            )
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        os.chmod(self.db_path, 0o444)
+
+        import io
+        stdout_cap = io.StringIO()
+        stderr_cap = io.StringIO()
+        orig_stdout = sys.stdout
+        orig_stderr = sys.stderr
+        try:
+            sys.stdout = stdout_cap
+            sys.stderr = stderr_cap
+            rc = quota_watch.run_live(self.db_path, self.state_dir, now=t0 + 60000)
+        finally:
+            sys.stdout = orig_stdout
+            sys.stderr = orig_stderr
+            os.chmod(self.db_path, 0o644)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("quota-watch: could not record run:", stderr_cap.getvalue())
+        self.assertIn("quota-watch T=", stdout_cap.getvalue())
+
 
 class TestCliSubcommands(unittest.TestCase):
     def setUp(self):
@@ -1087,6 +1230,59 @@ class TestCliSubcommands(unittest.TestCase):
             "--host", "customhost",
         ])
         self.assertEqual(ret_qr, 0)
+
+    def test_replay_record_does_not_overwrite_live(self):
+        """quota-replay --record does not overwrite an existing 'live' row for the same ts."""
+        conn = sqlite3.connect(self.db_path)
+        t0 = 1700000100000
+        for d in range(7):
+            ts = t0 - (7 - d) * 86400 * 1000
+            conn.execute(
+                "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                (ts, "acct1", 0.50, ts + 86400 * 1000),
+            )
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        # Pre-populate a 'live' row for t0
+        conn.execute(
+            """INSERT INTO quota_watch_runs (
+                ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
+                k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
+                pool_n, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (t0, 99.0, 0.0, 0.0, 0.0, 0.0, 0.0, None, 0.0, None, None, None, 1, "live"),
+        )
+        conn.commit()
+        conn.close()
+
+        since_str = datetime.datetime.fromtimestamp((t0 - 3600000) / 1000, tz=E).strftime("%Y-%m-%d %H:%M")
+        until_str = datetime.datetime.fromtimestamp((t0 + 3600000) / 1000, tz=E).strftime("%Y-%m-%d %H:%M")
+        import io
+        stdout_cap = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = stdout_cap
+            ret = llm_ledger.main([
+                "quota-replay",
+                "--db", self.db_path,
+                "--since", since_str,
+                "--until", until_str,
+                "--record",
+            ])
+        finally:
+            sys.stdout = orig_stdout
+
+        self.assertEqual(ret, 0)
+        self.assertIn("recorded", stdout_cap.getvalue())
+
+        conn = sqlite3.connect(self.db_path)
+        row = conn.execute("SELECT ts, h0, source FROM quota_watch_runs WHERE ts = ?", (t0,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[1], 99.0)
+        self.assertEqual(row[2], "live")
 
     def test_parse_et_datetime(self):
         """parse_et_datetime handles naive dates, end_of_day, naive datetimes, DST, and offsets."""

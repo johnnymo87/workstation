@@ -227,11 +227,13 @@ def forecast(
     refills: list[tuple[int, float]],
     k: float | None,
     T: int,
+    path: list[tuple[int, float]] | None = None,
 ) -> tuple[float, float | None, tuple[int, float] | None]:
     """Forecast zero headroom hours over 24h horizon in 5-min steps.
 
     next_refill is the earliest upcoming refill of any pool account even if beyond the horizon.
     The simulation only includes refills within the 24h horizon.
+    If path is provided, appends (t, h) for T and each 5-min step through the 24h horizon.
     Returns (zero_h, vertex_usd, next_refill).
     """
     sorted_all = sorted(refills, key=lambda r: r[0])
@@ -244,12 +246,17 @@ def forecast(
     i = 0
     step_h = STEP_MS / 3600_000.0
 
+    if path is not None:
+        path.append((t, h))
+
     while t < T + HORIZON_MS:
         t += STEP_MS
         h = max(0.0, h - B * step_h)
         while i < len(sim_refills) and sim_refills[i][0] <= t:
             h += sim_refills[i][1]
             i += 1
+        if path is not None:
+            path.append((t, h))
         if h < FORECAST_ZERO_H:
             zero_h += step_h
 
@@ -544,6 +551,119 @@ def load_or_seed_state(
     return state, is_fresh
 
 
+def record_run(
+    db: str,
+    row: dict[str, Any] | Sequence[Any],
+    path: list[tuple[int, float]] | None = None,
+    timeout: float = 30.0,
+) -> None:
+    """Record quota watch run and forecast path in the ledger.
+
+    Best-effort: catches sqlite3.Error and OSError, writes warning to stderr, returns.
+    """
+    try:
+        if isinstance(row, dict):
+            row_tuple = (
+                row["ts"],
+                row["h0"],
+                row["burn_h"],
+                row.get("burn_6h"),
+                row.get("burn_24h"),
+                row.get("spill_6h"),
+                row.get("spill_24h"),
+                row.get("k"),
+                row["zero_h"],
+                row.get("vertex_usd"),
+                row.get("next_refill_ts"),
+                row.get("next_refill_amt"),
+                row["pool_n"],
+                row.get("source", "live"),
+            )
+            run_ts = row["ts"]
+        else:
+            row_tuple = tuple(row)
+            run_ts = row_tuple[0]
+
+        conn = sqlite3.connect(db, timeout=timeout)
+        try:
+            with conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS quota_watch_runs (
+  ts INTEGER PRIMARY KEY,
+  h0 REAL NOT NULL, burn_h REAL NOT NULL,
+  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+  next_refill_ts INTEGER, next_refill_amt REAL,
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL)"""
+                )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS quota_forecast (
+  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL)"""
+                )
+                conn.execute(
+                    """INSERT OR REPLACE INTO quota_watch_runs (
+  ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
+  k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
+  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    row_tuple,
+                )
+                conn.execute("DELETE FROM quota_forecast")
+                if path:
+                    forecast_rows = [(t, h, run_ts) for t, h in path]
+                    conn.executemany(
+                        "INSERT INTO quota_forecast (ts, headroom, run_ts) VALUES (?, ?, ?)",
+                        forecast_rows,
+                    )
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:
+        sys.stderr.write(f"quota-watch: could not record run: {e}\n")
+        return
+
+
+def record_replay_runs(
+    db: str,
+    rows: list[tuple[Any, ...]],
+    timeout: float = 30.0,
+) -> int:
+    """Record replay runs into quota_watch_runs using INSERT OR IGNORE in one transaction.
+
+    Returns the number of rows inserted and prints how many rows inserted.
+    """
+    if not rows:
+        print("quota-replay: recorded 0 rows")
+        return 0
+    conn = sqlite3.connect(db, timeout=timeout)
+    try:
+        with conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS quota_watch_runs (
+  ts INTEGER PRIMARY KEY,
+  h0 REAL NOT NULL, burn_h REAL NOT NULL,
+  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+  next_refill_ts INTEGER, next_refill_amt REAL,
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL)"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS quota_forecast (
+  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL)"""
+            )
+            changes_before = conn.total_changes
+            conn.executemany(
+                """INSERT OR IGNORE INTO quota_watch_runs (
+  ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
+  k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
+  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            inserted = conn.total_changes - changes_before
+    finally:
+        conn.close()
+    print(f"quota-replay: recorded {inserted} rows")
+    return inserted
+
+
 def run_live(
     db: str,
     state_dir: str,
@@ -660,7 +780,8 @@ def run_live(
         for _, (u, r) in pool.items()
         if r is not None
     ]
-    zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
+    forecast_path: list[tuple[int, float]] = []
+    zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T, path=forecast_path)
 
     spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
     spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
@@ -718,6 +839,25 @@ def run_live(
             else:
                 print(f"would-alert: {action['signature']} ttl={action['ttl']} max={action['max']} text={action['text']}")
 
+    # Record run and forecast path in the ledger (best-effort)
+    run_row = {
+        "ts": T,
+        "h0": H0,
+        "burn_h": B,
+        "burn_6h": burn_6h,
+        "burn_24h": burn_24h,
+        "spill_6h": spill_6h,
+        "spill_24h": spill_24h,
+        "k": k,
+        "zero_h": zero_h,
+        "vertex_usd": vertex_usd,
+        "next_refill_ts": next_refill[0] if next_refill else None,
+        "next_refill_amt": next_refill[1] if next_refill else None,
+        "pool_n": len(pool),
+        "source": "live",
+    }
+    record_run(db, run_row, forecast_path)
+
     # Print summary line
     t_et = datetime.datetime.fromtimestamp(T / 1000, tz=NY_TZ).strftime("%Y-%m-%d %H:%M")
     k_str = str(round(k)) if k is not None else "none"
@@ -739,7 +879,9 @@ def replay(
     until_ms: int,
     excluded: set[str] | None = None,
     host: str | None = None,
-) -> list[ReplayEvent]:
+    record: bool = False,
+    return_runs: bool = False,
+) -> Any:
     """Replay quota watch evaluation tick-by-tick."""
     host = host or socket.gethostname()
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
@@ -757,6 +899,7 @@ def replay(
     tracker = PoolTracker(excluded=excluded)
     alert_state: dict[str, Any] = {}
     events: list[ReplayEvent] = []
+    replay_rows: list[tuple[Any, ...]] = []
 
     for T in sorted(samples_by_tick):
         rows = samples_by_tick[T]
@@ -787,6 +930,25 @@ def replay(
             if r is not None
         ]
         zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
+
+        replay_rows.append(
+            (
+                T,
+                H0,
+                B,
+                burn_6h,
+                burn_24h,
+                spill_6h,
+                spill_24h,
+                k,
+                zero_h,
+                vertex_usd,
+                next_refill[0] if next_refill else None,
+                next_refill[1] if next_refill else None,
+                len(pool),
+                "replay",
+            )
+        )
 
         spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
         spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
@@ -849,4 +1011,9 @@ def replay(
 
         alert_state = new_alert_state
 
+    if record:
+        record_replay_runs(db, replay_rows)
+
+    if return_runs:
+        return events, replay_rows
     return events

@@ -131,7 +131,11 @@ Check:
       # /tmp, which ProtectSystem=strict makes read-only ("disk I/O error" on
       # the first aggregate query, reproduced with systemd-run).
       PrivateTmp = true;
-      ReadWritePaths = [ "/var/lib/llm-quota-watch" ];
+      ReadWritePaths = [
+        "/var/lib/llm-quota-watch"
+        # DELETE journal needs parent dir writable to create/remove ledger.db-journal
+        "/var/lib/llm-ledger"
+      ];
     };
   };
 

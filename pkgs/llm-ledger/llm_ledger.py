@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS quota_samples (
   PRIMARY KEY (ts, account));
 
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS quota_watch_runs (
+  ts INTEGER PRIMARY KEY,          -- T, the quota_samples tick evaluated
+  h0 REAL NOT NULL, burn_h REAL NOT NULL,
+  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+  next_refill_ts INTEGER, next_refill_amt REAL,
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
+
+CREATE TABLE IF NOT EXISTS quota_forecast (
+  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
 """
 
 
@@ -1556,6 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
     qr_parser.add_argument("--until", default="now")
     qr_parser.add_argument("--exclude-account", action="append", default=None)
     qr_parser.add_argument("--host", default=socket.gethostname())
+    qr_parser.add_argument("--record", action="store_true", default=False, help="Record evaluated runs into quota_watch_runs")
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1581,6 +1593,7 @@ def main(argv: list[str] | None = None) -> int:
             until_ms=until_ms,
             excluded=excluded,
             host=args.host,
+            record=args.record,
         )
         for e in events:
             print(e)
