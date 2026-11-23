@@ -1735,6 +1735,39 @@ lib.mkIf isCloudbox {
     };
   };
 
+  # Fetch goose host readiness reports from devbox and mac (workstation-6w7i.27.12)
+  systemd.user.services.goose-host-reports-fetch = {
+    Unit = {
+      Description = "Fetch goose host readiness reports from GitHub Actions variables";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "goose-host-reports-fetch-start" ''
+        set -u
+        if [ -r /run/secrets/github_api_token ]; then
+          export GH_TOKEN="$(< /run/secrets/github_api_token)"
+        fi
+        exec ${localPkgs.goose-host-report}/bin/goose-host-report fetch
+      ''}";
+    };
+  };
+
+  systemd.user.timers.goose-host-reports-fetch = {
+    Unit = {
+      Description = "Periodically fetch goose host readiness reports";
+    };
+    Timer = {
+      OnCalendar = "hourly";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # NOT HERE, DELIBERATELY: the phantom-busy sweeper. Devbox defines it as a
   # systemd USER unit (users/dev/home.devbox.nix:1312-1358), so diffing the two
   # host files makes cloudbox look like it is missing one. It is not — cloudbox

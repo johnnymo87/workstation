@@ -418,6 +418,14 @@ in
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
         # Goose ACP server endpoint for pigeon goose runner (points at honkd proxy)
         "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
+        # A human /launch without --backend starts a goose session on this machine
+        # (pigeon#259; workstation-6w7i.11). Jonathan, 2026-11-23, accepting the
+        # Slack gaps (no /interrupt, attachments or /launch --mcp, bead .13): "Yes".
+        # `--backend opencode` still works per launch. If goose is unconfigured
+        # here (token missing unsets the URL below), unnamed launches are refused
+        # in chat, never silently sent to opencode. swarm_launch is unaffected.
+        # Rollback: delete this line and rebuild (restarts pigeon-daemon).
+        "PIGEON_LAUNCH_DEFAULT_BACKEND=goose"
         # Who may leave a message for a pull-mode session or prompt a topic-bound
         # goose session: the owner's user id in the devbox Slack workspace
         # (pigeon-4ogz.15). The Telegram id went with Telegram (pigeon-4ogz.13).
@@ -738,14 +746,25 @@ in
       # 2026-11-20, users/dev/home.devbox.nix; devbox has
       # no per-command scopes, so there both caps hold the tool commands too). Measured
       # peak over the 45 days to 2026-11-05: 565M (the Nov 4-5 run), so this is
-      # 10x headroom for the coordinators this serve hosts. Worst case with the
-      # user slice at its cap is 26G of 30G.
+      # 10x headroom for the coordinators this serve hosts.
+      #
+      # 10G since 2026-11-23 (workstation-6w7i.30): devbox's program WORKERS
+      # moved here from opencode-serve@ (worker_harness = "goose"), so their
+      # tool commands (mix test, the TEC python suite, pytest) now run in this
+      # cgroup. Coordinators alone reached the 6G cap on Nov 11, 18, 20 and 23
+      # (7.5-9G read from disk on those days: cache thrash at the cap), and two
+      # probe workers took the day's peak from 3.1G to 4.2G. Worst case with the
+      # user slice at its 20G cap is 30G of 30G RAM. Swap is zram, inside that
+      # RAM, so it is not extra room; the real backstop is earlyoom at <10%
+      # MemAvailable, which ranks goose tool commands (adj 500) first. The sum
+      # overstates use: both caps count page cache, and the user slice's anon
+      # was 8.6G of 20G on 2026-11-21.
       #
       # Max-only, no MemoryHigh, for the reason the opencode serves dropped it:
       # memory.high throttles instead of killing and produced multi-minute
       # silent stalls (workstation-94g8). MemorySwapMax=1G so the cap cannot be
       # relieved into zram indefinitely (the cloudbox h1y6 measurement).
-      MemoryMax = "6G";
+      MemoryMax = "10G";
       MemorySwapMax = "1G";
       # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
       # cgroup, and with `stop` ANY oom kill in it would end every goose turn on
@@ -767,6 +786,13 @@ in
       # daemon-reload re-realizes cgroup limits on the running unit. Check
       # /sys/fs/cgroup/system.slice/goose-serve.service/memory.current first.
       OOMPolicy = "continue";
+      # Soft open-files limit (workstation-6w7i.30). systemd's default is 1024
+      # soft / 524288 hard, and goose's tool shells inherit the soft one, while
+      # opencode bash gets 524288. Measured 2026-11-23 on devbox: eternal-machinery's
+      # TEC suite (1980 tests) passes under opencode and errors once under goose
+      # with "Too many open files". Applies when goose starts (restart or the
+      # nightly), not at switch.
+      LimitNOFILE = 524288;
     };
   };
 

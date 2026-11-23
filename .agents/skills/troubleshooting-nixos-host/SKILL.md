@@ -67,7 +67,7 @@ launchctl bootout gui/$UID/org.nix-community.home.devbox-chart-tunnel
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/org.nix-community.home.devbox-chart-tunnel.plist
 ```
 
-Re-running `home-switch` (no root) does the same thing if you prefer.
+Re-running `home-switch` (no root) does the same thing if you prefer. Note: `cloudbox-grafana-tunnel` (:3001) recovers the same way (`bootout`/`bootstrap` with `org.nix-community.home.cloudbox-grafana-tunnel`).
 
 Triage:
 

@@ -127,7 +127,9 @@ def main(argv=None) -> int:
         f.write(json.dumps({"host": a.host, "hour_utc": last.strftime("%Y-%m-%dT%H:00Z")}) + "\n")
     git(a.repo, "add", "-A", a.host)
     if git(a.repo, "diff", "--cached", "--quiet", check=False).returncode != 0:
-        git(a.repo, "commit", "-q", "-m", f"{a.host}: hourly usage through {now:%Y-%m-%dT%H:00Z}")
+        # Unsigned: regenerable data, and an unattended job may not reach the
+        # signing key (no agent/tty under launchd or systemd).
+        git(a.repo, "-c", "commit.gpgsign=false", "commit", "-q", "-m", f"{a.host}: hourly usage through {now:%Y-%m-%dT%H:00Z}")
     rl = git(a.repo, "rev-list", "--count", "@{u}..HEAD", check=False)
     ahead = rl.stdout.strip() if rl.returncode == 0 else "unknown"  # no upstream yet: push
     if not a.no_push and ahead != "0":

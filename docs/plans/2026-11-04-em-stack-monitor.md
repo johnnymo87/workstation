@@ -115,6 +115,21 @@ agents could not call the model, the game logged Decimian out for idling at
   stopped). Nothing logs the character back in: until the agent can act, a
   character in the world would only stand there unattended and be closed
   again. The restart is a person's or the runner's.
+- The quota sleep (EM bead kdubj.126, Jonathan 2026-11-23: "when we run out of
+  quota, we should `sleep` any active character"): once `quota:pool` stands
+  and this pass read the quota as spent (never on a carried key),
+  each pass POSTs `{"type":"sleep","reason":"quota"}` to the directive of every
+  session an agent plays (`agent_driven`) that is online and in the world. The
+  BEAM's hands send `sleep` (TEC's safe logout), no model is asked. A session a
+  person plays is never touched. The Character refuses while something attacks
+  her or a flee is in flight (it waits: the fight stays her hands'), and under a
+  GM halt, and the next pass asks again. Its own drill, walk or errand is
+  stopped first. Each try is logged and its outcome joins the `quota:pool` line.
+  The sleep then stands as `asleep:<sid>` (her session closed `by:
+  quota_sleep`) until the session is back. Nothing wakes her when quota
+  returns: her agent is told why she slept as her first wake once she is back,
+  and starting her is a person's or the runner's. `EM_STACK_QUOTA_SLEEP=0`
+  turns it off. With no stack up nothing runs, and no character can be online.
 - When only agent keys stand, the header is "EM agents: not acting (the stack
   is up)", not "EM stack: problem".
 - The footer says how far the stack-health checkout trails `origin/main` as

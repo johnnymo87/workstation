@@ -154,6 +154,9 @@
         inherit goose-link;
         driftAlert = p.callPackage ./pkgs/opencode-drift-alert { };
       };
+      goose-host-report = p.callPackage ./pkgs/goose-host-report {
+        inherit goose-link;
+      };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -170,6 +173,7 @@
       oc-revive = p.callPackage ./pkgs/oc-revive { };
       oc-session-list = p.callPackage ./pkgs/oc-session-list { };
       oc-tags = p.callPackage ./pkgs/oc-tags { };
+      llm-ledger = p.callPackage ./pkgs/llm-ledger { };
       worker-scorecard = p.callPackage ./pkgs/worker-scorecard { };
       # The honk rev the probe tests is the honk this flake deploys.
       goose-upgrade-probe = p.callPackage ./pkgs/goose-upgrade-probe { honkRev = honk.rev; };
@@ -694,8 +698,8 @@
       } ''
         cd ${self}
         bash hosts/devbox/test-em-stack-monitor.sh 2>&1 | tee "$TMPDIR/s.txt"
-        grep -q '^ALL PASS (189 assertions)' "$TMPDIR/s.txt" || {
-          echo "GATE FAILURE: em-stack-monitor suite did not reach ALL PASS (189 assertions)." >&2
+        grep -q '^ALL PASS (203 assertions)' "$TMPDIR/s.txt" || {
+          echo "GATE FAILURE: em-stack-monitor suite did not reach ALL PASS (203 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }
@@ -827,6 +831,222 @@
             echo "GATE FAILURE: the start script still exports Telegram env (pigeon-4ogz.13)" >&2; exit 1
           fi
           echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 4 script checks passed" > $out
+        '';
+
+      # cloudbox Grafana loopback exposure and security wiring (workstation-4si2.3).
+      # Loopback bind on 127.0.0.1:3000 is explicit and guarded because cloudbox
+      # has a public IP and no NixOS firewall. Eval half: module options, secrets,
+      # datasources, and env override immunity. Build half: greps the rendered
+      # grafana.ini that the service daemon script actually passes to -config.
+      cloudbox-grafana-exposure = let
+        cfg = self.nixosConfigurations.cloudbox.config;
+        lib = devboxPkgs.lib;
+        grafana = cfg.services.grafana;
+        settings = if builtins.isAttrs (grafana.settings or null) then grafana.settings else { };
+        server = if builtins.isAttrs (settings.server or null) then settings.server else { };
+        analytics = if builtins.isAttrs (settings.analytics or null) then settings.analytics else { };
+        news = if builtins.isAttrs (settings.news or null) then settings.news else { };
+        security = if builtins.isAttrs (settings.security or null) then settings.security else { };
+        users = if builtins.isAttrs (settings.users or null) then settings.users else { };
+        provisionSettings = grafana.provision.datasources.settings or null;
+        datasources =
+          if provisionSettings != null && provisionSettings ? datasources && builtins.isList provisionSettings.datasources
+          then provisionSettings.datasources
+          else [ ];
+        firstDs = if datasources != [ ] then builtins.head datasources else { };
+        firstDsJson = if builtins.isAttrs (firstDs.jsonData or null) then firstDs.jsonData else { };
+
+        sopsAdmin = cfg.sops.secrets.grafana_admin_password or null;
+        sopsSecretKey = cfg.sops.secrets.grafana_secret_key or null;
+
+        userGrafana = cfg.users.users.grafana or null;
+
+        svc = cfg.systemd.services.grafana or null;
+        grafanaUnit = cfg.systemd.units."grafana.service" or null;
+        grafanaUnitText =
+          if grafanaUnit != null && builtins.isAttrs grafanaUnit && builtins.isString (grafanaUnit.text or null)
+          then grafanaUnit.text
+          else "";
+        grafanaUnitLines = lib.splitString "\n" grafanaUnitText;
+        globalEnv = cfg.systemd.globalEnvironment or { };
+        systemdUnits = cfg.systemd.units or { };
+
+        script = if svc != null && svc ? script && builtins.isString svc.script then svc.script else "";
+        iniMatch = builtins.match ".*grafana server [^\n]*-config ([^ \n]+).*" script;
+        rawIniPath =
+          if iniMatch != null then builtins.head iniMatch
+          else "/nonexistent/grafana.ini";
+        iniPath = builtins.appendContext rawIniPath (builtins.getContext script);
+
+        checks = {
+          "grafana enabled" = (grafana.enable or false) == true;
+          "server http_addr is 127.0.0.1" = (server.http_addr or null) == "127.0.0.1";
+          "server http_port is 3000" = (server.http_port or null) == 3000;
+          "server protocol is http" = (server.protocol or null) == "http";
+          "openFirewall is false" = (grafana.openFirewall or null) == false;
+
+          "reporting_enabled is false" = (analytics.reporting_enabled or null) == false;
+          "check_for_updates is false" = (analytics.check_for_updates or null) == false;
+          "check_for_plugin_updates is false" = (analytics.check_for_plugin_updates or null) == false;
+          "feedback_links_enabled is false" = (analytics.feedback_links_enabled or null) == false;
+          "news_feed_enabled is false" = (news.news_feed_enabled or null) == false;
+
+          "users allow_sign_up is false" = (users.allow_sign_up or null) == false;
+          "plugin.frser-sqlite-datasource block_list contains grafana.db" =
+            let blockList = settings."plugin.frser-sqlite-datasource".block_list or null;
+            in builtins.isString blockList && lib.hasInfix "grafana.db" blockList;
+          "auth.anonymous enabled is absent or false" =
+            (settings."auth.anonymous".enabled or false) == false;
+          # Grafana's default is true: one click publishes to snapshots.raintank.io.
+          "snapshots external_enabled is false" =
+            (settings.snapshots.external_enabled or null) == false;
+          # Setting ha_peers opens the alerting gossip listener on 0.0.0.0:9094.
+          "unified_alerting ha_peers unset or empty" =
+            (settings.unified_alerting.ha_peers or "") == "";
+          "datasource pathOptions sets busy_timeout" =
+            builtins.isString (firstDsJson.pathOptions or null)
+            && lib.hasInfix "_pragma=busy_timeout(" firstDsJson.pathOptions;
+
+          "admin_password is sops file ref" =
+            sopsAdmin != null && builtins.isString (security.admin_password or null) && security.admin_password == "$__file{${sopsAdmin.path}}";
+          "secret_key is sops file ref" =
+            sopsSecretKey != null && builtins.isString (security.secret_key or null) && security.secret_key == "$__file{${sopsSecretKey.path}}";
+          "sops admin password secret owned by grafana 0400" =
+            sopsAdmin != null && builtins.isAttrs sopsAdmin && (sopsAdmin.owner or null) == "grafana" && (sopsAdmin.mode or null) == "0400";
+          "sops secret key secret owned by grafana 0400" =
+            sopsSecretKey != null && builtins.isAttrs sopsSecretKey && (sopsSecretKey.owner or null) == "grafana" && (sopsSecretKey.mode or null) == "0400";
+
+          "grafana in llm-ledger group" =
+            userGrafana != null && builtins.isList (userGrafana.extraGroups or null) && builtins.elem "llm-ledger" userGrafana.extraGroups;
+          "declarativePlugins has frser-sqlite-datasource" =
+            builtins.isList (grafana.declarativePlugins or null)
+            && builtins.any (p: builtins.isAttrs p && (p.pname or "") == "frser-sqlite-datasource") grafana.declarativePlugins;
+
+          "exactly one provisioned datasource" = builtins.length datasources == 1;
+          "datasource is frser-sqlite-datasource" = (firstDs.type or null) == "frser-sqlite-datasource";
+          "datasource path is /var/lib/llm-ledger/ledger.db" = (firstDsJson.path or null) == "/var/lib/llm-ledger/ledger.db";
+          "datasource pathPrefix is file:" = (firstDsJson.pathPrefix or null) == "file:";
+          "datasource pathOptions contains mode=ro" =
+            builtins.isString (firstDsJson.pathOptions or null) && lib.hasInfix "mode=ro" firstDsJson.pathOptions;
+          "datasource attachLimit is 0" = (firstDsJson.attachLimit or null) == 0;
+          "datasource editable is false" = (firstDs.editable or null) == false;
+
+          "no GF_ in unit Environment" =
+            grafanaUnitText != ""
+            && !(builtins.any (line: lib.hasInfix "Environment=" line && lib.hasInfix "GF_" line) grafanaUnitLines);
+          "no EnvironmentFile in unit" =
+            grafanaUnitText != ""
+            && !(lib.hasInfix "EnvironmentFile=" grafanaUnitText);
+          "no GF_* in systemd globalEnvironment" =
+            builtins.isAttrs globalEnv
+            && !(builtins.any (k: lib.hasPrefix "GF_" k) (builtins.attrNames globalEnv));
+          "no grafana.service.d drop-in units" =
+            builtins.isAttrs systemdUnits
+            && !(builtins.any (k: lib.hasPrefix "grafana.service.d" k) (builtins.attrNames systemdUnits));
+          "grafana service has no overrideStrategy drop-in" =
+            svc != null && (svc.overrideStrategy or "") != "asDropin";
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+        awk = "${devboxPkgs.gawk}/bin/awk";
+      in
+        assert lib.assertMsg (failed == [ ]) "cloudbox-grafana-exposure failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "cloudbox-grafana-exposure" { } ''
+          ini="${iniPath}"
+          [ -s "$ini" ] || { echo "GATE FAILURE: rendered grafana ini $ini missing or empty" >&2; exit 1; }
+          ${awk} '
+            BEGIN {
+              section = ""
+              err = 0
+            }
+            /^[ \t]*[;#]/ { next }
+            /^[ \t]*$/ { next }
+            /^[ \t]*\[.+\][ \t]*$/ {
+              section = $0
+              sub(/^[ \t]*\[/, "", section)
+              sub(/\].*$/, "", section)
+              next
+            }
+            /=/ {
+              key = $0
+              sub(/=.*$/, "", key)
+              sub(/^[ \t]+/, "", key)
+              sub(/[ \t]+$/, "", key)
+
+              val = $0
+              sub(/^[^=]*=/, "", val)
+              sub(/^[ \t]+/, "", val)
+              sub(/[ \t]+$/, "", val)
+
+              count[section, key]++
+              vals[section, key] = val
+            }
+            END {
+              if (count["server", "http_addr"] != 1) {
+                print "GATE FAILURE: [server] http_addr must appear exactly once, found " count["server", "http_addr"] > "/dev/stderr"
+                err = 1
+              } else if (vals["server", "http_addr"] != "127.0.0.1") {
+                print "GATE FAILURE: [server] http_addr is " vals["server", "http_addr"] ", expected 127.0.0.1" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["server", "http_port"] != "3000") {
+                print "GATE FAILURE: [server] http_port is " vals["server", "http_port"] ", expected 3000" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["server", "protocol"] != "http") {
+                print "GATE FAILURE: [server] protocol is " vals["server", "protocol"] ", expected http" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["analytics", "reporting_enabled"] != "false") {
+                print "GATE FAILURE: [analytics] reporting_enabled is " vals["analytics", "reporting_enabled"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["analytics", "check_for_updates"] != "false") {
+                print "GATE FAILURE: [analytics] check_for_updates is " vals["analytics", "check_for_updates"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["analytics", "check_for_plugin_updates"] != "false") {
+                print "GATE FAILURE: [analytics] check_for_plugin_updates is " vals["analytics", "check_for_plugin_updates"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (index(vals["security", "admin_password"], "$__file{") != 1) {
+                print "GATE FAILURE: [security] admin_password does not start with $__file{" > "/dev/stderr"
+                err = 1
+              }
+              if (index(vals["security", "secret_key"], "$__file{") != 1) {
+                print "GATE FAILURE: [security] secret_key does not start with $__file{" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["users", "allow_sign_up"] != "false") {
+                print "GATE FAILURE: [users] allow_sign_up is " vals["users", "allow_sign_up"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["snapshots", "external_enabled"] != "false") {
+                print "GATE FAILURE: [snapshots] external_enabled is " vals["snapshots", "external_enabled"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["unified_alerting", "ha_peers"] != "") {
+                print "GATE FAILURE: [unified_alerting] ha_peers is set; that opens a gossip listener on 0.0.0.0:9094" > "/dev/stderr"
+                err = 1
+              }
+
+              if (count["auth.anonymous", "enabled"] > 0 && vals["auth.anonymous", "enabled"] != "false") {
+                print "GATE FAILURE: [auth.anonymous] enabled is " vals["auth.anonymous", "enabled"] ", must be absent or false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (index(vals["plugin.frser-sqlite-datasource", "block_list"], "grafana.db") == 0) {
+                print "GATE FAILURE: [plugin.frser-sqlite-datasource] block_list does not contain grafana.db" > "/dev/stderr"
+                err = 1
+              }
+
+              if (err) exit 1
+            }
+          ' "$ini" || exit 1
+          echo "cloudbox-grafana-exposure: ${toString (builtins.length (builtins.attrNames checks))} eval + ini checks passed" > $out
         '';
 
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
@@ -1719,13 +1939,49 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 301 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 301 tests'. If you added or removed" >&2
+        grep -q '^Ran 316 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 316 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: oc-tags suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      llm-ledger-tests = devboxPkgs.runCommand "llm-ledger-tests" {
+        nativeBuildInputs = [
+          # zoneinfo has no tzdata inside the sandbox; ET bucketing needs it.
+          (devboxPkgs.python3.withPackages (ps: [ ps.tzdata ]))
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
+        python3 pkgs/llm-ledger/test_llm_ledger.py 2>&1 | tee "$TMPDIR/out.txt"
+
+        # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
+        # also what a suite that silently stopped collecting tests prints.
+        grep -q '^Ran 63 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 63 tests'. If you added or removed" >&2
+          echo "tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: llm-ledger suite did not report OK." >&2
+          exit 1
+        }
+
+        python3 pkgs/llm-ledger/test_quota_watch.py 2>&1 | tee "$TMPDIR/qw.txt"
+        grep -q '^Ran 40 tests' "$TMPDIR/qw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 40 tests' from test_quota_watch.py. If you" >&2
+          echo "added or removed tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/qw.txt" || {
+          echo "GATE FAILURE: quota-watch suite did not report OK." >&2
           exit 1
         }
         touch $out
@@ -2295,6 +2551,23 @@
         touch $out
       '';
 
+      # workstation-6w7i.27.12: goose-host-report unit tests.
+      goose-host-report = devboxPkgs.runCommand "goose-host-report-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        python3 pkgs/goose-host-report/test_goose_host_report.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q 'Ran 17 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected pinned 17 goose-host-report tests." >&2
+          exit 1
+        }
+        grep -q 'OK' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: goose-host-report suite did not pass with OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       # L6 (workstation-6w7i.27.2): on the NixOS hosts every goose -- goose-serve
       # and the user's CLI -- runs /var/lib/goose/current, and only goose-link
       # (the cutover, or a manual rollback) moves that link. So a merged pin,
@@ -2719,6 +2992,43 @@
         assert lib.assertMsg (failed == [ ]) "darwin-pigeon-slack-wiring failed: ${lib.concatStringsSep "; " failed}";
         devboxPkgs.runCommand "darwin-pigeon-slack-wiring" { } ''
           echo "darwin-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
+        '';
+
+      # The Mac's cloudbox-grafana-tunnel launchd agent (workstation-4si2.3).
+      # Eval-only on the Linux leg (same constraint as darwin-goose-wiring: reads
+      # module values only, does not force home.packages).
+      darwin-grafana-tunnel = let
+        hm = self.homeConfigurations.${mac.hostname}.config;
+        agent = hm.launchd.agents.cloudbox-grafana-tunnel or null;
+        config = if agent != null then agent.config or {} else {};
+        lib = devboxPkgs.lib;
+        script = lib.concatStringsSep "\n" (config.ProgramArguments or []);
+        listeners = if config ? Sockets && config.Sockets ? Listeners then config.Sockets.Listeners else {};
+        inetdWait = if config ? inetdCompatibility && config.inetdCompatibility ? Wait then config.inetdCompatibility.Wait else null;
+        checks = {
+          "agent enabled" = agent != null && (agent.enable or false);
+          "listener SockNodeName is 127.0.0.1" = (listeners.SockNodeName or null) == "127.0.0.1";
+          "listener SockServiceName is 3001" = (listeners.SockServiceName or null) == "3001";
+          "listener SockType is stream" = (listeners.SockType or null) == "stream";
+          "listener SockFamily is IPv4" = (listeners.SockFamily or null) == "IPv4";
+          "inetdCompatibility Wait is false" = inetdWait == false;
+          "StandardErrorPath set and ends with cloudbox-grafana-tunnel.err.log" =
+            (config ? StandardErrorPath) && config.StandardErrorPath != null && lib.hasSuffix "cloudbox-grafana-tunnel.err.log" config.StandardErrorPath;
+          "no RunAtLoad" = agent != null && (config.RunAtLoad or null) == null;
+          "no KeepAlive" = agent != null && (config.KeepAlive or null) == null;
+          "script contains host=cloudbox-chart" = lib.hasInfix "host=cloudbox-chart" script;
+          "script contains -W 127.0.0.1:3000 \"$host\"" = lib.hasInfix ''-W 127.0.0.1:3000 "$host"'' script;
+          # Both agents share the cloudbox-chart master; creation must be
+          # serialized or a losing racer leaks a daemonized ssh + gcloud.
+          "script serializes master creation" = lib.hasInfix ''mkdir "$lock"'' script;
+          "chart agent uses the same locked script" =
+            lib.hasInfix ''mkdir "$lock"'' (lib.concatStringsSep "\n" (hm.launchd.agents.cloudbox-chart-tunnel.config.ProgramArguments or [ ]));
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+      in
+        assert lib.assertMsg (failed == [ ]) "darwin-grafana-tunnel failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "darwin-grafana-tunnel" { } ''
+          echo "darwin-grafana-tunnel: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
         '';
 
       # oc-mcp-enable grants a RUNNING session an MCP server (connect + a
