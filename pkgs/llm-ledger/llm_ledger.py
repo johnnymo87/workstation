@@ -113,7 +113,7 @@ REMOTE_PRICES: dict[str, tuple[float, float, float, float]] = {
 
 def price_remote(
     model: str | None,
-    input: int,
+    input_tokens: int,
     output: int,
     cache_read: int,
     cw5m: int,
@@ -129,7 +129,7 @@ def price_remote(
     p_in, p_out, p_cr, p_cw5m = prices
     p_cw1h = 2.0 * p_in
     return (
-        (input or 0) * p_in
+        (input_tokens or 0) * p_in
         + (output or 0) * p_out
         + (cache_read or 0) * p_cr
         + (cw5m or 0) * p_cw5m
@@ -330,21 +330,25 @@ class LedgerLock:
         self.fd = open(self.lock_path, "a")
         if self.timeout_s is not None:
             deadline = time.monotonic() + self.timeout_s
-            while True:
-                try:
-                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.acquired = True
-                    return self
-                except (BlockingIOError, OSError):
-                    pass
-                now = time.monotonic()
-                if now >= deadline:
+            try:
+                while True:
+                    try:
+                        fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self.acquired = True
+                        return self
+                    except (BlockingIOError, OSError):
+                        pass
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise TimeoutError(
+                            f"Timed out after {self.timeout_s}s waiting for lock {self.lock_path}"
+                        )
+                    time.sleep(min(0.5, max(0.0, deadline - now)))
+            except BaseException:
+                if self.fd is not None:
                     self.fd.close()
                     self.fd = None
-                    raise TimeoutError(
-                        f"Timed out after {self.timeout_s}s waiting for lock {self.lock_path}"
-                    )
-                time.sleep(min(0.5, max(0.0, deadline - now)))
+                raise
         elif self.blocking:
             try:
                 fcntl.flock(self.fd, fcntl.LOCK_EX)
@@ -1356,6 +1360,7 @@ def ensure_fleet_objects(
     now_ms: int | None = None,
 ) -> None:
     """Ensure fleet_hourly view and synthetic session_program rows exist."""
+    local_host = local_host or socket.gethostname()
     if now_ms is None:
         now_ms = int(time.time() * 1000)
 
@@ -1378,11 +1383,30 @@ def ensure_fleet_objects(
 
     hosts = [r[0] for r in conn.execute("SELECT DISTINCT host FROM remote_hosts").fetchall()]
     if hosts:
-        conn.executemany(
-            "INSERT OR REPLACE INTO session_program (attr_key, tag, source, root, title, updated_at) "
-            "VALUES (?, ?, 'fleet', NULL, ?, ?)",
-            [(f"fleet:{h}", f"fleet:{h}", f"{h} (all usage)", now_ms) for h in hosts],
-        )
+        existing_sp = {
+            r[0]: (r[1], r[2], r[3])
+            for r in conn.execute(
+                "SELECT attr_key, tag, source, title FROM session_program WHERE attr_key LIKE 'fleet:%'"
+            ).fetchall()
+        }
+        to_upsert = []
+        for h in hosts:
+            attr_key = f"fleet:{h}"
+            tag = f"fleet:{h}"
+            source = "fleet"
+            title = f"{h} (all usage)"
+            if attr_key in existing_sp:
+                cur_tag, cur_source, cur_title = existing_sp[attr_key]
+                if (cur_tag, cur_source, cur_title) == (tag, source, title):
+                    continue
+            to_upsert.append((attr_key, tag, source, None, title, now_ms))
+
+        if to_upsert:
+            conn.executemany(
+                "INSERT OR REPLACE INTO session_program (attr_key, tag, source, root, title, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                to_upsert,
+            )
     conn.commit()
 
 
@@ -1643,6 +1667,8 @@ def import_remote(
     if not os.path.isdir(repo_dir):
         raise FileNotFoundError(f"repo dir not found: {repo_dir}")
 
+    local_host = local_host or socket.gethostname()
+
     if now_ms is None:
         now_ms = int(time.time() * 1000)
 
@@ -1668,8 +1694,7 @@ def import_remote(
                 if host == local_host:
                     continue
 
-                processed_hosts += 1
-
+                has_week_files = False
                 for fname in sorted(os.listdir(host_path)):
                     m = re.match(r"^(\d{4})-W(\d{2})\.jsonl$", fname)
                     if not m:
@@ -1677,6 +1702,7 @@ def import_remote(
                     file_path = os.path.join(host_path, fname)
                     if not os.path.isfile(file_path):
                         continue
+                    has_week_files = True
 
                     with open(file_path, "rb") as f:
                         content = f.read()
@@ -1792,12 +1818,20 @@ def import_remote(
                         with open(watermark_path, "r", encoding="utf-8") as wf:
                             wdata = json.load(wf)
                         if isinstance(wdata, dict):
-                            whour_str = wdata.get("hour_utc")
-                            whour = parse_iso_ts(whour_str)
-                            if whour is not None:
-                                exported_through = whour + 3600000
+                            wm_host = wdata.get("host")
+                            if wm_host is None or wm_host == host:
+                                whour_str = wdata.get("hour_utc")
+                                whour = parse_iso_ts(whour_str)
+                                if whour is not None:
+                                    exported_through = whour + 3600000
                     except Exception:
                         exported_through = None
+
+                # Only upsert remote_hosts for a dir if it had at least one week file or a valid watermark
+                if not (has_week_files or exported_through is not None):
+                    continue
+
+                processed_hosts += 1
 
                 min_row = conn.execute(
                     "SELECT MIN(hour) FROM remote_hourly WHERE host=?", (host,)

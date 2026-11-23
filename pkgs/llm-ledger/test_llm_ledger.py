@@ -2576,7 +2576,7 @@ class TestImportRemote(unittest.TestCase):
         # 46905*4 + 192940*20 + 52539503*0.2 + 3954596*5.0 = 34327300.6 / 1e6 = 34.3273006
         cost = llm_ledger.price_remote(
             "claude-opus-5-5",
-            input=46905,
+            input_tokens=46905,
             output=192940,
             cache_read=52539503,
             cw5m=3954596,
@@ -2589,7 +2589,7 @@ class TestImportRemote(unittest.TestCase):
         # Suffix stripping: claude-opus-5-5@20250219
         cost_suffixed = llm_ledger.price_remote(
             "claude-opus-5-5@20250219",
-            input=46905,
+            input_tokens=46905,
             output=192940,
             cache_read=52539503,
             cw5m=3954596,
@@ -2602,7 +2602,7 @@ class TestImportRemote(unittest.TestCase):
         # 1h write rate is 2x input rate: claude-opus-5-5 input rate is 4 $/MTok -> 1h rate is 8 $/MTok
         cost_1h = llm_ledger.price_remote(
             "claude-opus-5-5",
-            input=0,
+            input_tokens=0,
             output=0,
             cache_read=0,
             cw5m=0,
@@ -2616,7 +2616,7 @@ class TestImportRemote(unittest.TestCase):
         self.assertIsNone(
             llm_ledger.price_remote(
                 "claude-fable-5-2",
-                input=100,
+                input_tokens=100,
                 output=100,
                 cache_read=0,
                 cw5m=0,
@@ -3060,6 +3060,117 @@ class TestImportRemote(unittest.TestCase):
             code = llm_ledger.main(["import-remote", "--repo", self.repo_dir, "--db", self.db_path, "--host", "cloudbox"])
         self.assertEqual(code, 0)
         self.assertIn("import-remote files=1 rows=1 malformed=0 unpriced=0", out_buf.getvalue())
+
+    def test_import_remote_local_host_default(self):
+        # When local_host is empty or None, it defaults to socket.gethostname()
+        import socket
+        my_host = socket.gethostname()
+        my_host_dir = os.path.join(self.repo_dir, my_host)
+        os.makedirs(my_host_dir, exist_ok=True)
+        with open(os.path.join(my_host_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps({
+                "account": "user@example.com",
+                "host": my_host,
+                "hour_utc": "2026-11-23T00:00Z",
+                "model": "claude-opus-5-5",
+            }) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="",
+        )
+        self.assertEqual(res["files"], 0)
+        self.assertEqual(res["hosts"], 0)
+
+    def test_import_remote_watermark_host_mismatch_ignored(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T00:00Z",
+                "model": "claude-opus-5-5",
+            }) + "\n")
+
+        # Watermark has host "wrongbox" which differs from dir name "devbox"
+        watermark = {"host": "wrongbox", "hour_utc": "2026-11-23T21:00Z"}
+        with open(os.path.join(devbox_dir, "_exported_through.json"), "w") as f:
+            f.write(json.dumps(watermark) + "\n")
+
+        llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            r = conn.execute("SELECT exported_through FROM remote_hosts WHERE host='devbox'").fetchone()
+            self.assertIsNotNone(r)
+            self.assertIsNone(r[0])
+        finally:
+            conn.close()
+
+    def test_import_remote_stray_dir_ignored(self):
+        # docs/ dir with non-week file and empty/ dir
+        docs_dir = os.path.join(self.repo_dir, "docs")
+        os.makedirs(docs_dir, exist_ok=True)
+        with open(os.path.join(docs_dir, "README.md"), "w") as f:
+            f.write("Some documentation\n")
+
+        empty_dir = os.path.join(self.repo_dir, "empty")
+        os.makedirs(empty_dir, exist_ok=True)
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["hosts"], 0)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            hosts = conn.execute("SELECT host FROM remote_hosts").fetchall()
+            self.assertEqual(hosts, [])
+            sp_fleet = conn.execute("SELECT attr_key FROM session_program WHERE attr_key LIKE 'fleet:%'").fetchall()
+            self.assertEqual(sp_fleet, [])
+        finally:
+            conn.close()
+
+    def test_ensure_fleet_objects_session_program_updated_at_not_bumped_when_unchanged(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) "
+                "VALUES ('devbox', 100, 200, 300)"
+            )
+            conn.commit()
+
+            llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox", now_ms=1000)
+            row1 = conn.execute(
+                "SELECT updated_at FROM session_program WHERE attr_key = 'fleet:devbox'"
+            ).fetchone()
+            self.assertEqual(row1[0], 1000)
+
+            # Second call at later now_ms: updated_at must NOT be bumped because row is unchanged
+            llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox", now_ms=2000)
+            row2 = conn.execute(
+                "SELECT updated_at FROM session_program WHERE attr_key = 'fleet:devbox'"
+            ).fetchone()
+            self.assertEqual(row2[0], 1000)
+        finally:
+            conn.close()
+
+    def test_ledger_lock_timeout_closes_fd_on_base_exception(self):
+        with llm_ledger.LedgerLock(self.db_path, blocking=True):
+            lock = llm_ledger.LedgerLock(self.db_path, timeout_s=5.0)
+            with mock.patch("time.sleep", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    with lock:
+                        pass
+            self.assertIsNone(lock.fd)
 
 
 if __name__ == "__main__":
