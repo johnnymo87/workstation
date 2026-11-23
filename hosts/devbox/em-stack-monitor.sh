@@ -27,6 +27,9 @@
 #   EM_STACK_GATE_CMD    exit 0 when a stack (a BEAM on 127.0.0.1:4002) is up.
 #   EM_STACK_MODE_CMD    prints the BEAM's EM_MODE (empty when unknown).
 #   EM_STACK_HEALTH_CMD  prints bin/stack-health's output (exit code ignored).
+#   EM_STACK_QUOTA_CMD   prints teamclaude's quota state (JSON); exit 3 when
+#                        there is none (no teamclaude here), other non-zero
+#                        when it could not be read.
 #   EM_STACK_SLACK_CMD   reads the Slack message on stdin; non-zero = failed.
 #   EM_STACK_NOW         epoch seconds.
 #
@@ -46,9 +49,11 @@
 #                  carried when stack-health printed no SUMMARY line, or that
 #                  check (api, for session_not_started) reads UNKNOWN
 #   monitor:blind  never carried (it is derived from the stack-health output)
-#   presence:<sid> carried while the presence fetch failed
+#   presence:<sid>, idleout:<sid>
+#                  carried while the presence fetch failed
 #   gm_halt:<sid>  carried while the presence fetch failed, or this session's
 #                  status fetch failed (a 503 session_not_found is an answer)
+#   quota:pool     carried while the quota state could not be read
 #   quarantine:*   carried while the quiescence fetch failed (in a live mode, or
 #                  an unknown one, a refused :4400 counts as failed: AgentOS is
 #                  meant to be up, and fail:agentos takes over)
@@ -129,6 +134,15 @@ stack_mode() { # prints EM_MODE of the BEAM on :4002, empty when unknown
   tr '\0' '\n' <"/proc/$pid/environ" | sed -n 's/^EM_MODE=//p' | head -n 1 || true
 }
 
+# teamclaude's quota state (eternal-machinery a8gw1). Only the .state.json file:
+# never ~/.config/teamclaude.json, which holds the accounts' credentials.
+quota_state() { # prints the quota state JSON; exit 3: no state here; other non-zero: unreadable
+  if [ -n "${EM_STACK_QUOTA_CMD:-}" ]; then "$EM_STACK_QUOTA_CMD"; return; fi
+  local f=${EM_STACK_QUOTA_FILE:-/home/dev/.config/teamclaude.state.json}
+  [ -e "$f" ] || return 3
+  cat "$f"
+}
+
 stack_health() { # prints bin/stack-health output; exit code is ignored by the caller
   if [ -n "${EM_STACK_HEALTH_CMD:-}" ]; then "$EM_STACK_HEALTH_CMD" 2>&1; return; fi
   cd "$EM_STACK_REPO" && timeout 200 ./bin/stack-health 2>&1
@@ -190,18 +204,19 @@ events_seen=$(jq -c --argjson now "$now" \
 # Which sources failed this pass (for carry-forward); see the header.
 declare -A unknown_set=() sidset=() status_state=() prev_carried=() carried_n=()
 have_summary=0
-presence_state=failed; quies_state=failed
+presence_state=failed; quies_state=failed; quota_kind=failed
 source_failed() { # $1: key. 0 when the source behind that key FAILED this pass
   local sid chk
   case "$1" in
     fail:*|session_not_started)
       chk=${1#fail:}; [ "$1" != session_not_started ] || chk=api
       [ "$have_summary" = 0 ] || [ -n "${unknown_set[$chk]+x}" ] ;;
-    presence:*) [ "$presence_state" = failed ] ;;
+    presence:*|idleout:*) [ "$presence_state" = failed ] ;;
     gm_halt:*)
       sid=${1#gm_halt:}
       [ "$presence_state" = failed ] || { [ -n "${sidset[$sid]+x}" ] && [ "${status_state[$sid]:-}" = failed ]; } ;;
     quarantine:*) [ "$quies_state" = failed ] ;;
+    quota:*) [ "$quota_kind" = failed ] ;;
     *) return 1 ;;
   esac
 }
@@ -263,6 +278,41 @@ else
     add "monitor:blind" "bin/stack-health could not check: ${unknown_checks[*]}; the monitor cannot see those" deb
   fi
 
+  # --- Model quota (teamclaude, a8gw1) ----------------------------------------------
+  # Every account spent means no agent (character, coordinator, runner) can call
+  # the model: the 1122a afternoon, when all five sat at 98% weekly and nothing
+  # said so for 6 h. An account is spent while a window's utilization is at
+  # EM_STACK_QUOTA_FULL or more and that window's reset is still ahead (a reset
+  # already past means the number is stale and the account is usable again).
+  # EM_STACK_QUOTA_FULL is teamclaude's own switch threshold (0.98 unless
+  # someone runs `teamclaude threshold`): keep the two equal. Only Anthropic
+  # accounts count; the state file lists other providers too. Debounced like a
+  # check, so it alerts after about 20 minutes; the standing message repeats
+  # every EM_STACK_REMIND_H and says "resolved" when it clears. It is read only
+  # while a stack is up, as everything here is.
+  quota_spent=0
+  qrc=0; q=$(quota_state 2>/dev/null) || qrc=$?
+  if [ "$qrc" -eq 3 ]; then
+    quota_kind=gone
+  elif [ "$qrc" -eq 0 ] && jq -e '.quota | type == "array"' >/dev/null 2>&1 <<<"$q"; then
+    quota_kind=answered
+    quota_line=$(jq -r --argjson now "$now" --argjson full "${EM_STACK_QUOTA_FULL:-0.98}" '
+      def spent($u; $r): ($u | type) == "number" and $u >= $full and ($r | type) == "number" and $r > ($now * 1000);
+      [ .quota[] | select(type == "object" and (.provider // "anthropic") == "anthropic") | (.quota // {}) as $q
+        | [ (if spent($q.unified7d; $q.unified7dReset) then $q.unified7dReset else empty end),
+            (if spent($q.unified5h; $q.unified5hReset) then $q.unified5hReset else empty end) ] as $r
+        | {name: ((.name // "?") | tostring | split("@")[0]), spent: ($r | length > 0), back: ($r | max)} ] as $a
+      | select(($a | length) > 0 and all($a[]; .spent))
+      | ($a | min_by(.back)) as $next
+      | "model quota is spent on all \($a | length) teamclaude accounts, so no agent can act;"
+        + " the first back is \($next.name) at \($next.back / 1000 | floor | strftime("%Y-%m-%dT%H:%MZ"))"
+      ' <<<"$q" 2>/dev/null) || quota_line=""
+    if [ -n "$quota_line" ]; then
+      quota_spent=1
+      add "quota:pool" "$quota_line" deb
+    fi
+  fi
+
   # --- Presence ---------------------------------------------------------------------
   sids=()
   if get_json "http://127.0.0.1:4002/v1/presence" && [ "$GOT_CODE" = 200 ] &&
@@ -273,12 +323,19 @@ else
     done < <(jq -r '.presence | keys[] | select(test("^[A-Za-z0-9_-]+$"))' <<<"$GOT_BODY" 2>/dev/null || true)
     # last_close.cause "server" with wants_out null (it is an object {why, at}
     # when the close was wanted) means the server dropped us unasked.
-    # The game's idle close of an account no agent plays (last_close.idle true
-    # and agent_driven false, eternal-machinery kdubj.115) is expected: nobody
-    # is typing. It is one event, told once and only while the close is under
-    # an hour old, never a standing problem. With an agent playing it stays a
-    # problem: the agent sent nothing for an hour. A BEAM older than
-    # agent_driven leaves the field out, and that reads as a problem as before.
+    # The game's idle close (last_close.idle true, eternal-machinery kdubj.115)
+    # is the game enforcing its idle rule, not a fault of the stack. With no
+    # agent playing (agent_driven false) nobody was typing: one event, told
+    # once and only while the close is under an hour old. With an agent playing
+    # (a8gw1) it stands as idleout:<sid> until the session is back, because
+    # nothing logs the character back in: until the agent can act, a character
+    # in the world would stand there unattended and be closed again, so the
+    # restart is a person's or the runner's. Its text says when the agent last
+    # acted (the close less the game's idle minutes) and the likely cause:
+    # every model account spent (quota:pool above), or an agent that stopped
+    # while the stack stayed up. It is an agent key, so it does not read as a
+    # stack problem (the header below). A BEAM older than agent_driven leaves
+    # the field out, and that reads as a problem as before.
     while IFS=$'\t' read -r key line; do
       [ -n "$key" ] || continue
       if jq -e --arg k "$key" 'has($k)' >/dev/null <<<"$events_seen"; then continue; fi
@@ -295,10 +352,31 @@ else
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
     while IFS=$'\t' read -r key line; do
       [ -z "$key" ] || add "$key" "$line" deb
+    done < <(jq -r --argjson quota "$quota_spent" '
+      .presence | to_entries[]
+      | select(.value.link == "offline" and .value.last_close.cause == "server" and .value.wants_out == null
+               and .value.last_close.idle == true and .value.agent_driven == true)
+      | ((.value.last_close.at // "") | sub("\\.[0-9]+"; "") | try fromdateiso8601 catch null) as $t
+      | .value.last_close.idle_minutes as $m
+      | ["idleout:" + .key,
+         "session \(.key): the game logged out the idle character at \(.value.last_close.at // "?")"
+         + (if ($m | type) == "number" and $t != null then
+              ", \($m) min after its agent last acted (\($t - $m * 60 | strftime("%Y-%m-%dT%H:%MZ")))"
+            else ", after its idle notice" end)
+         + (if $quota == 1 then
+              "; model quota is spent on every account, so the agent likely could not act."
+              + " Start the session again once quota is back"
+            else
+              "; model quota is not spent now, so start the session again"
+              + " (if the agent stopped on its own, look at agentos and the runner on duty)"
+            end)]
+      | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
+    while IFS=$'\t' read -r key line; do
+      [ -z "$key" ] || add "$key" "$line" deb
     done < <(jq -r '
       .presence | to_entries[]
       | select(.value.link == "offline" and .value.last_close.cause == "server" and .value.wants_out == null)
-      | select((.value.last_close.idle == true and .value.agent_driven == false) | not)
+      | select((.value.last_close.idle == true and (.value.agent_driven | type) == "boolean") | not)
       | ["presence:" + .key,
          "session \(.key) is offline: the server closed the link at \(.value.last_close.at // "?") (code \(.value.last_close.code // "?"))"
          + (if .value.last_close.idle == true then ", while idle (TEC logs out an idle character)" else "" end)
@@ -437,7 +515,23 @@ if [ "$nostack" = 0 ] && [ -z "$sig" ]; then
 fi
 
 short_head=$(git -C "$EM_STACK_REPO" rev-parse --short HEAD 2>/dev/null) || short_head=unknown
-footer="stack-health ran from $EM_STACK_REPO @ $short_head (nothing keeps that tree current)
+# stack-health runs from the main checkout, the one the stack is started from,
+# so its checks match that code. The tree moves only when someone pulls (the
+# BEAM keeps running the commit it booted), and this unit does not fetch: say
+# how far the checkout trails origin/main as of its last fetch (a8gw1).
+staleness="how far it trails origin/main is unknown"
+if behind=$(git -C "$EM_STACK_REPO" rev-list --count HEAD..refs/remotes/origin/main 2>/dev/null); then
+  fetch_head=$(git -C "$EM_STACK_REPO" rev-parse --path-format=absolute --git-path FETCH_HEAD 2>/dev/null) || fetch_head=""
+  fetched_at=$(stat -c %Y "$fetch_head" 2>/dev/null) || fetched_at=""
+  as_of=""
+  [ -z "$fetched_at" ] || as_of=" as of its last fetch, $(date -u -d "@$fetched_at" +%Y-%m-%dT%H:%MZ)"
+  if [ "$behind" = 0 ]; then
+    staleness="level with origin/main$as_of"
+  else
+    staleness="$behind commits behind origin/main$as_of"
+  fi
+fi
+footer="stack-health ran from the checkout $EM_STACK_REPO @ $short_head, $staleness
 Runbook: $EM_STACK_RUNBOOK"
 
 msg=""
@@ -454,8 +548,20 @@ else
       standing="EM stack: resolved, all checks OK again."
     fi
   elif [ "$sig" != "$prev_sig" ] || [ $(( now - prev_sent )) -ge $(( ${EM_STACK_REMIND_H:-6} * 3600 )) ]; then
-    standing="EM stack: problem"
-    [ "$sig" != "$prev_sig" ] || standing="EM stack: STILL failing"
+    # Agent keys (a8gw1): the model quota and an agent's character logged out
+    # for idling. When nothing else stands, the header says it is the agents,
+    # not the stack.
+    stack_side=0
+    for k in "${active[@]}"; do
+      case "$k" in quota:*|idleout:*) ;; *) stack_side=1 ;; esac
+    done
+    if [ "$stack_side" = 1 ]; then
+      standing="EM stack: problem"
+      [ "$sig" != "$prev_sig" ] || standing="EM stack: STILL failing"
+    else
+      standing="EM agents: not acting (the stack is up)"
+      [ "$sig" != "$prev_sig" ] || standing="EM agents: STILL not acting (the stack is up)"
+    fi
     for k in "${active[@]}"; do standing+=$'\n'"- ${text[$k]}"; done
   fi
   evtxt=""
