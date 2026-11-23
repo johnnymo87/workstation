@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import collections
+import collections.abc
 import contextlib
 import datetime
 from dataclasses import dataclass, field
@@ -1539,6 +1540,141 @@ LGTM_JOIN_MS = 86_400_000
 CFP_GOOSE_UNKNOWN_TAG = "cfp:goose-unknown"
 
 
+class CfpSessionResolver:
+    """Resolves cfp session IDs to (root, tag, source, title, directory) across
+    opencode, goose-serve, and lgtm."""
+
+    def __init__(
+        self,
+        db_path: str = DEFAULT_OPENCODE_DB,
+        goose_db: str = DEFAULT_GOOSE_DB,
+        session_tags: dict[str, str] | None = None,
+        lgtm_ledger: str | None = None,
+        since_ms: int = 0,
+        until_ms: int = 0,
+        session_ids: collections.abc.Iterable[str] | None = None,
+        warnings: list[str] | None = None,
+        *,
+        s_tags: dict[str, str] | None = None,
+    ):
+        if session_tags is None and s_tags is not None:
+            session_tags = s_tags
+        self._s_tags = session_tags if session_tags is not None else {}
+        self._warnings = warnings if warnings is not None else []
+        if lgtm_ledger is None:
+            lgtm_ledger = DEFAULT_LGTM_LEDGER
+
+        sids = set(session_ids) if session_ids is not None else set()
+
+        self._parents: dict[str, str | None] = {}
+        self._dirs: dict[str, str | None] = {}
+        self._titles: dict[str, str | None] = {}
+        if any(isinstance(x, str) and x.startswith("ses_") for x in sids) and db_path and os.path.exists(db_path):
+            conn = connect_ro(db_path)
+            try:
+                for sid, parent, directory, title in conn.execute(
+                    "SELECT id, parent_id, directory, title FROM session"
+                ):
+                    self._parents[sid], self._dirs[sid], self._titles[sid] = parent, directory, title
+            finally:
+                conn.close()
+
+        goose_sids = {x for x in sids if isinstance(x, str) and _GOOSE_SESSION_ID.match(x)}
+        self._g_parents: dict[str, str | None] = {}
+        self._g_meta: dict[str, tuple] = {}
+        self._g_active: dict[str, list[int]] = {}  # goose-serve usage_ledger times (ms) per session
+        self._lgtm_rows: list[tuple] = []          # (ts, root, tag, source, title), time-sorted
+        if goose_sids:
+            if goose_db and os.path.exists(goose_db):
+                try:
+                    g_conn = connect_ro(goose_db)
+                    try:
+                        for sid, parent, wdir, name, stype, rtitle in g_conn.execute(
+                            "SELECT id, parent_session_id, working_dir, name, session_type, "
+                            "json_extract(recipe_json, '$.title') FROM sessions"
+                        ):
+                            self._g_parents[sid] = parent
+                            self._g_meta[sid] = (wdir, name, stype, rtitle)
+                        for sid, created in g_conn.execute(
+                            "SELECT session_id, created_timestamp FROM usage_ledger "
+                            "WHERE created_timestamp >= ? AND created_timestamp < ?",
+                            ((since_ms - GOOSE_LEDGER_JOIN_MS) // 1000,
+                             (until_ms + GOOSE_LEDGER_JOIN_MS) // 1000 + 1),
+                        ):
+                            if sid in goose_sids:
+                                self._g_active.setdefault(sid, []).append(int(created) * 1000)
+                    finally:
+                        g_conn.close()
+                except Exception as e:
+                    self._warnings.append(f"goose sessions not read for cfp join: {e}")
+            for sid in self._g_active:
+                self._g_active[sid].sort()
+            self._lgtm_rows = sorted(
+                (ts, root, tag, source, title)
+                for root, tag, source, title, ts, *_rest in read_lgtm_ledger(
+                    lgtm_ledger, since_ms - LGTM_JOIN_MS, until_ms + LGTM_JOIN_MS, self._s_tags, self._warnings
+                )
+            )
+
+        self._lgtm_times = [r[0] for r in self._lgtm_rows]
+
+    @staticmethod
+    def _near(times: list[int], ts: int, tol: int) -> int | None:
+        """Nearest element of sorted `times` within tol of ts, else None."""
+        i = bisect.bisect_left(times, ts)
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(times) and abs(times[j] - ts) <= tol:
+                if best is None or abs(times[j] - ts) < abs(best - ts):
+                    best = times[j]
+        return best
+
+    def in_goose_serve(self, sid: str | None) -> bool:
+        return bool(sid is not None and sid in self._g_meta)
+
+    def goose_claim(self, sid: str | None, ts: int) -> tuple[str, str, str, str] | None:
+        """The lgtm ledger row that claims a goose-shaped request at ts, or None.
+
+        If sid is in goose-serve's sessions AND goose-serve's usage_ledger has a
+        row within GOOSE_LEDGER_JOIN_MS of ts, no lgtm claim; else the nearest
+        lgtm row within LGTM_JOIN_MS claims it.
+        """
+        in_serve = self.in_goose_serve(sid)
+        if in_serve and self._near(self._g_active.get(sid, []), ts, GOOSE_LEDGER_JOIN_MS) is not None:
+            lgtm_ts = None  # goose-serve logged this request itself
+        else:
+            lgtm_ts = self._near(self._lgtm_times, ts, LGTM_JOIN_MS)
+        if lgtm_ts is not None:
+            _t, root, tag, source, title = self._lgtm_rows[self._lgtm_times.index(lgtm_ts)]
+            return (root, tag, source, title)
+        return None
+
+    def resolve(self, sid: str | None, ts: int) -> tuple[str, str, str, str | None, str | None]:
+        """Resolve a cfp session id at ts to (root, tag, source, title, directory)."""
+        if sid is not None and sid.startswith("ses_"):
+            root = root_of(sid, self._parents)
+            tag, source = effective_tag(root, self._dirs.get(root), session_tag_map=self._s_tags)
+            return (root, tag, source, self._titles.get(root), self._dirs.get(root))
+        if sid is not None and _GOOSE_SESSION_ID.match(sid):
+            claim = self.goose_claim(sid, ts)
+            if claim is not None:
+                root, tag, source, title = claim
+                return (root, tag, source, title, None)
+            if self.in_goose_serve(sid):
+                root_id = root_of(sid, self._g_parents)
+                root = f"goose:{root_id}"
+                wdir, name, stype, rtitle = self._g_meta.get(root_id, (None, None, None, None))
+                if root in self._s_tags:
+                    tag, source = self._s_tags[root], "manual"
+                else:
+                    tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
+                return (root, tag, source, rtitle or name or stype or "", wdir)
+            return (CFP_GOOSE_UNKNOWN_TAG, CFP_GOOSE_UNKNOWN_TAG, "manual",
+                    "goose-shaped cfp session id in no known ledger", None)
+        return (CFP_UNROUTED_TAG, CFP_UNROUTED_TAG, "manual",
+                "cfp usage with no route/session", None)
+
+
 def load_cfp_aggregate(
     backend: str,
     events_path: str | None = None,
@@ -1633,67 +1769,17 @@ def load_cfp_aggregate(
             usage = []
 
     sids = set(route_session.values())
-    parents: dict[str, str | None] = {}
-    dirs: dict[str, str | None] = {}
-    titles: dict[str, str | None] = {}
-    if any(x.startswith("ses_") for x in sids) and os.path.exists(db_path):
-        conn = connect_ro(db_path)
-        try:
-            for sid, parent, directory, title in conn.execute(
-                "SELECT id, parent_id, directory, title FROM session"
-            ):
-                parents[sid], dirs[sid], titles[sid] = parent, directory, title
-        finally:
-            conn.close()
+    resolver = CfpSessionResolver(
+        db_path=db_path,
+        goose_db=goose_db,
+        session_tags=s_tags,
+        lgtm_ledger=lgtm_ledger,
+        since_ms=win.since_ms,
+        until_ms=win.until_ms,
+        session_ids=sids,
+        warnings=agg.warnings,
+    )
 
-    goose_sids = {x for x in sids if _GOOSE_SESSION_ID.match(x)}
-    g_parents: dict[str, str | None] = {}
-    g_meta: dict[str, tuple] = {}
-    g_active: dict[str, list[int]] = {}  # goose-serve usage_ledger times (ms) per session
-    lgtm_rows: list[tuple] = []          # (ts, root, tag, source, title), time-sorted
-    if goose_sids:
-        if goose_db and os.path.exists(goose_db):
-            try:
-                g_conn = connect_ro(goose_db)
-                try:
-                    for sid, parent, wdir, name, stype, rtitle in g_conn.execute(
-                        "SELECT id, parent_session_id, working_dir, name, session_type, "
-                        "json_extract(recipe_json, '$.title') FROM sessions"
-                    ):
-                        g_parents[sid] = parent
-                        g_meta[sid] = (wdir, name, stype, rtitle)
-                    for sid, created in g_conn.execute(
-                        "SELECT session_id, created_timestamp FROM usage_ledger "
-                        "WHERE created_timestamp >= ? AND created_timestamp < ?",
-                        ((win.since_ms - GOOSE_LEDGER_JOIN_MS) // 1000,
-                         (win.until_ms + GOOSE_LEDGER_JOIN_MS) // 1000 + 1),
-                    ):
-                        if sid in goose_sids:
-                            g_active.setdefault(sid, []).append(int(created) * 1000)
-                finally:
-                    g_conn.close()
-            except Exception as e:
-                agg.warnings.append(f"goose sessions not read for cfp join: {e}")
-        for sid in g_active:
-            g_active[sid].sort()
-        lgtm_rows = sorted(
-            (ts, root, tag, source, title)
-            for root, tag, source, title, ts, *_rest in read_lgtm_ledger(
-                lgtm_ledger, win.since_ms - LGTM_JOIN_MS, win.until_ms + LGTM_JOIN_MS, s_tags, agg.warnings
-            )
-        )
-
-    def near(times: list[int], ts: int, tol: int) -> int | None:
-        """Nearest element of sorted `times` within tol of ts, else None."""
-        i = bisect.bisect_left(times, ts)
-        best = None
-        for j in (i - 1, i):
-            if 0 <= j < len(times) and abs(times[j] - ts) <= tol:
-                if best is None or abs(times[j] - ts) < abs(best - ts):
-                    best = times[j]
-        return best
-
-    lgtm_times = [r[0] for r in lgtm_rows]
     tag_cache: dict[str, tuple[str, str]] = {}
 
     def register(root, tag, source, title, directory):
@@ -1702,43 +1788,12 @@ def load_cfp_aggregate(
             agg.root_meta[root] = {"title": title, "directory": directory, "tag": tag, "source": source}
         return root
 
-    def resolve(sid: str | None, ts: int) -> str:
-        """Root id for a cfp session id at ts; registers its tag."""
-        if sid is not None and sid.startswith("ses_"):
-            root = root_of(sid, parents)
-            if root not in tag_cache:
-                tag, source = effective_tag(root, dirs.get(root), session_tag_map=s_tags)
-                register(root, tag, source, titles.get(root), dirs.get(root))
-            return root
-        if sid is not None and _GOOSE_SESSION_ID.match(sid):
-            in_serve = sid in g_meta
-            if in_serve and near(g_active.get(sid, []), ts, GOOSE_LEDGER_JOIN_MS) is not None:
-                lgtm_ts = None  # goose-serve logged this request itself
-            else:
-                lgtm_ts = near(lgtm_times, ts, LGTM_JOIN_MS)
-            if lgtm_ts is not None:
-                _t, root, tag, source, title = lgtm_rows[lgtm_times.index(lgtm_ts)]
-                return register(root, tag, source, title, None)
-            if in_serve:
-                root_id = root_of(sid, g_parents)
-                root = f"goose:{root_id}"
-                if root not in tag_cache:
-                    wdir, name, stype, rtitle = g_meta.get(root_id, (None, None, None, None))
-                    if root in s_tags:
-                        tag, source = s_tags[root], "manual"
-                    else:
-                        tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
-                    register(root, tag, source, rtitle or name or stype or "", wdir)
-                return root
-            return register(CFP_GOOSE_UNKNOWN_TAG, CFP_GOOSE_UNKNOWN_TAG, "manual",
-                            "goose-shaped cfp session id in no known ledger", None)
-        return register(CFP_UNROUTED_TAG, CFP_UNROUTED_TAG, "manual",
-                        "cfp usage with no route/session", None)
-
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
     newest_row_ms = 0
     for rid, ts, cost, toks, ev_model in usage:
-        root = resolve(route_session.get(rid) if rid is not None else None, ts)
+        sid = route_session.get(rid) if rid is not None else None
+        root, tag, source, title, directory = resolver.resolve(sid, ts)
+        register(root, tag, source, title, directory)
         tag, source = tag_cache[root]
         agg.sources[tag] = source
         per_bucket[tag][bucket_key(ts, b)] += cost
