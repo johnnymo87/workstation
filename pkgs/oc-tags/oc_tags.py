@@ -11,6 +11,7 @@ docs/plans/2026-09-08-oc-tags-design.md.
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import contextlib
 import datetime
@@ -568,6 +569,38 @@ def compute_goose_cost(
 # silent-undercount trap if that changes.
 CLAUDE_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"})
 
+# list-price $ (opus-5-5 rates) per Claude Max 20x account-week, calibrated
+# 2026-11-23 in docs/research/2026-11-23-claude-max-quota-budget.md; refit by
+# workstation-ynoq.2. Divisor for `report --account-weeks`.
+ACCOUNT_WEEK_USD = 1520.0
+
+# opus-5-5 list rates, $ per Mtok. The account-week divisor above was fitted
+# against TOKENS priced at these rates, so `--account-weeks` prices tokens with
+# them rather than reusing each row's own $ (a sonnet row's $ is not
+# comparable). Keep in step with GOOSE_MODEL_RATES["claude-opus-5-5"].
+OPUS_5_5_LIST_PER_MTOK = {"input": 4.0, "cache_read": 0.20, "cache_write": 5.0, "output": 20.0}
+
+
+def opus_list_cost(uncached_in, out, cache_read, cache_write) -> float:
+    r = OPUS_5_5_LIST_PER_MTOK
+    return (
+        (uncached_in or 0) * r["input"]
+        + (out or 0) * r["output"]
+        + (cache_read or 0) * r["cache_read"]
+        + (cache_write or 0) * r["cache_write"]
+    ) / 1_000_000
+
+
+def parse_providers(raw: str | None) -> frozenset[str] | None:
+    """Parse a `--provider a,b` value. None means "no filter"; an empty list
+    is an error rather than a filter that silently matches nothing."""
+    if raw is None:
+        return None
+    out = frozenset(p.strip() for p in raw.split(",") if p.strip())
+    if not out:
+        raise ValueError("--provider needs at least one provider id")
+    return out
+
 
 @dataclass
 class Window:
@@ -603,6 +636,12 @@ class Aggregate:
     em_freshness: str | None = None
     em_ledger_dir_exists: bool = False
     em_missing_msg: str | None = None
+    # tag -> tokens priced at opus-5-5 list (the `--account-weeks` numerator).
+    # Filled for opencode, goose and cfp rows; the lgtm/EM ledgers do not feed it.
+    acct_usd: dict[str, float] = field(default_factory=dict)
+    # Earliest timestamp the source actually has (cfp events retention); None
+    # when the source is not retention-limited.
+    data_start_ms: int | None = None
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -626,7 +665,12 @@ def aggregate(
     goose_db_path: str | None = None,
     lgtm_ledger_path: str | None = None,
     em_ledger_path: str | None = None,
+    providers: frozenset[str] | None = None,
 ) -> Aggregate:
+    """`providers`, when given, keeps only opencode rows whose message
+    `providerID` is in it and goose rows whose session `provider_name` is in
+    it. The lgtm and EM ledgers carry no provider field, so they are left out
+    entirely rather than guessed at."""
     agg = Aggregate()
     now_epoch_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     rows = []
@@ -741,6 +785,11 @@ def aggregate(
             agg.claude_day[day_str] = agg.claude_day.get(day_str, 0.0) + cost
             if day_accum[day_str] >= 195.0 and day_str not in agg.cap_hits:
                 agg.cap_hits[day_str] = dt.strftime("%H:%M")
+        # After the claude_day/cap block above, on purpose: those are compared
+        # with cfp's all-provider totals (the serve chart's coverage, drift and
+        # cap marker), so a provider filter must not shrink them.
+        if providers is not None and provider not in providers:
+            continue
         root = root_of(sid, parents)
         if root not in tag_cache:
             tag, source = effective_tag(
@@ -760,6 +809,7 @@ def aggregate(
         newest_row_ms = max(newest_row_ms, ts)
         per_bucket[tag][key] += cost
         agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+        agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(tin, tout, cread, cwrite)
 
         if total_tok is not None:
             toks = int(total_tok)
@@ -785,6 +835,8 @@ def aggregate(
         for sid, created_ts, model, in_tok, out_tok, total_tok, cread_tok, cwrite_tok, ledger_cost, cost_source in g_ledger_rows:
             ts = created_ts * 1000
             if ts < since_ms or ts >= until_ms:
+                continue
+            if providers is not None and g_providers.get(sid) not in providers:
                 continue
 
             root_id = root_of(sid, g_parents)
@@ -843,9 +895,11 @@ def aggregate(
             newest_row_ms = max(newest_row_ms, ts)
             per_bucket[tag][key] += cost
             agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+            agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(uncached_in, tout, cread, cwrite)
 
-    for root, tag, source, title, ts, cost, unpriced_model, toks in read_lgtm_ledger(
-        lgtm_ledger_path, since_ms, until_ms, session_tags, agg.warnings
+    for root, tag, source, title, ts, cost, unpriced_model, toks in (
+        () if providers is not None else
+        read_lgtm_ledger(lgtm_ledger_path, since_ms, until_ms, session_tags, agg.warnings)
     ):
         if root not in agg.root_meta:
             agg.root_meta[root] = {"title": title, "directory": None, "tag": tag, "source": source}
@@ -861,7 +915,9 @@ def aggregate(
 
     if em_ledger_path is None:
         em_ledger_path = os.environ.get("OC_TAGS_EM_LEDGER_DIR", DEFAULT_EM_LEDGER_DIR)
-    if em_ledger_path and os.path.isdir(em_ledger_path):
+    if providers is not None:
+        pass  # EM rows carry no provider field; see the docstring.
+    elif em_ledger_path and os.path.isdir(em_ledger_path):
         agg.em_ledger_dir_exists = True
         agg.em_freshness = format_em_freshness(
             em_ledger_port_freshness(em_ledger_path),
@@ -1243,6 +1299,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
     new_totals = dict(agg.totals)
     new_series = {t: dict(s) for t, s in agg.series.items()}
     new_sources = dict(agg.sources)
+    new_acct = dict(agg.acct_usd)
 
     for prefix in prefixes:
         pattern = f"{prefix}:"
@@ -1254,6 +1311,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
         for b in agg.buckets:
             val = sum(new_series[t].get(b, 0.0) for t in matching_tags) + new_series.get(prefix, {}).get(b, 0.0)
             folded_bucket_series[b] = val
+        new_acct[prefix] = sum(new_acct.pop(t, 0.0) for t in matching_tags) + new_acct.get(prefix, 0.0)
         folded_source = "manual" if any(new_sources.get(t) == "manual" for t in matching_tags) or new_sources.get(prefix) == "manual" else "auto"
 
         for t in matching_tags:
@@ -1274,6 +1332,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
     new_agg.totals = sorted_totals
     new_agg.series = new_series
     new_agg.sources = new_sources
+    new_agg.acct_usd = new_acct
     return new_agg
 
 
@@ -1306,6 +1365,7 @@ def load_aggregate(
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
     em_ledger_dir: str | None = None,
+    providers: frozenset[str] | None = None,
 ) -> Aggregate:
     win = calculate_window(days, now_ms=now_ms)
     if lgtm_ledger is None:
@@ -1338,6 +1398,7 @@ def load_aggregate(
         goose_db_path=goose_db,
         lgtm_ledger_path=lgtm_ledger,
         em_ledger_path=em_ledger_dir,
+        providers=providers,
     )
     agg.window = win
     return agg
@@ -1436,6 +1497,275 @@ def cfp_metered_by_day(cfp_dir: str = CFP_DIR) -> dict[str, float]:
     the cap first, i.e. time of day. See the design doc.
     """
     return cfp_spend_by_day(cfp_dir).metered
+
+
+def cfp_events_path(cfp_dir: str = CFP_DIR) -> str:
+    return os.path.join(cfp_dir, "events.jsonl")
+
+
+# goose session ids look like 20260908_3; opencode's are ses_<...>.
+_GOOSE_SESSION_ID = re.compile(r"^\d{8}_\d+$")
+CFP_UNROUTED_TAG = "cfp:unrouted"
+
+
+def _iter_cfp_events(path: str):
+    """Stream the JSON objects of a cfp events file, skipping blank and
+    malformed lines. Streams because the file is large."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                yield ev
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# A goose-shaped cfp session id that goose-serve has no recent activity for may
+# be one of lgtm's private-root goose runs, whose ids collide with goose-serve's
+# (same YYYYMMDD_N scheme, separate sessions.db). The lgtm ledger records no
+# goose session id (its `session` is lgtm's own `lgr-...` name), so the only
+# link is time: an lgtm row within a day claims the request. goose-serve keeps
+# it only when its own usage_ledger has a row within GOOSE_LEDGER_JOIN_MS.
+GOOSE_LEDGER_JOIN_MS = 600_000
+LGTM_JOIN_MS = 86_400_000
+CFP_GOOSE_UNKNOWN_TAG = "cfp:goose-unknown"
+
+
+def load_cfp_aggregate(
+    backend: str,
+    events_path: str | None = None,
+    db_path: str = DEFAULT_OPENCODE_DB,
+    tags_db: str = DEFAULT_TAGS_DB,
+    days: int = 14,
+    bucket: str | None = None,
+    now_ms: int | None = None,
+    goose_db: str = DEFAULT_GOOSE_DB,
+    lgtm_ledger: str | None = None,
+) -> Aggregate:
+    """Aggregate built ONLY from claude-failover-proxy events for one backend.
+
+    On cloudbox opencode reports the same providerID for Vertex and for Max, so
+    the backend is only knowable from cfp: each `usage` event carries `backend`
+    and a notional `cost`, and the `route` event with the same `requestId`
+    carries the session and model. The opencode and goose DB rows would double
+    count the same requests, so they are read for session -> tag resolution only.
+
+    Usage events with no matching route (or a session id of neither shape) land
+    under CFP_UNROUTED_TAG; goose-shaped ids no ledger can place land under
+    CFP_GOOSE_UNKNOWN_TAG (see GOOSE_LEDGER_JOIN_MS). Two streaming passes keep
+    memory bounded by the in-window usage events rather than by the whole file.
+    """
+    if events_path is None:
+        events_path = cfp_events_path()
+    if lgtm_ledger is None:
+        lgtm_ledger = DEFAULT_LGTM_LEDGER
+    win = calculate_window(days, now_ms=now_ms)
+    agg = Aggregate()
+    agg.window = win
+    b = bucket if bucket is not None else choose_bucket(days)
+
+    s_tags: dict[str, str] = {}
+    if os.path.exists(tags_db):
+        with open_store(tags_db, readonly=True) as st:
+            warn_retired_dir_tags(st)
+            s_tags = session_tags(st)
+
+    # (requestId, ts, cost, (input, output, cacheRead, cacheWrite), event model)
+    usage: list[tuple] = []
+    earliest: int | None = None
+    if not os.path.exists(events_path):
+        agg.warnings.append(f"cfp events not found: {events_path}")
+    else:
+        try:
+            for ev in _iter_cfp_events(events_path):
+                ts = ev.get("ts")
+                if not _is_num(ts):
+                    continue
+                earliest = int(ts) if earliest is None else min(earliest, int(ts))
+                if ev.get("type") != "usage" or ev.get("backend") != backend:
+                    continue
+                if ts < win.since_ms or ts >= win.until_ms:
+                    continue
+                rid = ev.get("requestId")
+                cost = ev.get("cost")
+                u = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+                toks = tuple(
+                    int(u[k]) if _is_num(u.get(k)) else 0
+                    for k in ("input", "output", "cacheRead", "cacheWrite")
+                )
+                model = ev.get("model") if isinstance(ev.get("model"), str) else None
+                usage.append(
+                    (rid if isinstance(rid, str) else None, int(ts),
+                     float(cost) if _is_num(cost) else 0.0, toks, model)
+                )
+        except OSError as e:
+            agg.warnings.append(f"cfp events not counted: {e}")
+            usage = []
+    if earliest is not None and earliest > win.since_ms:
+        agg.data_start_ms = earliest
+        fmt = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, ET).strftime("%Y-%m-%d %H:%M")
+        agg.warnings.append(
+            f"cfp events start at {fmt(earliest)} ET, later than the window start "
+            f"{fmt(win.since_ms)} ET: the report covers only from then"
+        )
+
+    wanted = {rid for rid, *_ in usage if rid is not None}
+    route_session: dict[str, str] = {}
+    route_model: dict[str, str] = {}
+    if wanted:
+        try:
+            for ev in _iter_cfp_events(events_path):
+                rid = ev.get("requestId")
+                if ev.get("type") == "route" and rid in wanted and isinstance(ev.get("sessionId"), str):
+                    route_session[rid] = ev["sessionId"]
+                    if isinstance(ev.get("model"), str):
+                        route_model[rid] = ev["model"]
+        except OSError as e:
+            agg.warnings.append(f"cfp events not counted: {e}")
+            usage = []
+
+    sids = set(route_session.values())
+    parents: dict[str, str | None] = {}
+    dirs: dict[str, str | None] = {}
+    titles: dict[str, str | None] = {}
+    if any(x.startswith("ses_") for x in sids) and os.path.exists(db_path):
+        conn = connect_ro(db_path)
+        try:
+            for sid, parent, directory, title in conn.execute(
+                "SELECT id, parent_id, directory, title FROM session"
+            ):
+                parents[sid], dirs[sid], titles[sid] = parent, directory, title
+        finally:
+            conn.close()
+
+    goose_sids = {x for x in sids if _GOOSE_SESSION_ID.match(x)}
+    g_parents: dict[str, str | None] = {}
+    g_meta: dict[str, tuple] = {}
+    g_active: dict[str, list[int]] = {}  # goose-serve usage_ledger times (ms) per session
+    lgtm_rows: list[tuple] = []          # (ts, root, tag, source, title), time-sorted
+    if goose_sids:
+        if goose_db and os.path.exists(goose_db):
+            try:
+                g_conn = connect_ro(goose_db)
+                try:
+                    for sid, parent, wdir, name, stype, rtitle in g_conn.execute(
+                        "SELECT id, parent_session_id, working_dir, name, session_type, "
+                        "json_extract(recipe_json, '$.title') FROM sessions"
+                    ):
+                        g_parents[sid] = parent
+                        g_meta[sid] = (wdir, name, stype, rtitle)
+                    for sid, created in g_conn.execute(
+                        "SELECT session_id, created_timestamp FROM usage_ledger "
+                        "WHERE created_timestamp >= ? AND created_timestamp < ?",
+                        ((win.since_ms - GOOSE_LEDGER_JOIN_MS) // 1000,
+                         (win.until_ms + GOOSE_LEDGER_JOIN_MS) // 1000 + 1),
+                    ):
+                        if sid in goose_sids:
+                            g_active.setdefault(sid, []).append(int(created) * 1000)
+                finally:
+                    g_conn.close()
+            except Exception as e:
+                agg.warnings.append(f"goose sessions not read for cfp join: {e}")
+        for sid in g_active:
+            g_active[sid].sort()
+        lgtm_rows = sorted(
+            (ts, root, tag, source, title)
+            for root, tag, source, title, ts, *_rest in read_lgtm_ledger(
+                lgtm_ledger, win.since_ms - LGTM_JOIN_MS, win.until_ms + LGTM_JOIN_MS, s_tags, agg.warnings
+            )
+        )
+
+    def near(times: list[int], ts: int, tol: int) -> int | None:
+        """Nearest element of sorted `times` within tol of ts, else None."""
+        i = bisect.bisect_left(times, ts)
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(times) and abs(times[j] - ts) <= tol:
+                if best is None or abs(times[j] - ts) < abs(best - ts):
+                    best = times[j]
+        return best
+
+    lgtm_times = [r[0] for r in lgtm_rows]
+    tag_cache: dict[str, tuple[str, str]] = {}
+
+    def register(root, tag, source, title, directory):
+        if root not in tag_cache:
+            tag_cache[root] = (tag, source)
+            agg.root_meta[root] = {"title": title, "directory": directory, "tag": tag, "source": source}
+        return root
+
+    def resolve(sid: str | None, ts: int) -> str:
+        """Root id for a cfp session id at ts; registers its tag."""
+        if sid is not None and sid.startswith("ses_"):
+            root = root_of(sid, parents)
+            if root not in tag_cache:
+                tag, source = effective_tag(root, dirs.get(root), session_tag_map=s_tags)
+                register(root, tag, source, titles.get(root), dirs.get(root))
+            return root
+        if sid is not None and _GOOSE_SESSION_ID.match(sid):
+            in_serve = sid in g_meta
+            if in_serve and near(g_active.get(sid, []), ts, GOOSE_LEDGER_JOIN_MS) is not None:
+                lgtm_ts = None  # goose-serve logged this request itself
+            else:
+                lgtm_ts = near(lgtm_times, ts, LGTM_JOIN_MS)
+            if lgtm_ts is not None:
+                _t, root, tag, source, title = lgtm_rows[lgtm_times.index(lgtm_ts)]
+                return register(root, tag, source, title, None)
+            if in_serve:
+                root_id = root_of(sid, g_parents)
+                root = f"goose:{root_id}"
+                if root not in tag_cache:
+                    wdir, name, stype, rtitle = g_meta.get(root_id, (None, None, None, None))
+                    if root in s_tags:
+                        tag, source = s_tags[root], "manual"
+                    else:
+                        tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
+                    register(root, tag, source, rtitle or name or stype or "", wdir)
+                return root
+            return register(CFP_GOOSE_UNKNOWN_TAG, CFP_GOOSE_UNKNOWN_TAG, "manual",
+                            "goose-shaped cfp session id in no known ledger", None)
+        return register(CFP_UNROUTED_TAG, CFP_UNROUTED_TAG, "manual",
+                        "cfp usage with no route/session", None)
+
+    per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
+    newest_row_ms = 0
+    for rid, ts, cost, toks, ev_model in usage:
+        root = resolve(route_session.get(rid) if rid is not None else None, ts)
+        tag, source = tag_cache[root]
+        agg.sources[tag] = source
+        per_bucket[tag][bucket_key(ts, b)] += cost
+        agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+        agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(*toks)
+        newest_row_ms = max(newest_row_ms, ts)
+        # Tokens with no usable cost must be LOUD, as in aggregate(): $0 would
+        # silently under-report.
+        if cost <= 0 and sum(toks) > 0:
+            model = (route_model.get(rid) if rid is not None else None) or ev_model or "unknown"
+            u = agg.unpriced.setdefault(model, {"messages": 0, "tokens": 0})
+            u["messages"] += 1
+            u["tokens"] += sum(toks)
+
+    # Same tail as aggregate(): enumerate through the newest row, rank by dollars.
+    now_epoch_ms = win.now_ms
+    agg.buckets = enumerate_buckets(win.since_ms, win.until_ms, b, max(now_epoch_ms, newest_row_ms))
+    agg.series = {t: dict(v) for t, v in per_bucket.items()}
+    agg.totals = dict(
+        sorted(
+            ((t, sum(v.values())) for t, v in agg.series.items()),
+            key=lambda item: (-item[1], item[0]),
+        )
+    )
+    current_bucket = bucket_key(now_epoch_ms, b)
+    agg.partial_bucket = current_bucket if current_bucket in agg.buckets else None
+    return agg
 
 
 # Chrome colours live in CSS classes, not SVG presentation attributes: a
@@ -1919,6 +2249,7 @@ def handle_request(
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
     em_ledger_dir: str | None = None,
+    providers: frozenset[str] | None = None,
 ) -> tuple[int, str, str]:
     if path == "/healthz":
         return (200, "text/plain; charset=utf-8", "ok\n")
@@ -2009,6 +2340,7 @@ def handle_request(
             goose_db=goose_db,
             lgtm_ledger=lgtm_ledger,
             em_ledger_dir=em_ledger_dir,
+            providers=providers,
         )
         spend = cfp_spend_by_day(cfp_dir)
         svg = render_svg(agg, spend, hide=hide, top_n=top_n, fold=fold_list)
@@ -2024,6 +2356,7 @@ def make_handler(
     goose_db: str = DEFAULT_GOOSE_DB,
     lgtm_ledger: str | None = None,
     em_ledger_dir: str | None = None,
+    providers: frozenset[str] | None = None,
 ):
     class OcTagsHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -2037,6 +2370,7 @@ def make_handler(
                 goose_db=goose_db,
                 lgtm_ledger=lgtm_ledger,
                 em_ledger_dir=em_ledger_dir,
+                providers=providers,
             )
             body_bytes = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
@@ -2057,6 +2391,11 @@ def make_handler(
 def cmd_serve(args: argparse.Namespace) -> int:
     host = args.host
     port = args.port
+    try:
+        providers = parse_providers(getattr(args, "provider", None))
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 2
     server = http.server.HTTPServer(
         (host, port),
         make_handler(
@@ -2066,6 +2405,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             getattr(args, "goose_db", DEFAULT_GOOSE_DB),
             getattr(args, "lgtm_ledger", None),
             getattr(args, "em_ledger_dir", None),
+            providers,
         ),
     )
     print(f"Serving oc-tags chart on http://{host}:{port}/ (Ctrl+C to stop)")
@@ -2112,6 +2452,14 @@ def _add_db_options(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="path to eternal-machinery spend ledger directory",
     )
+
+
+_PROVIDER_HELP = (
+    "comma-separated provider ids: keep only opencode messages whose providerID "
+    "(and goose sessions whose provider_name) is listed, e.g. 'anthropic' for "
+    "the Claude Max pool on devbox. The lgtm and eternal-machinery ledgers carry "
+    "no provider field and are EXCLUDED whenever this is given"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2185,18 +2533,46 @@ def build_parser() -> argparse.ArgumentParser:
     rep = sub.add_parser("report", help="text table of dollars by tag by day")
     rep.add_argument("--days", type=int, default=14, help="number of days to report")
     rep.add_argument("--fold", help="comma-separated tag prefixes to fold into one band (e.g. em-agents,em-bench)")
+    rep.add_argument("--provider", default=None, help=_PROVIDER_HELP)
+    rep.add_argument(
+        "--backend",
+        choices=("max", "vertex"),
+        default=None,
+        help="build the report only from claude-failover-proxy events for this "
+        "backend (cloudbox; opencode reports one providerID for both). Joins "
+        "usage to route events on requestId; dollars are cfp's notional `cost`. "
+        "Replaces the opencode/goose/ledger sources; cannot combine with --provider",
+    )
+    rep.add_argument(
+        "--cfp-events",
+        default=None,
+        help=f"path to cfp events.jsonl for --backend (default {cfp_events_path()})",
+    )
+    rep.add_argument(
+        "--account-weeks",
+        nargs="?",
+        const=ACCOUNT_WEEK_USD,
+        default=None,
+        type=float,
+        metavar="DOLLARS",
+        help="add an acct-wk column = dollars / DOLLARS (default "
+        f"{ACCOUNT_WEEK_USD:g}, list-price $ per Claude Max 20x account-week) "
+        "and a per-week rate line; only meaningful with --provider or --backend",
+    )
     _add_db_options(rep)
 
     # top
     top_p = sub.add_parser("top", help="rank untagged root sessions by dollars")
     top_p.add_argument("--days", type=int, default=14, help="number of days to look back")
     top_p.add_argument("--min", type=float, default=0.0, help="minimum dollar threshold")
+    top_p.add_argument("--provider", default=None, help=_PROVIDER_HELP)
     _add_db_options(top_p)
 
     # serve
     serve_p = sub.add_parser("serve", help="serve stacked-bar chart over HTTP")
     serve_p.add_argument("--host", default="127.0.0.1", help="host to bind (default: 127.0.0.1)")
     serve_p.add_argument("--port", type=int, default=4710, help="port to bind (default: 4710)")
+    serve_p.add_argument("--provider", default=None, help=_PROVIDER_HELP)
     _add_db_options(serve_p)
 
     return p
@@ -2536,14 +2912,48 @@ def cmd_rm(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    agg = load_aggregate(
-        db_path=args.db,
-        tags_db=args.tags_db,
-        days=args.days,
-        goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
-        lgtm_ledger=getattr(args, "lgtm_ledger", None),
-        em_ledger_dir=getattr(args, "em_ledger_dir", None),
-    )
+    try:
+        providers = parse_providers(getattr(args, "provider", None))
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 2
+    backend = getattr(args, "backend", None)
+    if backend and providers:
+        sys.stderr.write(
+            "Error: --backend builds the report from cfp events and cannot be combined with --provider\n"
+        )
+        return 2
+    acct_usd = getattr(args, "account_weeks", None)
+    if acct_usd is not None and acct_usd <= 0:
+        sys.stderr.write("Error: --account-weeks DOLLARS must be positive\n")
+        return 2
+    if acct_usd is not None and not backend and not providers:
+        sys.stderr.write(
+            "Warning: --account-weeks is only meaningful with --provider or --backend; "
+            "without one the total includes spend that does not draw on a Max account\n"
+        )
+
+    if backend:
+        events_path = getattr(args, "cfp_events", None) or cfp_events_path()
+        agg = load_cfp_aggregate(
+            backend,
+            events_path=events_path,
+            db_path=args.db,
+            tags_db=args.tags_db,
+            days=args.days,
+            goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+            lgtm_ledger=getattr(args, "lgtm_ledger", None),
+        )
+    else:
+        agg = load_aggregate(
+            db_path=args.db,
+            tags_db=args.tags_db,
+            days=args.days,
+            goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+            lgtm_ledger=getattr(args, "lgtm_ledger", None),
+            em_ledger_dir=getattr(args, "em_ledger_dir", None),
+            providers=providers,
+        )
     if getattr(args, "fold", None):
         agg = fold_aggregate(agg, [x.strip() for x in args.fold.split(",") if x.strip()])
     for w in agg.warnings:
@@ -2553,20 +2963,54 @@ def cmd_report(args: argparse.Namespace) -> int:
     since_str = win.since_str if win else ""
     until_str = win.until_str if win else ""
 
-    print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)\n")
+    print(f"Consumed at list price (USD) -- not billed.  Window: {since_str}..{until_str} (ET)")
+    if backend:
+        print(f"Source: cfp events, backend={backend} ({events_path}); opencode/goose/ledger rows not read")
+    elif providers:
+        print(f"Provider filter: {','.join(sorted(providers))} (lgtm/EM ledgers excluded)")
+    print()
 
     if not agg.totals:
         print("No assistant messages found in this window.")
         return 0
 
     total_dollars = sum(agg.totals.values())
-    print(f"{'tag':<36} {'total':>10} {'share':>7}")
-    print("-" * 55)
+    if acct_usd is not None:
+        width = 64
+        print(f"{'tag':<36} {'total':>10} {'acct-wk':>8} {'share':>7}")
+    else:
+        width = 55
+        print(f"{'tag':<36} {'total':>10} {'share':>7}")
+    print("-" * width)
     for tag, dollars in agg.totals.items():
         share = (dollars / total_dollars * 100.0) if total_dollars > 0 else 0.0
-        print(f"{tag:<36} {dollars:>10.2f} {share:>6.1f}%")
-    print("-" * 55)
-    print(f"{'total':<36} {total_dollars:>10.2f}\n")
+        if acct_usd is not None:
+            print(f"{tag:<36} {dollars:>10.2f} {agg.acct_usd.get(tag, 0.0) / acct_usd:>8.2f} {share:>6.1f}%")
+        else:
+            print(f"{tag:<36} {dollars:>10.2f} {share:>6.1f}%")
+    print("-" * width)
+    if acct_usd is not None:
+        total_acct = sum(agg.acct_usd.get(t, 0.0) for t in agg.totals) / acct_usd
+        print(f"{'total':<36} {total_dollars:>10.2f} {total_acct:>8.2f}\n")
+        print(
+            f"acct-wk = tokens priced at opus-5-5 list / ${acct_usd:g}; includes any "
+            "usage-billed seat traffic (cloudbox), which draws no Max quota"
+        )
+        # Elapsed, not calendar: the window runs to the end of today, which is
+        # still in progress, and dividing by the whole span would understate it.
+        # And never earlier than the source's own start (cfp retention).
+        start_ms = max(win.since_ms, agg.data_start_ms or 0) if win else 0
+        elapsed_ms = (min(win.now_ms, win.until_ms) - start_ms) if win else 0
+        weeks = elapsed_ms / (7 * 86_400_000)
+        rate = f"{total_acct / weeks:.2f}" if weeks > 0 else "n/a"
+        print(
+            f"1 account-week = ${acct_usd:g} list price.  "
+            f"{total_acct:.2f} account-weeks over {weeks * 7:.1f} days = "
+            f"{rate} account-weeks/week"
+        )
+        print()
+    else:
+        print(f"{'total':<36} {total_dollars:>10.2f}\n")
 
     if agg.unpriced:
         unpriced_parts = []
@@ -2591,12 +3035,18 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_top(args: argparse.Namespace) -> int:
+    try:
+        providers = parse_providers(getattr(args, "provider", None))
+    except ValueError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 2
     agg = load_aggregate(
         db_path=args.db,
         tags_db=args.tags_db,
         days=args.days,
         goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
         lgtm_ledger=getattr(args, "lgtm_ledger", None),
+        providers=providers,
     )
     for w in agg.warnings:
         sys.stderr.write(f"{w}\n")

@@ -22,6 +22,24 @@ session-tags serve                   # then, from the Mac, just open
                                 # LaunchAgents connect on demand
 ```
 
+### Claude Max only: `--provider`, `--backend`, `--account-weeks`
+
+To see consumption of the Claude Max subscription pool alone, in account-weeks (the unit its quota is budgeted in), per program tag.
+
+- **`--provider <id>[,<id>...]`** (`report`, `top`, `serve`): keep only opencode messages whose `providerID` is listed, and goose sessions whose `provider_name` is listed. The lgtm and eternal-machinery ledgers have no provider field, so they are **excluded** whenever `--provider` is given. On `serve` the filter shapes the bands only; the cfp coverage, drift and cap-marker inputs stay all-provider, since they are compared with cfp's all-provider totals.
+- **`--backend max|vertex`** (`report`): cloudbox's opencode reports `google-vertex-anthropic` for both Vertex and Max, so the split exists only in claude-failover-proxy's events. This builds the report **only** from `/var/lib/claude-failover-proxy/events.jsonl` (override with `--cfp-events`), joining each `usage` event (`backend`, notional `cost`) to its `route` event on `requestId` for the session. `ses_*` sessions resolve to their opencode root and tag, `YYYYMMDD_N` sessions to `goose:<id>`; a usage event with no route lands under `cfp:unrouted`. lgtm's goose runs use private goose roots whose ids can collide with goose-serve's, and the lgtm ledger records no goose session id, so a goose-shaped id is attributed to the nearest lgtm ledger row (within a day) unless goose-serve's own `usage_ledger` has a row for it within 10 minutes of the request; goose-shaped ids in no known ledger land under `cfp:goose-unknown`. Usage events with tokens but no positive `cost` are listed under "Unpriced models" (keyed by the route's model). If the events file starts after the window start (its retention is shorter), a warning is printed and the rate line counts from the file's first event. Dollars are the event's `cost`; opencode/goose/ledger rows are not read (they would double count). Cannot be combined with `--provider`.
+- **`--account-weeks [DOLLARS]`** (`report`): adds an `acct-wk` column and a rate line (account-weeks per week over the elapsed window). The numerator is each row's **tokens priced at opus-5-5 list** ($4 input, $0.20 cache read, $5 cache write, $20 output per Mtok), divided by `DOLLARS`, since that is how the divisor was calibrated; the `total` column stays the row's own list-price dollars. On cloudbox it includes any usage-billed seat traffic, which draws no Max quota (the report says so under the table). The lgtm/EM ledgers do not feed it. The default divisor is `ACCOUNT_WEEK_USD` = 1520 list-price dollars (opus-5-5 rates) per Claude Max 20x account-week, calibrated in `docs/research/2026-11-23-claude-max-quota-budget.md` and refit by `workstation-ynoq.2`. Only meaningful with `--provider` or `--backend`; it warns on stderr otherwise.
+
+```bash
+# devbox: the Max pool is providerID/provider_name `anthropic`
+session-tags report --days 7 --provider anthropic --account-weeks
+session-tags top --days 7 --provider anthropic
+
+# cloudbox: Max vs Vertex split comes from cfp
+session-tags report --days 7 --backend max --account-weeks
+session-tags report --days 7 --backend vertex
+```
+
 ### Goose spend source
 
 In addition to opencode sessions, `session-tags` reads Goose sessions from `~/.local/share/goose/sessions/sessions.db` (override with `--goose-db`). If the database does not exist or is unreadable, it is silently skipped.
