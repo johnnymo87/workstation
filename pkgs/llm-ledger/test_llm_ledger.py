@@ -2546,5 +2546,521 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.assertIn("quota@", data["line"])
 
 
+class TestImportRemote(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="llm-ledger-remote-")
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+        self.repo_dir = os.path.join(self.tmpdir.name, "quota-telemetry")
+        os.makedirs(self.repo_dir, exist_ok=True)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_schema_remote_tables(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            self.assertIn("remote_hourly", tables)
+            self.assertIn("remote_hosts", tables)
+        finally:
+            conn.close()
+
+    def test_price_remote(self):
+        # claude-opus-5-5: (4, 20, 0.2, 5.0) in $/MTok
+        # input=46905, output=192940, cache_read=52539503, cw5m=3954596, cw1h=0
+        # 46905*4 + 192940*20 + 52539503*0.2 + 3954596*5.0 = 34327300.6 / 1e6 = 34.3273006
+        cost = llm_ledger.price_remote(
+            "claude-opus-5-5",
+            input=46905,
+            output=192940,
+            cache_read=52539503,
+            cw5m=3954596,
+            cw1h=0,
+        )
+        self.assertIsNotNone(cost)
+        assert cost is not None
+        self.assertAlmostEqual(cost, 34.3273006, places=6)
+
+        # Suffix stripping: claude-opus-5-5@20250219
+        cost_suffixed = llm_ledger.price_remote(
+            "claude-opus-5-5@20250219",
+            input=46905,
+            output=192940,
+            cache_read=52539503,
+            cw5m=3954596,
+            cw1h=0,
+        )
+        self.assertIsNotNone(cost_suffixed)
+        assert cost_suffixed is not None
+        self.assertAlmostEqual(cost_suffixed, 34.3273006, places=6)
+
+        # 1h write rate is 2x input rate: claude-opus-5-5 input rate is 4 $/MTok -> 1h rate is 8 $/MTok
+        cost_1h = llm_ledger.price_remote(
+            "claude-opus-5-5",
+            input=0,
+            output=0,
+            cache_read=0,
+            cw5m=0,
+            cw1h=1_000_000,
+        )
+        self.assertIsNotNone(cost_1h)
+        assert cost_1h is not None
+        self.assertAlmostEqual(cost_1h, 8.0, places=6)
+
+        # Unknown model -> None
+        self.assertIsNone(
+            llm_ledger.price_remote(
+                "claude-fable-5-2",
+                input=100,
+                output=100,
+                cache_read=0,
+                cw5m=0,
+                cw1h=0,
+            )
+        )
+
+    def test_ledger_lock_timeout(self):
+        with llm_ledger.LedgerLock(self.db_path, blocking=True):
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                with llm_ledger.LedgerLock(self.db_path, timeout_s=0.2):
+                    pass
+            elapsed = time.monotonic() - t0
+            self.assertGreaterEqual(elapsed, 0.2)
+
+    def test_import_remote_first_import_and_prices_opus(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        # Week 48 of 2026 starts 2026-11-23T00:00Z
+        row = {
+            "account": "user@example.com",
+            "cache_read": 52539503,
+            "cache_write_1h": 0,
+            "cache_write_5m": 3954596,
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "input": 46905,
+            "model": "claude-opus-5-5",
+            "output": 192940,
+            "requests": 319,
+            "split": True,
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["files"], 1)
+        self.assertEqual(res["rows"], 1)
+        self.assertEqual(res["malformed"], 0)
+        self.assertEqual(res["unpriced"], 0)
+        self.assertEqual(res["dupes"], 0)
+        self.assertEqual(res["hosts"], 1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            r = conn.execute(
+                "SELECT host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd "
+                "FROM remote_hourly"
+            ).fetchone()
+            self.assertEqual(r[0], "devbox")
+            self.assertEqual(r[1], 1795392000000)  # 2026-11-23T00:00:00Z
+            self.assertEqual(r[2], "user@example.com")
+            self.assertEqual(r[3], "max")
+            self.assertEqual(r[4], "claude-opus-5-5")
+            self.assertEqual(r[5], 319)
+            self.assertEqual(r[6], 46905)
+            self.assertEqual(r[7], 192940)
+            self.assertEqual(r[8], 52539503)
+            self.assertEqual(r[9], 3954596)
+            self.assertEqual(r[10], 0)
+            self.assertAlmostEqual(r[11], 34.3273006, places=6)
+        finally:
+            conn.close()
+
+    def test_import_remote_reimport_unchanged_file(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            "requests": 1,
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        res1 = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res1["files"], 1)
+
+        # Re-import unchanged file
+        res2 = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res2["files"], 0)
+        self.assertEqual(res2["rows"], 0)
+
+    def test_import_remote_changed_file_replaces_week(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        # Week 48: 2026-11-23 to 2026-11-29
+        # Week 49: 2026-11-30 to 2026-12-06
+        w48_row1 = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            "requests": 10,
+        }
+        w49_row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-30T00:00Z",
+            "model": "claude-opus-5-5",
+            "requests": 20,
+        }
+        w48_path = os.path.join(devbox_dir, "2026-W48.jsonl")
+        w49_path = os.path.join(devbox_dir, "2026-W49.jsonl")
+        with open(w48_path, "w") as f:
+            f.write(json.dumps(w48_row1) + "\n")
+        with open(w49_path, "w") as f:
+            f.write(json.dumps(w49_row) + "\n")
+
+        llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+
+        # Now change W48: replace with a different row in W48
+        w48_row2 = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T01:00Z",
+            "model": "claude-sonnet-5-5",
+            "requests": 99,
+        }
+        with open(w48_path, "w") as f:
+            f.write(json.dumps(w48_row2) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["files"], 1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            w48_rows = conn.execute(
+                "SELECT model, requests FROM remote_hourly WHERE hour >= 1795392000000 AND hour < 1795996800000"
+            ).fetchall()
+            self.assertEqual(w48_rows, [("claude-sonnet-5-5", 99)])
+
+            # W49 is intact
+            w49_rows = conn.execute(
+                "SELECT model, requests FROM remote_hourly WHERE hour >= 1795996800000"
+            ).fetchall()
+            self.assertEqual(w49_rows, [("claude-opus-5-5", 20)])
+        finally:
+            conn.close()
+
+    def test_import_remote_own_host_skipped(self):
+        cloudbox_dir = os.path.join(self.repo_dir, "cloudbox")
+        os.makedirs(cloudbox_dir, exist_ok=True)
+        with open(os.path.join(cloudbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps({
+                "account": "user@example.com",
+                "host": "cloudbox",
+                "hour_utc": "2026-11-23T00:00Z",
+                "model": "claude-opus-5-5",
+            }) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["files"], 0)
+        self.assertEqual(res["hosts"], 0)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            count = conn.execute("SELECT count(*) FROM remote_hourly").fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
+
+    def test_import_remote_missing_backend_and_null_account(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        row = {
+            "account": None,
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            # backend missing
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            r = conn.execute("SELECT account, backend FROM remote_hourly").fetchone()
+            self.assertEqual(r[0], "")
+            self.assertEqual(r[1], "max")
+        finally:
+            conn.close()
+
+    def test_import_remote_unknown_model_unpriced(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "unknown-model-xyz",
+            "input": 1000,
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["rows"], 1)
+        self.assertEqual(res["unpriced"], 1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            cost = conn.execute("SELECT cost_usd FROM remote_hourly").fetchone()[0]
+            self.assertIsNone(cost)
+        finally:
+            conn.close()
+
+    def test_import_remote_cost_usd_preserved(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            "cost_usd": 12.34,
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["unpriced"], 0)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            cost = conn.execute("SELECT cost_usd FROM remote_hourly").fetchone()[0]
+            self.assertAlmostEqual(cost, 12.34, places=4)
+        finally:
+            conn.close()
+
+    def test_import_remote_malformed_lines_and_dupes(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        lines = [
+            "not a json line",
+            json.dumps({"host": "otherhost", "hour_utc": "2026-11-23T00:00Z", "model": "m"}),  # host mismatch
+            json.dumps({"host": "devbox", "hour_utc": "invalid-hour", "model": "m"}),            # bad hour
+            json.dumps({"host": "devbox", "hour_utc": "2026-11-15T00:00Z", "model": "m"}),      # outside W48 week
+            json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T00:00Z",
+                "backend": "max",
+                "model": "claude-opus-5-5",
+                "requests": 1,
+            }),
+            # Duplicate PK (same host, hour, account, backend, model) with requests=2
+            json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T00:00Z",
+                "backend": "max",
+                "model": "claude-opus-5-5",
+                "requests": 2,
+            }),
+        ]
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        res = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res["malformed"], 4)
+        self.assertEqual(res["dupes"], 1)
+        self.assertEqual(res["rows"], 2)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            reqs = conn.execute("SELECT requests FROM remote_hourly").fetchall()
+            self.assertEqual(reqs, [(2,)])
+        finally:
+            conn.close()
+
+    def test_import_remote_watermark(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T10:00Z",
+            "model": "claude-opus-5-5",
+        }
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps(row) + "\n")
+
+        watermark = {"host": "devbox", "hour_utc": "2026-11-23T21:00Z"}
+        with open(os.path.join(devbox_dir, "_exported_through.json"), "w") as f:
+            f.write(json.dumps(watermark) + "\n")
+
+        llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+            now_ms=1795455600000,
+        )
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            r = conn.execute("SELECT host, first_hour, exported_through, imported_at FROM remote_hosts").fetchone()
+            self.assertEqual(r[0], "devbox")
+            # first_hour: 2026-11-23T10:00Z -> 1795428000000
+            self.assertEqual(r[1], 1795428000000)
+            # exported_through: 2026-11-23T21:00Z (1795467600000) + 3600000 -> 1795471200000
+            self.assertEqual(r[2], 1795467600000 + 3600000)
+            self.assertEqual(r[3], 1795455600000)
+        finally:
+            conn.close()
+
+    def test_ensure_fleet_objects_view(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            # Seed hourly (local)
+            conn.execute(
+                "INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) "
+                "VALUES (100, 'ses_loc', 'vertex', 'claude-opus-5-5', 1, 10, 20, 30, 40, 0.5)"
+            )
+            # Seed remote_hourly
+            conn.execute(
+                "INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+                "VALUES ('devbox', 100, 'user@example.com', 'max', 'claude-opus-5-5', 2, 50, 60, 70, 80, 20, 1.5)"
+            )
+            conn.commit()
+
+            llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox")
+
+            rows = conn.execute(
+                "SELECT hour, host, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd "
+                "FROM fleet_hourly ORDER BY attr_key"
+            ).fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0], (100, "devbox", "fleet:devbox", "max", "claude-opus-5-5", 2, 50, 60, 70, 100, 1.5))
+            self.assertEqual(rows[1], (100, "cloudbox", "ses_loc", "vertex", "claude-opus-5-5", 1, 10, 20, 30, 40, 0.5))
+
+            # View not recreated when SQL unchanged
+            initial_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_hourly'").fetchone()[0]
+            stmts: list[str] = []
+            conn.set_trace_callback(stmts.append)
+            try:
+                llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox")
+                self.assertFalse(any("DROP VIEW" in s for s in stmts))
+            finally:
+                conn.set_trace_callback(None)
+            final_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_hourly'").fetchone()[0]
+            self.assertEqual(initial_sql, final_sql)
+        finally:
+            conn.close()
+
+    def test_ensure_fleet_objects_session_program_survives_snapshot(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) "
+                "VALUES ('devbox', 100, 200, 300)"
+            )
+            conn.commit()
+
+            llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox", now_ms=500)
+
+            sp_row = conn.execute(
+                "SELECT attr_key, tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'fleet:devbox'"
+            ).fetchone()
+            self.assertEqual(sp_row, ("fleet:devbox", "fleet:devbox", "fleet", None, "devbox (all usage)", 500))
+
+            # Run step_session_program_snapshot: fleet:devbox must survive untouched
+            llm_ledger.step_session_program_snapshot(conn, now=1000)
+
+            sp_row_after = conn.execute(
+                "SELECT attr_key, tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'fleet:devbox'"
+            ).fetchone()
+            self.assertEqual(sp_row_after, ("fleet:devbox", "fleet:devbox", "fleet", None, "devbox (all usage)", 500))
+        finally:
+            conn.close()
+
+    def test_import_remote_cli_missing_repo_and_success(self):
+        # Missing repo dir -> exit 1 with message
+        bad_dir = os.path.join(self.tmpdir.name, "does-not-exist")
+        import io
+        import contextlib
+        err_buf = io.StringIO()
+        with contextlib.redirect_stderr(err_buf):
+            code = llm_ledger.main(["import-remote", "--repo", bad_dir, "--db", self.db_path])
+        self.assertEqual(code, 1)
+        self.assertIn("repo dir not found", err_buf.getvalue())
+
+        # Success -> prints formatted counts
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
+            f.write(json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T00:00Z",
+                "model": "claude-opus-5-5",
+            }) + "\n")
+
+        out_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf):
+            code = llm_ledger.main(["import-remote", "--repo", self.repo_dir, "--db", self.db_path, "--host", "cloudbox"])
+        self.assertEqual(code, 0)
+        self.assertIn("import-remote files=1 rows=1 malformed=0 unpriced=0", out_buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

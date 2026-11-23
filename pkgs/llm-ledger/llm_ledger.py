@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import socket
 import sqlite3
 import sys
@@ -84,7 +85,56 @@ CREATE TABLE IF NOT EXISTS quota_samples (
   PRIMARY KEY (ts, account));
 
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS remote_hourly (
+  host TEXT NOT NULL, hour INTEGER NOT NULL, account TEXT NOT NULL,
+  backend TEXT NOT NULL, model TEXT NOT NULL,
+  requests INTEGER, input INTEGER, output INTEGER, cache_read INTEGER,
+  cache_write_5m INTEGER, cache_write_1h INTEGER, cost_usd REAL,
+  PRIMARY KEY (host, hour, account, backend, model));
+CREATE TABLE IF NOT EXISTS remote_hosts (
+  host TEXT PRIMARY KEY, first_hour INTEGER, exported_through INTEGER,
+  imported_at INTEGER NOT NULL);
 """ + QUOTA_WATCH_SCHEMA_SQL
+
+# Source: claude-failover-proxy src/price.ts (standard tier, 2026-11-23).
+# Rates are $/MTok: (input, output, cache_read, cache_write_5m).
+# Note: hourly aggregates can't apply haiku's 100k long-context tier (understates haiku);
+# fable-5-2 has no cfp rate → unpriced.
+REMOTE_PRICES: dict[str, tuple[float, float, float, float]] = {
+    "claude-opus-5-5": (4.0, 20.0, 0.2, 5.0),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.1, 2.5),
+    "claude-haiku-5-5": (0.1, 0.5, 0.01, 0.125),
+    "claude-opus-5": (5.0, 25.0, 0.5, 6.25),
+    "claude-fable-5-1": (10.0, 50.0, 0.25, 12.5),
+    "claude-fable-5": (10.0, 50.0, 1.0, 12.5),
+}
+
+
+def price_remote(
+    model: str | None,
+    input: int,
+    output: int,
+    cache_read: int,
+    cw5m: int,
+    cw1h: int,
+) -> float | None:
+    """Price remote usage in USD given token counts and model name."""
+    if not model or not isinstance(model, str):
+        return None
+    base_model = model.split("@")[0]
+    prices = REMOTE_PRICES.get(base_model)
+    if prices is None:
+        return None
+    p_in, p_out, p_cr, p_cw5m = prices
+    p_cw1h = 2.0 * p_in
+    return (
+        (input or 0) * p_in
+        + (output or 0) * p_out
+        + (cache_read or 0) * p_cr
+        + (cw5m or 0) * p_cw5m
+        + (cw1h or 0) * p_cw1h
+    ) / 1_000_000.0
 
 
 ADVISORY_WARNING_SUBSTRINGS: tuple[str, ...] = ()
@@ -263,16 +313,39 @@ def parse_quota_sample_line(
 class LedgerLock:
     """Exclusive fcntl flock on <db dir>/.lock."""
 
-    def __init__(self, db_path: str, blocking: bool = True):
+    def __init__(
+        self,
+        db_path: str,
+        blocking: bool = True,
+        timeout_s: float | None = None,
+    ):
         self.lock_path = os.path.join(os.path.dirname(os.path.abspath(db_path)), ".lock")
         self.blocking = blocking
+        self.timeout_s = timeout_s
         self.fd: Any = None
         self.acquired = False
 
     def __enter__(self) -> LedgerLock:
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         self.fd = open(self.lock_path, "a")
-        if self.blocking:
+        if self.timeout_s is not None:
+            deadline = time.monotonic() + self.timeout_s
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.acquired = True
+                    return self
+                except (BlockingIOError, OSError):
+                    pass
+                now = time.monotonic()
+                if now >= deadline:
+                    self.fd.close()
+                    self.fd = None
+                    raise TimeoutError(
+                        f"Timed out after {self.timeout_s}s waiting for lock {self.lock_path}"
+                    )
+                time.sleep(min(0.5, max(0.0, deadline - now)))
+        elif self.blocking:
             try:
                 fcntl.flock(self.fd, fcntl.LOCK_EX)
                 self.acquired = True
@@ -1277,6 +1350,42 @@ def step_session_program_snapshot(
     return len(to_upsert)
 
 
+def ensure_fleet_objects(
+    conn: sqlite3.Connection,
+    local_host: str,
+    now_ms: int | None = None,
+) -> None:
+    """Ensure fleet_hourly view and synthetic session_program rows exist."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    escaped_host = local_host.replace("'", "''")
+    view_sql = (
+        "CREATE VIEW fleet_hourly AS\n"
+        f"  SELECT hour, '{escaped_host}' AS host, attr_key, backend, model, n,\n"
+        "         input, output, cache_read, cache_write, cost_usd FROM hourly\n"
+        "  UNION ALL\n"
+        "  SELECT hour, host, 'fleet:' || host, backend, model, requests,\n"
+        "         input, output, cache_read, cache_write_5m + cache_write_1h, cost_usd\n"
+        "  FROM remote_hourly"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_hourly'"
+    ).fetchone()
+    if not row or row[0] != view_sql:
+        conn.execute("DROP VIEW IF EXISTS fleet_hourly")
+        conn.execute(view_sql)
+
+    hosts = [r[0] for r in conn.execute("SELECT DISTINCT host FROM remote_hosts").fetchall()]
+    if hosts:
+        conn.executemany(
+            "INSERT OR REPLACE INTO session_program (attr_key, tag, source, root, title, updated_at) "
+            "VALUES (?, ?, 'fleet', NULL, ?, ?)",
+            [(f"fleet:{h}", f"fleet:{h}", f"{h} (all usage)", now_ms) for h in hosts],
+        )
+    conn.commit()
+
+
 def run_ingest(
     db_path: str = DEFAULT_DB,
     events_path: str = DEFAULT_EVENTS,
@@ -1356,6 +1465,12 @@ def run_ingest(
                 warnings=warnings_list,
             )
             counts["snapshot_rows"] = snapshot_rows
+            now_ms = (
+                int(now * 1000)
+                if (now is not None and now <= 1e11)
+                else (int(now) if now is not None else int(time.time() * 1000))
+            )
+            ensure_fleet_objects(conn=conn, local_host=host, now_ms=now_ms)
             counts["warnings"] = warnings_list
 
             return counts
@@ -1516,6 +1631,199 @@ def import_events(
             conn.close()
 
 
+def import_remote(
+    db_path: str = DEFAULT_DB,
+    repo_dir: str = "",
+    local_host: str = "",
+    now_ms: int | None = None,
+    warnings: list[str] | None = None,
+    take_lock: bool = True,
+) -> dict[str, int]:
+    """Import remote usage JSONL files into remote_hourly and update fleet objects."""
+    if not os.path.isdir(repo_dir):
+        raise FileNotFoundError(f"repo dir not found: {repo_dir}")
+
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    lock_ctx: Any = LedgerLock(db_path, timeout_s=120.0) if take_lock else contextlib.nullcontext()
+    with lock_ctx:
+        conn = open_ledger_db(db_path)
+        try:
+            state = get_ingest_state(conn)
+            total_files = 0
+            total_rows = 0
+            total_malformed = 0
+            total_unpriced = 0
+            total_dupes = 0
+            processed_hosts = 0
+
+            for entry in sorted(os.listdir(repo_dir)):
+                if entry.startswith("."):
+                    continue
+                host_path = os.path.join(repo_dir, entry)
+                if not os.path.isdir(host_path):
+                    continue
+                host = entry
+                if host == local_host:
+                    continue
+
+                processed_hosts += 1
+
+                for fname in sorted(os.listdir(host_path)):
+                    m = re.match(r"^(\d{4})-W(\d{2})\.jsonl$", fname)
+                    if not m:
+                        continue
+                    file_path = os.path.join(host_path, fname)
+                    if not os.path.isfile(file_path):
+                        continue
+
+                    with open(file_path, "rb") as f:
+                        content = f.read()
+
+                    blob_id = hashlib.sha1(b"blob %d\0" % len(content) + content).hexdigest()
+                    state_key = f"remote_blob:{host}/{fname}"
+                    if state.get(state_key) == blob_id:
+                        continue
+
+                    year = int(m.group(1))
+                    week = int(m.group(2))
+                    try:
+                        monday = datetime.date.fromisocalendar(year, week, 1)
+                    except ValueError:
+                        continue
+                    start_dt = datetime.datetime(
+                        monday.year, monday.month, monday.day, 0, 0, 0, tzinfo=datetime.timezone.utc
+                    )
+                    week_start = int(start_dt.timestamp() * 1000)
+                    week_end = week_start + 7 * 86400 * 1000
+
+                    file_rows = []
+                    seen_pks = set()
+                    for raw_line in content.splitlines():
+                        line_str = raw_line.decode("utf-8", errors="replace").strip()
+                        if not line_str:
+                            continue
+                        try:
+                            row_dict = json.loads(line_str)
+                            if not isinstance(row_dict, dict):
+                                total_malformed += 1
+                                continue
+                        except Exception:
+                            total_malformed += 1
+                            continue
+
+                        if row_dict.get("host") != host:
+                            total_malformed += 1
+                            continue
+
+                        hour_utc = row_dict.get("hour_utc")
+                        hour = parse_iso_ts(hour_utc)
+                        if hour is None:
+                            total_malformed += 1
+                            continue
+
+                        if hour < week_start or hour >= week_end:
+                            total_malformed += 1
+                            continue
+
+                        model = row_dict.get("model")
+                        if not model or not isinstance(model, str):
+                            total_malformed += 1
+                            continue
+
+                        account = row_dict.get("account") or ""
+                        backend = row_dict.get("backend") or "max"
+
+                        reqs = to_int(row_dict.get("requests")) or 0
+                        inp = to_int(row_dict.get("input")) or 0
+                        out = to_int(row_dict.get("output")) or 0
+                        c_read = to_int(row_dict.get("cache_read")) or 0
+                        cw5m = to_int(row_dict.get("cache_write_5m")) or 0
+                        cw1h = to_int(row_dict.get("cache_write_1h")) or 0
+
+                        cost_val = row_dict.get("cost_usd")
+                        if isinstance(cost_val, (int, float)) and not isinstance(cost_val, bool):
+                            cost_usd = float(cost_val)
+                        elif backend == "max":
+                            cost_usd = price_remote(model, inp, out, c_read, cw5m, cw1h)
+                        else:
+                            cost_usd = None
+
+                        if cost_usd is None:
+                            total_unpriced += 1
+
+                        pk = (host, hour, account, backend, model)
+                        if pk in seen_pks:
+                            total_dupes += 1
+                        seen_pks.add(pk)
+
+                        total_rows += 1
+                        file_rows.append((
+                            host, hour, account, backend, model,
+                            reqs, inp, out, c_read, cw5m, cw1h, cost_usd
+                        ))
+
+                    with conn:
+                        conn.execute(
+                            "DELETE FROM remote_hourly WHERE host=? AND hour>=? AND hour<?",
+                            (host, week_start, week_end),
+                        )
+                        if file_rows:
+                            conn.executemany(
+                                "INSERT OR REPLACE INTO remote_hourly "
+                                "(host, hour, account, backend, model, "
+                                "requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                file_rows,
+                            )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
+                            (state_key, blob_id),
+                        )
+                    state[state_key] = blob_id
+                    total_files += 1
+
+                # Watermark file update
+                watermark_path = os.path.join(host_path, "_exported_through.json")
+                exported_through = None
+                if os.path.isfile(watermark_path):
+                    try:
+                        with open(watermark_path, "r", encoding="utf-8") as wf:
+                            wdata = json.load(wf)
+                        if isinstance(wdata, dict):
+                            whour_str = wdata.get("hour_utc")
+                            whour = parse_iso_ts(whour_str)
+                            if whour is not None:
+                                exported_through = whour + 3600000
+                    except Exception:
+                        exported_through = None
+
+                min_row = conn.execute(
+                    "SELECT MIN(hour) FROM remote_hourly WHERE host=?", (host,)
+                ).fetchone()
+                first_hour = min_row[0] if (min_row and min_row[0] is not None) else None
+
+                with conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO remote_hosts (host, first_hour, exported_through, imported_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (host, first_hour, exported_through, now_ms),
+                    )
+
+            ensure_fleet_objects(conn, local_host, now_ms=now_ms)
+            return {
+                "files": total_files,
+                "rows": total_rows,
+                "malformed": total_malformed,
+                "unpriced": total_unpriced,
+                "dupes": total_dupes,
+                "hosts": processed_hosts,
+            }
+        finally:
+            conn.close()
+
+
 def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int:
     """Parse ISO date or datetime string, interpreting naive datetimes in America/New_York."""
     import quota_watch
@@ -1574,6 +1882,12 @@ def main(argv: list[str] | None = None) -> int:
     # quota-outlook subcommand
     qo_parser = subparsers.add_parser("quota-outlook")
     qo_parser.add_argument("--db", default=DEFAULT_DB)
+
+    # import-remote subcommand
+    remote_parser = subparsers.add_parser("import-remote")
+    remote_parser.add_argument("--repo", required=True)
+    remote_parser.add_argument("--db", default=DEFAULT_DB)
+    remote_parser.add_argument("--host", default=socket.gethostname())
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1656,6 +1970,27 @@ def main(argv: list[str] | None = None) -> int:
         summary_parts = [f"{k}={counts[k]}" for k in sorted(counts)]
         print(f"events: {' '.join(summary_parts) if summary_parts else 'none'} total={len(events)}")
         return 0
+
+    if args.command == "import-remote":
+        if not os.path.isdir(args.repo):
+            sys.stderr.write(f"llm-ledger: repo dir not found: {args.repo}\n")
+            return 1
+        try:
+            res = import_remote(
+                db_path=args.db,
+                repo_dir=args.repo,
+                local_host=args.host,
+            )
+            print(
+                f"import-remote files={res.get('files', 0)} "
+                f"rows={res.get('rows', 0)} "
+                f"malformed={res.get('malformed', 0)} "
+                f"unpriced={res.get('unpriced', 0)}"
+            )
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"llm-ledger: import-remote failed: {e}\n")
+            return 1
 
     t0 = time.time()
 
