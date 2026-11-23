@@ -26,8 +26,11 @@ in
     "d /var/lib/llm-ledger/raw 2750 dev llm-ledger -"
   ];
 
-  # Phase 1 appends quota-watch to this unit after the writer
-  # (design: one timer, writer -> snapshot -> quota-watch).
+  # One timer, writer -> snapshot -> quota-watch (design "Ordering"): a oneshot
+  # runs its ExecStart lines in order and stops at the first failure, so
+  # quota-watch always sees the rows the writer just committed. quota-watch
+  # (bead workstation-4si2.2, docs/plans/2026-11-23-quota-watch-p1-plan.md)
+  # opens the ledger read-only and keeps its alert state in StateDirectory.
   systemd.services.llm-ledger = {
     description = "Maintain LLM spend ledger database and raw archive";
     after = [ "systemd-tmpfiles-setup.service" ];
@@ -43,7 +46,12 @@ in
       MemoryMax = "1G";
       Nice = 10;
       TimeoutStartSec = "15min";
-      ExecStart = "${llmLedger}/bin/llm-ledger run";
+      ExecStart = [
+        "${llmLedger}/bin/llm-ledger run"
+        "${llmLedger}/bin/llm-ledger quota-watch --state-dir /var/lib/llm-quota-watch --alert-cmd ${driftAlert}"
+      ];
+      StateDirectory = "llm-quota-watch";
+      StateDirectoryMode = "0700";
       # On success, clear the failure alert's backoff state so a later failure pages afresh.
       ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-ledger-failure/alerted";
       Environment = [ "HOME=/home/dev" ];
@@ -66,7 +74,7 @@ in
   };
 
   systemd.services.llm-ledger-failure = {
-    description = "Alert that the LLM spend ledger writer failed";
+    description = "Alert that the LLM spend ledger writer or quota-watch failed";
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
@@ -83,11 +91,14 @@ in
         [ -n "$RESULT" ] || RESULT=unknown
         ${driftAlert} /var/lib/llm-ledger-failure/alerted \
           "llm-ledger:$RESULT" \
-          "LLM spend ledger writer FAILED (result: $RESULT).
+          "LLM spend ledger FAILED (result: $RESULT).
 
-llm-ledger.service did not complete, so /var/lib/llm-ledger/ledger.db is going
-stale. Nothing is lost yet: the writer resumes from its saved offset, and cfp
-keeps 30 days of events. Past 30 days of failure, events are lost for good.
+llm-ledger.service did not complete. It runs the ledger writer, then
+quota-watch (Max pool shortfall / pool-dry alerts); the journal says which.
+If the writer failed, /var/lib/llm-ledger/ledger.db is going stale. Nothing is
+lost yet: the writer resumes from its saved offset, and cfp keeps 30 days of
+events. Past 30 days of failure, events are lost for good. If quota-watch
+failed, no Max quota alerts are being sent until it is fixed.
 
 Check:
   systemctl status llm-ledger.service --no-pager

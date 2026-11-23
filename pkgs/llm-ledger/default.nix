@@ -15,6 +15,7 @@ python3.pkgs.buildPythonApplication {
     root = ../.;
     fileset = lib.fileset.unions [
       ./llm_ledger.py
+      ./quota_watch.py
       ../oc-tags/oc_tags.py
     ];
   };
@@ -28,6 +29,7 @@ python3.pkgs.buildPythonApplication {
 
     mkdir -p $out/libexec/llm-ledger $out/bin
     cp llm-ledger/llm_ledger.py $out/libexec/llm-ledger/llm_ledger.py
+    cp llm-ledger/quota_watch.py $out/libexec/llm-ledger/quota_watch.py
     cp oc-tags/oc_tags.py $out/libexec/llm-ledger/oc_tags.py
     chmod +x $out/libexec/llm-ledger/llm_ledger.py
 
