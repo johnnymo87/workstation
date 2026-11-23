@@ -1503,6 +1503,12 @@ def import_events(
             conn.close()
 
 
+def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int:
+    """Parse ISO date or datetime string, interpreting naive datetimes in America/New_York."""
+    import quota_watch
+    return quota_watch.parse_et_datetime(val, end_of_day_for_date=end_of_day_for_date)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="llm-ledger")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1535,7 +1541,55 @@ def main(argv: list[str] | None = None) -> int:
     rebuild_parser = subparsers.add_parser("rebuild-hourly")
     rebuild_parser.add_argument("--db", default=DEFAULT_DB)
 
+    # quota-watch subcommand
+    qw_parser = subparsers.add_parser("quota-watch")
+    qw_parser.add_argument("--db", default=DEFAULT_DB)
+    qw_parser.add_argument("--state-dir", default="/var/lib/llm-quota-watch")
+    qw_parser.add_argument("--alert-cmd", default=None)
+    qw_parser.add_argument("--exclude-account", action="append", default=None)
+    qw_parser.add_argument("--host", default=socket.gethostname())
+
+    # quota-replay subcommand
+    qr_parser = subparsers.add_parser("quota-replay")
+    qr_parser.add_argument("--db", default=DEFAULT_DB)
+    qr_parser.add_argument("--since", required=True)
+    qr_parser.add_argument("--until", default="now")
+    qr_parser.add_argument("--exclude-account", action="append", default=None)
+    qr_parser.add_argument("--host", default=socket.gethostname())
+
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.command == "quota-watch":
+        import quota_watch
+        excluded = set(args.exclude_account or [])
+        return quota_watch.run_live(
+            db=args.db,
+            state_dir=args.state_dir,
+            alert_cmd=args.alert_cmd,
+            excluded=excluded,
+            host=args.host,
+        )
+
+    if args.command == "quota-replay":
+        import quota_watch
+        since_ms = quota_watch.parse_et_datetime(args.since, end_of_day_for_date=False)
+        until_ms = quota_watch.parse_et_datetime(args.until, end_of_day_for_date=True)
+        excluded = set(args.exclude_account or [])
+        events = quota_watch.replay(
+            db=args.db,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            excluded=excluded,
+            host=args.host,
+        )
+        for e in events:
+            print(e)
+        import collections
+        counts = collections.Counter(e.kind for e in events)
+        summary_parts = [f"{k}={counts[k]}" for k in sorted(counts)]
+        print(f"events: {' '.join(summary_parts) if summary_parts else 'none'} total={len(events)}")
+        return 0
+
     t0 = time.time()
 
     if args.command == "run":
