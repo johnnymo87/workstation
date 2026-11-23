@@ -105,14 +105,22 @@ running_files_gone() {
 }
 
 # The pid of whatever listens on the port, only if it is our Chrome: a Chrome
-# with this port on its command line. Used for an instance we adopted.
+# with this port AND this profile on its command line. Used for an instance we
+# adopted. The profile check matters on 9222, where other tools (a chrome-debug
+# alias, project scripts) start their own Chrome on the same port: one that
+# grabs the port during a respawn gap must not be adopted as ours. It is left
+# alone, and we launch once it goes away.
 listener_pid() {
   local pid cmd
   pid="$(/usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
   [ -n "$pid" ] || return 1
   cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
   case "$cmd" in
-    *"--remote-debugging-port=$PORT"*) echo "$pid" ;;
+    *"--remote-debugging-port=$PORT"*) ;;
+    *) return 1 ;;
+  esac
+  case "$cmd" in
+    *"--user-data-dir=$PROFILE"*) echo "$pid" ;;
     *) return 1 ;;
   esac
 }
