@@ -998,7 +998,7 @@ class TestLiveAndReplay(unittest.TestCase):
         since_ms = int(since_dt.timestamp() * 1000)
         until_ms = int(until_dt.timestamp() * 1000)
 
-        events = replay(self.db_path, since_ms=since_ms, until_ms=until_ms)
+        events = replay(self.db_path, since_ms=since_ms, until_ms=until_ms, host=host_name)
 
         # Assert: shortfall fires before 2026-11-22 12:00 ET
         short_fires = [
