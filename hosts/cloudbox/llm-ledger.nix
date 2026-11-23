@@ -127,6 +127,10 @@ Check:
       NoNewPrivileges = true;
       ProtectSystem = "strict";
       ProtectHome = true;
+      # Load-bearing: SQLite spills GROUP BY sorts to a temp file in /var/tmp or
+      # /tmp, which ProtectSystem=strict makes read-only ("disk I/O error" on
+      # the first aggregate query, reproduced with systemd-run).
+      PrivateTmp = true;
       ReadWritePaths = [ "/var/lib/llm-quota-watch" ];
     };
   };
