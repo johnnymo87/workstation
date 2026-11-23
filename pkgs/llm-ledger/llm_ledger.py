@@ -102,6 +102,48 @@ def add_warning(warnings: list[str] | None, msg: str) -> None:
         sys.stderr.write(f"warning: {msg}\n")
 
 
+def load_session_tags(
+    conn: sqlite3.Connection,
+    tags_db: str | None,
+    warnings: list[str] | None = None,
+) -> tuple[dict[str, str], bool]:
+    """Load session tags map from tags_db.
+
+    Rule:
+    - If tags_db does not exist AND session_program has no rows with source='manual',
+      proceed with an empty tag map and no warning (fresh host).
+    - If tags_db does not exist but manual rows exist (tags were there before and
+      vanished), record a fatal warning and signal skip (return {}, False).
+    - If tags_db exists but cannot be read, record a fatal warning and signal
+      skip (return {}, False).
+
+    Returns:
+        (tag_map, ok) where ok=False means snapshot should be skipped.
+    """
+    actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
+    if not actual_tags_db or not os.path.exists(actual_tags_db):
+        has_manual = False
+        try:
+            row = conn.execute("SELECT 1 FROM session_program WHERE source = 'manual' LIMIT 1").fetchone()
+            has_manual = row is not None
+        except sqlite3.OperationalError:
+            has_manual = False
+
+        if not has_manual:
+            return {}, True
+
+        add_warning(warnings, f"tags db not found: {actual_tags_db}")
+        return {}, False
+
+    try:
+        with oc_tags.open_store(actual_tags_db, readonly=True) as store:
+            tag_map = oc_tags.session_tags(store)
+        return tag_map, True
+    except Exception as e:
+        add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
+        return {}, False
+
+
 def to_int(val: Any) -> int | None:
     if val is None or isinstance(val, bool):
         return None
@@ -626,17 +668,8 @@ def step_cfp_tail_and_archive(
 
         f.seek(read_offset)
 
-        # Load session tags if tags.db exists
-        tag_map: dict[str, str] = {}
-        actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-        if not actual_tags_db or not os.path.exists(actual_tags_db):
-            add_warning(warnings, f"tags db not found: {actual_tags_db}")
-        else:
-            try:
-                with oc_tags.open_store(actual_tags_db, readonly=True) as store:
-                    tag_map = oc_tags.session_tags(store)
-            except Exception as e:
-                add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
+        # Load session tags
+        tag_map, _tags_ok = load_session_tags(conn, tags_db, warnings)
 
         total_new_routes = 0
         total_new_requests = 0
@@ -966,16 +999,7 @@ def step_goose_recheck(
     min_ts = min(r[1] for r in goose_rows)
     max_ts = max(r[1] for r in goose_rows)
 
-    tag_map: dict[str, str] = {}
-    actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-    if not actual_tags_db or not os.path.exists(actual_tags_db):
-        add_warning(warnings, f"tags db not found: {actual_tags_db}")
-    else:
-        try:
-            with oc_tags.open_store(actual_tags_db, readonly=True) as store:
-                tag_map = oc_tags.session_tags(store)
-        except Exception as e:
-            add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
+    tag_map, _tags_ok = load_session_tags(conn, tags_db, warnings)
 
     resolver = oc_tags.CfpSessionResolver(
         session_ids=goose_sids,
@@ -1158,16 +1182,8 @@ def step_session_program_snapshot(
         except Exception as e:
             add_warning(warnings, f"failed to read goose db {actual_goose_db}: {e}")
 
-    tag_map: dict[str, str] = {}
-    actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-    if not actual_tags_db or not os.path.exists(actual_tags_db):
-        add_warning(warnings, f"tags db not found: {actual_tags_db}")
-        return 0
-    try:
-        with oc_tags.open_store(actual_tags_db, readonly=True) as store:
-            tag_map = oc_tags.session_tags(store)
-    except Exception as e:
-        add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
+    tag_map, tags_ok = load_session_tags(conn, tags_db, warnings)
+    if not tags_ok:
         return 0
 
     attr_keys = [r[0] for r in conn.execute("SELECT DISTINCT attr_key FROM requests")]
@@ -1180,11 +1196,17 @@ def step_session_program_snapshot(
                 continue
             if attr_key not in opencode_parents:
                 if attr_key in existing_sp:
-                    continue
-                root = attr_key
-                tag, source = oc_tags.effective_tag(attr_key, None, tag_map)
-                title = None
-                resolved = (tag, source, root, title)
+                    cur_tag, cur_source, cur_root, cur_title = existing_sp[attr_key]
+                    target_tag = (tag_map.get(cur_root) if cur_root else None) or tag_map.get(attr_key)
+                    if target_tag is not None and target_tag != cur_tag:
+                        resolved = (target_tag, "manual", cur_root, cur_title)
+                    else:
+                        continue
+                else:
+                    root = attr_key
+                    tag, source = oc_tags.effective_tag(attr_key, None, tag_map)
+                    title = None
+                    resolved = (tag, source, root, title)
             else:
                 root = oc_tags.root_of(attr_key, opencode_parents)
                 tag, source = oc_tags.effective_tag(root, opencode_dirs.get(root), tag_map)
@@ -1383,19 +1405,7 @@ def import_events(
         host = host or socket.gethostname()
         conn = open_ledger_db(db_path)
         try:
-            tag_map: dict[str, str] = {}
-            actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-            tags_loaded = True
-            if not actual_tags_db or not os.path.exists(actual_tags_db):
-                add_warning(warnings_list, f"tags db not found: {actual_tags_db}")
-                tags_loaded = False
-            else:
-                try:
-                    with oc_tags.open_store(actual_tags_db, readonly=True) as store:
-                        tag_map = oc_tags.session_tags(store)
-                except Exception as e:
-                    add_warning(warnings_list, f"failed to read tags db {actual_tags_db}: {e}")
-                    tags_loaded = False
+            tag_map, tags_ok = load_session_tags(conn, tags_db, warnings_list)
 
             total_new_routes = 0
             total_new_requests = 0
@@ -1410,7 +1420,7 @@ def import_events(
                 open_fn = gzip.open if filepath.endswith(".gz") else open
                 try:
                     f = open_fn(filepath, "rb")
-                except OSError as e:
+                except (OSError, gzip.BadGzipFile) as e:
                     add_warning(warnings_list, f"failed to read events file {filepath}: {e}")
                     continue
 
@@ -1419,7 +1429,7 @@ def import_events(
                     while True:
                         try:
                             line = f.readline()
-                        except (EOFError, zlib.error) as e:
+                        except (EOFError, zlib.error, gzip.BadGzipFile) as e:
                             add_warning(warnings_list, f"truncated gzip file {filepath}: {e}")
                             break
                         if not line:
@@ -1469,7 +1479,7 @@ def import_events(
 
             # Step 6: snapshot
             snapshot_rows = 0
-            if tags_loaded:
+            if tags_ok:
                 snapshot_rows = step_session_program_snapshot(
                     conn=conn,
                     opencode_db=opencode_db,
@@ -1573,10 +1583,17 @@ def main(argv: list[str] | None = None) -> int:
     print(summary)
 
     warnings: list[str] = counts.get("warnings", [])
+    seen: set[str] = set()
+    deduped_warnings: list[str] = []
     for w in warnings:
+        if w not in seen:
+            seen.add(w)
+            deduped_warnings.append(w)
+
+    for w in deduped_warnings:
         sys.stderr.write(f"warning: {w}\n")
 
-    has_fatal = any(not is_advisory_warning(w) for w in warnings)
+    has_fatal = any(not is_advisory_warning(w) for w in deduped_warnings)
     return 1 if has_fatal else 0
 
 

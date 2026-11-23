@@ -831,10 +831,46 @@ class TestLlmLedger(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_run_missing_tags_db_warns_skips_snapshot_and_exits_1(self):
+    def test_run_missing_tags_db_fresh_host_proceeds_with_exit_0(self):
         line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
         with open(self.events_path, "w") as f:
             f.write(line1)
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "run",
+                "--db", self.db_path,
+                "--events", self.events_path,
+                "--raw-dir", self.raw_dir,
+                "--tags-db", "/nonexistent/tags.db",
+            ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(err.getvalue(), "")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_run_missing_tags_db_with_manual_rows_warns_skips_snapshot_and_exits_1(self):
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
+        with open(self.events_path, "w") as f:
+            f.write(line1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            # Seed a manual row in session_program indicating tags were present before
+            conn.execute(
+                "INSERT INTO session_program VALUES ('ses_prior', 'old-tag', 'manual', 'ses_prior', 'Prior', 100)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         import io
         import contextlib
@@ -855,8 +891,8 @@ class TestLlmLedger(unittest.TestCase):
         try:
             # Request was still ingested
             self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
-            # But snapshot was skipped
-            self.assertEqual(conn.execute("SELECT count(*) FROM session_program").fetchone()[0], 0)
+            # But snapshot was skipped: only the seeded row exists
+            self.assertEqual(conn.execute("SELECT count(*) FROM session_program").fetchone()[0], 1)
         finally:
             conn.close()
 
@@ -1013,6 +1049,67 @@ class TestLlmLedger(unittest.TestCase):
             self.assertEqual(reqs, {"r-gz-1", "r-gz-2"})
         finally:
             conn.close()
+
+    def test_import_events_bad_gzip_file_keeps_prior_rows_warns_and_exits_1(self):
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r-badgz-1", "cost": 0.01, "backend": "b"}) + "\n"
+        valid_gz = gzip.compress(line1.encode("utf-8"))
+
+        bad_gz_path = os.path.join(self.tmpdir.name, "bad.jsonl.gz")
+        with open(bad_gz_path, "wb") as f:
+            f.write(valid_gz)
+            f.write(b"NOT_GZIP_BYTES_CORRUPT")
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "import-events",
+                bad_gz_path,
+                "--db", self.db_path,
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("truncated gzip file", err.getvalue())
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            reqs = {r[0] for r in conn.execute("SELECT request_id FROM requests").fetchall()}
+            self.assertIn("r-badgz-1", reqs)
+        finally:
+            conn.close()
+
+    def test_warnings_deduplicated_order_preserving(self):
+        # Test that duplicate warnings are deduplicated preserving first-seen order
+        import io
+        import contextlib
+
+        mock_counts = {
+            "new_routes": 0,
+            "new_requests": 0,
+            "malformed": 0,
+            "quota_rows": 0,
+            "rechecked": 0,
+            "hours_rebuilt": 0,
+            "snapshot_rows": 0,
+            "warnings": [
+                "warning first",
+                "warning second",
+                "warning first",
+                "warning third",
+                "warning second",
+            ],
+        }
+
+        err = io.StringIO()
+        out = io.StringIO()
+        with mock.patch("llm_ledger.run_ingest", return_value=mock_counts):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_code = llm_ledger.main(["run", "--db", self.db_path])
+
+        self.assertEqual(exit_code, 1)
+        expected = "warning: warning first\nwarning: warning second\nwarning: warning third\n"
+        self.assertEqual(err.getvalue(), expected)
 
     def test_quota_dst_offsets(self):
         # Line 1: EDT offset (-04:00) -> 2026-07-26T22:00:00-04:00 is 2026-07-27T02:00:00Z (1785117600000 ms)
@@ -1985,9 +2082,7 @@ class TestLlmLedgerTask4(unittest.TestCase):
 
     def test_snapshot_absent_ses_with_existing_row_remains_untouched(self):
         self._create_opencode_db([])
-        with oc_tags.open_store(self.tags_db) as st:
-            oc_tags.set_session_tag(st, "ses_prior", "new-tag")
-
+        # tags.db has NO entry for ses_prior or ses_prior_root
         conn = llm_ledger.open_ledger_db(self.db_path)
         conn.execute(
             "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_prior', 'ses_prior', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
@@ -2005,6 +2100,47 @@ class TestLlmLedgerTask4(unittest.TestCase):
 
         r = conn.execute("SELECT tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'ses_prior'").fetchone()
         self.assertEqual(r, ("old-tag", "manual", "ses_prior_root", "Prior Title", 1700000000000))
+        conn.close()
+
+    def test_snapshot_absent_ses_with_existing_row_updates_if_retagged(self):
+        self._create_opencode_db([])
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_child', 'ses_child', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.execute(
+            "INSERT INTO session_program VALUES ('ses_child', 'tag-v1', 'manual', 'ses_root', 'Prior Title', 1700000000000)"
+        )
+        conn.commit()
+
+        # Case A: tag_map has entry for row's root ('ses_root')
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_root", "tag-v2")
+
+        written1 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700001000.0
+        )
+        self.assertEqual(written1, 1)
+        r1 = conn.execute("SELECT tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'ses_child'").fetchone()
+        self.assertEqual(r1, ("tag-v2", "manual", "ses_root", "Prior Title", 1700001000000))
+
+        # Case B: tag_map has entry for attr_key itself ('ses_child')
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.rm_session_tag(st, "ses_root")
+            oc_tags.set_session_tag(st, "ses_child", "tag-v3")
+
+        written2 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700002000.0
+        )
+        self.assertEqual(written2, 1)
+        r2 = conn.execute("SELECT tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'ses_child'").fetchone()
+        self.assertEqual(r2, ("tag-v3", "manual", "ses_root", "Prior Title", 1700002000000))
+
+        # Case C: tag_map has same tag -> no update
+        written3 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700003000.0
+        )
+        self.assertEqual(written3, 0)
         conn.close()
 
     def test_snapshot_goose_root_tag_and_auto(self):

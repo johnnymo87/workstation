@@ -103,9 +103,11 @@ CREATE TABLE ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 For every DISTINCT `attr_key` in `requests`: upsert a row, never delete one.
 - `ses_*`: if the id exists in opencode.db: `root = root_of(id)`,
   `(tag, source) = effective_tag(root, directory(root), session_tags)`. If the id
-  is absent from opencode.db: if a row already exists in `session_program`, leave it
-  untouched (it was resolved while the session existed); if no row exists, attribute it
-  exactly as `load_cfp_aggregate` does: `root = sid`, `(tag, source) = effective_tag(sid, None, session_tags)`,
+  is absent from opencode.db: if a row already exists in `session_program`, check if
+  `session_tags` has an entry for the row's root (or `sid` itself) whose tag differs
+  from the row's tag: if so, update the row to `(that tag, 'manual', same root, same title)`;
+  otherwise leave it untouched; if no row exists, attribute it exactly as
+  `load_cfp_aggregate` does: `root = sid`, `(tag, source) = effective_tag(sid, None, session_tags)`,
   `title = None`.
 - `goose:<sid>`: only if `sid` exists in sessions.db: root = `root_of` within
   goose; tag = tags.db's `goose:<root>` (manual) else `goose_auto_key(...)`
