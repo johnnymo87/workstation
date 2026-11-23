@@ -12,6 +12,7 @@ import socket
 import sqlite3
 import sys
 import time
+import zlib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -611,17 +612,97 @@ def step_cfp_tail_and_archive(
     }
 
 
+def ingest_quota_lines(
+    lines: Any,
+    conn: sqlite3.Connection,
+    newest_ts: int | None = None,
+    batch_size: int = 50000,
+    check_trailing_newline: bool = False,
+) -> tuple[int, int, int, int]:
+    """Process an iterable of quota lines and stage inserts into quota_pool and quota_samples.
+
+    Returns:
+        (pool_rows_added, sample_rows_added, malformed_count, lines_read)
+    """
+    pool_rows_added = 0
+    sample_rows_added = 0
+    malformed_count = 0
+    lines_read = 0
+    cur = conn.cursor()
+    pool_batch: list[tuple[Any, ...]] = []
+    sample_batch: list[tuple[Any, ...]] = []
+
+    for line in lines:
+        if check_trailing_newline and not line.endswith("\n"):
+            # Partial trailing line at EOF - stop without consuming or counting as malformed
+            break
+        lines_read += 1
+        p_row, s_rows, is_mal = parse_quota_sample_line(line)
+        if is_mal:
+            malformed_count += 1
+            continue
+        if p_row is None:
+            continue
+
+        ts = p_row[0]
+        if newest_ts is not None and ts <= newest_ts:
+            continue
+
+        pool_batch.append(p_row)
+        sample_batch.extend(s_rows)
+
+        if len(pool_batch) >= batch_size:
+            cur.executemany(
+                "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                pool_batch,
+            )
+            pool_rows_added += cur.rowcount
+            pool_batch = []
+
+        if len(sample_batch) >= batch_size:
+            cur.executemany(
+                "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sample_batch,
+            )
+            sample_rows_added += cur.rowcount
+            sample_batch = []
+
+    if pool_batch:
+        cur.executemany(
+            "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            pool_batch,
+        )
+        pool_rows_added += cur.rowcount
+
+    if sample_batch:
+        cur.executemany(
+            "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            sample_batch,
+        )
+        sample_rows_added += cur.rowcount
+
+    return pool_rows_added, sample_rows_added, malformed_count, lines_read
+
+
 def step_quota_samples(
     conn: sqlite3.Connection,
     samples_path: str = DEFAULT_SAMPLES,
     samples_archive: str = DEFAULT_SAMPLES_ARCHIVE,
     batch_size: int = 50000,
+    now: float | None = None,
+    archive_min_age: float = 120.0,
 ) -> dict[str, int]:
     """Step 3: quota samples import from archives and live file."""
     state = get_ingest_state(conn)
     total_pool_rows = 0
     total_sample_rows = 0
     total_malformed = 0
+    quota_archive_retry = 0
+    current_time = time.time() if now is None else now
 
     # 1. Archives: import each archive not yet recorded in ingest_state
     if os.path.isdir(samples_archive):
@@ -632,134 +713,80 @@ def step_quota_samples(
             if state_key in state:
                 continue
 
-            pool_rows: list[tuple[Any, ...]] = []
-            sample_rows: list[tuple[Any, ...]] = []
-            cur = conn.cursor()
+            try:
+                st = archive_path.stat()
+            except OSError as e:
+                quota_archive_retry += 1
+                sys.stderr.write(f"warning: stat failed for archive {basename}: {e}\n")
+                continue
+
+            if st.st_size == 0:
+                quota_archive_retry += 1
+                sys.stderr.write(f"warning: skipping 0-byte archive {basename}\n")
+                continue
+
+            if current_time - st.st_mtime < archive_min_age:
+                quota_archive_retry += 1
+                continue
 
             try:
                 with gzip.open(archive_path, "rt", encoding="utf-8", errors="replace") as f:
-                    for line in f:
-                        p_row, s_rows, is_mal = parse_quota_sample_line(line)
-                        if is_mal:
-                            total_malformed += 1
-                            continue
-                        if p_row is not None:
-                            pool_rows.append(p_row)
-                        sample_rows.extend(s_rows)
+                    p_add, s_add, mal_cnt, lines_read = ingest_quota_lines(
+                        lines=f,
+                        conn=conn,
+                        newest_ts=None,
+                        batch_size=batch_size,
+                        check_trailing_newline=False,
+                    )
 
-                        if len(pool_rows) >= batch_size:
-                            cur.executemany(
-                                "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                pool_rows,
-                            )
-                            total_pool_rows += cur.rowcount
-                            pool_rows = []
+                if lines_read == 0:
+                    conn.rollback()
+                    quota_archive_retry += 1
+                    sys.stderr.write(f"warning: archive {basename} yielded 0 lines\n")
+                    continue
 
-                        if len(sample_rows) >= batch_size:
-                            cur.executemany(
-                                "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
-                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                sample_rows,
-                            )
-                            total_sample_rows += cur.rowcount
-                            sample_rows = []
-            except (OSError, gzip.BadGzipFile):
-                total_malformed += 1
+                # Record archive in ingest_state in the SAME transaction as its rows
+                conn.execute(
+                    "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
+                    (state_key, "1"),
+                )
+                conn.commit()
+                state[state_key] = "1"
+                total_pool_rows += p_add
+                total_sample_rows += s_add
+                total_malformed += mal_cnt
+            except (OSError, EOFError, zlib.error) as e:
+                conn.rollback()
+                quota_archive_retry += 1
+                sys.stderr.write(f"warning: error reading archive {basename}: {e}\n")
                 continue
-
-            if pool_rows:
-                cur.executemany(
-                    "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    pool_rows,
-                )
-                total_pool_rows += cur.rowcount
-
-            if sample_rows:
-                cur.executemany(
-                    "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    sample_rows,
-                )
-                total_sample_rows += cur.rowcount
-
-            # Record archive in ingest_state in the SAME transaction as its rows
-            conn.execute(
-                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
-                (state_key, "1"),
-            )
-            conn.commit()
-            state[state_key] = "1"
 
     # 2. Live file: skipping lines whose ts <= newest quota_pool.ts
     if os.path.isfile(samples_path):
         row = conn.execute("SELECT max(ts) FROM quota_pool").fetchone()
         newest_ts = row[0] if (row and row[0] is not None) else None
 
-        pool_rows = []
-        sample_rows = []
-        cur = conn.cursor()
-
         try:
             with open(samples_path, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    p_row, s_rows, is_mal = parse_quota_sample_line(line)
-                    if is_mal:
-                        total_malformed += 1
-                        continue
-                    if p_row is None:
-                        continue
-
-                    ts = p_row[0]
-                    if newest_ts is not None and ts <= newest_ts:
-                        continue
-
-                    pool_rows.append(p_row)
-                    sample_rows.extend(s_rows)
-
-                    if len(pool_rows) >= batch_size:
-                        cur.executemany(
-                            "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            pool_rows,
-                        )
-                        total_pool_rows += cur.rowcount
-                        pool_rows = []
-
-                    if len(sample_rows) >= batch_size:
-                        cur.executemany(
-                            "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            sample_rows,
-                        )
-                        total_sample_rows += cur.rowcount
-                        sample_rows = []
-
-            if pool_rows:
-                cur.executemany(
-                    "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    pool_rows,
+                p_add, s_add, mal_cnt, _ = ingest_quota_lines(
+                    lines=f,
+                    conn=conn,
+                    newest_ts=newest_ts,
+                    batch_size=batch_size,
+                    check_trailing_newline=True,
                 )
-                total_pool_rows += cur.rowcount
-
-            if sample_rows:
-                cur.executemany(
-                    "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    sample_rows,
-                )
-                total_sample_rows += cur.rowcount
-
             conn.commit()
-        except OSError:
-            pass
+            total_pool_rows += p_add
+            total_sample_rows += s_add
+            total_malformed += mal_cnt
+        except OSError as e:
+            sys.stderr.write(f"warning: failed to read live quota samples from {samples_path}: {e}\n")
 
     return {
         "quota_rows": total_sample_rows,
         "quota_pool_rows": total_pool_rows,
         "quota_sample_rows": total_sample_rows,
+        "quota_archive_retry": quota_archive_retry,
         "malformed": total_malformed,
     }
 
@@ -775,6 +802,7 @@ def run_ingest(
     lgtm_ledger: str | None = None,
     samples_path: str = DEFAULT_SAMPLES,
     samples_archive: str = DEFAULT_SAMPLES_ARCHIVE,
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Execute run steps 1-3."""
     host = host or socket.gethostname()
@@ -796,11 +824,13 @@ def run_ingest(
             conn=conn,
             samples_path=samples_path,
             samples_archive=samples_archive,
+            now=now,
         )
         counts["malformed"] = counts.get("malformed", 0) + quota_counts.get("malformed", 0)
         counts["quota_rows"] = quota_counts.get("quota_rows", 0)
         counts["quota_pool_rows"] = quota_counts.get("quota_pool_rows", 0)
         counts["quota_sample_rows"] = quota_counts.get("quota_sample_rows", 0)
+        counts["quota_archive_retry"] = quota_counts.get("quota_archive_retry", 0)
         return counts
     finally:
         conn.close()

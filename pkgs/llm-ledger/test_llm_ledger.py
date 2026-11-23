@@ -9,6 +9,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -821,6 +822,7 @@ class TestLlmLedger(unittest.TestCase):
         }
         with gzip.open(archive_file, "wt") as f:
             f.write(json.dumps(line1) + "\n" + json.dumps(line2) + "\n")
+        os.utime(archive_file, (time.time() - 200, time.time() - 200))
 
         conn = llm_ledger.open_ledger_db(self.db_path)
         try:
@@ -987,6 +989,7 @@ class TestLlmLedger(unittest.TestCase):
             archive_path = os.path.join(self.samples_archive, "quota-samples-until-20261120T100100.jsonl.gz")
             with gzip.open(archive_path, "wt") as gz:
                 gz.write(json.dumps(lines[0]) + "\n" + json.dumps(lines[1]) + "\n")
+            os.utime(archive_path, (time.time() - 200, time.time() - 200))
 
             # Canary rewrites live file to keep only lines 2, 3, and appends a new line 4
             line4 = {"ts": "2026-11-20T10:04:00-05:00", "healthy": 5, "accounts": [{"n": "acc1", "u7d": 0.4}]}
@@ -1078,6 +1081,187 @@ class TestLlmLedger(unittest.TestCase):
         self.assertEqual(ret["quota_rows"], 1)
         self.assertEqual(ret["new_routes"], 0)
         self.assertEqual(ret["new_requests"], 0)
+
+    def test_quota_archive_zero_byte_skipped_and_imported_next_run(self):
+        os.makedirs(self.samples_archive, exist_ok=True)
+        archive_file = os.path.join(self.samples_archive, "quota-samples-until-20260828T222004.jsonl.gz")
+        # Write 0-byte file
+        with open(archive_file, "wb"):
+            pass
+        os.utime(archive_file, (time.time() - 200, time.time() - 200))
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            # Not recorded in ingest_state, retried next run
+            self.assertEqual(ret1.get("quota_archive_retry", 0), 1)
+            self.assertEqual(ret1["quota_rows"], 0)
+            val = conn.execute("SELECT count(*) FROM ingest_state").fetchone()[0]
+            self.assertEqual(val, 0)
+
+            # Next run: archive is populated with real data
+            line = {"ts": "2026-08-28T22:20:00-04:00", "healthy": 3, "accounts": [{"n": "acc1", "u7d": 0.2}]}
+            with gzip.open(archive_file, "wt") as f:
+                f.write(json.dumps(line) + "\n")
+            os.utime(archive_file, (time.time() - 200, time.time() - 200))
+
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret2["quota_rows"], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 1)
+            ingest_val = conn.execute(
+                "SELECT value FROM ingest_state WHERE key = 'quota_archive:quota-samples-until-20260828T222004.jsonl.gz'"
+            ).fetchone()
+            self.assertIsNotNone(ingest_val)
+        finally:
+            conn.close()
+
+    def test_quota_archive_truncated_gzip_skipped_and_imported_next_run(self):
+        os.makedirs(self.samples_archive, exist_ok=True)
+        archive_file = os.path.join(self.samples_archive, "quota-samples-until-20260828T222004.jsonl.gz")
+        line1 = {"ts": "2026-08-28T22:15:00-04:00", "healthy": 3, "accounts": [{"n": "acc1", "u7d": 0.1}]}
+        line2 = {"ts": "2026-08-28T22:20:00-04:00", "healthy": 3, "accounts": [{"n": "acc1", "u7d": 0.2}]}
+        full_bytes = gzip.compress((json.dumps(line1) + "\n" + json.dumps(line2) + "\n").encode("utf-8"))
+        # Truncate gzip bytes mid-file
+        truncated_bytes = full_bytes[: len(full_bytes) // 2]
+        with open(archive_file, "wb") as f:
+            f.write(truncated_bytes)
+        os.utime(archive_file, (time.time() - 200, time.time() - 200))
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret1.get("quota_archive_retry", 0), 1)
+            self.assertEqual(ret1["quota_rows"], 0)
+            self.assertEqual(ret1["malformed"], 0)  # NOT counted as malformed lines
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 0)  # transaction rolled back
+            self.assertEqual(conn.execute("SELECT count(*) FROM ingest_state").fetchone()[0], 0)
+
+            # Next run: full file appears
+            with open(archive_file, "wb") as f:
+                f.write(full_bytes)
+            os.utime(archive_file, (time.time() - 200, time.time() - 200))
+
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret2["quota_rows"], 2)
+            self.assertEqual(ret2["quota_pool_rows"], 2)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 2)
+            ingest_val = conn.execute(
+                "SELECT value FROM ingest_state WHERE key = 'quota_archive:quota-samples-until-20260828T222004.jsonl.gz'"
+            ).fetchone()
+            self.assertIsNotNone(ingest_val)
+        finally:
+            conn.close()
+
+    def test_quota_archive_fresh_mtime_skipped_then_imported(self):
+        os.makedirs(self.samples_archive, exist_ok=True)
+        archive_file = os.path.join(self.samples_archive, "quota-samples-until-20260828T222004.jsonl.gz")
+        line = {"ts": "2026-08-28T22:20:00-04:00", "healthy": 3, "accounts": [{"n": "acc1", "u7d": 0.2}]}
+        with gzip.open(archive_file, "wt") as f:
+            f.write(json.dumps(line) + "\n")
+        # mtime is now (fresh)
+        file_mtime = os.stat(archive_file).st_mtime
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            # Run at file_mtime + 30s (< 120s old)
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+                now=file_mtime + 30.0,
+            )
+            self.assertEqual(ret1.get("quota_archive_retry", 0), 1)
+            self.assertEqual(ret1["quota_rows"], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM ingest_state").fetchone()[0], 0)
+
+            # Next run at file_mtime + 150s (>= 120s old)
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+                now=file_mtime + 150.0,
+            )
+            self.assertEqual(ret2["quota_rows"], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 1)
+            ingest_val = conn.execute(
+                "SELECT value FROM ingest_state WHERE key = 'quota_archive:quota-samples-until-20260828T222004.jsonl.gz'"
+            ).fetchone()
+            self.assertIsNotNone(ingest_val)
+        finally:
+            conn.close()
+
+    def test_quota_live_file_partial_trailing_line_not_lost(self):
+        line1 = json.dumps({"ts": "2026-11-20T10:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.1}]})
+        line2_part = '{"ts": "2026-11-20T10:05:00-05:00", "healthy": 5'
+        with open(self.samples_path, "w") as f:
+            f.write(line1 + "\n")
+            f.write(line2_part)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            # Line 1 imported, partial line 2 skipped without counting as malformed
+            self.assertEqual(ret1["quota_rows"], 1)
+            self.assertEqual(ret1["quota_pool_rows"], 1)
+            self.assertEqual(ret1["malformed"], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 1)
+
+            # Next run: line 2 completed
+            with open(self.samples_path, "a") as f:
+                f.write(', "accounts": [{"n": "a1", "u7d": 0.2}]}\n')
+
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            # Line 2 imported
+            self.assertEqual(ret2["quota_rows"], 1)
+            self.assertEqual(ret2["quota_pool_rows"], 1)
+            self.assertEqual(ret2["malformed"], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 2)
+        finally:
+            conn.close()
+
+    def test_quota_live_file_oserror_warns_stderr(self):
+        import io
+        import contextlib
+        with open(self.samples_path, "w") as f:
+            f.write("dummy\n")
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            err_buf = io.StringIO()
+            with contextlib.redirect_stderr(err_buf):
+                with mock.patch("builtins.open", side_effect=OSError("disk error")):
+                    ret = llm_ledger.step_quota_samples(
+                        conn,
+                        samples_path=self.samples_path,
+                        samples_archive=self.samples_archive,
+                    )
+            self.assertEqual(ret["quota_rows"], 0)
+            self.assertIn("warning: failed to read live quota samples", err_buf.getvalue())
+        finally:
+            conn.close()
 
 
 if __name__ == "__main__":
