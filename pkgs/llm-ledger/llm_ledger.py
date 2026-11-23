@@ -123,49 +123,61 @@ def compute_attr_key(
     return oc_tags.CFP_UNROUTED_TAG
 
 
+def parse_raw_lines(
+    lines: Sequence[bytes],
+) -> list[tuple[bytes, dict[str, Any] | None, int | None, bool]]:
+    """Parse raw byte lines once.
+
+    Returns:
+        list of (raw_bytes, json_dict | None, ts | None, is_malformed)
+    """
+    parsed: list[tuple[bytes, dict[str, Any] | None, int | None, bool]] = []
+    for raw in lines:
+        try:
+            line_str = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            parsed.append((raw, None, None, True))
+            continue
+
+        stripped = line_str.strip()
+        if not stripped:
+            continue
+
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict):
+                ts = to_int(obj.get("ts"))
+                parsed.append((raw, obj, ts, False))
+            else:
+                parsed.append((raw, None, None, True))
+        except Exception:
+            parsed.append((raw, None, None, True))
+
+    return parsed
+
+
 def process_batch(
     conn: sqlite3.Connection,
-    lines: Sequence[str | bytes],
+    parsed_lines: Sequence[tuple[bytes, dict[str, Any] | None, int | None, bool]],
     host: str,
     opencode_db: str | None,
     goose_db: str | None,
     tags_db: str | None,
     lgtm_ledger: str | None,
     tag_map: dict[str, str],
-    recent_routes: dict[str, tuple[str | None, str | None]],
 ) -> tuple[int, int, int, int]:
-    """Process a batch of lines, inserting routes and requests into conn.
+    """Process pre-parsed lines, inserting routes and requests into conn.
 
     Returns:
         (new_routes, new_requests, malformed, max_ts)
     """
     batch_routes: list[tuple[str, int, str | None, str | None, str | None, str | None]] = []
     batch_usages: list[dict[str, Any]] = []
-    malformed = 0
+    malformed = sum(1 for _, _, _, is_mal in parsed_lines if is_mal)
     max_ts = 0
 
-    for raw in lines:
-        if isinstance(raw, bytes):
-            try:
-                line_str = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                malformed += 1
-                continue
-        else:
-            line_str = raw
-
-        line_str = line_str.strip()
-        if not line_str:
-            continue
-
-        try:
-            obj = json.loads(line_str)
-        except Exception:
-            malformed += 1
-            continue
-
-        if not isinstance(obj, dict):
-            malformed += 1
+    for _raw, obj, ts, is_mal in parsed_lines:
+        if is_mal or obj is None:
             continue
 
         ltype = obj.get("type")
@@ -180,7 +192,6 @@ def process_batch(
             malformed += 1
             continue
 
-        ts = to_int(obj.get("ts"))
         if ts is None:
             malformed += 1
             continue
@@ -193,7 +204,6 @@ def process_batch(
             desired = str(obj["desired"]) if obj.get("desired") is not None else None
             chosen = str(obj["chosen"]) if obj.get("chosen") is not None else None
             batch_routes.append((req_id, ts, sid, model, desired, chosen))
-            recent_routes[req_id] = (sid, model)
         elif ltype == "usage":
             dur = to_int(obj.get("durationMs"))
             cost = to_float(obj.get("cost"))
@@ -218,30 +228,44 @@ def process_batch(
                 "cache_write": cwrite,
             })
 
-    # Associate routes with usages
+    # Insert batch routes into route table
+    new_routes = 0
+    if batch_routes:
+        cur = conn.cursor()
+        cur.executemany(
+            "INSERT OR IGNORE INTO route (request_id, ts, session_id, model, desired, chosen) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            batch_routes,
+        )
+        new_routes = cur.rowcount
+
+    # Match routes for batch usages:
+    # First from batch_routes in memory, then from DB route table in chunks of <= 500
+    batch_routes_map = {r[0]: (r[2], r[3]) for r in batch_routes}
     missing_route_ids = []
     for u in batch_usages:
         rid = u["req_id"]
-        if rid in recent_routes:
-            u["sid"], u["model"] = recent_routes[rid]
+        if rid in batch_routes_map:
+            u["sid"], u["model"] = batch_routes_map[rid]
         else:
             missing_route_ids.append(rid)
 
     if missing_route_ids:
-        # Check DB route table in chunks of 500
+        db_route_map: dict[str, tuple[str | None, str | None]] = {}
         for i in range(0, len(missing_route_ids), 500):
-            chunk = missing_route_ids[i:i + 500]
+            chunk = missing_route_ids[i : i + 500]
             placeholders = ",".join("?" for _ in chunk)
             for row in conn.execute(
                 f"SELECT request_id, session_id, model FROM route WHERE request_id IN ({placeholders})",
                 chunk,
             ):
-                recent_routes[row[0]] = (row[1], row[2])
+                db_route_map[row[0]] = (row[1], row[2])
 
         for u in batch_usages:
             if "sid" not in u:
-                if u["req_id"] in recent_routes:
-                    u["sid"], u["model"] = recent_routes[u["req_id"]]
+                rid = u["req_id"]
+                if rid in db_route_map:
+                    u["sid"], u["model"] = db_route_map[rid]
                 else:
                     u["sid"], u["model"] = None, None
 
@@ -285,17 +309,6 @@ def process_batch(
             u["duration_ms"],
         ))
 
-    # Insert into route
-    new_routes = 0
-    if batch_routes:
-        cur = conn.cursor()
-        cur.executemany(
-            "INSERT OR IGNORE INTO route (request_id, ts, session_id, model, desired, chosen) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            batch_routes,
-        )
-        new_routes = cur.rowcount
-
     # Insert into requests
     new_requests = 0
     if requests_rows:
@@ -308,37 +321,49 @@ def process_batch(
         )
         new_requests = cur.rowcount
 
-    # Check if any route fills in an existing request with session_id IS NULL
+    # Route-after-usage fill-in: check this batch's route request_ids via PK in chunks of <= 500
     if batch_routes:
-        null_rows = conn.execute(
-            "SELECT request_id, ts FROM requests WHERE session_id IS NULL"
-        ).fetchall()
-        if null_rows:
-            null_dict = {r[0]: r[1] for r in null_rows}
+        route_ids = list({r[0] for r in batch_routes})
+        needs_fill: list[tuple[str, int]] = []
+        for i in range(0, len(route_ids), 500):
+            chunk = route_ids[i : i + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for row in conn.execute(
+                f"SELECT request_id, ts FROM requests WHERE request_id IN ({placeholders}) AND session_id IS NULL",
+                chunk,
+            ):
+                needs_fill.append((row[0], row[1]))
+
+        if needs_fill:
+            route_by_id = {r[0]: r for r in batch_routes}
+            fill_goose_sids = {
+                route_by_id[req_id][2]
+                for req_id, _ in needs_fill
+                if route_by_id[req_id][2] and oc_tags._GOOSE_SESSION_ID.match(route_by_id[req_id][2])
+            }
+            fill_resolver = None
+            if fill_goose_sids:
+                goose_fill_ts = [
+                    ts for req_id, ts in needs_fill
+                    if route_by_id[req_id][2] in fill_goose_sids
+                ]
+                fill_resolver = oc_tags.CfpSessionResolver(
+                    session_ids=fill_goose_sids,
+                    db_path=opencode_db or oc_tags.DEFAULT_OPENCODE_DB,
+                    goose_db=goose_db or oc_tags.DEFAULT_GOOSE_DB,
+                    session_tags=tag_map,
+                    lgtm_ledger=lgtm_ledger,
+                    since_ms=min(goose_fill_ts),
+                    until_ms=max(goose_fill_ts) + 1,
+                )
+
             updates = []
-            for r in batch_routes:
-                rid = r[0]
-                if rid in null_dict:
-                    req_ts = null_dict[rid]
-                    sid = r[2]
-                    model = r[3]
-                    if sid is not None and oc_tags._GOOSE_SESSION_ID.match(sid):
-                        if resolver and sid in goose_sids:
-                            attr_k = compute_attr_key(sid, req_ts, resolver)
-                        else:
-                            single_res = oc_tags.CfpSessionResolver(
-                                session_ids=[sid],
-                                db_path=opencode_db or oc_tags.DEFAULT_OPENCODE_DB,
-                                goose_db=goose_db or oc_tags.DEFAULT_GOOSE_DB,
-                                session_tags=tag_map,
-                                lgtm_ledger=lgtm_ledger,
-                                since_ms=req_ts - 1000,
-                                until_ms=req_ts + 1000,
-                            )
-                            attr_k = compute_attr_key(sid, req_ts, single_res)
-                    else:
-                        attr_k = compute_attr_key(sid, req_ts, None)
-                    updates.append((sid, model, attr_k, rid))
+            for req_id, req_ts in needs_fill:
+                r = route_by_id[req_id]
+                sid = r[2]
+                model = r[3]
+                attr_k = compute_attr_key(sid, req_ts, fill_resolver)
+                updates.append((sid, model, attr_k, req_id))
 
             if updates:
                 conn.executemany(
@@ -371,125 +396,128 @@ def step_cfp_tail_and_archive(
         else None
     )
 
-    if not os.path.exists(events_path):
+    try:
+        f = open(events_path, "rb")
+    except OSError:
         return {"new_routes": 0, "new_requests": 0, "malformed": 0}
 
-    st = os.stat(events_path)
-    cur_inode = st.st_ino
-    cur_size = st.st_size
+    with f:
+        st = os.fstat(f.fileno())
+        cur_inode = st.st_ino
+        cur_size = st.st_size
 
-    is_restart = (stored_inode is not None) and (
-        cur_inode != stored_inode or cur_size < stored_offset
-    )
-    read_offset = 0 if (is_restart or stored_inode is None) else stored_offset
-    cutoff = (
-        (stored_archived_ts - 600_000)
-        if (is_restart and stored_archived_ts is not None)
-        else None
-    )
+        is_restart = (stored_inode is not None) and (
+            cur_inode != stored_inode or cur_size < stored_offset
+        )
+        read_offset = 0 if (is_restart or stored_inode is None) else stored_offset
+        cutoff = (
+            (stored_archived_ts - 600_000)
+            if (is_restart and stored_archived_ts is not None)
+            else None
+        )
 
-    if cur_size == read_offset:
-        return {"new_routes": 0, "new_requests": 0, "malformed": 0}
+        if cur_size <= read_offset:
+            return {"new_routes": 0, "new_requests": 0, "malformed": 0}
 
-    with open(events_path, "rb") as f:
         f.seek(read_offset)
-        data = f.read()
 
-    last_nl = data.rfind(b"\n")
-    if last_nl == -1:
-        return {"new_routes": 0, "new_requests": 0, "malformed": 0}
-
-    consumed_data = data[:last_nl + 1]
-    raw_lines = consumed_data.splitlines(keepends=True)
-    if not raw_lines:
-        return {"new_routes": 0, "new_requests": 0, "malformed": 0}
-
-    # Load session tags if tags.db exists
-    tag_map: dict[str, str] = {}
-    actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-    if actual_tags_db and os.path.exists(actual_tags_db):
-        try:
-            store = oc_tags.open_store(actual_tags_db, readonly=True)
+        # Load session tags if tags.db exists
+        tag_map: dict[str, str] = {}
+        actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
+        if actual_tags_db and os.path.exists(actual_tags_db):
             try:
-                tag_map = oc_tags.session_tags(store)
-            finally:
-                store.close()
-        except Exception:
-            tag_map = {}
-
-    total_new_routes = 0
-    total_new_requests = 0
-    total_malformed = 0
-    current_archived_through_ts = stored_archived_ts or 0
-
-    recent_routes: dict[str, tuple[str | None, str | None]] = {}
-    current_offset = read_offset
-
-    for i in range(0, len(raw_lines), batch_size):
-        batch = raw_lines[i : i + batch_size]
-        batch_len = sum(len(l) for l in batch)
-        batch_end_offset = current_offset + batch_len
-
-        # Step 2: raw archive BEFORE DB commit
-        if is_restart:
-            # Re-archive only lines with ts > cutoff.
-            # Lines without numeric ts are NOT archived on restart.
-            to_archive = []
-            for bline in batch:
+                store = oc_tags.open_store(actual_tags_db, readonly=True)
                 try:
-                    obj = json.loads(bline)
-                    ts = to_int(obj.get("ts"))
-                    if ts is not None and (cutoff is None or ts > cutoff):
-                        to_archive.append(bline)
-                except Exception:
-                    pass
-            archive_bytes = b"".join(to_archive)
-        else:
-            # Non-restart: archive all lines (including boot/keepwarm)
-            archive_bytes = b"".join(batch)
+                    tag_map = oc_tags.session_tags(store)
+                finally:
+                    store.close()
+            except Exception:
+                tag_map = {}
 
-        if archive_bytes:
-            os.makedirs(raw_dir, exist_ok=True)
-            utc_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-            archive_file = os.path.join(raw_dir, f"cfp-events-{utc_date}.jsonl.gz")
-            with open(archive_file, "ab") as af:
-                af.write(gzip.compress(archive_bytes))
+        total_new_routes = 0
+        total_new_requests = 0
+        total_malformed = 0
+        current_archived_through_ts = stored_archived_ts or 0
+        current_offset = read_offset
 
-        # Step 1: parse and insert into DB
-        routes_n, reqs_n, malformed_n, batch_max_ts = process_batch(
-            conn=conn,
-            lines=batch,
-            host=host,
-            opencode_db=opencode_db,
-            goose_db=goose_db,
-            tags_db=tags_db,
-            lgtm_ledger=lgtm_ledger,
-            tag_map=tag_map,
-            recent_routes=recent_routes,
-        )
+        batch_lines: list[bytes] = []
+        batch_bytes_len = 0
 
-        total_new_routes += routes_n
-        total_new_requests += reqs_n
-        total_malformed += malformed_n
-        if batch_max_ts > current_archived_through_ts:
-            current_archived_through_ts = batch_max_ts
+        def process_and_commit_batch(lines: list[bytes], byte_len: int) -> None:
+            nonlocal current_offset, total_new_routes, total_new_requests, total_malformed, current_archived_through_ts
+            if not lines:
+                return
 
-        # Commit DB transaction including offset and inode
-        conn.execute(
-            "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_inode', ?)",
-            (str(cur_inode),),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_offset', ?)",
-            (str(batch_end_offset),),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_archived_through_ts', ?)",
-            (str(current_archived_through_ts),),
-        )
-        conn.commit()
+            parsed = parse_raw_lines(lines)
 
-        current_offset = batch_end_offset
+            # Step 2: raw archive BEFORE DB commit
+            if is_restart:
+                archive_bytes = b"".join(
+                    raw for raw, obj, ts, is_mal in parsed
+                    if not is_mal and ts is not None and (cutoff is None or ts > cutoff)
+                )
+            else:
+                archive_bytes = b"".join(lines)
+
+            if archive_bytes:
+                os.makedirs(raw_dir, exist_ok=True)
+                utc_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+                archive_file = os.path.join(raw_dir, f"cfp-events-{utc_date}.jsonl.gz")
+                with open(archive_file, "ab") as af:
+                    af.write(gzip.compress(archive_bytes))
+
+            # Step 1: parse and insert into DB
+            routes_n, reqs_n, malformed_n, batch_max_ts = process_batch(
+                conn=conn,
+                parsed_lines=parsed,
+                host=host,
+                opencode_db=opencode_db,
+                goose_db=goose_db,
+                tags_db=tags_db,
+                lgtm_ledger=lgtm_ledger,
+                tag_map=tag_map,
+            )
+
+            total_new_routes += routes_n
+            total_new_requests += reqs_n
+            total_malformed += malformed_n
+            if batch_max_ts > current_archived_through_ts:
+                current_archived_through_ts = batch_max_ts
+
+            batch_end_offset = current_offset + byte_len
+
+            # Commit DB transaction including offset and inode
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_inode', ?)",
+                (str(cur_inode),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_offset', ?)",
+                (str(batch_end_offset),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_archived_through_ts', ?)",
+                (str(current_archived_through_ts),),
+            )
+            conn.commit()
+            current_offset = batch_end_offset
+
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            if not line.endswith(b"\n"):
+                # Partial line at EOF - stop without consuming it
+                break
+            batch_lines.append(line)
+            batch_bytes_len += len(line)
+            if len(batch_lines) >= batch_size:
+                process_and_commit_batch(batch_lines, batch_bytes_len)
+                batch_lines = []
+                batch_bytes_len = 0
+
+        if batch_lines:
+            process_and_commit_batch(batch_lines, batch_bytes_len)
 
     return {
         "new_routes": total_new_routes,
@@ -561,28 +589,30 @@ def import_events(
         total_new_routes = 0
         total_new_requests = 0
         total_malformed = 0
-        recent_routes: dict[str, tuple[str | None, str | None]] = {}
 
         for filepath in files:
             if not os.path.exists(filepath):
                 continue
 
             open_fn = gzip.open if filepath.endswith(".gz") else open
-            with open_fn(filepath, "rt", encoding="utf-8", errors="replace") as f:
-                batch: list[str] = []
-                for line in f:
+            with open_fn(filepath, "rb") as f:
+                batch: list[bytes] = []
+                while True:
+                    line = f.readline()
+                    if not line:
+                        break
                     batch.append(line)
                     if len(batch) >= batch_size:
+                        parsed = parse_raw_lines(batch)
                         r_n, req_n, mal_n, _ = process_batch(
                             conn=conn,
-                            lines=batch,
+                            parsed_lines=parsed,
                             host=host,
                             opencode_db=opencode_db,
                             goose_db=goose_db,
                             tags_db=tags_db,
                             lgtm_ledger=lgtm_ledger,
                             tag_map=tag_map,
-                            recent_routes=recent_routes,
                         )
                         conn.commit()
                         total_new_routes += r_n
@@ -591,16 +621,16 @@ def import_events(
                         batch = []
 
                 if batch:
+                    parsed = parse_raw_lines(batch)
                     r_n, req_n, mal_n, _ = process_batch(
                         conn=conn,
-                        lines=batch,
+                        parsed_lines=parsed,
                         host=host,
                         opencode_db=opencode_db,
                         goose_db=goose_db,
                         tags_db=tags_db,
                         lgtm_ledger=lgtm_ledger,
                         tag_map=tag_map,
-                        recent_routes=recent_routes,
                     )
                     conn.commit()
                     total_new_routes += r_n

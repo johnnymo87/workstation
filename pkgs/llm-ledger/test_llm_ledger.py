@@ -636,19 +636,78 @@ class TestLlmLedger(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertIn('"keepwarm"', lines[0])
 
+    def test_fstat_on_opened_fd_records_opened_file_inode(self):
+        # Create initial events file
+        with open(self.events_path, "w") as f:
+            f.write(json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "backend": "v", "cost": 0.01}) + "\n")
+
+        real_open = open
+        def open_and_rename(*args, **kwargs):
+            fh = real_open(*args, **kwargs)
+            # When opening self.events_path in binary read mode, rename it immediately
+            if args and args[0] == self.events_path and len(args) > 1 and "b" in args[1]:
+                os.rename(self.events_path, self.events_path + ".old")
+                with real_open(self.events_path, "w") as f_new:
+                    f_new.write(json.dumps({"type": "usage", "ts": 200, "requestId": "r2", "backend": "v", "cost": 0.02}) + "\n")
+            return fh
+
+        with mock.patch("builtins.open", side_effect=open_and_rename):
+            llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+
+        # The recorded inode in ingest_state should be the inode of the OPENED file (which is now .old)
+        st_old = os.stat(self.events_path + ".old")
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            stored_ino = int(conn.execute("SELECT value FROM ingest_state WHERE key = 'cfp_inode'").fetchone()[0])
+            self.assertEqual(stored_ino, st_old.st_ino)
+        finally:
+            conn.close()
+
+    def test_route_fill_in_goose_batch_resolver(self):
+        # Insert 2 usage rows with goose-shaped session ids that have no route
+        u1 = json.dumps({"type": "usage", "ts": 1700000000000, "requestId": "g-fill-1", "backend": "v", "cost": 0.01})
+        u2 = json.dumps({"type": "usage", "ts": 1700000000000, "requestId": "g-fill-2", "backend": "v", "cost": 0.02})
+        with open(self.events_path, "w") as f:
+            f.write(u1 + "\n" + u2 + "\n")
+        llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+
+        # Next run: routes arrive for both
+        r1 = json.dumps({"type": "route", "ts": 1700000000000, "requestId": "g-fill-1", "sessionId": "20261120_1", "model": "m1"})
+        r2 = json.dumps({"type": "route", "ts": 1700000000000, "requestId": "g-fill-2", "sessionId": "20261120_2", "model": "m2"})
+        with open(self.events_path, "a") as f:
+            f.write(r1 + "\n" + r2 + "\n")
+
+        with mock.patch("oc_tags.CfpSessionResolver", wraps=oc_tags.CfpSessionResolver) as mock_resolver:
+            llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+            # Should have called CfpSessionResolver AT MOST ONCE for the batch of goose fill-ins
+            self.assertLessEqual(mock_resolver.call_count, 1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            rows = dict(conn.execute("SELECT request_id, session_id FROM requests").fetchall())
+            self.assertEqual(rows["g-fill-1"], "20261120_1")
+            self.assertEqual(rows["g-fill-2"], "20261120_2")
+        finally:
+            conn.close()
+
     def test_cli_main(self):
         route_line = json.dumps({"type": "route", "ts": 100, "requestId": "r-cli", "sessionId": "ses_cli", "model": "m"})
         usage_line = json.dumps({"type": "usage", "ts": 100, "requestId": "r-cli", "backend": "v", "cost": 0.01})
         with open(self.events_path, "w") as f:
             f.write(route_line + "\n" + usage_line + "\n")
 
-        exit_code = llm_ledger.main([
-            "run",
-            "--db", self.db_path,
-            "--events", self.events_path,
-            "--raw-dir", self.raw_dir,
-        ])
+        import io
+        import contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exit_code = llm_ledger.main([
+                "run",
+                "--db", self.db_path,
+                "--events", self.events_path,
+                "--raw-dir", self.raw_dir,
+            ])
         self.assertEqual(exit_code, 0)
+        self.assertIn("routes=1 requests=1", out.getvalue())
 
         conn = llm_ledger.open_ledger_db(self.db_path)
         try:
