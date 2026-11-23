@@ -20,6 +20,7 @@
 {
   services.grafana = {
     enable = true;
+    openFirewall = false; # Cloudbox has a public IP; never open Grafana firewall ports.
     declarativePlugins = [ pkgs.grafanaPlugins.frser-sqlite-datasource ];
     settings = {
       server = {

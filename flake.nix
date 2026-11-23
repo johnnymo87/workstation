@@ -842,18 +842,19 @@
         cfg = self.nixosConfigurations.cloudbox.config;
         lib = devboxPkgs.lib;
         grafana = cfg.services.grafana;
-        settings = grafana.settings or { };
-        server = settings.server or { };
-        analytics = settings.analytics or { };
-        news = settings.news or { };
-        security = settings.security or { };
+        settings = if builtins.isAttrs (grafana.settings or null) then grafana.settings else { };
+        server = if builtins.isAttrs (settings.server or null) then settings.server else { };
+        analytics = if builtins.isAttrs (settings.analytics or null) then settings.analytics else { };
+        news = if builtins.isAttrs (settings.news or null) then settings.news else { };
+        security = if builtins.isAttrs (settings.security or null) then settings.security else { };
+        users = if builtins.isAttrs (settings.users or null) then settings.users else { };
         provisionSettings = grafana.provision.datasources.settings or null;
         datasources =
           if provisionSettings != null && provisionSettings ? datasources && builtins.isList provisionSettings.datasources
           then provisionSettings.datasources
           else [ ];
         firstDs = if datasources != [ ] then builtins.head datasources else { };
-        firstDsJson = firstDs.jsonData or { };
+        firstDsJson = if builtins.isAttrs (firstDs.jsonData or null) then firstDs.jsonData else { };
 
         sopsAdmin = cfg.sops.secrets.grafana_admin_password or null;
         sopsSecretKey = cfg.sops.secrets.grafana_secret_key or null;
@@ -861,22 +862,21 @@
         userGrafana = cfg.users.users.grafana or null;
 
         svc = cfg.systemd.services.grafana or null;
-        svcEnv = if svc != null && svc ? environment then svc.environment else { };
-        svcConfig = if svc != null && svc ? serviceConfig then svc.serviceConfig else { };
-        svcConfigEnvList =
-          if svcConfig ? Environment then
-            if builtins.isList svcConfig.Environment then svcConfig.Environment
-            else if builtins.isString svcConfig.Environment then [ svcConfig.Environment ]
-            else [ ]
-          else [ ];
+        grafanaUnit = cfg.systemd.units."grafana.service" or null;
+        grafanaUnitText =
+          if grafanaUnit != null && builtins.isAttrs grafanaUnit && builtins.isString (grafanaUnit.text or null)
+          then grafanaUnit.text
+          else "";
+        grafanaUnitLines = lib.splitString "\n" grafanaUnitText;
+        globalEnv = cfg.systemd.globalEnvironment or { };
+        systemdUnits = cfg.systemd.units or { };
 
-        script = if svc != null && svc ? script then svc.script else "";
-        iniParts = lib.splitString "-config " script;
-        iniPath =
-          if builtins.length iniParts > 1 then
-            builtins.head (lib.splitString " " (builtins.head (lib.splitString "\n" (builtins.elemAt iniParts 1))))
-          else
-            "/dev/null";
+        script = if svc != null && svc ? script && builtins.isString svc.script then svc.script else "";
+        iniMatch = builtins.match ".*grafana server [^\n]*-config ([^ \n]+).*" script;
+        rawIniPath =
+          if iniMatch != null then builtins.head iniMatch
+          else "/nonexistent/grafana.ini";
+        iniPath = builtins.appendContext rawIniPath (builtins.getContext script);
 
         checks = {
           "grafana enabled" = (grafana.enable or false) == true;
@@ -891,56 +891,144 @@
           "feedback_links_enabled is false" = (analytics.feedback_links_enabled or null) == false;
           "news_feed_enabled is false" = (news.news_feed_enabled or null) == false;
 
+          "users allow_sign_up is false" = (users.allow_sign_up or null) == false;
+          "plugin.frser-sqlite-datasource block_list contains grafana.db" =
+            let blockList = settings."plugin.frser-sqlite-datasource".block_list or null;
+            in builtins.isString blockList && lib.hasInfix "grafana.db" blockList;
+          "auth.anonymous enabled is absent or false" =
+            (settings."auth.anonymous".enabled or false) == false;
+
           "admin_password is sops file ref" =
-            sopsAdmin != null && (security.admin_password or null) == "$__file{${sopsAdmin.path}}";
+            sopsAdmin != null && builtins.isString (security.admin_password or null) && security.admin_password == "$__file{${sopsAdmin.path}}";
           "secret_key is sops file ref" =
-            sopsSecretKey != null && (security.secret_key or null) == "$__file{${sopsSecretKey.path}}";
+            sopsSecretKey != null && builtins.isString (security.secret_key or null) && security.secret_key == "$__file{${sopsSecretKey.path}}";
           "sops admin password secret owned by grafana 0400" =
-            sopsAdmin != null && (sopsAdmin.owner or null) == "grafana" && (sopsAdmin.mode or null) == "0400";
+            sopsAdmin != null && builtins.isAttrs sopsAdmin && (sopsAdmin.owner or null) == "grafana" && (sopsAdmin.mode or null) == "0400";
           "sops secret key secret owned by grafana 0400" =
-            sopsSecretKey != null && (sopsSecretKey.owner or null) == "grafana" && (sopsSecretKey.mode or null) == "0400";
+            sopsSecretKey != null && builtins.isAttrs sopsSecretKey && (sopsSecretKey.owner or null) == "grafana" && (sopsSecretKey.mode or null) == "0400";
 
           "grafana in llm-ledger group" =
-            userGrafana != null && builtins.elem "llm-ledger" (userGrafana.extraGroups or [ ]);
+            userGrafana != null && builtins.isList (userGrafana.extraGroups or null) && builtins.elem "llm-ledger" userGrafana.extraGroups;
           "declarativePlugins has frser-sqlite-datasource" =
             builtins.isList (grafana.declarativePlugins or null)
-            && builtins.any (p: (p.pname or "") == "frser-sqlite-datasource") grafana.declarativePlugins;
+            && builtins.any (p: builtins.isAttrs p && (p.pname or "") == "frser-sqlite-datasource") grafana.declarativePlugins;
 
           "exactly one provisioned datasource" = builtins.length datasources == 1;
           "datasource is frser-sqlite-datasource" = (firstDs.type or null) == "frser-sqlite-datasource";
           "datasource path is /var/lib/llm-ledger/ledger.db" = (firstDsJson.path or null) == "/var/lib/llm-ledger/ledger.db";
           "datasource pathPrefix is file:" = (firstDsJson.pathPrefix or null) == "file:";
-          "datasource pathOptions contains mode=ro" = lib.hasInfix "mode=ro" (firstDsJson.pathOptions or "");
+          "datasource pathOptions contains mode=ro" =
+            builtins.isString (firstDsJson.pathOptions or null) && lib.hasInfix "mode=ro" firstDsJson.pathOptions;
           "datasource attachLimit is 0" = (firstDsJson.attachLimit or null) == 0;
           "datasource editable is false" = (firstDs.editable or null) == false;
 
-          "no GF_SERVER_* in systemd environment" =
-            !(builtins.any (name: lib.hasPrefix "GF_SERVER_" name) (builtins.attrNames svcEnv));
-          "no GF_SERVER_* in serviceConfig.Environment" =
-            !(builtins.any (e: lib.hasPrefix "GF_SERVER_" e) svcConfigEnvList);
-          "no EnvironmentFile in serviceConfig" =
-            !(svcConfig ? EnvironmentFile) || svcConfig.EnvironmentFile == null || svcConfig.EnvironmentFile == [ ];
+          "no GF_ in unit Environment" =
+            grafanaUnitText != ""
+            && !(builtins.any (line: lib.hasInfix "Environment=" line && lib.hasInfix "GF_" line) grafanaUnitLines);
+          "no EnvironmentFile in unit" =
+            grafanaUnitText != ""
+            && !(lib.hasInfix "EnvironmentFile=" grafanaUnitText);
+          "no GF_* in systemd globalEnvironment" =
+            builtins.isAttrs globalEnv
+            && !(builtins.any (k: lib.hasPrefix "GF_" k) (builtins.attrNames globalEnv));
+          "no grafana.service.d drop-in units" =
+            builtins.isAttrs systemdUnits
+            && !(builtins.any (k: lib.hasPrefix "grafana.service.d" k) (builtins.attrNames systemdUnits));
+          "grafana service has no overrideStrategy drop-in" =
+            svc != null && (svc.overrideStrategy or "") != "asDropin";
         };
         failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
-        g = "${devboxPkgs.gnugrep}/bin/grep";
+        awk = "${devboxPkgs.gawk}/bin/awk";
       in
         assert lib.assertMsg (failed == [ ]) "cloudbox-grafana-exposure failed: ${lib.concatStringsSep "; " failed}";
         devboxPkgs.runCommand "cloudbox-grafana-exposure" { } ''
           ini="${iniPath}"
           [ -s "$ini" ] || { echo "GATE FAILURE: rendered grafana ini $ini missing or empty" >&2; exit 1; }
-          ${g} -q '^http_addr=127\.0\.0\.1$' "$ini" || {
-            echo "GATE FAILURE: http_addr is not 127.0.0.1 in $ini" >&2; exit 1; }
-          ${g} -q '^http_port=3000$' "$ini" || {
-            echo "GATE FAILURE: http_port is not 3000 in $ini" >&2; exit 1; }
-          ${g} -q '^reporting_enabled=false$' "$ini" || {
-            echo "GATE FAILURE: reporting_enabled is not false in $ini" >&2; exit 1; }
-          ${g} -q '^check_for_updates=false$' "$ini" || {
-            echo "GATE FAILURE: check_for_updates is not false in $ini" >&2; exit 1; }
-          ${g} -q '^check_for_plugin_updates=false$' "$ini" || {
-            echo "GATE FAILURE: check_for_plugin_updates is not false in $ini" >&2; exit 1; }
-          ${g} -q '^admin_password=\$__file{' "$ini" || {
-            echo "GATE FAILURE: admin_password is not a \$__file{ reference in $ini" >&2; exit 1; }
-          echo "cloudbox-grafana-exposure: ${toString (builtins.length (builtins.attrNames checks))} eval + 6 ini checks passed" > $out
+          ${awk} '
+            BEGIN {
+              section = ""
+              err = 0
+            }
+            /^[ \t]*[;#]/ { next }
+            /^[ \t]*$/ { next }
+            /^[ \t]*\[.+\][ \t]*$/ {
+              section = $0
+              sub(/^[ \t]*\[/, "", section)
+              sub(/\].*$/, "", section)
+              next
+            }
+            /=/ {
+              key = $0
+              sub(/=.*$/, "", key)
+              sub(/^[ \t]+/, "", key)
+              sub(/[ \t]+$/, "", key)
+
+              val = $0
+              sub(/^[^=]*=/, "", val)
+              sub(/^[ \t]+/, "", val)
+              sub(/[ \t]+$/, "", val)
+
+              count[section, key]++
+              vals[section, key] = val
+            }
+            END {
+              if (count["server", "http_addr"] != 1) {
+                print "GATE FAILURE: [server] http_addr must appear exactly once, found " count["server", "http_addr"] > "/dev/stderr"
+                err = 1
+              } else if (vals["server", "http_addr"] != "127.0.0.1") {
+                print "GATE FAILURE: [server] http_addr is " vals["server", "http_addr"] ", expected 127.0.0.1" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["server", "http_port"] != "3000") {
+                print "GATE FAILURE: [server] http_port is " vals["server", "http_port"] ", expected 3000" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["server", "protocol"] != "http") {
+                print "GATE FAILURE: [server] protocol is " vals["server", "protocol"] ", expected http" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["analytics", "reporting_enabled"] != "false") {
+                print "GATE FAILURE: [analytics] reporting_enabled is " vals["analytics", "reporting_enabled"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["analytics", "check_for_updates"] != "false") {
+                print "GATE FAILURE: [analytics] check_for_updates is " vals["analytics", "check_for_updates"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["analytics", "check_for_plugin_updates"] != "false") {
+                print "GATE FAILURE: [analytics] check_for_plugin_updates is " vals["analytics", "check_for_plugin_updates"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (index(vals["security", "admin_password"], "$__file{") != 1) {
+                print "GATE FAILURE: [security] admin_password does not start with $__file{" > "/dev/stderr"
+                err = 1
+              }
+              if (index(vals["security", "secret_key"], "$__file{") != 1) {
+                print "GATE FAILURE: [security] secret_key does not start with $__file{" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["users", "allow_sign_up"] != "false") {
+                print "GATE FAILURE: [users] allow_sign_up is " vals["users", "allow_sign_up"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (count["auth.anonymous", "enabled"] > 0 && vals["auth.anonymous", "enabled"] != "false") {
+                print "GATE FAILURE: [auth.anonymous] enabled is " vals["auth.anonymous", "enabled"] ", must be absent or false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (index(vals["plugin.frser-sqlite-datasource", "block_list"], "grafana.db") == 0) {
+                print "GATE FAILURE: [plugin.frser-sqlite-datasource] block_list does not contain grafana.db" > "/dev/stderr"
+                err = 1
+              }
+
+              if (err) exit 1
+            }
+          ' "$ini" || exit 1
+          echo "cloudbox-grafana-exposure: ${toString (builtins.length (builtins.attrNames checks))} eval + ini checks passed" > $out
         '';
 
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
