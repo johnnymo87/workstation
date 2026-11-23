@@ -98,6 +98,20 @@ against W23's would therefore credit #471's smaller contexts to the TTL.
 
 Empty the `sessions` list, or delete the file. No restart is needed.
 
+### Status and loss rule (11-23)
+
+- **First result (W24, 11-23).** The runner's only post-switch gap of 5–60 min was a cache hit (185k read instead of rewritten). The 5m baseline was 12/12 full rewrites for the runner on 11-19..22, and 10/11 for a 10-min-wake 5m control. That is n=1. The cost was about break-even: the 0.6× premium on 456k of 1h writes against ~185k avoided. The script is `m1.py`; its logic is in bead `workstation-ynoq.1`.
+- **Loss rule (Jonathan, 11-23).** 1h costs more whenever a session writes cache that no later 5–60 min gap reuses. At each re-measure, compare each listed session's 1h premium (0.6 × its 1h write tokens) with the rewrite tokens it avoided (cache reads on the first request after each 5–60 min gap). Remove from the list any session where the premium is larger.
+
+### What the devbox move to goose means for this test
+
+Jonathan has a cloudbox session moving all of devbox from opencode to goose. Goose self-compacts idle sessions above 200k context before the cache goes cold. This mechanism cannot follow sessions there:
+
+- **Goose sessions cannot be matched.** goose reaches teamclaude through cfp-shaper (:3457), which drops `x-session-affinity`/`X-Session-Id`, so the ledger records them as `session: null` and no rule can name them. Matching them would need cfp-shaper to forward a session header, or a rule keyed on something else.
+- **The runner's result stops at the move.** Once the runner moves, the test ends: its sessions fall back to 5m.
+- **The question becomes partly moot.** Goose's compact-before-cold shrinks the context that a cold gap re-caches, the same lever #471 pulls. What remains is the full rewrite of a smaller (≤200k) context after each 5–60 min gap.
+- **Re-measuring on goose.** Measure 1 can be re-run there from the goose sessions DB plus the ledger. Whether 1h is worth wiring through cfp-shaper should be decided on that, not on opencode numbers.
+
 ## (c1) Exhaustion forecast and the token-to-quota refit (`ynoq.2`)
 
 The cloudbox session `ses_dfb8c2cac…` owns this, under cloudbox bead

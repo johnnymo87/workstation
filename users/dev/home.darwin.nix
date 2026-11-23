@@ -1147,12 +1147,18 @@ lib.mkIf isDarwin {
           "/bin/sh" "-c"
           ''
             ${localPkgs.teamclaude}/bin/teamclaude-seeded || exit 0
+            /bin/mkdir -p "$HOME/.local/state/teamclaude"
             exec ${localPkgs.teamclaude}/bin/teamclaude server --headless
           ''
         ];
         EnvironmentVariables = {
           HOME = config.home.homeDirectory;
           TEAMCLAUDE_CONFIG = "${config.home.homeDirectory}/.config/teamclaude.json";
+          # Per-response usage ledger (teamclaude#6), exported hourly to
+          # johnnymo87/quota-telemetry by quota-telemetry.nix (bead
+          # workstation-ynoq.2). No TEAMCLAUDE_CACHE_TTL_FILE here on purpose:
+          # the 1h cache-TTL experiment is devbox-only.
+          TEAMCLAUDE_USAGE_LOG = "${config.home.homeDirectory}/.local/state/teamclaude/usage.jsonl";
           PATH = "/usr/bin:/bin";
         };
         RunAtLoad = true;
