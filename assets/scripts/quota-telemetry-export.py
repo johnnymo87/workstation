@@ -81,31 +81,57 @@ def main(argv=None) -> int:
         os.makedirs(os.path.dirname(a.repo), exist_ok=True)
         subprocess.run(["git", "clone", "-q", a.remote, a.repo], check=True)
     if not a.no_push:
-        git(a.repo, "pull", "-q", "--rebase", check=False)
+        # Output is regenerable from the ledger, so on any pull trouble take
+        # upstream as-is rather than leave a half-done rebase for every later run.
+        if git(a.repo, "pull", "-q", "--rebase", check=False).returncode != 0:
+            git(a.repo, "rebase", "--abort", check=False)
+            git(a.repo, "fetch", "-q", check=False)
+            git(a.repo, "reset", "-q", "--hard", "@{u}", check=False)
 
     now = dt.datetime.now(dt.timezone.utc)
     since = now - dt.timedelta(days=a.days)
     # Re-export whole weeks: start at the Monday of `since`'s ISO week.
     y, w, _ = since.isocalendar()
     since = dt.datetime.fromisocalendar(y, w, 1).replace(tzinfo=dt.timezone.utc)
+    first = None
     with open(a.ledger, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                first = hour_of(json.loads(line).get("ts"))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if first:
+                break
+        f.seek(0)
         weeks = aggregate(f, a.host, now, since)
 
     os.makedirs(os.path.join(a.repo, a.host), exist_ok=True)
     for key, rows in weeks.items():
         path = os.path.join(a.repo, a.host, f"{key}.jsonl")
+        # A ledger that was moved or truncated must not erase hours already
+        # exported: keep committed rows older than the ledger's first line.
+        if first and os.path.exists(path):
+            cutoff = first.strftime("%Y-%m-%dT%H:00Z")
+            with open(path, encoding="utf-8") as f:
+                kept = [json.loads(l) for l in f if l.strip()]
+            rows = sorted([r for r in kept if r.get("hour_utc", "") < cutoff] + rows,
+                          key=lambda r: (r["hour_utc"], r["account"] or "", r["model"] or ""))
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r, sort_keys=True) + "\n")
         os.replace(tmp, path)
+    # Watermark: hours after this are MISSING (exporter down), not zero usage.
+    with open(os.path.join(a.repo, a.host, "_exported_through.json"), "w", encoding="utf-8") as f:
+        last = now.replace(minute=0, second=0, microsecond=0) - dt.timedelta(hours=1)
+        f.write(json.dumps({"host": a.host, "hour_utc": last.strftime("%Y-%m-%dT%H:00Z")}) + "\n")
     git(a.repo, "add", "-A", a.host)
-    if git(a.repo, "diff", "--cached", "--quiet", check=False).returncode == 0:
-        print("no change")
-        return 0
-    git(a.repo, "commit", "-q", "-m", f"{a.host}: hourly usage through {now:%Y-%m-%dT%H:00Z}")
-    if not a.no_push:
-        r = git(a.repo, "push", "-q", check=False)
+    if git(a.repo, "diff", "--cached", "--quiet", check=False).returncode != 0:
+        git(a.repo, "commit", "-q", "-m", f"{a.host}: hourly usage through {now:%Y-%m-%dT%H:00Z}")
+    rl = git(a.repo, "rev-list", "--count", "@{u}..HEAD", check=False)
+    ahead = rl.stdout.strip() if rl.returncode == 0 else "unknown"  # no upstream yet: push
+    if not a.no_push and ahead != "0":
+        r = git(a.repo, "push", "-q", "-u", "origin", "HEAD", check=False)
         if r.returncode != 0:
             print(r.stderr, file=sys.stderr)
             return 1
