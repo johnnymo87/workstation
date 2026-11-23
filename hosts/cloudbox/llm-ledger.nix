@@ -18,7 +18,7 @@ let
   driftAlert = pkgs.callPackage ../../pkgs/opencode-drift-alert { };
 in
 {
-  # Grafana joins this group in phase 2 (workstation-4si2.3).
+  # Grafana joins this group via ./grafana.nix (workstation-4si2.3).
   users.groups.llm-ledger = { };
 
   systemd.tmpfiles.rules = [

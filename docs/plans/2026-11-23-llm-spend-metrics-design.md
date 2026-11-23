@@ -227,10 +227,15 @@ signal in its own right.
      resets, and gaps in membership.
    - Replay validation.
    - Supersedes the forecast half of `workstation-qn8u`.
-2. **Grafana on cloudbox.** `workstation-4si2.3`
-   - NixOS service with the plugin; a provisioned datasource (read-only URI);
-     the grafana user gets read access through a group.
-   - Loopback bind plus a check; sops admin password; Mac tunnel `:3001`.
+2. **Grafana on cloudbox.** `workstation-4si2.3` — **Built**
+   - NixOS service in `hosts/cloudbox/grafana.nix` with `frser-sqlite-datasource` plugin
+     and provisioned read-only datasource uid `llm-ledger` (`/var/lib/llm-ledger/ledger.db`);
+     grafana user joins `llm-ledger` group.
+   - Loopback bind (`127.0.0.1:3000`) guarded by `cloudbox-grafana-exposure` check;
+     sops admin password and secret key owned by `grafana:grafana` 0400; admin password
+     is read with `sudo cat /run/secrets/grafana_admin_password`.
+   - Mac launchd agent `cloudbox-grafana-tunnel` on `:3001` riding the `cloudbox-chart`
+     SSH host block and ControlMaster.
 3. **Dashboards.** `workstation-4si2.4`
    - Spend by program over time (Max notional and Vertex cash shown apart),
      drill-down to model, sub and session, top sessions, and headroom vs burn

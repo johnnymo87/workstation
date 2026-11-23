@@ -68,6 +68,51 @@ let
   # sleep. Nobody noticed for hours -- it surfaced as "copy-paste is broken".
   # Hence also the notification: a tunnel that is down and not coming back should
   # say so rather than retry into an unwatched log forever.
+  # Socket-activated forward over the `cloudbox-chart` ssh host block, used by
+  # cloudbox-chart-tunnel (:4710) and cloudbox-grafana-tunnel (:3001). Both share
+  # one ControlMaster (ControlPath ~/.ssh/cm-chart-*), created out of band here;
+  # see cloudbox-chart-tunnel's comments for why it must not be created by the
+  # forwarding ssh itself. That ControlPath is deliberately NOT shared with the
+  # always-on cloudbox-tunnel: coupling them made a stale leftover able to take
+  # the tunnel's multiplexing down with it.
+  #
+  # The mkdir lock serializes master creation. Without it, two cold connections
+  # (a browser's parallel requests, or both agents at once) both pass `-O check`
+  # during the 2-3s IAP handshake; the loser gets "ControlSocket ... already
+  # exists, disabling multiplexing", carries on as a plain `-N -f` session, and
+  # daemon() lets it (and its gcloud) outlive launchd's cleanup indefinitely.
+  # A lock older than a minute is a dead holder's and is broken; a waiter that
+  # times out proceeds without creating a master (the -W below still works,
+  # just without multiplexing).
+  cloudboxChartForward = remotePort: ''
+    ssh="${pkgs.openssh}/bin/ssh"
+    host=cloudbox-chart
+    lock="${config.home.homeDirectory}/.ssh/cm-chart.lock"
+    if ! "$ssh" -O check "$host" >/dev/null 2>&1; then
+      got=0
+      i=0
+      while [ "$i" -lt 45 ]; do
+        if mkdir "$lock" 2>/dev/null; then got=1; break; fi
+        if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+          rmdir "$lock" 2>/dev/null || true
+          continue
+        fi
+        i=$((i + 1))
+        sleep 1
+      done
+      if [ "$got" = 1 ]; then
+        if ! "$ssh" -O check "$host" >/dev/null 2>&1; then
+          "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                 -o ControlMaster=yes -o ControlPersist=10m -N -f "$host" \
+                 </dev/null >/dev/null 2>&1 || true
+        fi
+        rmdir "$lock" 2>/dev/null || true
+      fi
+    fi
+    exec "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                -W 127.0.0.1:${toString remotePort} "$host"
+  '';
+
   sshTunnelCommand = { host, fallbackHost ? null, iapConfig ? null }: ''
     state_file="${config.home.homeDirectory}/Library/Logs/${host}.state"
     fails=0
@@ -901,24 +946,10 @@ lib.mkIf isDarwin {
         #
         # -O check is cheap and idempotent, so this costs one extra process on
         # a warm path and pays for itself many times over on a cold one.
-        ProgramArguments = [
-          "/bin/sh"
-          "-c"
-          ''
-            ssh="${pkgs.openssh}/bin/ssh"
-            host=cloudbox-chart
-            # ControlPath comes from the ssh config (dedicated to the chart, NOT
-            # shared with the always-on tunnel -- coupling them made a stale
-            # leftover able to take the tunnel's multiplexing down with it).
-            if ! "$ssh" -O check "$host" >/dev/null 2>&1; then
-              "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
-                     -o ControlMaster=yes -o ControlPersist=10m -N -f "$host" \
-                     </dev/null >/dev/null 2>&1 || true
-            fi
-            exec "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
-                        -W 127.0.0.1:4710 "$host"
-          ''
-        ];
+        #
+        # The script is cloudboxChartForward (top of this file), shared with
+        # cloudbox-grafana-tunnel, which rides the same master.
+        ProgramArguments = [ "/bin/sh" "-c" (cloudboxChartForward 4710) ];
         inetdCompatibility = { Wait = false; };
         Sockets = {
           Listeners = {
@@ -938,6 +969,37 @@ lib.mkIf isDarwin {
         # and corrupt the chart. Deliberately no StandardOutPath: stdout must
         # stay the socket, which is how the reply reaches the browser.
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-chart-tunnel.err.log";
+      };
+    };
+
+    # Grafana OSS on cloudbox, reachable at http://127.0.0.1:3001 on this Mac.
+    #
+    # SOCKET-ACTIVATED (same shape as cloudbox-chart-tunnel above; see its
+    # comments for the inetd, stderr redirect and out-of-band ControlMaster rationale).
+    #
+    # Grafana on cloudbox listens on 127.0.0.1:3000 only (hosts/cloudbox/grafana.nix).
+    # Mac port 3001 avoids colliding with any local service on 3000.
+    # Grafana's server.root_url is configured as http://127.0.0.1:3001/, so links
+    # it generates (and quota-watch alert payloads) assume this local port.
+    #
+    # Reuses the `cloudbox-chart` ssh host block and its dedicated ControlMaster/
+    # ControlPath: `-W` ignores the block's LocalForward 4710, and sharing the
+    # multiplexed connection avoids paying the ~2-3s IAP handshake on cold requests
+    # without needing any update-ssh-config.sh changes on the Mac.
+    cloudbox-grafana-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [ "/bin/sh" "-c" (cloudboxChartForward 3000) ];
+        inetdCompatibility = { Wait = false; };
+        Sockets = {
+          Listeners = {
+            SockNodeName = "127.0.0.1";
+            SockServiceName = "3001";
+            SockType = "stream";
+            SockFamily = "IPv4";
+          };
+        };
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-grafana-tunnel.err.log";
       };
     };
 
