@@ -2976,6 +2976,38 @@
           echo "darwin-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
         '';
 
+      # The Mac's cloudbox-grafana-tunnel launchd agent (workstation-4si2.3).
+      # Eval-only on the Linux leg (same constraint as darwin-goose-wiring: reads
+      # module values only, does not force home.packages).
+      darwin-grafana-tunnel = let
+        hm = self.homeConfigurations.${mac.hostname}.config;
+        agent = hm.launchd.agents.cloudbox-grafana-tunnel or null;
+        config = if agent != null then agent.config or {} else {};
+        lib = devboxPkgs.lib;
+        script = lib.concatStringsSep "\n" (config.ProgramArguments or []);
+        listeners = if config ? Sockets && config.Sockets ? Listeners then config.Sockets.Listeners else {};
+        inetdWait = if config ? inetdCompatibility && config.inetdCompatibility ? Wait then config.inetdCompatibility.Wait else null;
+        checks = {
+          "agent enabled" = agent != null && (agent.enable or false);
+          "listener SockNodeName is 127.0.0.1" = (listeners.SockNodeName or null) == "127.0.0.1";
+          "listener SockServiceName is 3001" = (listeners.SockServiceName or null) == "3001";
+          "listener SockType is stream" = (listeners.SockType or null) == "stream";
+          "listener SockFamily is IPv4" = (listeners.SockFamily or null) == "IPv4";
+          "inetdCompatibility Wait is false" = inetdWait == false;
+          "StandardErrorPath set and ends with cloudbox-grafana-tunnel.err.log" =
+            (config ? StandardErrorPath) && config.StandardErrorPath != null && lib.hasSuffix "cloudbox-grafana-tunnel.err.log" config.StandardErrorPath;
+          "no RunAtLoad" = agent != null && (config.RunAtLoad or null) == null;
+          "no KeepAlive" = agent != null && (config.KeepAlive or null) == null;
+          "script contains host=cloudbox-chart" = lib.hasInfix "host=cloudbox-chart" script;
+          "script contains -W 127.0.0.1:3000 \"$host\"" = lib.hasInfix ''-W 127.0.0.1:3000 "$host"'' script;
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+      in
+        assert lib.assertMsg (failed == [ ]) "darwin-grafana-tunnel failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "darwin-grafana-tunnel" { } ''
+          echo "darwin-grafana-tunnel: ${toString (builtins.length (builtins.attrNames checks))} passed" > $out
+        '';
+
       # oc-mcp-enable grants a RUNNING session an MCP server (connect + a
       # session-scoped allow rule). The suite pins the two things a silent
       # regression would break: the `<server>_*` permission pattern (a wrong

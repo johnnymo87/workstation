@@ -941,6 +941,54 @@ lib.mkIf isDarwin {
       };
     };
 
+    # Grafana OSS on cloudbox, reachable at http://127.0.0.1:3001 on this Mac.
+    #
+    # SOCKET-ACTIVATED (same shape as cloudbox-chart-tunnel above; see its
+    # comments for the inetd, stderr redirect and out-of-band ControlMaster rationale).
+    #
+    # Grafana on cloudbox listens on 127.0.0.1:3000 only (hosts/cloudbox/grafana.nix).
+    # Mac port 3001 avoids colliding with any local service on 3000.
+    # Grafana's server.root_url is configured as http://127.0.0.1:3001/, so links
+    # it generates (and quota-watch alert payloads) assume this local port.
+    #
+    # Reuses the `cloudbox-chart` ssh host block and its dedicated ControlMaster/
+    # ControlPath: `-W` ignores the block's LocalForward 4710, and sharing the
+    # multiplexed connection avoids paying the ~2-3s IAP handshake on cold requests
+    # without needing any update-ssh-config.sh changes on the Mac.
+    cloudbox-grafana-tunnel = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          ''
+            ssh="${pkgs.openssh}/bin/ssh"
+            host=cloudbox-chart
+            # ControlPath comes from the ssh config (dedicated to the chart, NOT
+            # shared with the always-on tunnel -- coupling them made a stale
+            # leftover able to take the tunnel's multiplexing down with it).
+            if ! "$ssh" -O check "$host" >/dev/null 2>&1; then
+              "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                     -o ControlMaster=yes -o ControlPersist=10m -N -f "$host" \
+                     </dev/null >/dev/null 2>&1 || true
+            fi
+            exec "$ssh" -o BatchMode=yes -o ConnectTimeout=30 -o IgnoreUnknown=UseKeychain \
+                        -W 127.0.0.1:3000 "$host"
+          ''
+        ];
+        inetdCompatibility = { Wait = false; };
+        Sockets = {
+          Listeners = {
+            SockNodeName = "127.0.0.1";
+            SockServiceName = "3001";
+            SockType = "stream";
+            SockFamily = "IPv4";
+          };
+        };
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cloudbox-grafana-tunnel.err.log";
+      };
+    };
+
     # `oc-tags serve` chart, at http://127.0.0.1:4711 on this Mac (devbox twin of
     # cloudbox-chart-tunnel on :4710).
     #
