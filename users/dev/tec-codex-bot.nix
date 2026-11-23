@@ -56,10 +56,12 @@
 #   CODEX_BOT_QUERY_LOG_PATH. The bot API alone gets a key FILE,
 #   CODEX_BOT_OPENAI_API_KEY_FILE, for hybrid search: it embeds each member
 #   search with OpenAI (Jonathan allowed hosted models, tec-codex-toi.9.27;
-#   the privacy page names OpenAI). It points at the agents' sops key until
-#   tec-codex-toi.9.30 gives the bot its own project key with a spend cap;
-#   meanwhile the API logs a warning and /health says "key": "shared". The
-#   bot process and the prune timer get no key. A rotated key file needs
+#   the privacy page names OpenAI). It is the bot's own key
+#   (tec-codex-toi.9.30): a restricted service-account key in OpenAI project
+#   tec-codex-bot, which allows only text-embedding-3-small, has a $5/month
+#   enforced hard limit and 60 RPM / 60k TPM, so /health says "key": "own".
+#   The agents' openai_api_key is untouched. The bot process and the prune
+#   timer get no key. A rotated key file needs
 #   `systemctl --user restart tec-codex-bot-api`.
 # - MemoryMax caps: devbox is short of memory, and a runaway must not touch
 #   the live stack. Logs go to the journal:
@@ -82,8 +84,8 @@
 
 let
   tokenPath = "/run/secrets/discord_bot_token";
-  # The agents' key until tec-codex-toi.9.30 adds a bot-only secret.
-  botOpenaiKeyFile = "/run/secrets/openai_api_key";
+  # The bot's own key (tec-codex-toi.9.30), never the agents' openai_api_key.
+  botOpenaiKeyFile = "/run/secrets/tec_codex_bot_openai_api_key";
   checkout = "${config.home.homeDirectory}/projects/tec-codex";
   apiPort = 4012;
   uvRun = "${pkgs.uv}/bin/uv run --frozen --no-sync";
