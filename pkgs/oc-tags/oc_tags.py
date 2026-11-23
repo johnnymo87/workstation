@@ -1546,25 +1546,22 @@ class CfpSessionResolver:
 
     def __init__(
         self,
+        *,
+        session_ids: collections.abc.Iterable[str],
         db_path: str = DEFAULT_OPENCODE_DB,
         goose_db: str = DEFAULT_GOOSE_DB,
         session_tags: dict[str, str] | None = None,
         lgtm_ledger: str | None = None,
         since_ms: int = 0,
         until_ms: int = 0,
-        session_ids: collections.abc.Iterable[str] | None = None,
         warnings: list[str] | None = None,
-        *,
-        s_tags: dict[str, str] | None = None,
     ):
-        if session_tags is None and s_tags is not None:
-            session_tags = s_tags
-        self._s_tags = session_tags if session_tags is not None else {}
+        self._session_tags = session_tags if session_tags is not None else {}
         self._warnings = warnings if warnings is not None else []
         if lgtm_ledger is None:
             lgtm_ledger = DEFAULT_LGTM_LEDGER
 
-        sids = set(session_ids) if session_ids is not None else set()
+        sids = set(session_ids)
 
         self._parents: dict[str, str | None] = {}
         self._dirs: dict[str, str | None] = {}
@@ -1612,7 +1609,7 @@ class CfpSessionResolver:
             self._lgtm_rows = sorted(
                 (ts, root, tag, source, title)
                 for root, tag, source, title, ts, *_rest in read_lgtm_ledger(
-                    lgtm_ledger, since_ms - LGTM_JOIN_MS, until_ms + LGTM_JOIN_MS, self._s_tags, self._warnings
+                    lgtm_ledger, since_ms - LGTM_JOIN_MS, until_ms + LGTM_JOIN_MS, self._session_tags, self._warnings
                 )
             )
 
@@ -1632,13 +1629,19 @@ class CfpSessionResolver:
     def in_goose_serve(self, sid: str | None) -> bool:
         return bool(sid is not None and sid in self._g_meta)
 
+    def in_opencode(self, sid: str | None) -> bool:
+        return bool(sid is not None and sid in self._parents)
+
     def goose_claim(self, sid: str | None, ts: int) -> tuple[str, str, str, str] | None:
         """The lgtm ledger row that claims a goose-shaped request at ts, or None.
 
+        If sid is not goose-shaped, returns None.
         If sid is in goose-serve's sessions AND goose-serve's usage_ledger has a
         row within GOOSE_LEDGER_JOIN_MS of ts, no lgtm claim; else the nearest
         lgtm row within LGTM_JOIN_MS claims it.
         """
+        if sid is None or not _GOOSE_SESSION_ID.match(sid):
+            return None
         in_serve = self.in_goose_serve(sid)
         if in_serve and self._near(self._g_active.get(sid, []), ts, GOOSE_LEDGER_JOIN_MS) is not None:
             lgtm_ts = None  # goose-serve logged this request itself
@@ -1653,7 +1656,7 @@ class CfpSessionResolver:
         """Resolve a cfp session id at ts to (root, tag, source, title, directory)."""
         if sid is not None and sid.startswith("ses_"):
             root = root_of(sid, self._parents)
-            tag, source = effective_tag(root, self._dirs.get(root), session_tag_map=self._s_tags)
+            tag, source = effective_tag(root, self._dirs.get(root), session_tag_map=self._session_tags)
             return (root, tag, source, self._titles.get(root), self._dirs.get(root))
         if sid is not None and _GOOSE_SESSION_ID.match(sid):
             claim = self.goose_claim(sid, ts)
@@ -1664,8 +1667,8 @@ class CfpSessionResolver:
                 root_id = root_of(sid, self._g_parents)
                 root = f"goose:{root_id}"
                 wdir, name, stype, rtitle = self._g_meta.get(root_id, (None, None, None, None))
-                if root in self._s_tags:
-                    tag, source = self._s_tags[root], "manual"
+                if root in self._session_tags:
+                    tag, source = self._session_tags[root], "manual"
                 else:
                     tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
                 return (root, tag, source, rtitle or name or stype or "", wdir)

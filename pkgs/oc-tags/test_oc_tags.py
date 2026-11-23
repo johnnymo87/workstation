@@ -4175,6 +4175,23 @@ class TestCfpSessionResolver(unittest.TestCase):
         self.assertFalse(res.in_goose_serve("ses_root"))
         self.assertFalse(res.in_goose_serve(None))
 
+    def test_in_opencode(self):
+        res = self._resolver()
+        self.assertTrue(res.in_opencode("ses_root"))
+        self.assertTrue(res.in_opencode("ses_kid"))
+        self.assertFalse(res.in_opencode("ses_unknown"))
+        self.assertFalse(res.in_opencode("20260908_3"))
+        self.assertFalse(res.in_opencode(None))
+
+    def test_goose_claim_requires_goose_shaped_id(self):
+        at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        # Even though an lgtm row sits right at self.T, non-goose-shaped sids are never claimed
+        self.assertIsNone(res.goose_claim("ses_root", self.T))
+        self.assertIsNone(res.goose_claim("not_a_goose_id", self.T))
+        self.assertIsNone(res.goose_claim(None, self.T))
+
     def test_goose_claim_active_in_goose_serve_suppresses_lgtm(self):
         at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         self.write_lgtm(_ledger_row(at=at))
@@ -4209,6 +4226,33 @@ class TestCfpSessionResolver(unittest.TestCase):
     def test_goose_claim_no_lgtm_row_within_window(self):
         res = self._resolver()
         self.assertIsNone(res.goose_claim("20260908_9", self.T))
+
+    def test_goose_claim_boundaries(self):
+        # 1. goose-serve active suppression boundary:
+        # 20260908_3 has usage_ledger row at self.T
+        # An lgtm row exists at self.T + 2 * oc_tags.GOOSE_LEDGER_JOIN_MS
+        lgtm_t = self.T + 2 * oc_tags.GOOSE_LEDGER_JOIN_MS
+        at = datetime.datetime.fromtimestamp(lgtm_t / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+
+        # At exactly GOOSE_LEDGER_JOIN_MS from usage_ledger (self.T):
+        # active suppression triggers -> no claim
+        t_in = self.T + oc_tags.GOOSE_LEDGER_JOIN_MS
+        self.assertIsNone(res.goose_claim("20260908_3", t_in))
+
+        # At GOOSE_LEDGER_JOIN_MS + 1 ms from usage_ledger (self.T):
+        # active suppression no longer triggers; lgtm row at lgtm_t is within LGTM_JOIN_MS -> claimed!
+        t_out = self.T + oc_tags.GOOSE_LEDGER_JOIN_MS + 1
+        claim = res.goose_claim("20260908_3", t_out)
+        self.assertIsNotNone(claim)
+
+        # 2. LGTM_JOIN_MS boundary for sid not in goose-serve:
+        # lgtm row is at lgtm_t
+        # At exactly LGTM_JOIN_MS from lgtm_t: claimed
+        self.assertIsNotNone(res.goose_claim("20260908_9", lgtm_t + oc_tags.LGTM_JOIN_MS))
+        # At LGTM_JOIN_MS + 1 ms from lgtm_t: out of window -> None
+        self.assertIsNone(res.goose_claim("20260908_9", lgtm_t + oc_tags.LGTM_JOIN_MS + 1))
 
     def test_resolve_opencode_child_to_root_and_tag(self):
         res = self._resolver()
@@ -4265,24 +4309,30 @@ class TestCfpSessionResolver(unittest.TestCase):
             (oc_tags.CFP_UNROUTED_TAG, oc_tags.CFP_UNROUTED_TAG, "manual", "cfp usage with no route/session", None)
         )
 
-    def test_s_tags_alias_and_warnings(self):
+    def test_corrupt_goose_db_warning(self):
         warns = []
         bad_goose = os.path.join(self.td.name, "corrupt_goose.db")
         with open(bad_goose, "w", encoding="utf-8") as fh:
             fh.write("not a sqlite database")
         res = oc_tags.CfpSessionResolver(
+            session_ids={"ses_root", "20260908_3"},
             db_path=self.db,
             goose_db=bad_goose,
-            s_tags={"ses_root": "tagged_alias"},
+            session_tags={"ses_root": "tagged"},
             lgtm_ledger=self.lgtm,
             since_ms=self.T - 1000,
             until_ms=self.T + 1000,
-            session_ids={"ses_root", "20260908_3"},
             warnings=warns,
         )
-        self.assertEqual(res.resolve("ses_root", self.T)[1], "tagged_alias")
+        self.assertEqual(res.resolve("ses_root", self.T)[1], "tagged")
         # Unreadable goose DB produced a warning
         self.assertTrue(any("goose sessions not read" in w for w in warns))
+
+    def test_session_ids_required_keyword(self):
+        with self.assertRaises(TypeError):
+            oc_tags.CfpSessionResolver()
+        with self.assertRaises(TypeError):
+            oc_tags.CfpSessionResolver({"ses_root"})
 
 
 class TestAccountWeeks(unittest.TestCase):
