@@ -22,7 +22,7 @@ using only `/var/lib/llm-ledger/ledger.db` (read-only). Alerts go through
 | One roster member never reports `u7d` (spend-capped seat). | Accounts with no non-null `u7d` in the loaded window are excluded automatically; `--exclude-account` can add more. No account names in code. |
 | The pool ran dry 2026-11-22 12:10–18:05 EST while Σ(1−u7d) read 0.09–0.12; teamclaude refuses at about 0.98. | Headroom = Σ max(0, 0.98 − u7d). |
 | Spillover is visible in the ledger as `route.desired='max' AND requests.backend='vertex'` ($340 in 30 days, $333 of it on 11-22). `desired='vertex'` is the deliberate ~$100/day Vertex budget, not spillover. | Spillover uses exactly that predicate. |
-| cloudbox Max notional $ per unit of pool burn varies 60–1,700 per day (devbox and the Mac burn the same accounts). | `k` (local) = 7-day Max $ ÷ 7-day burn. It *underestimates* true $/quota, so spillover ÷ k *overestimates* the missing burn: conservative. Reported as `k(local)`. |
+| cloudbox Max notional $ per unit of pool burn varies 60–1,700 per day (devbox and the Mac burn the same accounts). | `k` (local) = 7-day cloudbox Max $ ÷ 7-day *pool* burn: cloudbox's $ per account-week of everyone's burn. So spillover ÷ k is pool burn on the assumption that cloudbox's share holds, and dry hours × B × k is **cloudbox's** Vertex cash (devbox and the Mac spill separately). Reported as `k(local)`. |
 
 Prototype replay (`2026-10-25` → now, the rules below): resets detected 81
 (the bead's count); shortfall episodes **3** (11-18 14:20, 11-19 15:25, and

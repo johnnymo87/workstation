@@ -278,8 +278,25 @@ def step_alerts(
     vertex_usd: float | None = metrics.get("vertex_usd")
     next_refill: tuple[int, float] | None = metrics.get("next_refill")
 
-    k_str = str(round(k)) if k is not None else "None"
-    refill_str = f"Next refill: {format_dt_et(next_refill[0])} (+{next_refill[1]:.2f}). " if next_refill else ""
+    refill_str = (
+        f"Next refill: {format_dt_et(next_refill[0])}, +{next_refill[1]:.2f}.\n"
+        if next_refill else "Next refill: none known.\n"
+    )
+    burn_str = f"burn {B:.3f}/h" + (f" (one account every ~{1 / B:.0f} h)" if B > 0 else "")
+    vertex_str = (
+        f", about ${round(vertex_usd)} of Vertex cash at the current rate" if vertex_usd is not None else ""
+    )
+    units_note = (
+        "Headroom is in account-weeks: the sum over accounts of max(0, "
+        f"{CAP:.2f} - u7d); teamclaude stops using an account at about {CAP:.2f}. "
+        + (
+            f"The Vertex $ are cloudbox's alone (devbox and the Mac spill on their own), "
+            f"estimated with k(local)={round(k)}: cloudbox's notional Max $ per account-week "
+            "of pool burn over the last 7 days."
+            if k is not None
+            else "No Vertex $ estimate: too little burn in the last 7 days to fit k."
+        )
+    )
 
     # 1. pool-dry alert
     was_dry: bool = bool(state.get("pool_dry", False))
@@ -297,12 +314,11 @@ def step_alerts(
         actions.append({"type": "clear", "kind": "pool-dry", "name": "pool-dry"})
     elif is_dry:
         text = (
-            f"Claude Max pool is dry (headroom={H0:.3f}, 15m spillover=${spill_15m:.2f}). "
-            f"Burn rate: {B:.3f}/h. k(local): {k_str}. "
-            f"Projected dry: {zero_h:.1f}h"
-            + (f" (Vertex ≈ ${round(vertex_usd)})" if vertex_usd is not None else "")
-            + f". {refill_str}"
-            + "Note: Max $ are notional, Vertex $ are cash."
+            "Claude Max pool is DRY: Max traffic is spilling to Vertex, which is cash.\n"
+            f"${spill_15m:.2f} spilled in the last 15 min. Headroom {H0:.3f}, {burn_str}.\n"
+            + refill_str
+            + f"Forecast: {zero_h:.1f} h dry in the next 24 h{vertex_str}.\n"
+            + units_note
         )
         actions.append({
             "type": "send",
@@ -331,11 +347,11 @@ def step_alerts(
     elif is_short and not is_dry:
         # Not sent while pool-dry is active
         text = (
-            f"Claude Max pool shortfall projected: {zero_h:.1f}h dry over next 24h"
-            + (f" (Vertex ≈ ${round(vertex_usd)})" if vertex_usd is not None else "")
-            + f". Headroom: {H0:.3f}. Burn rate: {B:.3f}/h. k(local): {k_str}. "
-            + f"{refill_str}"
-            + "Note: Max $ are notional, Vertex $ are cash."
+            f"Claude Max pool is projected to run dry: {zero_h:.1f} h at zero headroom "
+            f"in the next 24 h{vertex_str}.\n"
+            f"Now: headroom {H0:.3f}, {burn_str}.\n"
+            + refill_str
+            + units_note
         )
         actions.append({
             "type": "send",
@@ -360,12 +376,12 @@ def step_alerts(
         if u_eff >= ACCT_HI:
             if not was_latched:
                 new_acct_high[account] = True
-                reset_text = f"Reset time: {format_dt_et(r7d_eff)}. " if r7d_eff else ""
+                reset_text = f"It resets {format_dt_et(r7d_eff)}.\n" if r7d_eff else ""
                 text = (
-                    f"Claude Max account '{account}' high usage: u7d={u_eff:.3f} (>= {ACCT_HI:.2f}). "
-                    f"Headroom: {H0:.3f}. Burn rate: {B:.3f}/h. "
+                    f"Claude Max account '{account}' is at u7d={u_eff:.2f} "
+                    f"(warning at {ACCT_HI:.2f}; teamclaude stops using it at about {CAP:.2f}).\n"
                     + reset_text
-                    + "Note: Max $ are notional, Vertex $ are cash."
+                    + f"Pool headroom {H0:.3f} account-weeks, {burn_str}."
                 )
                 actions.append({
                     "type": "send",

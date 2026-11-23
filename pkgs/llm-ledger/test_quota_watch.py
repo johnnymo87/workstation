@@ -61,6 +61,19 @@ from quota_watch import (
 E = ZoneInfo("America/New_York")
 
 
+def _python_stub(alert_log: str) -> str:
+    """A stand-in for opencode-drift-alert: logs its argv as one JSON line
+    (alert texts contain newlines, so shell quoting is not safe) and touches
+    the state file, as the real helper does after a successful send."""
+    return (
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        f"with open({alert_log!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[1:]}) + '\\n')\n"
+        "pathlib.Path(sys.argv[1]).touch()\n"
+    )
+
+
 class TestQuotaWatchMathAndAccumulator(unittest.TestCase):
     def test_accumulator_jitter_counts_zero(self):
         """Jitter: a -> a - 0.01 -> a counts zero burn."""
@@ -497,13 +510,7 @@ class TestLiveAndReplay(unittest.TestCase):
         alert_log = os.path.join(self.tmp_dir.name, "alert_invocations.jsonl")
         stub_script = os.path.join(self.tmp_dir.name, "stub_alert.sh")
         with open(stub_script, "w") as f:
-            f.write(f"""#!/bin/sh
-cat <<EOF >> "{alert_log}"
-{{"argv": ["$1", "$2", "$3", "$4", "$5", "$6"]}}
-EOF
-# Touch the alert file as real drift-alert would
-touch "$1"
-""")
+            f.write(_python_stub(alert_log))
         os.chmod(stub_script, os.stat(stub_script).st_mode | stat.S_IEXEC)
 
         conn = sqlite3.connect(self.db_path)
@@ -658,12 +665,7 @@ touch "$1"
         alert_log = os.path.join(self.tmp_dir.name, "alert_log_dry.jsonl")
         stub_script = os.path.join(self.tmp_dir.name, "stub_dry.sh")
         with open(stub_script, "w") as f:
-            f.write(f"""#!/bin/sh
-cat <<EOF >> "{alert_log}"
-{{"argv": ["$1", "$2", "$3", "$4", "$5", "$6"]}}
-EOF
-touch "$1"
-""")
+            f.write(_python_stub(alert_log))
         os.chmod(stub_script, 0o755)
 
         state_dir = os.path.join(self.tmp_dir.name, "state_dry_test")
