@@ -2545,6 +2545,51 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.assertIn("error", data)
         self.assertIn("quota@", data["line"])
 
+    def _remote_json(self, verdict="tight"):
+        import json
+        path = os.path.join(self.tmpdir.name, "remote.json")
+        with open(path, "w") as f:
+            json.dump({"verdict": verdict, "ts": int(time.time() * 1000) - 60000, "h0": 0.4,
+                       "burn_h": 0.03, "zero_h": 3.0, "next_refill_ts": None,
+                       "next_refill_amt": None, "line": "x"}, f)
+        return path
+
+    def _run_outlook(self, argv, env=None):
+        import io
+        import contextlib
+        import json
+        out_buf = io.StringIO()
+        with mock.patch.dict(os.environ, env or {}, clear=False):
+            if env is None:
+                os.environ.pop("LLM_LEDGER_OUTLOOK_JSON", None)
+            with contextlib.redirect_stdout(out_buf):
+                code = llm_ledger.main(argv)
+        self.assertEqual(code, 0)
+        return json.loads(out_buf.getvalue().strip())
+
+    def test_quota_outlook_cli_from_json(self):
+        """--from-json reads a copied outlook instead of a ledger DB."""
+        path = self._remote_json("tight")
+        data = self._run_outlook(["quota-outlook", "--from-json", path])
+        self.assertEqual(data["verdict"], "tight")
+        self.assertIn("TIGHT", data["line"])
+
+    def test_quota_outlook_cli_env_default(self):
+        """LLM_LEDGER_OUTLOOK_JSON is the default source when neither flag is given."""
+        path = self._remote_json("dry")
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", os.path.join(self.tmpdir.name, "absent.db")):
+            data = self._run_outlook(["quota-outlook"], env={"LLM_LEDGER_OUTLOOK_JSON": path})
+        self.assertEqual(data["verdict"], "dry")
+
+    def test_quota_outlook_cli_explicit_db_beats_env(self):
+        """An explicit --db wins over LLM_LEDGER_OUTLOOK_JSON."""
+        path = self._remote_json("dry")
+        nonexistent = os.path.join(self.tmpdir.name, "nonexistent.db")
+        data = self._run_outlook(["quota-outlook", "--db", nonexistent],
+                                 env={"LLM_LEDGER_OUTLOOK_JSON": path})
+        self.assertEqual(data["verdict"], "unknown")
+        self.assertFalse(os.path.exists(nonexistent))
+
 
 if __name__ == "__main__":
     unittest.main()

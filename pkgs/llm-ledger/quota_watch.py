@@ -1339,6 +1339,65 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             "error": "no live rows",
         }
 
+    return _outlook_from_row(row, now_ms)
+
+
+def _unknown_outlook(now_ms: int, error: str) -> dict[str, Any]:
+    try:
+        line = format_line({"verdict": "unknown", "now_ms": now_ms})
+    except Exception:
+        line = "quota@--:--: unknown (outlook unavailable)"
+    return {
+        "verdict": "unknown",
+        "ts": None,
+        "age_s": None,
+        "h0": None,
+        "burn_h": None,
+        "zero_h": None,
+        "next_refill_ts": None,
+        "next_refill_amt": None,
+        "line": line,
+        "error": str(error)[:200],
+    }
+
+
+OUTLOOK_JSON_MAX_BYTES: int = 64 * 1024
+
+
+def outlook_from_json(path: str, now_ms: int | None = None) -> dict[str, Any]:
+    """Outlook from a copy of another host's `quota-outlook` JSON (devbox reads cloudbox's).
+
+    The copy is only a carrier for the reading: age, staleness, clock skew and the line are
+    re-derived here from the reading's own ts, exactly as outlook() does for a DB row, so a
+    copy that stops being refreshed turns unknown after 20 min instead of repeating itself.
+    """
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(OUTLOOK_JSON_MAX_BYTES + 1)
+        if len(raw) > OUTLOOK_JSON_MAX_BYTES:
+            return _unknown_outlook(now_ms, f"remote outlook too large (> {OUTLOOK_JSON_MAX_BYTES} bytes)")
+        d = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        return _unknown_outlook(now_ms, f"remote outlook unreadable: {e}")
+    if not isinstance(d, dict):
+        return _unknown_outlook(now_ms, "remote outlook is not a JSON object")
+    verdict = d.get("verdict")
+    if verdict not in ("ample", "tight", "dry"):
+        detail = d.get("error")
+        detail = f": {str(detail)[:150]}" if detail else ""
+        return _unknown_outlook(now_ms, f"remote verdict {str(verdict)[:20]!r}{detail}")
+    if _safe_int(d.get("ts")) is None:
+        return _unknown_outlook(now_ms, "remote outlook has no ts")
+    row = (
+        d.get("ts"), d.get("h0"), d.get("burn_h"), d.get("zero_h"),
+        d.get("next_refill_ts"), d.get("next_refill_amt"), verdict,
+    )
+    return _outlook_from_row(row, now_ms)
+
+
+def _outlook_from_row(row: Sequence[Any], now_ms: int) -> dict[str, Any]:
     try:
         ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
         ts = _safe_int(ts_val)

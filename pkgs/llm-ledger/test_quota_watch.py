@@ -2289,5 +2289,101 @@ class TestQuotaOutlook(unittest.TestCase):
                 self.assertIn("quota@", res["line"])
 
 
+class TestOutlookFromJson(unittest.TestCase):
+    """outlook_from_json: a host without a ledger (devbox) reads a copy of another
+    host's quota-outlook JSON and re-derives age and staleness at read time."""
+
+    CONTRACT = {
+        "verdict", "ts", "age_s", "h0", "burn_h", "zero_h",
+        "next_refill_ts", "next_refill_amt", "line",
+    }
+    TS = 1795455600000  # 12:40 ET
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir.name, "cloudbox.json")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, obj):
+        with open(self.path, "w") as f:
+            if isinstance(obj, str):
+                f.write(obj)
+            else:
+                json.dump(obj, f)
+
+    def _remote(self, verdict="tight", **over):
+        d = {
+            "verdict": verdict, "ts": self.TS, "age_s": 30, "h0": 1.47, "burn_h": 0.036,
+            "zero_h": 2.5, "next_refill_ts": 1795608000372, "next_refill_amt": 0.9,
+            "line": "remote line, not trusted",
+        }
+        d.update(over)
+        return d
+
+    def test_known_verdicts_recompute_age_and_line(self):
+        for verdict in ("ample", "tight", "dry"):
+            self._write(self._remote(verdict))
+            res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 400_000)
+            self.assertEqual(set(res.keys()), self.CONTRACT)
+            self.assertEqual(res["verdict"], verdict)
+            self.assertEqual(res["age_s"], 400)  # from ts at read time, not the remote age_s
+            self.assertEqual(res["h0"], 1.47)
+            self.assertEqual(res["line"], quota_watch.format_line(res))
+            self.assertTrue(res["line"].startswith("quota@12:40: "))
+
+    def test_stale_reading_is_unknown(self):
+        self._write(self._remote("ample"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1201_000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("stale", res["error"])
+        self.assertEqual(res["line"], "quota@12:40: unknown (outlook unavailable)")
+
+    def test_future_reading_is_unknown(self):
+        self._write(self._remote("ample"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS - 120_000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("clock skew", res["error"])
+
+    def test_remote_unknown_stays_unknown(self):
+        self._write(self._remote("unknown", error="no live rows"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("remote", res["error"])
+        self.assertIn("no live rows", res["error"])
+
+    def test_missing_file_is_unknown(self):
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("error", res)
+        self.assertIn("quota@", res["line"])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_garbage_is_unknown(self):
+        for bad in ("not json", "[1, 2]", json.dumps(self._remote("plenty")),
+                    json.dumps(self._remote("ample", ts="soon")), json.dumps(self._remote("ample", ts=None))):
+            self._write(bad)
+            res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+            self.assertEqual(res["verdict"], "unknown", bad)
+            self.assertIn("error", res)
+            json.dumps(res, allow_nan=False)
+
+    def test_non_finite_numbers_sanitized(self):
+        self._write('{"verdict": "ample", "ts": %d, "h0": NaN, "burn_h": Infinity}' % self.TS)
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "ample")
+        self.assertIsNone(res["h0"])
+        self.assertIsNone(res["burn_h"])
+        json.dumps(res, allow_nan=False)
+
+    def test_oversized_file_is_unknown(self):
+        self._write(" " * (70 * 1024) + json.dumps(self._remote("ample")))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("too large", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

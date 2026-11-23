@@ -1573,7 +1573,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # quota-outlook subcommand
     qo_parser = subparsers.add_parser("quota-outlook")
-    qo_parser.add_argument("--db", default=DEFAULT_DB)
+    # --db defaults to None so DEFAULT_DB is read at call time and an explicit --db can be
+    # told apart from the default (it wins over LLM_LEDGER_OUTLOOK_JSON).
+    qo_parser.add_argument("--db", default=None)
+    # A host without a ledger (devbox) reads a copy of another host's outlook JSON instead.
+    # Its wrapper sets LLM_LEDGER_OUTLOOK_JSON so a bare `llm-ledger quota-outlook` uses it.
+    qo_parser.add_argument("--from-json", default=None)
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1599,8 +1604,13 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             import quota_watch
-            db_path = getattr(args, "db", DEFAULT_DB)
-            res = quota_watch.outlook(db=db_path)
+            from_json = args.from_json
+            if from_json is None and args.db is None:
+                from_json = os.environ.get("LLM_LEDGER_OUTLOOK_JSON") or None
+            if from_json is not None:
+                res = quota_watch.outlook_from_json(from_json)
+            else:
+                res = quota_watch.outlook(db=args.db or DEFAULT_DB)
             try:
                 payload = json.dumps(res, allow_nan=False) + "\n"
             except (ValueError, TypeError) as e:

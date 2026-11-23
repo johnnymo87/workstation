@@ -11,6 +11,7 @@
     ./disk-cleanup.nix
     ./em-drift-detector.nix
     ./quota-telemetry.nix
+    ./quota-outlook-remote.nix
     ./em-test-postgres.nix
     ./tec-codex-bot.nix
     ./tec-codex-wiki-scrape.nix
