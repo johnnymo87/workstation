@@ -1747,7 +1747,7 @@ lib.mkIf isCloudbox {
       ExecStart = "${pkgs.writeShellScript "goose-host-reports-fetch-start" ''
         set -u
         if [ -r /run/secrets/github_api_token ]; then
-          export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+          export GH_TOKEN="$(< /run/secrets/github_api_token)"
         fi
         exec ${localPkgs.goose-host-report}/bin/goose-host-report fetch
       ''}";

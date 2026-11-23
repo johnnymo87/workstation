@@ -2140,7 +2140,7 @@ down and its silence means nothing. This host has no second leg.
       ExecStart = "${pkgs.writeShellScript "goose-host-report-start" ''
         set -u
         if [ -r /run/secrets/github_api_token ]; then
-          export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+          export GH_TOKEN="$(< /run/secrets/github_api_token)"
         fi
         exec ${localPkgs.goose-host-report}/bin/goose-host-report publish --host devbox --honk-bin "${config.home.profileDirectory}/bin/honk"
       ''}";
