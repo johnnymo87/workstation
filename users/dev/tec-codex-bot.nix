@@ -118,6 +118,9 @@ let
     ];
     Restart = "on-failure";
     RestartPreventExitStatus = 2;
+    # `uv run` exits 143 when systemd stops it with SIGTERM; without this a
+    # clean stop leaves the unit "failed" (and needs reset-failed).
+    SuccessExitStatus = 143;
     RestartSec = 30;
     RestartSteps = 6;
     RestartMaxDelaySec = "30min";
@@ -167,6 +170,11 @@ lib.mkIf isDevbox {
         "CODEX_BOT_API_URL=http://127.0.0.1:${toString apiPort}"
         "CODEX_QUERY_LOG_PATH="
         "UV_PYTHON_DOWNLOADS=never"
+        # discord.py connects with aiohttp, which uses Python's default SSL
+        # context; uv's Python looks for a CA bundle at FHS paths NixOS does
+        # not have (CERTIFICATE_VERIFY_FAILED on discord.com). The bot API
+        # needs no such line: httpx uses certifi.
+        "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       ];
       ExecStart = "${uvRun} python -m codex.bot --token-file ${tokenPath}";
       MemoryMax = "512M";
