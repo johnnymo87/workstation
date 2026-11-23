@@ -1264,5 +1264,586 @@ class TestLlmLedger(unittest.TestCase):
             conn.close()
 
 
+class TestLlmLedgerTask4(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="llm-ledger-task4-")
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+        self.events_path = os.path.join(self.tmpdir.name, "events.jsonl")
+        self.raw_dir = os.path.join(self.tmpdir.name, "raw")
+        self.opencode_db = os.path.join(self.tmpdir.name, "opencode.db")
+        self.goose_db = os.path.join(self.tmpdir.name, "goose.db")
+        self.tags_db = os.path.join(self.tmpdir.name, "tags.db")
+        self.lgtm_ledger = os.path.join(self.tmpdir.name, "lgtm.jsonl")
+        self.samples_path = os.path.join(self.tmpdir.name, "quota-samples.jsonl")
+        self.samples_archive = os.path.join(self.tmpdir.name, "archive")
+        self.orig_default_samples = llm_ledger.DEFAULT_SAMPLES
+        self.orig_default_samples_archive = llm_ledger.DEFAULT_SAMPLES_ARCHIVE
+        llm_ledger.DEFAULT_SAMPLES = self.samples_path
+        llm_ledger.DEFAULT_SAMPLES_ARCHIVE = self.samples_archive
+
+    def tearDown(self):
+        llm_ledger.DEFAULT_SAMPLES = self.orig_default_samples
+        llm_ledger.DEFAULT_SAMPLES_ARCHIVE = self.orig_default_samples_archive
+        self.tmpdir.cleanup()
+
+    def _create_opencode_db(self, sessions: list[tuple[str, str | None, str | None, str | None]]):
+        conn = sqlite3.connect(self.opencode_db)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT)")
+        conn.executemany("INSERT INTO session VALUES (?, ?, ?, ?)", sessions)
+        conn.commit()
+        conn.close()
+
+    def _create_goose_db(
+        self,
+        sessions: list[tuple[str, str | None, str | None, str | None, str | None, str | None]],
+        ledger: list[tuple[str, int]] | None = None,
+    ):
+        conn = sqlite3.connect(self.goose_db)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, working_dir TEXT, "
+            "name TEXT, session_type TEXT, recipe_json TEXT)"
+        )
+        conn.execute("CREATE TABLE IF NOT EXISTS usage_ledger (session_id TEXT, created_timestamp INTEGER)")
+        conn.execute("DELETE FROM sessions")
+        conn.execute("DELETE FROM usage_ledger")
+        # recipe_json column needs to hold JSON if title is extracted via json_extract(recipe_json, '$.title')
+        rows = []
+        for s in sessions:
+            sid, parent, wdir, name, stype, rtitle = s
+            r_json = json.dumps({"title": rtitle}) if rtitle is not None else None
+            rows.append((sid, parent, wdir, name, stype, r_json))
+        conn.executemany("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?)", rows)
+        if ledger:
+            conn.executemany("INSERT INTO usage_ledger VALUES (?, ?)", ledger)
+        conn.commit()
+        conn.close()
+
+    def _write_lgtm_ledger(self, entries: list[dict]):
+        with open(self.lgtm_ledger, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+
+    def test_held_lock_exit_zero_no_writes(self):
+        import fcntl
+        lock_file = os.path.join(os.path.dirname(os.path.abspath(self.db_path)), ".lock")
+        os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+        fd = open(lock_file, "a")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            # 1. run_ingest should detect lock and not touch DB
+            ret = llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path)
+            self.assertTrue(ret.get("locked"))
+            self.assertFalse(os.path.exists(self.db_path))
+
+            # 2. main(["run", ...]) should return 0
+            code = llm_ledger.main(["run", "--db", self.db_path, "--events", self.events_path])
+            self.assertEqual(code, 0)
+            self.assertFalse(os.path.exists(self.db_path))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+
+    def test_rollup_matches_group_by_incremental(self):
+        # Multiple runs across several hours
+        h1 = 1700000000000 // 3600000 * 3600000
+        h2 = h1 + 3600000
+        h3 = h1 + 7200000
+
+        events_run1 = [
+            {"type": "route", "ts": h1 + 1000, "requestId": "r1", "sessionId": "ses_1", "model": "m1"},
+            {"type": "usage", "ts": h1 + 1000, "requestId": "r1", "backend": "b1", "cost": 0.01,
+             "usage": {"input": 10, "output": 20, "cacheRead": 5, "cacheWrite": 0}},
+            {"type": "route", "ts": h2 + 2000, "requestId": "r2", "sessionId": "ses_2", "model": "m2"},
+            {"type": "usage", "ts": h2 + 2000, "requestId": "r2", "backend": "b2", "cost": 0.02,
+             "usage": {"input": 15, "output": 25, "cacheRead": 0, "cacheWrite": 5}},
+        ]
+        with open(self.events_path, "w") as f:
+            for ev in events_run1:
+                f.write(json.dumps(ev) + "\n")
+
+        ret1 = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir
+        )
+        self.assertEqual(ret1["new_requests"], 2)
+
+        # Run 2: more events in h2 and new in h3
+        events_run2 = [
+            {"type": "route", "ts": h2 + 5000, "requestId": "r3", "sessionId": "ses_2", "model": "m2"},
+            {"type": "usage", "ts": h2 + 5000, "requestId": "r3", "backend": "b2", "cost": 0.03,
+             "usage": {"input": 20, "output": 30, "cacheRead": 10, "cacheWrite": 0}},
+            {"type": "route", "ts": h3 + 1000, "requestId": "r4", "sessionId": "ses_3", "model": "m3"},
+            {"type": "usage", "ts": h3 + 1000, "requestId": "r4", "backend": "b1", "cost": 0.04,
+             "usage": {"input": 40, "output": 50, "cacheRead": 0, "cacheWrite": 0}},
+        ]
+        with open(self.events_path, "a") as f:
+            for ev in events_run2:
+                f.write(json.dumps(ev) + "\n")
+
+        ret2 = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir
+        )
+        self.assertEqual(ret2["new_requests"], 2)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            hourly_rows = conn.execute(
+                "SELECT hour, attr_key, backend, model, n, input, output, cache_read, cache_write, round(cost_usd, 4) "
+                "FROM hourly ORDER BY hour, attr_key, backend, model"
+            ).fetchall()
+            expected_rows = conn.execute(
+                "SELECT (ts / 3600000) * 3600000 AS hr, attr_key, COALESCE(backend, ''), COALESCE(model, ''), "
+                "count(*), coalesce(sum(input),0), coalesce(sum(output),0), "
+                "coalesce(sum(cache_read),0), coalesce(sum(cache_write),0), round(coalesce(sum(cost_usd),0.0), 4) "
+                "FROM requests GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"
+            ).fetchall()
+            self.assertEqual(hourly_rows, expected_rows)
+            self.assertEqual(len(hourly_rows), 3)  # h1(ses_1), h2(ses_2), h3(ses_3)
+        finally:
+            conn.close()
+
+    def test_rollup_after_route_fill_in(self):
+        h = 1700000000000 // 3600000 * 3600000
+        # Usage without route
+        usage1 = {"type": "usage", "ts": h + 1000, "requestId": "rf1", "backend": "b1", "cost": 0.05,
+                  "usage": {"input": 10, "output": 20, "cacheRead": 0, "cacheWrite": 0}}
+        with open(self.events_path, "w") as f:
+            f.write(json.dumps(usage1) + "\n")
+
+        llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            h_row = conn.execute("SELECT attr_key, model, n, cost_usd FROM hourly WHERE hour = ?", (h,)).fetchone()
+            self.assertEqual(h_row[0], oc_tags.CFP_UNROUTED_TAG)
+            self.assertEqual(h_row[1], "")
+        finally:
+            conn.close()
+
+        # Later route arrives
+        route1 = {"type": "route", "ts": h + 1000, "requestId": "rf1", "sessionId": "ses_filled", "model": "opus-model"}
+        with open(self.events_path, "a") as f:
+            f.write(json.dumps(route1) + "\n")
+
+        llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            h_rows = conn.execute("SELECT attr_key, model, n, cost_usd FROM hourly WHERE hour = ?", (h,)).fetchall()
+            self.assertEqual(len(h_rows), 1)
+            self.assertEqual(h_rows[0][0], "ses_filled")
+            self.assertEqual(h_rows[0][1], "opus-model")
+
+            # Check matches GROUP BY
+            expected = conn.execute(
+                "SELECT (ts / 3600000) * 3600000, attr_key, COALESCE(backend, ''), COALESCE(model, ''), count(*), "
+                "coalesce(sum(input),0), coalesce(sum(output),0), coalesce(sum(cache_read),0), coalesce(sum(cache_write),0), cost_usd "
+                "FROM requests GROUP BY 1, 2, 3, 4"
+            ).fetchall()
+            actual = conn.execute(
+                "SELECT hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd FROM hourly"
+            ).fetchall()
+            self.assertEqual(actual, expected)
+        finally:
+            conn.close()
+
+    def test_rollup_after_goose_reattribution(self):
+        now_ts = 1700000000000
+        req_ts = now_ts - 5 * 3600 * 1000
+        h = req_ts // 3600000 * 3600000
+        sid = "20261120_1"
+
+        self._create_goose_db(
+            sessions=[(sid, None, "/tmp", "g-session", "chat", None)],
+            ledger=[(sid, req_ts // 1000)],
+        )
+
+        # Ingest initially as goose:20261120_1
+        route = {"type": "route", "ts": req_ts, "requestId": "rg1", "sessionId": sid, "model": "m"}
+        usage = {"type": "usage", "ts": req_ts, "requestId": "rg1", "backend": "v", "cost": 0.05,
+                 "usage": {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0}}
+        with open(self.events_path, "w") as f:
+            f.write(json.dumps(route) + "\n")
+            f.write(json.dumps(usage) + "\n")
+
+        llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            goose_db=self.goose_db, now=now_ts / 1000.0,
+        )
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            h_row = conn.execute("SELECT attr_key FROM hourly WHERE hour = ?", (h,)).fetchone()
+            self.assertEqual(h_row[0], f"goose:{sid}")
+        finally:
+            conn.close()
+
+        # Later lgtm row appears
+        self._write_lgtm_ledger([{
+            "v": 1, "key": "k1", "kind": "review", "session": "pr-42",
+            "repo": "workstation", "pr": 42,
+            "at": datetime.datetime.fromtimestamp(req_ts / 1000, datetime.timezone.utc).isoformat(),
+            "costUsd": 0.05,
+        }])
+        # Note: goose_claim will claim if no usage_ledger in goose within GOOSE_LEDGER_JOIN_MS or lgtm claims it
+        # Let's recreate goose_db without the usage_ledger timestamp so lgtm claims it
+        self._create_goose_db(sessions=[(sid, None, "/tmp", "g-session", "chat", None)], ledger=[])
+
+        ret = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            goose_db=self.goose_db, lgtm_ledger=self.lgtm_ledger, now=now_ts / 1000.0,
+        )
+        self.assertEqual(ret.get("rechecked"), 1)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            h_row = conn.execute("SELECT attr_key FROM hourly WHERE hour = ?", (h,)).fetchone()
+            self.assertEqual(h_row[0], "lgtm-goose:pr-42")
+
+            # Check matches GROUP BY
+            expected = conn.execute(
+                "SELECT (ts / 3600000) * 3600000, attr_key, COALESCE(backend, ''), COALESCE(model, ''), count(*), "
+                "coalesce(sum(input),0), coalesce(sum(output),0), coalesce(sum(cache_read),0), coalesce(sum(cache_write),0), cost_usd "
+                "FROM requests GROUP BY 1, 2, 3, 4"
+            ).fetchall()
+            actual = conn.execute(
+                "SELECT hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd FROM hourly"
+            ).fetchall()
+            self.assertEqual(actual, expected)
+        finally:
+            conn.close()
+
+    def test_fresh_db_full_rebuild(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        h1 = 1700000000000 // 3600000 * 3600000
+        h2 = h1 + 3600000
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', ?, 'host', 's1', 'k1', 'b1', 'm1', 1, 2, 0, 0, 0.01, 200, 100)",
+            (h1 + 100,)
+        )
+        conn.execute(
+            "INSERT INTO requests VALUES ('r2', ?, 'host', 's2', 'k2', 'b2', 'm2', 3, 4, 0, 0, 0.02, 200, 200)",
+            (h2 + 200,)
+        )
+        conn.commit()
+        conn.close()
+
+        # hourly is currently empty
+        # Call step_hourly_rollup directly or run_ingest with empty events
+        with open(self.events_path, "w") as f:
+            pass
+        ret = llm_ledger.run_ingest(db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir)
+        self.assertEqual(ret.get("hours_rebuilt"), 2)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT count(*) FROM hourly").fetchone()[0], 2)
+        finally:
+            conn.close()
+
+    def test_rebuild_hourly_subcommand(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        h1 = 1700000000000 // 3600000 * 3600000
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', ?, 'host', 's1', 'k1', 'b1', 'm1', 1, 2, 0, 0, 0.01, 200, 100)",
+            (h1 + 100,)
+        )
+        conn.commit()
+        conn.close()
+
+        code = llm_ledger.main(["rebuild-hourly", "--db", self.db_path])
+        self.assertEqual(code, 0)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT count(*) FROM hourly").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_snapshot_maps_child_to_root_tag(self):
+        self._create_opencode_db([
+            ("ses_root", None, "/home/dev/projects/proj", "Root Session Title"),
+            ("ses_child", "ses_root", "/home/dev/projects/proj/sub", "Child Session Title"),
+        ])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_root", "proj-alpha")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_child', 'ses_child', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        written = llm_ledger.step_session_program_snapshot(
+            conn=conn,
+            opencode_db=self.opencode_db,
+            goose_db=self.goose_db,
+            tags_db=self.tags_db,
+            now=1700000000.0,
+        )
+        self.assertEqual(written, 1)
+
+        row = conn.execute("SELECT attr_key, tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'ses_child'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "ses_child")
+        self.assertEqual(row[1], "proj-alpha")
+        self.assertEqual(row[2], "manual")
+        self.assertEqual(row[3], "ses_root")
+        self.assertEqual(row[4], "Root Session Title")
+        self.assertEqual(row[5], 1700000000000)
+        conn.close()
+
+    def test_snapshot_picks_up_retag_next_run(self):
+        self._create_opencode_db([
+            ("ses_root", None, "/home/dev/projects/proj", "Root"),
+        ])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_root", "tag-v1")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_root', 'ses_root', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        written1 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700000000.0
+        )
+        self.assertEqual(written1, 1)
+        r1 = conn.execute("SELECT tag, updated_at FROM session_program WHERE attr_key = 'ses_root'").fetchone()
+        self.assertEqual(r1[0], "tag-v1")
+        self.assertEqual(r1[1], 1700000000000)
+
+        # Retag in tags.db
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_root", "tag-v2")
+
+        written2 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700001000.0
+        )
+        self.assertEqual(written2, 1)
+        r2 = conn.execute("SELECT tag, updated_at FROM session_program WHERE attr_key = 'ses_root'").fetchone()
+        self.assertEqual(r2[0], "tag-v2")
+        self.assertEqual(r2[1], 1700001000000)
+
+        # Run 3: unchanged -> written is 0
+        written3 = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700002000.0
+        )
+        self.assertEqual(written3, 0)
+        r3 = conn.execute("SELECT tag, updated_at FROM session_program WHERE attr_key = 'ses_root'").fetchone()
+        self.assertEqual(r3[1], 1700001000000)
+        conn.close()
+
+    def test_snapshot_keeps_deleted_session_row(self):
+        self._create_opencode_db([
+            ("ses_del", None, "/home/dev/projects/proj", "To Delete"),
+        ])
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_del', 'ses_del', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700000000.0
+        )
+        r1 = conn.execute("SELECT tag, root, title FROM session_program WHERE attr_key = 'ses_del'").fetchone()
+        self.assertIsNotNone(r1)
+
+        # Delete from opencode.db
+        oconn = sqlite3.connect(self.opencode_db)
+        oconn.execute("DELETE FROM session WHERE id = 'ses_del'")
+        oconn.commit()
+        oconn.close()
+
+        written = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700001000.0
+        )
+        self.assertEqual(written, 0)
+        r2 = conn.execute("SELECT tag, root, title FROM session_program WHERE attr_key = 'ses_del'").fetchone()
+        self.assertEqual(r1, r2)
+        conn.close()
+
+    def test_snapshot_goose_root_tag_and_auto(self):
+        self._create_goose_db([
+            ("g_root", None, "/home/dev/work", "goose-name", "chat", "Recipe Title"),
+            ("g_child", "g_root", "/home/dev/work", "child-name", "chat", None),
+        ])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "goose:g_root", "manual-goose-tag")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'g_child', 'goose:g_child', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        # Subcase A: tags.db has override
+        llm_ledger.step_session_program_snapshot(
+            conn=conn, goose_db=self.goose_db, tags_db=self.tags_db, now=1700000000.0
+        )
+        r1 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'goose:g_child'").fetchone()
+        self.assertEqual(r1[0], "manual-goose-tag")
+        self.assertEqual(r1[1], "manual")
+        self.assertEqual(r1[2], "goose:g_root")
+        self.assertEqual(r1[3], "Recipe Title")
+
+        # Subcase B: remove override -> auto fallback
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.rm_session_tag(st, "goose:g_root")
+
+        llm_ledger.step_session_program_snapshot(
+            conn=conn, goose_db=self.goose_db, tags_db=self.tags_db, now=1700001000.0
+        )
+        r2 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'goose:g_child'").fetchone()
+        expected_auto = oc_tags.goose_auto_key(recipe_title="Recipe Title", name="goose-name", session_type="chat")
+        self.assertEqual(r2[0], expected_auto)
+        self.assertEqual(r2[1], "auto")
+        self.assertEqual(r2[2], "goose:g_root")
+        self.assertEqual(r2[3], "Recipe Title")
+        conn.close()
+
+    def test_snapshot_lgtm_default_and_override(self):
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "lgtm-goose:pr-override", "custom-lgtm-tag")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'sid', 'lgtm-goose:pr-default', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.execute(
+            "INSERT INTO requests VALUES ('r2', 1700000000000, 'h', 'sid', 'lgtm-goose:pr-override', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        llm_ledger.step_session_program_snapshot(
+            conn=conn, tags_db=self.tags_db, now=1700000000.0
+        )
+
+        r_def = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'lgtm-goose:pr-default'").fetchone()
+        self.assertEqual(r_def[0], oc_tags.LGTM_LEDGER_TAG)
+        self.assertEqual(r_def[1], "manual")
+        self.assertEqual(r_def[2], "lgtm-goose:pr-default")
+        self.assertIsNone(r_def[3])
+
+        r_ov = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'lgtm-goose:pr-override'").fetchone()
+        self.assertEqual(r_ov[0], "custom-lgtm-tag")
+        self.assertEqual(r_ov[1], "manual")
+        self.assertEqual(r_ov[2], "lgtm-goose:pr-override")
+        self.assertIsNone(r_ov[3])
+        conn.close()
+
+    def test_snapshot_cfp_keys(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 's', 'cfp:unrouted', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.execute(
+            "INSERT INTO requests VALUES ('r2', 1700000000000, 'h', 's', 'cfp:goose-unknown', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        llm_ledger.step_session_program_snapshot(conn=conn, now=1700000000.0)
+
+        r1 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'cfp:unrouted'").fetchone()
+        self.assertEqual(r1, ("cfp:unrouted", "manual", "cfp:unrouted", None))
+
+        r2 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'cfp:goose-unknown'").fetchone()
+        self.assertEqual(r2, ("cfp:goose-unknown", "manual", "cfp:goose-unknown", None))
+        conn.close()
+
+    def test_goose_recheck_window(self):
+        now_ts = 1700000000000
+        # Request 1: 10h ago (within 72h)
+        ts1 = now_ts - 10 * 3600 * 1000
+        sid1 = "20261120_1"
+
+        # Request 2: 100h ago (older than 72h)
+        ts2 = now_ts - 100 * 3600 * 1000
+        sid2 = "20261120_2"
+
+        self._create_goose_db(sessions=[
+            (sid1, None, "/tmp", "g1", "chat", None),
+            (sid2, None, "/tmp", "g2", "chat", None),
+        ])
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', ?, 'h', ?, ?, 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)",
+            (ts1, sid1, f"goose:{sid1}")
+        )
+        conn.execute(
+            "INSERT INTO requests VALUES ('r2', ?, 'h', ?, ?, 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)",
+            (ts2, sid2, f"goose:{sid2}")
+        )
+        conn.commit()
+
+        # Both have late lgtm rows
+        self._write_lgtm_ledger([
+            {
+                "v": 1, "key": "k1", "kind": "review", "session": "pr-1",
+                "repo": "workstation", "pr": 1,
+                "at": datetime.datetime.fromtimestamp(ts1 / 1000, datetime.timezone.utc).isoformat(),
+                "costUsd": 0.01,
+            },
+            {
+                "v": 1, "key": "k2", "kind": "review", "session": "pr-2",
+                "repo": "workstation", "pr": 2,
+                "at": datetime.datetime.fromtimestamp(ts2 / 1000, datetime.timezone.utc).isoformat(),
+                "costUsd": 0.01,
+            },
+        ])
+
+        rechecked, touched_h = llm_ledger.step_goose_recheck(
+            conn=conn,
+            goose_db=self.goose_db,
+            lgtm_ledger=self.lgtm_ledger,
+            goose_recheck_hours=72,
+            now=now_ts / 1000.0,
+        )
+        self.assertEqual(rechecked, 1)
+        self.assertIn((ts1 // 3600000) * 3600000, touched_h)
+
+        row1 = conn.execute("SELECT attr_key FROM requests WHERE request_id = 'r1'").fetchone()
+        row2 = conn.execute("SELECT attr_key FROM requests WHERE request_id = 'r2'").fetchone()
+        self.assertEqual(row1[0], "lgtm-goose:pr-1")
+        self.assertEqual(row2[0], f"goose:{sid2}")  # Unchanged because > 72h
+        conn.close()
+
+    def test_snapshot_db_read_failure_skips_family(self):
+        import io
+        import contextlib
+
+        # Create a corrupt opencode.db file
+        with open(self.opencode_db, "wb") as f:
+            f.write(b"this is not a valid sqlite database file!")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_existing', 'ses_existing', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.execute(
+            "INSERT INTO session_program VALUES ('ses_existing', 'my-tag', 'manual', 'ses_existing', 'Title', 1700000000000)"
+        )
+        conn.commit()
+
+        err_buf = io.StringIO()
+        with contextlib.redirect_stderr(err_buf):
+            written = llm_ledger.step_session_program_snapshot(
+                conn=conn,
+                opencode_db=self.opencode_db,
+                goose_db=self.goose_db,
+                tags_db=self.tags_db,
+                now=1700001000.0,
+            )
+
+        self.assertEqual(written, 0)
+        self.assertIn("warning: failed to read opencode db", err_buf.getvalue())
+        # The existing row is not deleted or modified
+        row = conn.execute("SELECT tag, source FROM session_program WHERE attr_key = 'ses_existing'").fetchone()
+        self.assertEqual(row, ("my-tag", "manual"))
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
