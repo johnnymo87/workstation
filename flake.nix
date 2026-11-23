@@ -1049,6 +1049,46 @@
           echo "cloudbox-grafana-exposure: ${toString (builtins.length (builtins.attrNames checks))} eval + ini checks passed" > $out
         '';
 
+      # cloudbox Grafana provisioned dashboards guard (workstation-4si2.4, Phase 3).
+      # Asserts that the provisioned dashboard provider is configured with
+      # allowUiUpdates = false and options.path pointing to the dashboards dir,
+      # and runs check_grafana_dashboards.py to lint and execute all dashboard queries.
+      cloudbox-grafana-dashboards = let
+        cfg = self.nixosConfigurations.cloudbox.config;
+        lib = devboxPkgs.lib;
+        grafana = cfg.services.grafana;
+        dashboardSettings = grafana.provision.dashboards.settings or null;
+        providers =
+          if dashboardSettings != null && dashboardSettings ? providers && builtins.isList dashboardSettings.providers
+          then dashboardSettings.providers
+          else [ ];
+        firstProv = if providers != [ ] then builtins.head providers else { };
+        provPath = firstProv.options.path or null;
+
+        checks = {
+          "grafana enabled" = (grafana.enable or false) == true;
+          "exactly one dashboard provider" = builtins.length providers == 1;
+          "dashboard provider type is file" = (firstProv.type or null) == "file";
+          "dashboard provider folder is LLM" = (firstProv.folder or null) == "LLM";
+          "dashboard provider allowUiUpdates is false" = (firstProv.allowUiUpdates or null) == false;
+          "dashboard provider disableDeletion is true" = (firstProv.disableDeletion or null) == true;
+          "dashboard provider options.path points to grafana-dashboards" =
+            provPath != null && lib.hasSuffix "hosts/cloudbox/grafana-dashboards" (toString provPath);
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+      in
+        assert lib.assertMsg (failed == [ ]) "cloudbox-grafana-dashboards failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "cloudbox-grafana-dashboards" {
+          nativeBuildInputs = [
+            (devboxPkgs.python3.withPackages (ps: [ ps.tzdata ]))
+          ];
+        } ''
+          cd ${self}
+          export HOME="$TMPDIR"
+          PYTHONPATH="pkgs/llm-ledger:pkgs/oc-tags" python3 hosts/cloudbox/check_grafana_dashboards.py hosts/cloudbox/grafana-dashboards
+          echo "cloudbox-grafana-dashboards: ${toString (builtins.length (builtins.attrNames checks))} eval + lint+execute checks passed" > $out
+        '';
+
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
       # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
       credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {
@@ -1975,8 +2015,8 @@
         }
 
         python3 pkgs/llm-ledger/test_quota_watch.py 2>&1 | tee "$TMPDIR/qw.txt"
-        grep -q '^Ran 40 tests' "$TMPDIR/qw.txt" || {
-          echo "GATE FAILURE: expected 'Ran 40 tests' from test_quota_watch.py. If you" >&2
+        grep -q '^Ran 47 tests' "$TMPDIR/qw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 47 tests' from test_quota_watch.py. If you" >&2
           echo "added or removed tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

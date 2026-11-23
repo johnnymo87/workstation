@@ -1,0 +1,1004 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Stats for the selected range. First partial hour is dropped (h.hour >= $__from AND h.hour < $__to). Max notional and cash (Vertex/Enterprise) are kept separate.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Max $ (notional)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Max $ (notional)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Vertex $ (cash)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Vertex $ (cash)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Enterprise $ (cash)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Enterprise $ (cash)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend = 'vertex' THEN h.cost_usd ELSE 0 END) AS \"Vertex $ (cash)\",\n  SUM(CASE WHEN h.backend = 'enterprise' THEN h.cost_usd ELSE 0 END) AS \"Enterprise $ (cash)\",\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend = 'vertex' THEN h.cost_usd ELSE 0 END) AS \"Vertex $ (cash)\",\n  SUM(CASE WHEN h.backend = 'enterprise' THEN h.cost_usd ELSE 0 END) AS \"Enterprise $ (cash)\",\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Overview: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Cash $ per hour (Vertex/Enterprise) per program",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 3,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Max $ per hour (notional) per program",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Spend by program. Sorted by cash + max for ordering only (sum not displayed). Click a program link to filter.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "program"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Program"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Filter by program",
+                    "url": "/d/llm-spend?${__url_time_range}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "Max $ (notional)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cash_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "cash $ (Vertex/Enterprise)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 4,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Program Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Spend by program and sub-program (e.g. auto: slug).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "program"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Program"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sub"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Sub (auto: slug)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "Max $ (notional)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cash_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "cash $ (Vertex/Enterprise)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 5,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Program & Sub Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Tokens and spend broken down by model and backend.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Model"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "backend"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Backend"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "input"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Input tokens"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "output"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Output tokens"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_read"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Cache read"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cache_write"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Cache write"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "USD"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 6,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Model Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Top 25 sessions in the range ordered by total spend.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "attr_key"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Session Key"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "title"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Title"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "program"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Program"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Filter by program",
+                    "url": "/d/llm-spend?${__url_time_range}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "Max $ (notional)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cash_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "displayName",
+                "value": "cash $ (Vertex/Enterprise)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "displayName",
+                "value": "Requests"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "first"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "First seen"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Last seen"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 7,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
+          "refId": "A",
+          "timeColumns": [
+            "first",
+            "last"
+          ]
+        }
+      ],
+      "title": "Top 25 Sessions: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "llm",
+    "spend"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": null,
+        "current": {},
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "llm-ledger"
+        },
+        "definition": "SELECT DISTINCT backend FROM hourly ORDER BY backend",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Backend",
+        "multi": true,
+        "name": "backend",
+        "options": [],
+        "query": "SELECT DISTINCT backend FROM hourly ORDER BY backend",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "allValue": null,
+        "current": {},
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "llm-ledger"
+        },
+        "definition": "SELECT DISTINCT model FROM hourly ORDER BY model",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model",
+        "options": [],
+        "query": "SELECT DISTINCT model FROM hourly ORDER BY model",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "allValue": null,
+        "current": {},
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "llm-ledger"
+        },
+        "definition": "SELECT DISTINCT CASE WHEN instr(tag,'/')>0 THEN substr(tag,1,instr(tag,'/')-1) ELSE tag END AS program FROM session_program UNION SELECT 'unresolved' ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Program",
+        "multi": true,
+        "name": "program",
+        "options": [],
+        "query": "SELECT DISTINCT CASE WHEN instr(tag,'/')>0 THEN substr(tag,1,instr(tag,'/')-1) ELSE tag END AS program FROM session_program UNION SELECT 'unresolved' ORDER BY 1",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "LLM Spend",
+  "uid": "llm-spend",
+  "version": 1,
+  "weekStart": ""
+}

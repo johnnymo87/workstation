@@ -32,6 +32,19 @@ DEFAULT_EVENTS = "/var/lib/claude-failover-proxy/events.jsonl"
 DEFAULT_SAMPLES = "/var/lib/teamclaude-pool-canary/quota-samples.jsonl"
 DEFAULT_SAMPLES_ARCHIVE = "/var/lib/teamclaude-pool-canary/archive"
 
+QUOTA_WATCH_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS quota_watch_runs (
+  ts INTEGER PRIMARY KEY,          -- T, the quota_samples tick evaluated
+  h0 REAL NOT NULL, burn_h REAL NOT NULL,
+  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+  next_refill_ts INTEGER, next_refill_amt REAL,
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
+
+CREATE TABLE IF NOT EXISTS quota_forecast (
+  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
+"""
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS route (
   request_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, session_id TEXT,
@@ -71,7 +84,7 @@ CREATE TABLE IF NOT EXISTS quota_samples (
   PRIMARY KEY (ts, account));
 
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-"""
+""" + QUOTA_WATCH_SCHEMA_SQL
 
 
 ADVISORY_WARNING_SUBSTRINGS: tuple[str, ...] = ()
@@ -1556,6 +1569,7 @@ def main(argv: list[str] | None = None) -> int:
     qr_parser.add_argument("--until", default="now")
     qr_parser.add_argument("--exclude-account", action="append", default=None)
     qr_parser.add_argument("--host", default=socket.gethostname())
+    qr_parser.add_argument("--record", action="store_true", default=False, help="Record evaluated runs into quota_watch_runs")
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1575,13 +1589,17 @@ def main(argv: list[str] | None = None) -> int:
         since_ms = quota_watch.parse_et_datetime(args.since, end_of_day_for_date=False)
         until_ms = quota_watch.parse_et_datetime(args.until, end_of_day_for_date=True)
         excluded = set(args.exclude_account or [])
-        events = quota_watch.replay(
-            db=args.db,
-            since_ms=since_ms,
-            until_ms=until_ms,
-            excluded=excluded,
-            host=args.host,
-        )
+        try:
+            events = quota_watch.replay(
+                db=args.db,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                excluded=excluded,
+                host=args.host,
+                record=args.record,
+            )
+        except quota_watch.QuotaRecordError:
+            return 1
         for e in events:
             print(e)
         import collections

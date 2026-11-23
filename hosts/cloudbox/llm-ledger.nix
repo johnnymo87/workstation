@@ -115,7 +115,10 @@ Check:
       User = "dev";
       Group = "dev";
       SupplementaryGroups = [ "llm-ledger" ];
-      UMask = "0077";
+      # SQLite gives the journal the DB file's mode (0640 dev:llm-ledger);
+      # UMask 0027 is defence in depth, not what makes it 0640.
+      # StateDirectoryMode 0700 still keeps its own state private.
+      UMask = "0027";
       MemoryMax = "512M";
       Nice = 10;
       TimeoutStartSec = "5min";
@@ -131,7 +134,11 @@ Check:
       # /tmp, which ProtectSystem=strict makes read-only ("disk I/O error" on
       # the first aggregate query, reproduced with systemd-run).
       PrivateTmp = true;
-      ReadWritePaths = [ "/var/lib/llm-quota-watch" ];
+      ReadWritePaths = [
+        "/var/lib/llm-quota-watch"
+        # DELETE journal needs parent dir writable to create/remove ledger.db-journal
+        "/var/lib/llm-ledger"
+      ];
     };
   };
 
