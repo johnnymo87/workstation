@@ -29,6 +29,7 @@ except ImportError:
     import oc_tags
 
 DEFAULT_DB = "/var/lib/llm-ledger/ledger.db"
+DEFAULT_OUTLOOK_JSON = "~/.local/state/llm-ledger/outlook.json"
 DEFAULT_EVENTS = "/var/lib/claude-failover-proxy/events.jsonl"
 DEFAULT_SAMPLES = "/var/lib/teamclaude-pool-canary/quota-samples.jsonl"
 DEFAULT_SAMPLES_ARCHIVE = "/var/lib/teamclaude-pool-canary/archive"
@@ -1915,7 +1916,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # quota-outlook subcommand
     qo_parser = subparsers.add_parser("quota-outlook")
-    qo_parser.add_argument("--db", default=DEFAULT_DB)
+    # --db defaults to None so DEFAULT_DB is read at call time and an explicit --db can be
+    # told apart from the default (it wins over LLM_LEDGER_OUTLOOK_JSON).
+    qo_parser.add_argument("--db", default=None, help="Path to ledger DB (cloudbox default)")
+    # A host without a ledger (devbox) reads a copy of another host's outlook JSON instead,
+    # synced from the git repo branch 'outlook' of johnnymo87/quota-telemetry.
+    qo_parser.add_argument("--from-json", default=None, help="Path to published outlook JSON")
 
     # import-remote subcommand
     remote_parser = subparsers.add_parser("import-remote")
@@ -1947,8 +1953,21 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             import quota_watch
-            db_path = getattr(args, "db", DEFAULT_DB)
-            res = quota_watch.outlook(db=db_path)
+            from_json = args.from_json
+            db_path = args.db
+            if from_json is None and db_path is None:
+                env_json = os.environ.get("LLM_LEDGER_OUTLOOK_JSON")
+                if env_json:
+                    from_json = env_json
+                elif not os.path.exists(DEFAULT_DB):
+                    from_json = os.path.expanduser(DEFAULT_OUTLOOK_JSON)
+                else:
+                    db_path = DEFAULT_DB
+
+            if from_json is not None:
+                res = quota_watch.outlook_from_json(from_json)
+            else:
+                res = quota_watch.outlook(db=db_path or DEFAULT_DB)
             try:
                 payload = json.dumps(res, allow_nan=False) + "\n"
             except (ValueError, TypeError) as e:

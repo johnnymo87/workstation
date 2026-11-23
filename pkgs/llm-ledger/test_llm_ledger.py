@@ -2545,6 +2545,97 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.assertIn("error", data)
         self.assertIn("quota@", data["line"])
 
+    def _remote_json(self, verdict="tight"):
+        import json
+        path = os.path.join(self.tmpdir.name, "remote.json")
+        with open(path, "w") as f:
+            json.dump({"verdict": verdict, "ts": int(time.time() * 1000) - 60000, "h0": 0.4,
+                       "burn_h": 0.03, "zero_h": 3.0, "next_refill_ts": None,
+                       "next_refill_amt": None, "line": "x"}, f)
+        return path
+
+    def _run_outlook(self, argv, env=None):
+        import io
+        import contextlib
+        import json
+        out_buf = io.StringIO()
+        with mock.patch.dict(os.environ, env or {}, clear=False):
+            if env is None or "LLM_LEDGER_OUTLOOK_JSON" not in env:
+                os.environ.pop("LLM_LEDGER_OUTLOOK_JSON", None)
+            with contextlib.redirect_stdout(out_buf):
+                code = llm_ledger.main(argv)
+        self.assertEqual(code, 0)
+        return json.loads(out_buf.getvalue().strip())
+
+    def test_quota_outlook_cli_from_json(self):
+        """--from-json reads a published outlook instead of a ledger DB."""
+        path = self._remote_json("tight")
+        data = self._run_outlook(["quota-outlook", "--from-json", path])
+        self.assertEqual(data["verdict"], "tight")
+        self.assertIn("TIGHT", data["line"])
+
+    def test_quota_outlook_cli_resolution_explicit_db_wins_over_env(self):
+        """Explicit --db wins over LLM_LEDGER_OUTLOOK_JSON."""
+        path = self._remote_json("dry")
+        nonexistent = os.path.join(self.tmpdir.name, "nonexistent.db")
+        data = self._run_outlook(["quota-outlook", "--db", nonexistent],
+                                 env={"LLM_LEDGER_OUTLOOK_JSON": path})
+        self.assertEqual(data["verdict"], "unknown")
+        self.assertFalse(os.path.exists(nonexistent))
+
+    def test_quota_outlook_cli_resolution_env_wins_over_default(self):
+        """LLM_LEDGER_OUTLOOK_JSON wins over default DB and default file."""
+        path = self._remote_json("dry")
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", self.db_path):
+            data = self._run_outlook(["quota-outlook"], env={"LLM_LEDGER_OUTLOOK_JSON": path})
+        self.assertEqual(data["verdict"], "dry")
+
+    def test_quota_outlook_cli_resolution_db_present(self):
+        """When DB is present, default resolution uses DB."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS quota_watch_runs (
+            ts INTEGER PRIMARY KEY, h0 REAL, burn_h REAL, zero_h REAL,
+            next_refill_ts INTEGER, next_refill_amt REAL, source TEXT DEFAULT 'live', verdict TEXT
+        )""")
+        ts = int(time.time() * 1000) - 10000
+        conn.execute("INSERT OR REPLACE INTO quota_watch_runs (ts, h0, burn_h, zero_h, source, verdict) VALUES (?, 1.2, 0.01, 0.0, 'live', 'ample')", (ts,))
+        conn.commit()
+        conn.close()
+
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", self.db_path):
+            data = self._run_outlook(["quota-outlook"])
+        self.assertEqual(data["verdict"], "ample")
+
+    def test_quota_outlook_cli_resolution_db_absent_uses_default_file(self):
+        """When DEFAULT_DB is absent, default resolution uses DEFAULT_OUTLOOK_JSON."""
+        absent_db = os.path.join(self.tmpdir.name, "absent.db")
+        default_file = os.path.join(self.tmpdir.name, "default_outlook.json")
+        with open(default_file, "w") as f:
+            json.dump({"verdict": "ample", "ts": int(time.time() * 1000) - 60000, "h0": 1.5,
+                       "burn_h": 0.02, "zero_h": 0.0, "next_refill_ts": None,
+                       "next_refill_amt": None, "line": "quota line"}, f)
+
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", absent_db), \
+             mock.patch.object(llm_ledger, "DEFAULT_OUTLOOK_JSON", default_file):
+            data = self._run_outlook(["quota-outlook"])
+        self.assertEqual(data["verdict"], "ample")
+        self.assertIn("AMPLE", data["line"])
+
+    def test_quota_outlook_cli_missing_file_error(self):
+        """Missing published outlook file returns unknown with expected error message."""
+        absent_json = os.path.join(self.tmpdir.name, "nonexistent_outlook.json")
+        data = self._run_outlook(["quota-outlook", "--from-json", absent_json])
+        self.assertEqual(data["verdict"], "unknown")
+        self.assertEqual(data["error"], f"no published outlook at {absent_json}")
+        self.assertIn("quota@", data["line"])
+
+        absent_db = os.path.join(self.tmpdir.name, "absent.db")
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", absent_db), \
+             mock.patch.object(llm_ledger, "DEFAULT_OUTLOOK_JSON", absent_json):
+            data_def = self._run_outlook(["quota-outlook"])
+        self.assertEqual(data_def["verdict"], "unknown")
+        self.assertEqual(data_def["error"], f"no published outlook at {absent_json}")
+
 
 class TestImportRemote(unittest.TestCase):
     def setUp(self):
