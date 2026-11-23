@@ -45,7 +45,8 @@ lib.mkIf (isDevbox || isDarwin) (lib.mkMerge [
   })
 
   (lib.mkIf isDarwin {
-    # /usr/bin first so git uses macOS ssh (keychain-aware) for the push.
+    # git from nix, ssh from /usr/bin (as ensure-projects does). The ssh
+    # timeouts stop a push stuck across a lid close from wedging the agent.
     launchd.agents.quota-telemetry-export = {
       enable = true;
       config = {
@@ -54,6 +55,7 @@ lib.mkIf (isDevbox || isDarwin) (lib.mkMerge [
           HOME = config.home.homeDirectory;
           TEAMCLAUDE_USAGE_LOG = ledger;
           PATH = "${pkgs.git}/bin:/usr/bin:/bin";
+          GIT_SSH_COMMAND = "/usr/bin/ssh -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4";
         };
         StartCalendarInterval = [ { Minute = 9; } ];
         RunAtLoad = false;
