@@ -33,10 +33,17 @@
 #   REAUTH_CHROME        Chrome binary
 #   REAUTH_CHROME_PROFILE  --user-data-dir
 #   REAUTH_CDP_PORT      default 9223
+#   REAUTH_CHROME_LABEL  prefix for log lines, default gcloud-reauth-chrome
+#
+# ALSO USED FOR THE AGENT CHROME: the agent-chrome launchd agent in
+# users/dev/home.darwin.nix runs this same wrapper with its own profile
+# (Chrome-Agent) and port (9222). Everything above applies to it unchanged;
+# the env vars are the only difference.
 
 CHROME="${REAUTH_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 PROFILE="${REAUTH_CHROME_PROFILE:-$HOME/Library/Application Support/Chrome-gcloud}"
 PORT="${REAUTH_CDP_PORT:-9223}"
+LABEL="${REAUTH_CHROME_LABEL:-gcloud-reauth-chrome}"
 
 # Captured, then matched with a here-string rather than piped into grep -q: under
 # pipefail an early-exiting grep can EPIPE the writer and turn a match into a
@@ -124,7 +131,7 @@ watch_chrome() {
     if running_files_gone; then
       strikes=$((strikes + 1))
       if [ "$strikes" -ge 2 ]; then
-        echo "gcloud-reauth-chrome: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Killing pid $pid so a fresh one starts." >&2
+        echo "$LABEL: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Killing pid $pid so a fresh one starts." >&2
         # `|| true`: writeShellApplication runs this under errexit, and a kill
         # of a process that has just exited by itself fails.
         kill -KILL "$pid" 2>/dev/null || true
@@ -146,7 +153,7 @@ while cdp_is_chrome; do
 done
 
 if [ ! -x "$CHROME" ]; then
-  echo "gcloud-reauth-chrome: $CHROME missing or not executable" >&2
+  echo "$LABEL: $CHROME missing or not executable" >&2
   exit 1
 fi
 

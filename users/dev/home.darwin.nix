@@ -473,6 +473,33 @@ lib.mkIf isDarwin {
       };
     };
 
+    # The agent Chrome on 127.0.0.1:9222 (reverse-forwarded to devbox and
+    # cloudbox): the browser agents drive, kept apart from everyday browsing.
+    # Same wrapper and same always-on shape as gcloud-reauth-chrome above:
+    # Cmd-Q brings it back windowless within ThrottleInterval, so agents can
+    # rely on 9222 being up. It does not hold up logout or restart; launchd
+    # does not respawn agents while the GUI session is ending. Its profile is
+    # set to clear cookies on exit, so a quit is also how you sign it out of
+    # everything. Stop it for real with:
+    #   launchctl bootout "gui/$(id -u)/org.nix-community.home.agent-chrome"
+    agent-chrome = {
+      enable = true;
+      config = {
+        ProgramArguments = [ "${config.home.profileDirectory}/bin/gcloud-reauth-chrome" ];
+        EnvironmentVariables = {
+          REAUTH_CHROME_PROFILE = "${config.home.homeDirectory}/Library/Application Support/Chrome-Agent";
+          REAUTH_CDP_PORT = "9222";
+          REAUTH_CHROME_LABEL = "agent-chrome";
+        };
+        RunAtLoad = true;
+        KeepAlive = true;
+        ThrottleInterval = 60;
+        ProcessType = "Interactive";
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/agent-chrome.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/agent-chrome.err.log";
+      };
+    };
+
     cloudflared-ccr = {
       enable = true;
       config = {
@@ -1913,6 +1940,27 @@ EOF
       mv "$ctmp" "$cfg"
 
       echo "deployDoltCreds: dolt credential deployed"
+    fi
+  '';
+
+  # 1Password's Touch ID unlock in a Chrome started with --user-data-dir.
+  # The extension unlocks by asking the desktop app over native messaging, and
+  # Chrome looks for the host manifest under <user-data-dir>/NativeMessagingHosts
+  # rather than the default profile's directory, so in the agent profiles the
+  # extension could not reach the app and fell back to the account password.
+  # Symlinked, not copied: 1Password rewrites the default-dir manifest when it
+  # starts. Chrome-gcloud is left alone on purpose (nobody browses in it).
+  home.activation.linkOnePasswordNativeHost = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    appsup="$HOME/Library/Application Support"
+    manifest="$appsup/Google/Chrome/NativeMessagingHosts/com.1password.1password.json"
+    if [ ! -e "$manifest" ]; then
+      echo "linkOnePasswordNativeHost: skipping ($manifest missing; is the 1Password app installed?)"
+    else
+      for p in Chrome-Agent Chrome-VQA-Citadels; do
+        [ -d "$appsup/$p" ] || continue
+        run mkdir -p "$appsup/$p/NativeMessagingHosts"
+        run ln -sfn "$manifest" "$appsup/$p/NativeMessagingHosts/com.1password.1password.json"
+      done
     fi
   '';
 
