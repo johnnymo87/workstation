@@ -190,6 +190,7 @@ in
 {
   imports = [
     ../../modules/goose-cutover.nix
+    ./llm-ledger.nix
   ];
 
   # Guard: abort activation if applying the wrong host's config.
