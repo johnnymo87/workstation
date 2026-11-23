@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import fcntl
 import gzip
@@ -184,19 +185,27 @@ class LedgerLock:
         self.fd: Any = None
         self.acquired = False
 
-    def __enter__(self) -> bool:
+    def __enter__(self) -> LedgerLock:
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         self.fd = open(self.lock_path, "a")
-        flags = fcntl.LOCK_EX if self.blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            fcntl.flock(self.fd, flags)
-            self.acquired = True
-            return True
-        except (BlockingIOError, OSError):
-            self.fd.close()
-            self.fd = None
-            self.acquired = False
-            return False
+        if self.blocking:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX)
+                self.acquired = True
+                return self
+            except Exception:
+                self.fd.close()
+                self.fd = None
+                raise
+        else:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.acquired = True
+            except (BlockingIOError, OSError):
+                self.fd.close()
+                self.fd = None
+                self.acquired = False
+            return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self.fd is not None:
@@ -922,11 +931,33 @@ def step_goose_recheck(
     return len(to_update), recheck_touched_hours
 
 
+def coalesce_hour_ranges(hours: set[int]) -> list[tuple[int, int]]:
+    """Merge sorted hour starts into contiguous [start_ms, end_ms) intervals."""
+    if not hours:
+        return []
+    sorted_h = sorted(hours)
+    ranges: list[tuple[int, int]] = []
+    cur_start = sorted_h[0]
+    cur_end = cur_start + 3_600_000
+    for h in sorted_h[1:]:
+        if h == cur_end:
+            cur_end = h + 3_600_000
+        else:
+            ranges.append((cur_start, cur_end))
+            cur_start = h
+            cur_end = h + 3_600_000
+    ranges.append((cur_start, cur_end))
+    return ranges
+
+
 def step_hourly_rollup(
     conn: sqlite3.Connection,
     touched_hours: set[int] | None = None,
 ) -> int:
     """Step 5: rebuild hourly rollup for touched hours (or all hours if fresh/None).
+
+    Uses index-friendly range predicates (ts >= start_ms AND ts < end_ms) over
+    requests_ts index to avoid full-table scans.
 
     Returns:
         number of hours rebuilt
@@ -960,12 +991,12 @@ def step_hourly_rollup(
     if not touched_hours:
         return 0
 
-    sorted_hours = sorted(touched_hours)
-    for i in range(0, len(sorted_hours), 500):
-        chunk = sorted_hours[i : i + 500]
-        placeholders = ",".join("?" for _ in chunk)
-        conn.execute(f"DELETE FROM hourly WHERE hour IN ({placeholders})", chunk)
-        conn.execute(f"""
+    # Coalesce contiguous hours into [start_ms, end_ms) ranges so the queries
+    # use the requests_ts B-tree index (ts >= ? AND ts < ?) instead of table scans.
+    ranges = coalesce_hour_ranges(touched_hours)
+    for start_ms, end_ms in ranges:
+        conn.execute("DELETE FROM hourly WHERE hour >= ? AND hour < ?", (start_ms, end_ms))
+        conn.execute("""
             INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd)
             SELECT
               (ts / 3600000) * 3600000 AS hour,
@@ -979,11 +1010,11 @@ def step_hourly_rollup(
               COALESCE(SUM(cache_write), 0) AS cache_write,
               COALESCE(SUM(cost_usd), 0.0) AS cost_usd
             FROM requests
-            WHERE (ts / 3600000) * 3600000 IN ({placeholders})
+            WHERE ts >= ? AND ts < ?
             GROUP BY (ts / 3600000) * 3600000, attr_key, COALESCE(backend, ''), COALESCE(model, '')
-        """, chunk)
+        """, (start_ms, end_ms))
     conn.commit()
-    return len(sorted_hours)
+    return len(touched_hours)
 
 
 def step_session_program_snapshot(
@@ -1040,7 +1071,7 @@ def step_session_program_snapshot(
             try:
                 for sid, parent_session_id, working_dir, name, session_type, rtitle in g_conn.execute(
                     "SELECT id, parent_session_id, working_dir, name, session_type, "
-                    "json_extract(recipe_json, '$.title') FROM sessions"
+                    "CASE WHEN json_valid(recipe_json) THEN json_extract(recipe_json, '$.title') END FROM sessions"
                 ):
                     goose_parents[sid] = parent_session_id
                     goose_meta[sid] = (working_dir, name, session_type, rtitle)
@@ -1141,14 +1172,12 @@ def run_ingest(
     take_lock: bool = True,
 ) -> dict[str, Any]:
     """Execute run steps 1-6 under lock."""
-    lock = None
-    if take_lock:
-        lock = LedgerLock(db_path, blocking=False)
-        if not lock.__enter__():
+    lock_ctx: Any = LedgerLock(db_path, blocking=False) if take_lock else contextlib.nullcontext()
+    with lock_ctx as lock:
+        if take_lock and not lock.acquired:
             print(f"llm-ledger: lock {lock.lock_path} is held; exiting")
             return {"locked": True}
 
-    try:
         host = host or socket.gethostname()
         actual_raw_dir = raw_dir or os.path.join(os.path.dirname(os.path.abspath(db_path)), "raw")
 
@@ -1205,9 +1234,6 @@ def run_ingest(
             return counts
         finally:
             conn.close()
-    finally:
-        if lock is not None:
-            lock.__exit__(None, None, None)
 
 
 def rebuild_hourly(
@@ -1215,12 +1241,8 @@ def rebuild_hourly(
     take_lock: bool = True,
 ) -> dict[str, Any]:
     """Rebuild all hourly rollup rows under blocking lock."""
-    lock = None
-    if take_lock:
-        lock = LedgerLock(db_path, blocking=True)
-        lock.__enter__()
-
-    try:
+    lock_ctx: Any = LedgerLock(db_path, blocking=True) if take_lock else contextlib.nullcontext()
+    with lock_ctx:
         conn = open_ledger_db(db_path)
         try:
             hours_rebuilt = step_hourly_rollup(conn, touched_hours=None)
@@ -1235,9 +1257,6 @@ def rebuild_hourly(
             }
         finally:
             conn.close()
-    finally:
-        if lock is not None:
-            lock.__exit__(None, None, None)
 
 
 def import_events(
@@ -1264,12 +1283,8 @@ def import_events(
             "snapshot_rows": 0,
         }
 
-    lock = None
-    if take_lock:
-        lock = LedgerLock(db_path, blocking=True)
-        lock.__enter__()
-
-    try:
+    lock_ctx: Any = LedgerLock(db_path, blocking=True) if take_lock else contextlib.nullcontext()
+    with lock_ctx:
         host = host or socket.gethostname()
         conn = open_ledger_db(db_path)
         try:
@@ -1359,9 +1374,6 @@ def import_events(
             }
         finally:
             conn.close()
-    finally:
-        if lock is not None:
-            lock.__exit__(None, None, None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1391,7 +1403,6 @@ def main(argv: list[str] | None = None) -> int:
     import_parser.add_argument("--goose-db", default=oc_tags.DEFAULT_GOOSE_DB)
     import_parser.add_argument("--tags-db", default=oc_tags.DEFAULT_TAGS_DB)
     import_parser.add_argument("--lgtm-ledger", default=oc_tags.DEFAULT_LGTM_LEDGER)
-    import_parser.add_argument("--goose-recheck-hours", type=int, default=72)
 
     # rebuild-hourly subcommand
     rebuild_parser = subparsers.add_parser("rebuild-hourly")

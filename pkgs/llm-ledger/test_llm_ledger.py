@@ -1844,6 +1844,83 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.assertEqual(row, ("my-tag", "manual"))
         conn.close()
 
+    def test_blocking_lock_raises_on_failure(self):
+        with mock.patch("fcntl.flock", side_effect=OSError("flock failed")):
+            with self.assertRaises(OSError):
+                with llm_ledger.LedgerLock(self.db_path, blocking=True):
+                    pass
+
+    def test_rollup_explain_query_plan_uses_requests_ts_index(self):
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            h = 1700000000000 // 3600000 * 3600000
+            query = """
+                EXPLAIN QUERY PLAN
+                SELECT
+                  (ts / 3600000) * 3600000 AS hour,
+                  attr_key,
+                  COALESCE(backend, '') AS backend,
+                  COALESCE(model, '') AS model,
+                  COUNT(*) AS n,
+                  COALESCE(SUM(input), 0) AS input,
+                  COALESCE(SUM(output), 0) AS output,
+                  COALESCE(SUM(cache_read), 0) AS cache_read,
+                  COALESCE(SUM(cache_write), 0) AS cache_write,
+                  COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+                FROM requests
+                WHERE ts >= ? AND ts < ?
+                GROUP BY (ts / 3600000) * 3600000, attr_key, COALESCE(backend, ''), COALESCE(model, '')
+            """
+            plan = [r[3] for r in conn.execute(query, (h, h + 3600000)).fetchall()]
+            # Confirm that requests_ts index is used by query planner
+            self.assertTrue(
+                any("USING INDEX requests_ts" in step for step in plan),
+                f"Expected requests_ts index in plan: {plan}",
+            )
+        finally:
+            conn.close()
+
+    def test_goose_invalid_recipe_json_does_not_drop_family(self):
+        # Create goose db with one valid and one corrupt recipe_json
+        conn = sqlite3.connect(self.goose_db)
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, working_dir TEXT, "
+            "name TEXT, session_type TEXT, recipe_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES "
+            "('g_good', NULL, '/tmp', 'good-name', 'chat', '{\"title\": \"Good Title\"}'), "
+            "('g_bad', NULL, '/tmp', 'bad-name', 'chat', '{invalid json syntax')"
+        )
+        conn.commit()
+        conn.close()
+
+        ledger_conn = llm_ledger.open_ledger_db(self.db_path)
+        ledger_conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'g_good', 'goose:g_good', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        ledger_conn.execute(
+            "INSERT INTO requests VALUES ('r2', 1700000000000, 'h', 'g_bad', 'goose:g_bad', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        ledger_conn.commit()
+
+        written = llm_ledger.step_session_program_snapshot(
+            conn=ledger_conn, goose_db=self.goose_db, now=1700000000.0
+        )
+        self.assertEqual(written, 2)
+
+        r_good = ledger_conn.execute("SELECT title FROM session_program WHERE attr_key = 'goose:g_good'").fetchone()
+        r_bad = ledger_conn.execute("SELECT title FROM session_program WHERE attr_key = 'goose:g_bad'").fetchone()
+        self.assertEqual(r_good[0], "Good Title")
+        # In bad JSON, recipe_json title is NULL, but fallback to name is 'bad-name'
+        self.assertEqual(r_bad[0], "bad-name")
+        ledger_conn.close()
+
+    def test_import_events_no_goose_recheck_hours_flag(self):
+        # --goose-recheck-hours was removed from import-events
+        with self.assertRaises(SystemExit):
+            llm_ledger.main(["import-events", "dummy.jsonl", "--goose-recheck-hours", "48"])
+
 
 if __name__ == "__main__":
     unittest.main()
