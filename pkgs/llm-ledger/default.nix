@@ -32,6 +32,7 @@ python3.pkgs.buildPythonApplication {
     chmod +x $out/libexec/llm-ledger/llm_ledger.py
 
     makeWrapper ${py}/bin/python3 $out/bin/llm-ledger \
+      --prefix PYTHONPATH : "$out/libexec/llm-ledger" \
       --add-flags "$out/libexec/llm-ledger/llm_ledger.py"
 
     runHook postInstall
