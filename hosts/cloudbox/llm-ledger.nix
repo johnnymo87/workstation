@@ -44,6 +44,8 @@ in
       Nice = 10;
       TimeoutStartSec = "15min";
       ExecStart = "${llmLedger}/bin/llm-ledger run";
+      # On success, clear the failure alert's backoff state so a later failure pages afresh.
+      ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-ledger-failure/alerted";
       Environment = [ "HOME=/home/dev" ];
       # Light hardening only. ProtectSystem=strict / ProtectHome would make
       # /home read-only, and a read-only connection to the WAL-mode opencode,

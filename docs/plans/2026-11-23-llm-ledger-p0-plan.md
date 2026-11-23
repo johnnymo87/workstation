@@ -101,9 +101,12 @@ CREATE TABLE ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ### `session_program` snapshot (every run, after ingest)
 
 For every DISTINCT `attr_key` in `requests`: upsert a row, never delete one.
-- `ses_*`: only if the id exists in opencode.db: `root = root_of(id)`,
+- `ses_*`: if the id exists in opencode.db: `root = root_of(id)`,
   `(tag, source) = effective_tag(root, directory(root), session_tags)`. If the id
-  is gone from opencode.db, leave any existing row as it is.
+  is absent from opencode.db: if a row already exists in `session_program`, leave it
+  untouched (it was resolved while the session existed); if no row exists, attribute it
+  exactly as `load_cfp_aggregate` does: `root = sid`, `(tag, source) = effective_tag(sid, None, session_tags)`,
+  `title = None`.
 - `goose:<sid>`: only if `sid` exists in sessions.db: root = `root_of` within
   goose; tag = tags.db's `goose:<root>` (manual) else `goose_auto_key(...)`
   (auto), exactly as `load_cfp_aggregate` does.
@@ -222,8 +225,12 @@ lgtm keys default to `lgtm-runs`; a held lock exits 0 without writing.
 
 ### After merge (controller)
 
-Deploy, run `llm-ledger import-events
-~/.local/state/llm-ledger/cfp-archive/events-snapshot-2026-11-23.jsonl.gz`, copy
-that snapshot into `/var/lib/llm-ledger/raw/`, and verify: request count ≈ usage
-lines; Σ cost by backend matches a direct parse of events.jsonl; timer runs
-clean twice; the file permissions are `dev:llm-ledger 0640`.
+Deploy. Run manual commands as dev (never sudo) via the store path
+(`systemctl cat llm-ledger` shows it) or `nix run .#llm-ledger --`. Run
+`import-events` only after the first timer run has created the DB (so it gets
+0640):
+`llm-ledger import-events ~/.local/state/llm-ledger/cfp-archive/events-snapshot-2026-11-23.jsonl.gz`.
+Copy the snapshot into `raw/` as dev:
+`cp ~/.local/state/llm-ledger/cfp-archive/events-snapshot-2026-11-23.jsonl.gz /var/lib/llm-ledger/raw/`.
+Verify: request count ≈ usage lines; Σ cost by backend matches a direct parse of
+events.jsonl; timer runs clean twice; the file permissions are `dev:llm-ledger 0640`.

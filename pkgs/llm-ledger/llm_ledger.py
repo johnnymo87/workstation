@@ -8,6 +8,7 @@ import contextlib
 import datetime
 import fcntl
 import gzip
+import hashlib
 import json
 import os
 import socket
@@ -71,6 +72,28 @@ CREATE TABLE IF NOT EXISTS quota_samples (
 
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
+
+
+def is_advisory_warning(warning: str) -> bool:
+    """Determine whether a warning is advisory (non-fatal) vs fatal.
+
+    Fatal warnings cause exit code 1 so systemd's OnFailure alert fires.
+    Advisory warnings (e.g. rejected rows in lgtm goose ledger due to schema
+    or timestamp noise) indicate non-critical data quality notes that should be
+    reported to stderr without paging/failing the entire ledger service.
+    """
+    if "lgtm goose ledger:" in warning and "row(s) not counted" in warning:
+        return True
+    return False
+
+
+def add_warning(warnings: list[str] | None, msg: str) -> None:
+    """Add a warning to the list if not already present, or print to stderr if no list."""
+    if warnings is not None:
+        if msg not in warnings:
+            warnings.append(msg)
+    else:
+        sys.stderr.write(f"warning: {msg}\n")
 
 
 def to_int(val: Any) -> int | None:
@@ -296,6 +319,7 @@ def process_batch(
     tags_db: str | None,
     lgtm_ledger: str | None,
     tag_map: dict[str, str],
+    warnings: list[str] | None = None,
 ) -> tuple[int, int, int, int, set[int]]:
     """Process pre-parsed lines, inserting routes and requests into conn.
 
@@ -418,6 +442,7 @@ def process_batch(
             lgtm_ledger=lgtm_ledger,
             since_ms=min_ts,
             until_ms=max_ts_g + 1,
+            warnings=warnings,
         )
 
     requests_rows = []
@@ -505,6 +530,7 @@ def process_batch(
                     lgtm_ledger=lgtm_ledger,
                     since_ms=min(goose_fill_ts),
                     until_ms=max(goose_fill_ts) + 1,
+                    warnings=warnings,
                 )
 
             updates = []
@@ -537,6 +563,7 @@ def step_cfp_tail_and_archive(
     tags_db: str | None = None,
     lgtm_ledger: str | None = None,
     batch_size: int = 50000,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Step 1 & 2: cfp tail ingest and raw gzip archive."""
     state = get_ingest_state(conn)
@@ -547,10 +574,17 @@ def step_cfp_tail_and_archive(
         if "cfp_archived_through_ts" in state
         else None
     )
+    stored_head_sha = state.get("cfp_head_sha")
+    stored_head_len = int(state["cfp_head_len"]) if "cfp_head_len" in state else None
+
+    if not os.path.exists(events_path):
+        add_warning(warnings, f"events file not found: {events_path}")
+        return {"new_routes": 0, "new_requests": 0, "malformed": 0, "touched_hours": set()}
 
     try:
         f = open(events_path, "rb")
-    except OSError:
+    except OSError as e:
+        add_warning(warnings, f"failed to read events file {events_path}: {e}")
         return {"new_routes": 0, "new_requests": 0, "malformed": 0, "touched_hours": set()}
 
     with f:
@@ -558,9 +592,22 @@ def step_cfp_tail_and_archive(
         cur_inode = st.st_ino
         cur_size = st.st_size
 
-        is_restart = (stored_inode is not None) and (
-            cur_inode != stored_inode or cur_size < stored_offset
-        )
+        is_restart = False
+        if stored_inode is not None:
+            if cur_inode != stored_inode or cur_size < stored_offset:
+                is_restart = True
+            else:
+                # Inode matches and cur_size >= stored_offset
+                if stored_head_sha is not None and stored_head_len is not None:
+                    f.seek(0)
+                    head_data = f.read(stored_head_len)
+                    if len(head_data) != stored_head_len or hashlib.sha256(head_data).hexdigest() != stored_head_sha:
+                        is_restart = True
+                if not is_restart and stored_offset > 0:
+                    f.seek(stored_offset - 1)
+                    if f.read(1) != b"\n":
+                        is_restart = True
+
         read_offset = 0 if (is_restart or stored_inode is None) else stored_offset
         cutoff = (
             (stored_archived_ts - 600_000)
@@ -576,12 +623,14 @@ def step_cfp_tail_and_archive(
         # Load session tags if tags.db exists
         tag_map: dict[str, str] = {}
         actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-        if actual_tags_db and os.path.exists(actual_tags_db):
+        if not actual_tags_db or not os.path.exists(actual_tags_db):
+            add_warning(warnings, f"tags db not found: {actual_tags_db}")
+        else:
             try:
                 with oc_tags.open_store(actual_tags_db, readonly=True) as store:
                     tag_map = oc_tags.session_tags(store)
-            except Exception:
-                tag_map = {}
+            except Exception as e:
+                add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
 
         total_new_routes = 0
         total_new_requests = 0
@@ -626,6 +675,7 @@ def step_cfp_tail_and_archive(
                 tags_db=tags_db,
                 lgtm_ledger=lgtm_ledger,
                 tag_map=tag_map,
+                warnings=warnings,
             )
 
             total_new_routes += routes_n
@@ -636,6 +686,14 @@ def step_cfp_tail_and_archive(
                 current_archived_through_ts = batch_max_ts
 
             batch_end_offset = current_offset + byte_len
+
+            # Read head bytes from the same fd at commit time
+            saved_pos = f.tell()
+            f.seek(0)
+            cur_head_bytes = f.read(4096)
+            f.seek(saved_pos)
+            cur_head_len = len(cur_head_bytes)
+            cur_head_sha = hashlib.sha256(cur_head_bytes).hexdigest()
 
             # Commit DB transaction including offset and inode
             conn.execute(
@@ -649,6 +707,14 @@ def step_cfp_tail_and_archive(
             conn.execute(
                 "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_archived_through_ts', ?)",
                 (str(current_archived_through_ts),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_head_sha', ?)",
+                (cur_head_sha,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('cfp_head_len', ?)",
+                (str(cur_head_len),),
             )
             conn.commit()
             current_offset = batch_end_offset
@@ -865,6 +931,7 @@ def step_goose_recheck(
     lgtm_ledger: str | None = None,
     goose_recheck_hours: int = 72,
     now: float | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[int, set[int]]:
     """Step 4: recheck goose-shaped requests within goose_recheck_hours window.
 
@@ -895,12 +962,14 @@ def step_goose_recheck(
 
     tag_map: dict[str, str] = {}
     actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-    if actual_tags_db and os.path.exists(actual_tags_db):
+    if not actual_tags_db or not os.path.exists(actual_tags_db):
+        add_warning(warnings, f"tags db not found: {actual_tags_db}")
+    else:
         try:
             with oc_tags.open_store(actual_tags_db, readonly=True) as store:
                 tag_map = oc_tags.session_tags(store)
-        except Exception:
-            tag_map = {}
+        except Exception as e:
+            add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
 
     resolver = oc_tags.CfpSessionResolver(
         session_ids=goose_sids,
@@ -910,6 +979,7 @@ def step_goose_recheck(
         lgtm_ledger=lgtm_ledger,
         since_ms=min_ts,
         until_ms=max_ts + 1,
+        warnings=warnings,
     )
 
     to_update: list[tuple[str, str]] = []
@@ -1023,6 +1093,7 @@ def step_session_program_snapshot(
     goose_db: str | None = None,
     tags_db: str | None = None,
     now: float | None = None,
+    warnings: list[str] | None = None,
 ) -> int:
     """Step 6: update session_program snapshot.
 
@@ -1059,7 +1130,7 @@ def step_session_program_snapshot(
             finally:
                 oc_conn.close()
         except Exception as e:
-            sys.stderr.write(f"warning: failed to read opencode db {actual_opencode_db}: {e}\n")
+            add_warning(warnings, f"failed to read opencode db {actual_opencode_db}: {e}")
 
     goose_parents: dict[str, str | None] = {}
     goose_meta: dict[str, tuple[str | None, str | None, str | None, str | None]] = {}
@@ -1079,16 +1150,19 @@ def step_session_program_snapshot(
             finally:
                 g_conn.close()
         except Exception as e:
-            sys.stderr.write(f"warning: failed to read goose db {actual_goose_db}: {e}\n")
+            add_warning(warnings, f"failed to read goose db {actual_goose_db}: {e}")
 
     tag_map: dict[str, str] = {}
     actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-    if actual_tags_db and os.path.exists(actual_tags_db):
-        try:
-            with oc_tags.open_store(actual_tags_db, readonly=True) as store:
-                tag_map = oc_tags.session_tags(store)
-        except Exception as e:
-            sys.stderr.write(f"warning: failed to read tags db {actual_tags_db}: {e}\n")
+    if not actual_tags_db or not os.path.exists(actual_tags_db):
+        add_warning(warnings, f"tags db not found: {actual_tags_db}")
+        return 0
+    try:
+        with oc_tags.open_store(actual_tags_db, readonly=True) as store:
+            tag_map = oc_tags.session_tags(store)
+    except Exception as e:
+        add_warning(warnings, f"failed to read tags db {actual_tags_db}: {e}")
+        return 0
 
     attr_keys = [r[0] for r in conn.execute("SELECT DISTINCT attr_key FROM requests")]
     to_upsert: list[tuple[str, str, str, str | None, str | None, int]] = []
@@ -1099,11 +1173,17 @@ def step_session_program_snapshot(
             if not opencode_loaded:
                 continue
             if attr_key not in opencode_parents:
-                continue
-            root = oc_tags.root_of(attr_key, opencode_parents)
-            tag, source = oc_tags.effective_tag(root, opencode_dirs.get(root), tag_map)
-            title = opencode_titles.get(root)
-            resolved = (tag, source, root, title)
+                if attr_key in existing_sp:
+                    continue
+                root = attr_key
+                tag, source = oc_tags.effective_tag(attr_key, None, tag_map)
+                title = None
+                resolved = (tag, source, root, title)
+            else:
+                root = oc_tags.root_of(attr_key, opencode_parents)
+                tag, source = oc_tags.effective_tag(root, opencode_dirs.get(root), tag_map)
+                title = opencode_titles.get(root)
+                resolved = (tag, source, root, title)
         elif attr_key.startswith("goose:"):
             if not goose_loaded:
                 continue
@@ -1170,13 +1250,15 @@ def run_ingest(
     goose_recheck_hours: int = 72,
     now: float | None = None,
     take_lock: bool = True,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute run steps 1-6 under lock."""
+    warnings_list = warnings if warnings is not None else []
     lock_ctx: Any = LedgerLock(db_path, blocking=False) if take_lock else contextlib.nullcontext()
     with lock_ctx as lock:
         if take_lock and not lock.acquired:
             print(f"llm-ledger: lock {lock.lock_path} is held; exiting")
-            return {"locked": True}
+            return {"locked": True, "warnings": warnings_list}
 
         host = host or socket.gethostname()
         actual_raw_dir = raw_dir or os.path.join(os.path.dirname(os.path.abspath(db_path)), "raw")
@@ -1192,6 +1274,7 @@ def run_ingest(
                 goose_db=goose_db,
                 tags_db=tags_db,
                 lgtm_ledger=lgtm_ledger,
+                warnings=warnings_list,
             )
             touched_hours: set[int] = counts.pop("touched_hours", set())
 
@@ -1215,6 +1298,7 @@ def run_ingest(
                 lgtm_ledger=lgtm_ledger,
                 goose_recheck_hours=goose_recheck_hours,
                 now=now,
+                warnings=warnings_list,
             )
             counts["rechecked"] = rechecked_count
             touched_hours.update(recheck_hours)
@@ -1228,8 +1312,10 @@ def run_ingest(
                 goose_db=goose_db,
                 tags_db=tags_db,
                 now=now,
+                warnings=warnings_list,
             )
             counts["snapshot_rows"] = snapshot_rows
+            counts["warnings"] = warnings_list
 
             return counts
         finally:
@@ -1270,8 +1356,10 @@ def import_events(
     batch_size: int = 50000,
     take_lock: bool = True,
     now: float | None = None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     """Import events from files (plain or .gz) without touching tail state or raw archive."""
+    warnings_list = warnings if warnings is not None else []
     if not files:
         return {
             "new_routes": 0,
@@ -1281,6 +1369,7 @@ def import_events(
             "rechecked": 0,
             "hours_rebuilt": 0,
             "snapshot_rows": 0,
+            "warnings": warnings_list,
         }
 
     lock_ctx: Any = LedgerLock(db_path, blocking=True) if take_lock else contextlib.nullcontext()
@@ -1290,12 +1379,17 @@ def import_events(
         try:
             tag_map: dict[str, str] = {}
             actual_tags_db = tags_db or oc_tags.DEFAULT_TAGS_DB
-            if actual_tags_db and os.path.exists(actual_tags_db):
+            tags_loaded = True
+            if not actual_tags_db or not os.path.exists(actual_tags_db):
+                add_warning(warnings_list, f"tags db not found: {actual_tags_db}")
+                tags_loaded = False
+            else:
                 try:
                     with oc_tags.open_store(actual_tags_db, readonly=True) as store:
                         tag_map = oc_tags.session_tags(store)
-                except Exception:
-                    tag_map = {}
+                except Exception as e:
+                    add_warning(warnings_list, f"failed to read tags db {actual_tags_db}: {e}")
+                    tags_loaded = False
 
             total_new_routes = 0
             total_new_requests = 0
@@ -1304,13 +1398,24 @@ def import_events(
 
             for filepath in files:
                 if not os.path.exists(filepath):
+                    add_warning(warnings_list, f"events file not found: {filepath}")
                     continue
 
                 open_fn = gzip.open if filepath.endswith(".gz") else open
-                with open_fn(filepath, "rb") as f:
+                try:
+                    f = open_fn(filepath, "rb")
+                except OSError as e:
+                    add_warning(warnings_list, f"failed to read events file {filepath}: {e}")
+                    continue
+
+                with f:
                     batch: list[bytes] = []
                     while True:
-                        line = f.readline()
+                        try:
+                            line = f.readline()
+                        except (EOFError, zlib.error) as e:
+                            add_warning(warnings_list, f"truncated gzip file {filepath}: {e}")
+                            break
                         if not line:
                             break
                         batch.append(line)
@@ -1325,6 +1430,7 @@ def import_events(
                                 tags_db=tags_db,
                                 lgtm_ledger=lgtm_ledger,
                                 tag_map=tag_map,
+                                warnings=warnings_list,
                             )
                             conn.commit()
                             total_new_routes += r_n
@@ -1344,6 +1450,7 @@ def import_events(
                             tags_db=tags_db,
                             lgtm_ledger=lgtm_ledger,
                             tag_map=tag_map,
+                            warnings=warnings_list,
                         )
                         conn.commit()
                         total_new_routes += r_n
@@ -1355,13 +1462,16 @@ def import_events(
             hours_rebuilt = step_hourly_rollup(conn=conn, touched_hours=touched_hours)
 
             # Step 6: snapshot
-            snapshot_rows = step_session_program_snapshot(
-                conn=conn,
-                opencode_db=opencode_db,
-                goose_db=goose_db,
-                tags_db=tags_db,
-                now=now,
-            )
+            snapshot_rows = 0
+            if tags_loaded:
+                snapshot_rows = step_session_program_snapshot(
+                    conn=conn,
+                    opencode_db=opencode_db,
+                    goose_db=goose_db,
+                    tags_db=tags_db,
+                    now=now,
+                    warnings=warnings_list,
+                )
 
             return {
                 "new_routes": total_new_routes,
@@ -1371,6 +1481,7 @@ def import_events(
                 "rechecked": 0,
                 "hours_rebuilt": hours_rebuilt,
                 "snapshot_rows": snapshot_rows,
+                "warnings": warnings_list,
             }
         finally:
             conn.close()
@@ -1454,7 +1565,13 @@ def main(argv: list[str] | None = None) -> int:
         f"elapsed={elapsed:.2f}s"
     )
     print(summary)
-    return 0
+
+    warnings: list[str] = counts.get("warnings", [])
+    for w in warnings:
+        sys.stderr.write(f"warning: {w}\n")
+
+    has_fatal = any(not is_advisory_warning(w) for w in warnings)
+    return 1 if has_fatal else 0
 
 
 if __name__ == "__main__":

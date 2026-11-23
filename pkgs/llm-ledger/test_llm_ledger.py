@@ -33,6 +33,9 @@ class TestLlmLedger(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
         self.events_path = os.path.join(self.tmpdir.name, "events.jsonl")
         self.raw_dir = os.path.join(self.tmpdir.name, "raw")
+        self.tags_db = os.path.join(self.tmpdir.name, "tags.db")
+        with oc_tags.open_store(self.tags_db) as _:
+            pass
         self.samples_path = os.path.join(self.tmpdir.name, "quota-samples.jsonl")
         self.samples_archive = os.path.join(self.tmpdir.name, "archive")
         self.orig_default_samples = llm_ledger.DEFAULT_SAMPLES
@@ -399,7 +402,110 @@ class TestLlmLedger(unittest.TestCase):
 
         conn = llm_ledger.open_ledger_db(self.db_path)
         try:
-            self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 3)
+            reqs = {r[0] for r in conn.execute("SELECT request_id FROM requests").fetchall()}
+            self.assertEqual(reqs, {"r1", "r2", "r3"})
+        finally:
+            conn.close()
+
+    def test_inode_reuse_head_sha_mismatch_restarts(self):
+        # File 1 has 2 lines
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
+        line2 = json.dumps({"type": "usage", "ts": 200, "requestId": "r2", "cost": 0.01, "backend": "b"}) + "\n"
+        with open(self.events_path, "w") as f:
+            f.write(line1)
+            f.write(line2)
+
+        orig_ino = os.stat(self.events_path).st_ino
+        ret1 = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+        )
+        self.assertEqual(ret1["new_requests"], 2)
+
+        # Check ingest_state has cfp_head_sha and cfp_head_len
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            state = llm_ledger.get_ingest_state(conn)
+            self.assertIn("cfp_head_sha", state)
+            self.assertIn("cfp_head_len", state)
+            stored_offset = int(state["cfp_offset"])
+        finally:
+            conn.close()
+
+        # Overwrite file in-place (same inode, size >= stored_offset, but head content different)
+        line_diff_1 = json.dumps({"type": "usage", "ts": 300, "requestId": "r_diff_1", "cost": 0.02, "backend": "b"}) + "\n"
+        line_diff_2 = json.dumps({"type": "usage", "ts": 400, "requestId": "r_diff_2", "cost": 0.02, "backend": "b"}) + "\n"
+        content = (line_diff_1 + line_diff_2).encode("utf-8")
+        # Ensure new content is at least as large as stored_offset
+        if len(content) < stored_offset:
+            content += b" " * (stored_offset - len(content)) + b"\n"
+
+        with open(self.events_path, "r+b") as f:
+            f.seek(0)
+            f.write(content)
+            f.truncate()
+
+        cur_ino = os.stat(self.events_path).st_ino
+        self.assertEqual(cur_ino, orig_ino)
+        self.assertGreaterEqual(os.stat(self.events_path).st_size, stored_offset)
+
+        ret2 = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+        )
+        # Restarted from offset 0, so r_diff_1 and r_diff_2 are ingested without rows lost
+        self.assertGreaterEqual(ret2["new_requests"], 2)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            reqs = {r[0] for r in conn.execute("SELECT request_id FROM requests").fetchall()}
+            self.assertTrue({"r1", "r2", "r_diff_1", "r_diff_2"}.issubset(reqs))
+        finally:
+            conn.close()
+
+    def test_inode_reuse_non_newline_at_offset_minus_one_restarts(self):
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
+        line2 = json.dumps({"type": "usage", "ts": 200, "requestId": "r2", "cost": 0.01, "backend": "b"}) + "\n\n"
+        with open(self.events_path, "w") as f:
+            f.write(line1)
+            f.write(line2)
+
+        ret1 = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+        )
+        self.assertEqual(ret1["new_requests"], 2)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            state = llm_ledger.get_ingest_state(conn)
+            stored_offset = int(state["cfp_offset"])
+        finally:
+            conn.close()
+
+        # Mutate the byte at stored_offset - 1 so it is not b"\n", but keep head intact
+        with open(self.events_path, "r+b") as f:
+            f.seek(stored_offset - 1)
+            f.write(b"X\n")
+            # Append a new line after offset
+            new_line = json.dumps({"type": "usage", "ts": 300, "requestId": "r3", "cost": 0.01, "backend": "b"}) + "\n"
+            f.write(new_line.encode("utf-8"))
+
+        ret2 = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+        )
+        # Because byte at offset-1 wasn't \n, it restarts from 0
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            reqs = {r[0] for r in conn.execute("SELECT request_id FROM requests").fetchall()}
+            self.assertIn("r1", reqs)
+            self.assertIn("r2", reqs)
+            self.assertIn("r3", reqs)
         finally:
             conn.close()
 
@@ -714,6 +820,7 @@ class TestLlmLedger(unittest.TestCase):
                 "--db", self.db_path,
                 "--events", self.events_path,
                 "--raw-dir", self.raw_dir,
+                "--tags-db", self.tags_db,
             ])
         self.assertEqual(exit_code, 0)
         self.assertIn("routes=1 requests=1", out.getvalue())
@@ -721,6 +828,183 @@ class TestLlmLedger(unittest.TestCase):
         conn = llm_ledger.open_ledger_db(self.db_path)
         try:
             self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_run_missing_tags_db_warns_skips_snapshot_and_exits_1(self):
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
+        with open(self.events_path, "w") as f:
+            f.write(line1)
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "run",
+                "--db", self.db_path,
+                "--events", self.events_path,
+                "--raw-dir", self.raw_dir,
+                "--tags-db", "/nonexistent/tags.db",
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("tags db not found", err.getvalue())
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            # Request was still ingested
+            self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
+            # But snapshot was skipped
+            self.assertEqual(conn.execute("SELECT count(*) FROM session_program").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_run_corrupt_tags_db_warns_skips_snapshot_and_exits_1(self):
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"}) + "\n"
+        with open(self.events_path, "w") as f:
+            f.write(line1)
+
+        corrupt_tags = os.path.join(self.tmpdir.name, "corrupt_tags.db")
+        with open(corrupt_tags, "wb") as f:
+            f.write(b"NOT A SQLITE FILE")
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "run",
+                "--db", self.db_path,
+                "--events", self.events_path,
+                "--raw-dir", self.raw_dir,
+                "--tags-db", corrupt_tags,
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("failed to read tags db", err.getvalue())
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM session_program").fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_run_missing_events_file_warns_and_exits_1(self):
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "run",
+                "--db", self.db_path,
+                "--events", "/nonexistent/events.jsonl",
+                "--raw-dir", self.raw_dir,
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("events file not found", err.getvalue())
+
+    def test_advisory_warning_keeps_exit_0(self):
+        # Create a valid tags.db so tags loading doesn't trigger a fatal warning
+        tags_db = os.path.join(self.tmpdir.name, "tags.db")
+        with oc_tags.open_store(tags_db) as _:
+            pass
+
+        # Goose-shaped sessionId so CfpSessionResolver is constructed
+        route_line = json.dumps({"type": "route", "ts": 100, "requestId": "r1", "sessionId": "20261123_1", "model": "m"})
+        usage_line = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"})
+        with open(self.events_path, "w") as f:
+            f.write(route_line + "\n" + usage_line + "\n")
+
+        # Mock CfpSessionResolver to inject an advisory warning
+        orig_resolver = oc_tags.CfpSessionResolver
+        def mock_resolver(*args, **kwargs):
+            warns = kwargs.get("warnings")
+            if warns is not None:
+                warns.append("lgtm goose ledger: 3 row(s) not counted (unknown schema, kind, or timestamp) in /path")
+            return orig_resolver(*args, **kwargs)
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with mock.patch("oc_tags.CfpSessionResolver", side_effect=mock_resolver):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_code = llm_ledger.main([
+                    "run",
+                    "--db", self.db_path,
+                    "--events", self.events_path,
+                    "--raw-dir", self.raw_dir,
+                    "--tags-db", tags_db,
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("lgtm goose ledger: 3 row(s) not counted", err.getvalue())
+
+    def test_fatal_resolver_warning_causes_exit_1(self):
+        tags_db = os.path.join(self.tmpdir.name, "tags.db")
+        with oc_tags.open_store(tags_db) as _:
+            pass
+
+        route_line = json.dumps({"type": "route", "ts": 100, "requestId": "r1", "sessionId": "20261123_1", "model": "m"})
+        usage_line = json.dumps({"type": "usage", "ts": 100, "requestId": "r1", "cost": 0.01, "backend": "b"})
+        with open(self.events_path, "w") as f:
+            f.write(route_line + "\n" + usage_line + "\n")
+
+        orig_resolver = oc_tags.CfpSessionResolver
+        def mock_resolver(*args, **kwargs):
+            warns = kwargs.get("warnings")
+            if warns is not None:
+                warns.append("goose sessions not read for cfp join: database disk image is malformed")
+            return orig_resolver(*args, **kwargs)
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with mock.patch("oc_tags.CfpSessionResolver", side_effect=mock_resolver):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_code = llm_ledger.main([
+                    "run",
+                    "--db", self.db_path,
+                    "--events", self.events_path,
+                    "--raw-dir", self.raw_dir,
+                    "--tags-db", tags_db,
+                ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("goose sessions not read for cfp join", err.getvalue())
+
+    def test_import_events_truncated_gzip_keeps_prior_rows_warns_and_exits_1(self):
+        # Create a valid gz stream followed by truncated member
+        line1 = json.dumps({"type": "usage", "ts": 100, "requestId": "r-gz-1", "cost": 0.01, "backend": "b"}) + "\n"
+        line2 = json.dumps({"type": "usage", "ts": 200, "requestId": "r-gz-2", "cost": 0.01, "backend": "b"}) + "\n"
+        valid_gz = gzip.compress((line1 + line2).encode("utf-8"))
+
+        # Append truncated gzip header (first 5 bytes of a new gzip member)
+        truncated_gz_path = os.path.join(self.tmpdir.name, "truncated.jsonl.gz")
+        with open(truncated_gz_path, "wb") as f:
+            f.write(valid_gz)
+            f.write(b"\x1f\x8b\x08\x00\x00")  # Incomplete gzip member header
+
+        import io
+        import contextlib
+        err = io.StringIO()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            exit_code = llm_ledger.main([
+                "import-events",
+                truncated_gz_path,
+                "--db", self.db_path,
+            ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("truncated gzip file", err.getvalue())
+
+        # Verify prior rows were kept and committed into DB
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            reqs = {r[0] for r in conn.execute("SELECT request_id FROM requests").fetchall()}
+            self.assertEqual(reqs, {"r-gz-1", "r-gz-2"})
         finally:
             conn.close()
 
@@ -1273,6 +1557,8 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.opencode_db = os.path.join(self.tmpdir.name, "opencode.db")
         self.goose_db = os.path.join(self.tmpdir.name, "goose.db")
         self.tags_db = os.path.join(self.tmpdir.name, "tags.db")
+        with oc_tags.open_store(self.tags_db) as _:
+            pass
         self.lgtm_ledger = os.path.join(self.tmpdir.name, "lgtm.jsonl")
         self.samples_path = os.path.join(self.tmpdir.name, "quota-samples.jsonl")
         self.samples_archive = os.path.join(self.tmpdir.name, "archive")
@@ -1664,6 +1950,57 @@ class TestLlmLedgerTask4(unittest.TestCase):
         self.assertEqual(r1, r2)
         conn.close()
 
+    def test_snapshot_absent_ses_without_existing_row_gets_attributed(self):
+        # Session not in opencode.db, but tagged in tags.db (like short-lived lgtm sessions)
+        self._create_opencode_db([])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_lgtm_absent", "lgtm-runs")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_lgtm_absent', 'ses_lgtm_absent', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.execute(
+            "INSERT INTO requests VALUES ('r2', 1700000000000, 'h', 'ses_untagged_absent', 'ses_untagged_absent', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        conn.commit()
+
+        written = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700000000.0
+        )
+        self.assertEqual(written, 2)
+
+        r1 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'ses_lgtm_absent'").fetchone()
+        self.assertEqual(r1, ("lgtm-runs", "manual", "ses_lgtm_absent", None))
+
+        r2 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'ses_untagged_absent'").fetchone()
+        self.assertEqual(r2, ("auto:no-dir", "auto", "ses_untagged_absent", None))
+        conn.close()
+
+    def test_snapshot_absent_ses_with_existing_row_remains_untouched(self):
+        self._create_opencode_db([])
+        with oc_tags.open_store(self.tags_db) as st:
+            oc_tags.set_session_tag(st, "ses_prior", "new-tag")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO requests VALUES ('r1', 1700000000000, 'h', 'ses_prior', 'ses_prior', 'b', 'm', 1, 1, 0, 0, 0.01, 200, 10)"
+        )
+        # Pre-existing row resolved previously while session existed
+        conn.execute(
+            "INSERT INTO session_program VALUES ('ses_prior', 'old-tag', 'manual', 'ses_prior_root', 'Prior Title', 1700000000000)"
+        )
+        conn.commit()
+
+        written = llm_ledger.step_session_program_snapshot(
+            conn=conn, opencode_db=self.opencode_db, tags_db=self.tags_db, now=1700001000.0
+        )
+        self.assertEqual(written, 0)
+
+        r = conn.execute("SELECT tag, source, root, title, updated_at FROM session_program WHERE attr_key = 'ses_prior'").fetchone()
+        self.assertEqual(r, ("old-tag", "manual", "ses_prior_root", "Prior Title", 1700000000000))
+        conn.close()
+
     def test_snapshot_goose_root_tag_and_auto(self):
         self._create_goose_db([
             ("g_root", None, "/home/dev/work", "goose-name", "chat", "Recipe Title"),
@@ -1743,7 +2080,7 @@ class TestLlmLedgerTask4(unittest.TestCase):
         )
         conn.commit()
 
-        llm_ledger.step_session_program_snapshot(conn=conn, now=1700000000.0)
+        llm_ledger.step_session_program_snapshot(conn=conn, tags_db=self.tags_db, now=1700000000.0)
 
         r1 = conn.execute("SELECT tag, source, root, title FROM session_program WHERE attr_key = 'cfp:unrouted'").fetchone()
         self.assertEqual(r1, ("cfp:unrouted", "manual", "cfp:unrouted", None))
@@ -1905,7 +2242,7 @@ class TestLlmLedgerTask4(unittest.TestCase):
         ledger_conn.commit()
 
         written = llm_ledger.step_session_program_snapshot(
-            conn=ledger_conn, goose_db=self.goose_db, now=1700000000.0
+            conn=ledger_conn, goose_db=self.goose_db, tags_db=self.tags_db, now=1700000000.0
         )
         self.assertEqual(written, 2)
 
