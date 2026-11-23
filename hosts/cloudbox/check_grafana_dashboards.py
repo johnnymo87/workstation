@@ -60,7 +60,7 @@ def lint_dashboard(path: Path, raw_text: str, data: dict[str, Any], seen_uids: s
                 errors.append(f"{path}: variable '{vname}' datasource must be {expected_ds}, got {v_ds}")
             v_query = var.get("query", "")
             if isinstance(v_query, str):
-                if re.search(r"\baccount\s*(=|IN\b|LIKE\b)", v_query, re.IGNORECASE):
+                if re.search(r"\baccount\s*(!=|<>|=|IN\b|LIKE\b)", v_query, re.IGNORECASE):
                     errors.append(f"{path}: variable '{vname}' SQL contains forbidden account filter: {v_query}")
 
     # 5. Panel & target linting
@@ -84,31 +84,95 @@ def lint_dashboard(path: Path, raw_text: str, data: dict[str, Any], seen_uids: s
                 errors.append(f"{path}: panel '{p_title}' target '{t_ref}' rawQueryText does not match queryText")
 
             sql = raw_qt or ""
-            # No account literal comparisons (account = / IN / LIKE)
-            if re.search(r"\baccount\s*(=|IN\b|LIKE\b)", sql, re.IGNORECASE):
+            # No account literal comparisons (account = / != / <> / IN / LIKE)
+            if re.search(r"\baccount\s*(!=|<>|=|IN\b|LIKE\b)", sql, re.IGNORECASE):
                 errors.append(f"{path}: panel '{p_title}' target '{t_ref}' contains forbidden account filter")
 
-            # Every query reading requests/hourly/quota_samples must have $__from and $__to
-            reads_bounded_tables = any(
-                re.search(rf"\b{table}\b", sql, re.IGNORECASE)
-                for table in ["requests", "hourly", "quota_samples"]
+            # Every query reading requests/hourly/quota_samples must have $__from/${__from} and $__to/${__to}
+            reads_bounded_tables = bool(
+                re.search(
+                    r"\b(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)?(?:requests|hourly|quota_samples)\b",
+                    sql,
+                    re.IGNORECASE,
+                )
             )
             if reads_bounded_tables:
-                if "$__from" not in sql or "$__to" not in sql:
+                has_from = "$__from" in sql or "${__from}" in sql
+                has_to = "$__to" in sql or "${__to}" in sql
+                if not (has_from and has_to):
                     errors.append(
                         f"{path}: panel '{p_title}' target '{t_ref}' reads bounded table but lacks $__from or $__to: {sql}"
                     )
 
+        # 6. Override matchers and fieldConfig links linting
+        fc = panel.get("fieldConfig", {})
+        overrides = fc.get("overrides", [])
+        for ov_idx, override in enumerate(overrides):
+            matcher = override.get("matcher", {})
+            if matcher.get("id") == "byName":
+                opt = matcher.get("options")
+                if isinstance(opt, str):
+                    pat = rf'(?i:\bAS\s+)(?:\"{re.escape(opt)}\"(?!\w)|{re.escape(opt)}\b)'
+                    found = any(
+                        re.search(pat, target.get("rawQueryText") or "")
+                        for target in targets
+                    )
+                    if not found:
+                        errors.append(
+                            f"{path}: panel '{p_title}' override[{ov_idx}] matcher byName option '{opt}' does not appear as column alias in any target"
+                        )
+
+        links_to_check: list[dict[str, Any]] = []
+        for link in fc.get("defaults", {}).get("links", []):
+            if isinstance(link, dict):
+                links_to_check.append(link)
+        for override in overrides:
+            for prop in override.get("properties", []):
+                if prop.get("id") == "links":
+                    val = prop.get("value")
+                    if isinstance(val, list):
+                        for link in val:
+                            if isinstance(link, dict):
+                                links_to_check.append(link)
+        for link in links_to_check:
+            url = link.get("url", "")
+            if "${__url}" in url:
+                errors.append(
+                    f"{path}: panel '{p_title}' data link URL contains forbidden '${{__url}}': {url}"
+                )
+            if not url.startswith("/d/"):
+                errors.append(
+                    f"{path}: panel '{p_title}' data link URL must start with '/d/': {url}"
+                )
+
     return errors
+
+
+def quote_sql_str(s: Any) -> str:
+    """Format string or value for SQL literal with doubled single quotes."""
+    return "'" + str(s).replace("'", "''") + "'"
 
 
 def substitute_query(sql: str, params: dict[str, Any]) -> str:
     """Substitute Grafana macros and template variables in SQL query."""
     res = sql
     for k, v in params.items():
-        res = res.replace(f"${k}", str(v))
-        res = res.replace(f"${{{k}}}", str(v))
-        res = res.replace(f"${{{k}:sqlstring}}", str(v))
+        if isinstance(v, list):
+            sqlstring_val = ",".join(quote_sql_str(item) for item in v) if v else "'__none__'"
+            plain_val = ",".join(str(item) for item in v)
+        elif isinstance(v, str):
+            if v.startswith("'") and v.endswith("'"):
+                sqlstring_val = v
+            else:
+                sqlstring_val = quote_sql_str(v)
+            plain_val = v
+        else:
+            sqlstring_val = str(v)
+            plain_val = str(v)
+
+        res = res.replace(f"${{{k}:sqlstring}}", sqlstring_val)
+        res = res.replace(f"${{{k}}}", plain_val)
+        res = re.sub(rf"\${re.escape(k)}\b", plain_val, res)
     return res
 
 
@@ -120,25 +184,27 @@ def build_fixture_db() -> sqlite3.Connection:
     t_now = 1795000000000  # Nov 2026 ms epoch
     t_next = t_now + 86400 * 1000
 
-    # 1. session_program: manual tag, auto tag with '/', and leave attr-orphan without a row
+    # 1. session_program: manual tag, auto tag with '/', tag with apostrophe, and leave attr-orphan without a row
     conn.execute(
         """
         INSERT INTO session_program (attr_key, tag, source, root, title, updated_at) VALUES
           ('attr-manual', 'lgtm', 'manual', 'ses_1', 'Manual Session', ?),
-          ('attr-auto', 'auto:mono/branch-fix', 'auto', 'ses_2', 'Auto Session', ?)
+          ('attr-auto', 'auto:mono/branch-fix', 'auto', 'ses_2', 'Auto Session', ?),
+          ('attr-quote', "team's-feature", 'manual', 'ses_3', 'Quote Session', ?)
         """,
-        (t_now, t_now),
+        (t_now, t_now, t_now),
     )
 
-    # 2. hourly: rows for attr-manual, attr-auto, and attr-orphan
+    # 2. hourly: rows for attr-manual, attr-auto, attr-orphan, and attr-quote
     conn.execute(
         """
         INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) VALUES
           (?, 'attr-manual', 'max', 'claude-opus-5-5', 10, 1000, 500, 200, 100, 1.5),
           (?, 'attr-auto', 'vertex', 'claude-opus-5-5', 5, 500, 250, 100, 50, 2.0),
-          (?, 'attr-orphan', 'enterprise', 'claude-haiku-4-5', 2, 200, 100, 50, 20, 0.5)
+          (?, 'attr-orphan', 'enterprise', 'claude-haiku-4-5', 2, 200, 100, 50, 20, 0.5),
+          (?, 'attr-quote', 'vertex', 'claude-opus-5-5', 3, 300, 150, 60, 30, 0.8)
         """,
-        (t_now, t_now, t_now),
+        (t_now, t_now, t_now, t_now),
     )
 
     # 3. route & requests
@@ -211,8 +277,8 @@ def execute_dashboard_queries(dash_path: Path, data: dict[str, Any], conn: sqlit
             cur = conn.execute(vquery)
             rows = cur.fetchall()
             vals = [str(r[0]) for r in rows if r and r[0] is not None]
-            # Format as SQL comma-separated quoted list: 'val1','val2'
-            quoted = ",".join(f"'{v}'" for v in vals) if vals else "'__none__'"
+            # Format as SQL comma-separated quoted list with doubled single quotes
+            quoted = ",".join(quote_sql_str(v) for v in vals) if vals else "'__none__'"
             sub_params[vname] = quoted
 
     # Execute panel queries
@@ -347,30 +413,148 @@ def run_self_tests() -> None:
     planted_cases.append(("forbidden account IN", json.dumps(d11), d11, set()))
 
     # 12. Query with forbidden account LIKE '...'
-    d12 = copy.deepcopy(base_valid)
+    d_12 = copy.deepcopy(base_valid)
     bad_sql12 = "SELECT ts AS time FROM quota_samples WHERE ts >= $__from AND ts < $__to AND account LIKE 'acct%'"
-    d12["panels"][0]["targets"][0]["rawQueryText"] = bad_sql12
-    d12["panels"][0]["targets"][0]["queryText"] = bad_sql12
-    planted_cases.append(("forbidden account LIKE", json.dumps(d12), d12, set()))
+    d_12["panels"][0]["targets"][0]["rawQueryText"] = bad_sql12
+    d_12["panels"][0]["targets"][0]["queryText"] = bad_sql12
+    planted_cases.append(("forbidden account LIKE", json.dumps(d_12), d_12, set()))
+
+    # 13. (b) Bounded-table detection: JOIN hourly missing $__from
+    d_b1 = copy.deepcopy(base_valid)
+    d_b1["panels"][0]["targets"][0]["rawQueryText"] = "SELECT ts AS time FROM session_program sp JOIN hourly h ON sp.attr_key = h.attr_key WHERE h.hour < $__to"
+    d_b1["panels"][0]["targets"][0]["queryText"] = d_b1["panels"][0]["targets"][0]["rawQueryText"]
+    planted_cases.append(("bounded-table JOIN hourly missing $__from", json.dumps(d_b1), d_b1, set()))
+
+    # 14. (b) Bounded-table detection: FROM main.requests missing $__to
+    d_b2 = copy.deepcopy(base_valid)
+    d_b2["panels"][0]["targets"][0]["rawQueryText"] = "SELECT ts AS time FROM main.requests WHERE ts >= $__from"
+    d_b2["panels"][0]["targets"][0]["queryText"] = d_b2["panels"][0]["targets"][0]["rawQueryText"]
+    planted_cases.append(("bounded-table FROM schema.requests missing $__to", json.dumps(d_b2), d_b2, set()))
+
+    # 15. (d) Forbidden account != '...'
+    d_d1 = copy.deepcopy(base_valid)
+    bad_sql_d1 = "SELECT ts AS time FROM quota_samples WHERE ts >= $__from AND ts < $__to AND account != 'acct-a'"
+    d_d1["panels"][0]["targets"][0]["rawQueryText"] = bad_sql_d1
+    d_d1["panels"][0]["targets"][0]["queryText"] = bad_sql_d1
+    planted_cases.append(("forbidden account !=", json.dumps(d_d1), d_d1, set()))
+
+    # 16. (d) Forbidden account <> '...'
+    d_d2 = copy.deepcopy(base_valid)
+    bad_sql_d2 = "SELECT ts AS time FROM quota_samples WHERE ts >= $__from AND ts < $__to AND account <> 'acct-a'"
+    d_d2["panels"][0]["targets"][0]["rawQueryText"] = bad_sql_d2
+    d_d2["panels"][0]["targets"][0]["queryText"] = bad_sql_d2
+    planted_cases.append(("forbidden account <>", json.dumps(d_d2), d_d2, set()))
+
+    # 17. (e) byName override option missing as column alias in panel targets
+    d_e = copy.deepcopy(base_valid)
+    d_e["panels"][0]["fieldConfig"] = {
+        "overrides": [
+            {
+                "matcher": {
+                    "id": "byName",
+                    "options": "missing_alias",
+                },
+                "properties": [],
+            }
+        ]
+    }
+    planted_cases.append(("byName override alias missing in targets", json.dumps(d_e), d_e, set()))
+
+    # 18. (f) Data link URL contains ${__url}
+    d_f1 = copy.deepcopy(base_valid)
+    d_f1["panels"][0]["fieldConfig"] = {
+        "overrides": [
+            {
+                "matcher": {"id": "byName", "options": "time"},
+                "properties": [
+                    {
+                        "id": "links",
+                        "value": [{"title": "Link", "url": "${__url}&var-x=1"}],
+                    }
+                ],
+            }
+        ]
+    }
+    planted_cases.append(("link URL contains ${__url}", json.dumps(d_f1), d_f1, set()))
+
+    # 19. (f) Data link URL does not start with /d/
+    d_f2 = copy.deepcopy(base_valid)
+    d_f2["panels"][0]["fieldConfig"] = {
+        "overrides": [
+            {
+                "matcher": {"id": "byName", "options": "time"},
+                "properties": [
+                    {
+                        "id": "links",
+                        "value": [{"title": "Link", "url": "https://external.example.com"}],
+                    }
+                ],
+            }
+        ]
+    }
+    planted_cases.append(("link URL does not start with /d/", json.dumps(d_f2), d_f2, set()))
 
     for name, raw_text, data, seen in planted_cases:
         caught_errs = lint_dashboard(dummy_path, raw_text, data, seen)
         if not caught_errs:
             raise AssertionError(f"SELF-TEST FAILURE: planted violation '{name}' was not caught by linter!")
 
-    # 13. Time series query execution missing 'time' column
+    # Verify non-bounded query mentioning requests does not fail lint (b)
+    d_b_ok = copy.deepcopy(base_valid)
+    d_b_ok["panels"][0]["targets"][0]["rawQueryText"] = "SELECT 1 AS requests FROM other_table"
+    d_b_ok["panels"][0]["targets"][0]["queryText"] = "SELECT 1 AS requests FROM other_table"
+    assert len(lint_dashboard(dummy_path, json.dumps(d_b_ok), d_b_ok, set())) == 0, (
+        "Query with 'AS requests' falsely flagged as reading bounded table!"
+    )
+
+    # Verify ${__from} and ${__to} syntax is accepted in lint (c)
+    d_c_ok = copy.deepcopy(base_valid)
+    d_c_ok["panels"][0]["targets"][0]["rawQueryText"] = (
+        "SELECT hour AS time FROM hourly WHERE hour >= ${__from} AND hour < ${__to}"
+    )
+    d_c_ok["panels"][0]["targets"][0]["queryText"] = d_c_ok["panels"][0]["targets"][0]["rawQueryText"]
+    assert len(lint_dashboard(dummy_path, json.dumps(d_c_ok), d_c_ok, set())) == 0, (
+        "Query with ${__from}/${__to} failed lint!"
+    )
+
     conn = build_fixture_db()
-    d13 = copy.deepcopy(base_valid)
-    bad_sql13 = "SELECT hour AS not_time FROM hourly WHERE hour >= $__from AND hour < $__to"
-    d13["panels"][0]["targets"][0]["rawQueryText"] = bad_sql13
-    d13["panels"][0]["targets"][0]["queryText"] = bad_sql13
+
+    # Time series query execution missing 'time' column
+    d_missing_time = copy.deepcopy(base_valid)
+    bad_sql_time = "SELECT hour AS not_time FROM hourly WHERE hour >= $__from AND hour < $__to"
+    d_missing_time["panels"][0]["targets"][0]["rawQueryText"] = bad_sql_time
+    d_missing_time["panels"][0]["targets"][0]["queryText"] = bad_sql_time
     try:
-        execute_dashboard_queries(dummy_path, d13, conn)
+        execute_dashboard_queries(dummy_path, d_missing_time, conn)
         raise AssertionError("SELF-TEST FAILURE: time series query missing 'time' column was not caught!")
     except AssertionError:
         pass  # Expected
 
-    print(f"check_grafana_dashboards: {len(planted_cases) + 1} self-test cases verified successfully")
+    # (a) sqlstring expansion doubles embedded single quotes
+    assert substitute_query("${x:sqlstring}", {"x": ["it's", "o'clock"]}) == "'it''s','o''clock'"
+    assert substitute_query("${x:sqlstring}", {"x": "it's"}) == "'it''s'"
+
+    # Planted execution failure for (a): unescaped single quote in SQL causes failure
+    d_bad_quote = copy.deepcopy(base_valid)
+    bad_quote_sql = "SELECT hour AS time FROM hourly WHERE hour >= $__from AND hour < $__to AND 'it's' = 'x'"
+    d_bad_quote["panels"][0]["targets"][0]["rawQueryText"] = bad_quote_sql
+    d_bad_quote["panels"][0]["targets"][0]["queryText"] = bad_quote_sql
+    try:
+        execute_dashboard_queries(dummy_path, d_bad_quote, conn)
+        raise AssertionError("SELF-TEST FAILURE: unescaped single quote was not caught by executor!")
+    except RuntimeError:
+        pass  # Expected
+
+    # Verified execution with tag containing apostrophe from fixture DB
+    d_good_quote = copy.deepcopy(base_valid)
+    good_quote_sql = (
+        "SELECT hour AS time FROM hourly WHERE hour >= $__from AND hour < $__to AND 'team''s-feature' IN (${backend:sqlstring})"
+    )
+    d_good_quote["panels"][0]["targets"][0]["rawQueryText"] = good_quote_sql
+    d_good_quote["panels"][0]["targets"][0]["queryText"] = good_quote_sql
+    execute_dashboard_queries(dummy_path, d_good_quote, conn)
+
+    print(f"check_grafana_dashboards: {len(planted_cases) + 2} self-test cases verified successfully")
 
 
 def main() -> None:

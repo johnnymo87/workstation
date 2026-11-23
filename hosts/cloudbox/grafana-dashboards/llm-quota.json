@@ -301,9 +301,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Headroom H0' AS series,\n  AVG(h0) AS headroom\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(h0) AS \"Headroom\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Headroom H0' AS series,\n  AVG(h0) AS headroom\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(h0) AS \"Headroom\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -314,9 +314,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Forecast' AS series,\n  AVG(headroom) AS headroom\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(headroom) AS \"Forecast\"\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Forecast' AS series,\n  AVG(headroom) AS headroom\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(headroom) AS \"Forecast\"\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "refId": "B",
           "timeColumns": [
             "time"
@@ -350,7 +350,24 @@
           },
           "unit": "none"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Dry hours next 24h"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "h"
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -379,9 +396,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Burn/h' AS series,\n  AVG(burn_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(burn_h) AS \"Burn per hour\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Burn/h' AS series,\n  AVG(burn_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(burn_h) AS \"Burn per hour\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -392,9 +409,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Zero hours' AS series,\n  AVG(zero_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(zero_h) AS \"Dry hours next 24h\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Zero hours' AS series,\n  AVG(zero_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  AVG(zero_h) AS \"Dry hours next 24h\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
           "refId": "B",
           "timeColumns": [
             "time"
@@ -479,9 +496,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS u7d\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS Value\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS u7d\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS Value\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
