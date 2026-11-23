@@ -91,7 +91,7 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.21-balanced-fw-ub-cap-seat-ttl"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst + per-session cache TTL / usage ledger (#6)
+  version = "1.1.21-balanced-fw-ub-cap-seat-ttl-acct"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst + per-session cache TTL / usage ledger (#6) + served-account header / pins that hold (#7)
 
   src = fetchFromGitHub {
     # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
@@ -195,6 +195,15 @@ stdenvNoCC.mkDerivation rec {
     # hot-reloads, so its rollback is setting it to false and POST
     # /teamclaude/reload.
     #
+    # SERVED ACCOUNT (johnnymo87/teamclaude#7, merged 2026-11-23, 4e07f80):
+    # every response carries `x-teamclaude-account-id` (the config entry's
+    # opaque `id`, never the email), that id is accepted as a /tc-acct/ pin,
+    # and GET /teamclaude/route-target?model= names the account a no-session
+    # request would land on. A pinned request no longer hops on a 429/5xx and
+    # survives account renumbering. cfp >= 0.14.0 needs this to pin keep-warm
+    # pokes; an older TeamClaude makes cfp skip every poke (safe, just off).
+    # Bead claude-failover-proxy-28x.
+    #
     # Rollback, cheapest first:
     #   0. usageSeatFirst -> false, or finalWindowHours -> 0, in
     #      ~/.config/teamclaude.json (both hot-reload).
@@ -202,7 +211,11 @@ stdenvNoCC.mkDerivation rec {
     #      (or set it to "expiry"). No rebuild. This is the real rollback for
     #      anything balanced does wrong, and it is why the port ships behind a
     #      default rather than as a replacement.
-    #   2. PREVIOUS PIN = rev 8a35f5792a69cc33ba9f43a85d607d2e7369bae2, hash
+    #   2. PREVIOUS PIN = rev 9c2ee1b42c9d3f0abc782bcb33df24cbdf53a627, hash
+    #      sha256-DQ2FbY1hBuAB90YFwF/bOFEBeyaNWqdvX4cTo8u+RAA=, version
+    #      "1.1.21-balanced-fw-ub-cap-seat-ttl" (no served-account header: cfp
+    #      0.14 then sends no keep-warm pokes). Before that: rev
+    #      8a35f5792a69cc33ba9f43a85d607d2e7369bae2, hash
     #      sha256-hokkt50/y3vC+CpXkSWFAhbWvuATlIOf1oaxLNFPYYc=, version
     #      "1.1.21-balanced-fw-ub-cap" (no usageSeatFirst; the key is ignored).
     #      Before that: rev d636766a8fec94e3991c278143d6881870b48f6e, hash
@@ -230,8 +243,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "9c2ee1b42c9d3f0abc782bcb33df24cbdf53a627"; # feat/balanced-on-v1121 (+ #6 cache-ttl/usage ledger)
-    hash = "sha256-DQ2FbY1hBuAB90YFwF/bOFEBeyaNWqdvX4cTo8u+RAA=";
+    rev = "4e07f80323edad51e1c647c7eed65bbcc9030800"; # feat/balanced-on-v1121 (+ #7 served-account header)
+    hash = "sha256-8Gl1CFN32SkAgqLDTWeIpkV2XrzJMOd1hTYdxubUzGk=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
