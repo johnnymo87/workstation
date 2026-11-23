@@ -2164,7 +2164,7 @@ class TestQuotaOutlook(unittest.TestCase):
                     res = quota_watch.outlook(db=db_path, now_ms=ts + 1000)
                     self.assertEqual(res["verdict"], "ample")
                     self.assertEqual(attempts, 2)
-                    mock_sleep.assert_called_once_with(1)
+                    mock_sleep.assert_called_once_with(0.2)
 
             # Failure on both attempts gives up -> unknown with error
             attempts = 0
@@ -2181,7 +2181,112 @@ class TestQuotaOutlook(unittest.TestCase):
                     self.assertIn("error", res)
                     self.assertIn("rollback", res["error"].lower())
                     self.assertEqual(attempts, 2)
-                    mock_sleep.assert_called_once_with(1)
+                    mock_sleep.assert_called_once_with(0.2)
+
+    def test_outlook_nan_inf_stored_in_db(self):
+        """outlook sanitizes NaN/inf/unparseable values to None, producing strict JSON without 'nan'/'inf'."""
+        import tempfile
+        import json
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            # Insert NaN / Inf into floats and text into integers
+            conn.execute(
+                "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, float("nan"), float("inf"), float("-inf"), 1795608000372, float("nan"), "live", "tight")
+            )
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=ts + 60000)
+            self.assertEqual(res["verdict"], "tight")
+            self.assertIsNone(res["h0"])
+            self.assertIsNone(res["burn_h"])
+            self.assertIsNone(res["zero_h"])
+            self.assertIsNone(res["next_refill_amt"])
+            self.assertEqual(res["ts"], ts)
+
+            # Strict JSON check: parse_constant must not be called
+            def _fail_const(c):
+                raise ValueError(f"Unexpected constant in JSON: {c}")
+
+            dumped = json.dumps(res, allow_nan=False)
+            parsed = json.loads(dumped, parse_constant=_fail_const)
+            self.assertIsNone(parsed["h0"])
+            self.assertNotIn("nan", res["line"].lower())
+            self.assertNotIn("inf", res["line"].lower())
+
+    def test_outlook_clock_skew(self):
+        """outlook treats age_s < -60 as unknown with error 'clock skew: age_s=N'."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            now_ms = ts - 61000  # age_s = -61 (< -60)
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (ts, 1.47, 0.036, 0.0, None, None, "live", "ample"))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertEqual(res["age_s"], -61)
+            self.assertIn("error", res)
+            self.assertIn("clock skew", res["error"])
+            self.assertIn("age_s=-61", res["error"])
+
+    def test_outlook_never_raises_on_corrupt_row_or_format_error(self):
+        """outlook wraps row parsing and format_line so it never raises even on unexpected errors."""
+        import tempfile
+        from unittest import mock
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (ts, 1.47, 0.036, 0.0, None, None, "live", "ample"))
+            conn.commit()
+            conn.close()
+
+            # Mock format_line to raise
+            with mock.patch("quota_watch.format_line", side_effect=RuntimeError("format crashed")):
+                res = quota_watch.outlook(db=db_path, now_ms=ts + 1000)
+                self.assertIsInstance(res, dict)
+                self.assertEqual(res["verdict"], "ample")
+                self.assertIn("quota@", res["line"])
 
 
 if __name__ == "__main__":

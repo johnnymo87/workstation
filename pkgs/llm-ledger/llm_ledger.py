@@ -1578,12 +1578,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     if args.command == "quota-outlook":
-        import quota_watch
-        try:
-            db_path = getattr(args, "db", DEFAULT_DB)
-            res = quota_watch.outlook(db=db_path)
-        except Exception as e:
-            res = {
+        def _make_fallback(err_str: str) -> dict[str, Any]:
+            try:
+                from zoneinfo import ZoneInfo
+                time_str = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            return {
                 "verdict": "unknown",
                 "ts": None,
                 "age_s": None,
@@ -1592,10 +1593,33 @@ def main(argv: list[str] | None = None) -> int:
                 "zero_h": None,
                 "next_refill_ts": None,
                 "next_refill_amt": None,
-                "line": quota_watch.format_line({"verdict": "unknown"}),
-                "error": str(e)[:200],
+                "line": f"quota@{time_str}: unknown (outlook unavailable)",
+                "error": err_str[:200],
             }
-        print(json.dumps(res))
+
+        try:
+            import quota_watch
+            db_path = getattr(args, "db", DEFAULT_DB)
+            res = quota_watch.outlook(db=db_path)
+            try:
+                payload = json.dumps(res, allow_nan=False) + "\n"
+            except (ValueError, TypeError) as e:
+                res = _make_fallback(str(e))
+                payload = json.dumps(res, allow_nan=False) + "\n"
+        except Exception as e:
+            res = _make_fallback(str(e))
+            payload = json.dumps(res, allow_nan=False) + "\n"
+
+        try:
+            sys.stdout.write(payload)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            try:
+                devnull = open(os.devnull, "w")
+                os.dup2(devnull.fileno(), sys.stdout.fileno())
+                sys.stdout = devnull
+            except Exception:
+                pass
         return 0
 
     if args.command == "quota-watch":

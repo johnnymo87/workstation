@@ -7,6 +7,7 @@ import collections
 import dataclasses
 import datetime
 import json
+import math
 import os
 import re
 import sqlite3
@@ -1180,11 +1181,34 @@ def replay(
     return events
 
 
+def _safe_float(val: Any) -> float | None:
+    """Return float or None for None, NaN, inf, or unparseable values."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(val: Any) -> int | None:
+    """Return int or None for None or unparseable values."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def format_line(d: dict) -> str:
     """Format single-line quota summary for coordinators (<= 200 bytes)."""
     verdict = d.get("verdict", "unknown")
-    ts = d.get("ts")
-    now_ms = d.get("now_ms")
+    ts = _safe_int(d.get("ts"))
+    now_ms = _safe_int(d.get("now_ms"))
     if ts is not None:
         dt = datetime.datetime.fromtimestamp(ts / 1000, tz=NY_TZ)
     elif now_ms is not None:
@@ -1197,15 +1221,15 @@ def format_line(d: dict) -> str:
         line = f"quota@{time_str}: unknown (outlook unavailable)"
     else:
         clauses: list[str] = []
-        h0 = d.get("h0")
+        h0 = _safe_float(d.get("h0"))
         if h0 is not None:
             clauses.append(f"headroom {h0:.2f} acct-wk")
 
-        next_refill_ts = d.get("next_refill_ts")
+        next_refill_ts = _safe_int(d.get("next_refill_ts"))
         if next_refill_ts is not None:
             refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
             refill_str = refill_dt.strftime("%a %H:%M")
-            amt = d.get("next_refill_amt")
+            amt = _safe_float(d.get("next_refill_amt"))
             if amt is not None:
                 clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
             else:
@@ -1216,7 +1240,7 @@ def format_line(d: dict) -> str:
         else:
             verdict_word = "TIGHT" if verdict == "tight" else "DRY"
             prefix = f"quota@{time_str}: {verdict_word}"
-            zero_h = d.get("zero_h")
+            zero_h = _safe_float(d.get("zero_h"))
             if zero_h is not None:
                 prefix += f" — Max forecast dry ~{zero_h:.1f}h in next 24h (forecast over-predicts)"
 
@@ -1258,7 +1282,9 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             fetch_error = e
             msg = str(e).lower()
             if attempt == 0 and ("readonly" in msg or "rollback" in msg):
-                time.sleep(1)
+                # A hot journal is only left by a crashed writer; consumer kill cap is 3 s;
+                # worst case now ≈ 0.5+0.5+0.2+0.5+0.5 s.
+                time.sleep(0.2)
                 continue
             break
         except Exception as e:
@@ -1267,7 +1293,15 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
 
     if fetch_error is not None:
         err_msg = str(fetch_error)[:200]
-        res: dict[str, Any] = {
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
             "verdict": "unknown",
             "ts": None,
             "age_s": None,
@@ -1276,13 +1310,20 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             "zero_h": None,
             "next_refill_ts": None,
             "next_refill_amt": None,
+            "line": line,
             "error": err_msg,
         }
-        res["line"] = format_line({"verdict": "unknown", "now_ms": now_ms})
-        return res
 
     if row is None:
-        res = {
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
             "verdict": "unknown",
             "ts": None,
             "age_s": None,
@@ -1291,48 +1332,82 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             "zero_h": None,
             "next_refill_ts": None,
             "next_refill_amt": None,
+            "line": line,
             "error": "no live rows",
         }
-        res["line"] = format_line({"verdict": "unknown", "now_ms": now_ms})
+
+    try:
+        ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
+        ts = _safe_int(ts_val)
+        h0 = _safe_float(h0_val)
+        burn_h = _safe_float(burn_val)
+        zero_h = _safe_float(zero_val)
+        next_refill_ts = _safe_int(refill_ts_val)
+        next_refill_amt = _safe_float(refill_amt_val)
+
+        age_s = (now_ms - ts) // 1000 if ts is not None else None
+
+        if age_s is not None and age_s > 1200:
+            verdict = "unknown"
+            error = f"stale: age_s={age_s}"
+        elif age_s is not None and age_s < -60:
+            verdict = "unknown"
+            error = f"clock skew: age_s={age_s}"
+        elif stored_verdict is None:
+            verdict = "unknown"
+            error = "verdict is NULL"
+        elif stored_verdict not in ("ample", "tight", "dry"):
+            verdict = "unknown"
+            error = f"invalid verdict: {stored_verdict}"
+        else:
+            verdict = stored_verdict
+            error = None
+
+        res = {
+            "verdict": verdict,
+            "ts": ts,
+            "age_s": age_s,
+            "h0": h0,
+            "burn_h": burn_h,
+            "zero_h": zero_h,
+            "next_refill_ts": next_refill_ts,
+            "next_refill_amt": next_refill_amt,
+        }
+        try:
+            line = format_line(res)
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(
+                    (ts if ts is not None else now_ms) / 1000, tz=NY_TZ
+                ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        res["line"] = line
+        if error is not None:
+            res["error"] = error
         return res
-
-    ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
-    ts = int(ts_val) if ts_val is not None else None
-    h0 = float(h0_val) if h0_val is not None else None
-    burn_h = float(burn_val) if burn_val is not None else None
-    zero_h = float(zero_val) if zero_val is not None else None
-    next_refill_ts = int(refill_ts_val) if refill_ts_val is not None else None
-    next_refill_amt = float(refill_amt_val) if refill_amt_val is not None else None
-
-    age_s = (now_ms - ts) // 1000 if ts is not None else None
-
-    if age_s is not None and age_s > 1200:
-        verdict = "unknown"
-        error = f"stale: age_s={age_s}"
-    elif stored_verdict is None:
-        verdict = "unknown"
-        error = "verdict is NULL"
-    elif stored_verdict not in ("ample", "tight", "dry"):
-        verdict = "unknown"
-        error = f"invalid verdict: {stored_verdict}"
-    else:
-        verdict = stored_verdict
-        error = None
-
-    res = {
-        "verdict": verdict,
-        "ts": ts,
-        "age_s": age_s,
-        "h0": h0,
-        "burn_h": burn_h,
-        "zero_h": zero_h,
-        "next_refill_ts": next_refill_ts,
-        "next_refill_amt": next_refill_amt,
-    }
-    line = format_line(res)
-    res["line"] = line
-    if error is not None:
-        res["error"] = error
-    return res
+    except Exception as e:
+        err_msg = str(e)[:200]
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "line": line,
+            "error": err_msg,
+        }
 
 
