@@ -2128,6 +2128,39 @@ down and its silence means nothing. This host has no second leg.
     Install.WantedBy = [ "timers.target" ];
   };
 
+  # Publish goose host readiness report to GitHub variable for cloudbox goose-cutover (workstation-6w7i.27.12)
+  systemd.user.services.goose-host-report = {
+    Unit = {
+      Description = "Publish goose host readiness report to GitHub Actions variable";
+      After = [ "network-online.target" ];
+      Wants = [ "network-online.target" ];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.writeShellScript "goose-host-report-start" ''
+        set -u
+        if [ -r /run/secrets/github_api_token ]; then
+          export GH_TOKEN="$(cat /run/secrets/github_api_token)"
+        fi
+        exec ${localPkgs.goose-host-report}/bin/goose-host-report publish --host devbox
+      ''}";
+    };
+  };
+
+  systemd.user.timers.goose-host-report = {
+    Unit = {
+      Description = "Periodically publish goose host readiness report";
+    };
+    Timer = {
+      OnCalendar = "hourly";
+      Persistent = true;
+      RandomizedDelaySec = "5min";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
   # BoldCo (boldco.mohrbacher.dev) was retired on 2026-10-26: its user unit
   # and the tunnel's port-3000 allowlist were removed, and its devbox clones
   # (~/srv/boldco, ~/projects/boldco*) and Supabase stack were deleted. The

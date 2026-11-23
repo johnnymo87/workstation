@@ -154,6 +154,9 @@
         inherit goose-link;
         driftAlert = p.callPackage ./pkgs/opencode-drift-alert { };
       };
+      goose-host-report = p.callPackage ./pkgs/goose-host-report {
+        inherit goose-link;
+      };
       gws = p.callPackage ./pkgs/gws { };
       hm-deploy-gate-sh = p.callPackage ./pkgs/hm-deploy-gate-sh { };
       hm-deploy-canary-sh = p.callPackage ./pkgs/hm-deploy-canary-sh { };
@@ -2290,6 +2293,23 @@
         }
         grep -q 'OK' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: goose-cutover suite did not pass with OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # workstation-6w7i.27.12: goose-host-report unit tests.
+      goose-host-report = devboxPkgs.runCommand "goose-host-report-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        cd ${self}
+        python3 pkgs/goose-host-report/test_goose_host_report.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q 'Ran 12 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected pinned 12 goose-host-report tests." >&2
+          exit 1
+        }
+        grep -q 'OK' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: goose-host-report suite did not pass with OK." >&2
           exit 1
         }
         touch $out
