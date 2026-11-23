@@ -98,6 +98,24 @@ against W23's would therefore credit #471's smaller contexts to the TTL.
 
 Empty the `sessions` list, or delete the file. No restart is needed.
 
+### Status and loss rule (11-23)
+
+- **First result (W24, 11-23).** Use the teamclaude ledger, not the opencode DB. One opencode assistant message can span several LLM requests, so a long tool call such as a 1000 s `sleep` is a cache gap *inside* a message. A message-level count from the DB therefore undercounts gaps: it found 1 for W24, while the ledger shows 11.
+  - **Gaps:** all 11 gaps of 5–60 min after the switch were cache hits (main session 9/9, one subagent 2/2). The 5m baseline was 12/12 full rewrites for the runner (11-19..22, DB count) and 10/11 for a 10-min-wake 5m control.
+  - **Tokens:** about 1.45M tokens of rewrite avoided, against a 1h premium of about 0.27M (0.6 × 456k 1h writes). The net saving is about 1.2M 5m-write-equivalents, roughly $6 at list rate for one W24 run.
+  - **One loss:** a short subagent with no gaps, which paid a 76k-token premium for nothing. Subagents match through their parent, so this loss cannot be excluded on its own.
+  - **Scripts:** the per-session tally is `loss.py` and the DB count is `m1.py`. Both are described in bead `workstation-ynoq.1`.
+- **Loss rule (Jonathan, 11-23).** 1h costs more whenever a session writes cache that no later 5–60 min gap reuses. At each re-measure, compare each listed session's 1h premium (0.6 × its 1h write tokens) with the rewrite tokens it avoided (cache reads on the first request after each 5–60 min gap). Remove from the list any session where the premium is larger.
+
+### What the devbox move to goose means for this test
+
+Jonathan has a cloudbox session moving all of devbox from opencode to goose. Goose self-compacts idle sessions above 200k context before the cache goes cold. This mechanism cannot follow sessions there:
+
+- **Goose sessions cannot be matched.** goose reaches teamclaude through cfp-shaper (:3457), which drops `x-session-affinity`/`X-Session-Id`, so the ledger records them as `session: null` and no rule can name them. Matching them would need cfp-shaper to forward a session header, or a rule keyed on something else.
+- **The runner's result stops at the move.** Once the runner moves, the test ends: its sessions fall back to 5m.
+- **The question becomes partly moot.** Goose's compact-before-cold shrinks the context that a cold gap re-caches, the same lever #471 pulls. What remains is the full rewrite of a smaller (≤200k) context after each 5–60 min gap.
+- **Re-measuring on goose.** Measure 1 can be re-run there from the goose sessions DB plus the ledger. Whether 1h is worth wiring through cfp-shaper should be decided on that, not on opencode numbers.
+
 ## (c1) Exhaustion forecast and the token-to-quota refit (`ynoq.2`)
 
 The cloudbox session `ses_dfb8c2cac…` owns this, under cloudbox bead
