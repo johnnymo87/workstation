@@ -32,10 +32,20 @@ datasource for `/var/lib/llm-ledger/ledger.db`. The Mac reaches it at
   cannot point a datasource at Grafana's own DB.
 - **`admin_password` and `secret_key` defaults are public** (`admin`, and a
   fixed string in the module). Both come from sops via `$__file{}`. The secrets
-  are owned by `grafana`, mode 0400, so dev (and therefore every agent bash
-  call) cannot read them; Jonathan reads the admin password with
+  are owned by `grafana`, mode 0400. That keeps them out of casual reads and out
+  of shell-env injection, but it is **not** a boundary against agents: dev has
+  passwordless sudo. Jonathan reads the admin password with
   `sudo cat /run/secrets/grafana_admin_password`. `admin_password` only takes
-  effect when grafana.db is first created.
+  effect when grafana.db is first created, so neither secret has
+  `restartUnits`; rotation is in `hosts/cloudbox/grafana.nix`'s header.
+
+**As built, after the pre-PR review** (supersedes the sketch below where they
+differ): `pathOptions = "mode=ro&_pragma=busy_timeout(5000)"` (frser and its
+driver set no busy timeout, so panels hit SQLITE_BUSY in the writer's commit
+window); `snapshots.external_enabled = false`; the guard also pins
+`unified_alerting.ha_peers` empty (setting it opens `0.0.0.0:9094`); both Mac
+agents share one locked master-creation script (`cloudboxChartForward`), since
+a racing loser leaks a daemonized ssh and gcloud.
 - **Mac tunnel.** The precedent is `cloudbox-chart-tunnel`
   (`users/dev/home.darwin.nix`): a socket-activated launchd agent that owns a
   loopback port and runs `ssh -W` per connection over a ControlMaster it

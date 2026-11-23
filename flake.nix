@@ -897,6 +897,15 @@
             in builtins.isString blockList && lib.hasInfix "grafana.db" blockList;
           "auth.anonymous enabled is absent or false" =
             (settings."auth.anonymous".enabled or false) == false;
+          # Grafana's default is true: one click publishes to snapshots.raintank.io.
+          "snapshots external_enabled is false" =
+            (settings.snapshots.external_enabled or null) == false;
+          # Setting ha_peers opens the alerting gossip listener on 0.0.0.0:9094.
+          "unified_alerting ha_peers unset or empty" =
+            (settings.unified_alerting.ha_peers or "") == "";
+          "datasource pathOptions sets busy_timeout" =
+            builtins.isString (firstDsJson.pathOptions or null)
+            && lib.hasInfix "_pragma=busy_timeout(" firstDsJson.pathOptions;
 
           "admin_password is sops file ref" =
             sopsAdmin != null && builtins.isString (security.admin_password or null) && security.admin_password == "$__file{${sopsAdmin.path}}";
@@ -1012,6 +1021,15 @@
 
               if (vals["users", "allow_sign_up"] != "false") {
                 print "GATE FAILURE: [users] allow_sign_up is " vals["users", "allow_sign_up"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+
+              if (vals["snapshots", "external_enabled"] != "false") {
+                print "GATE FAILURE: [snapshots] external_enabled is " vals["snapshots", "external_enabled"] ", expected false" > "/dev/stderr"
+                err = 1
+              }
+              if (vals["unified_alerting", "ha_peers"] != "") {
+                print "GATE FAILURE: [unified_alerting] ha_peers is set; that opens a gossip listener on 0.0.0.0:9094" > "/dev/stderr"
                 err = 1
               }
 
@@ -3000,6 +3018,11 @@
           "no KeepAlive" = agent != null && (config.KeepAlive or null) == null;
           "script contains host=cloudbox-chart" = lib.hasInfix "host=cloudbox-chart" script;
           "script contains -W 127.0.0.1:3000 \"$host\"" = lib.hasInfix ''-W 127.0.0.1:3000 "$host"'' script;
+          # Both agents share the cloudbox-chart master; creation must be
+          # serialized or a losing racer leaks a daemonized ssh + gcloud.
+          "script serializes master creation" = lib.hasInfix ''mkdir "$lock"'' script;
+          "chart agent uses the same locked script" =
+            lib.hasInfix ''mkdir "$lock"'' (lib.concatStringsSep "\n" (hm.launchd.agents.cloudbox-chart-tunnel.config.ProgramArguments or [ ]));
         };
         failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
       in
