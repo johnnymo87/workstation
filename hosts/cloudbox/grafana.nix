@@ -87,6 +87,20 @@
           }
         ];
       };
+      # Provisioned LLM spend & quota dashboards (workstation-4si2.4, Phase 3).
+      dashboards.settings = {
+        apiVersion = 1;
+        providers = [
+          {
+            name = "llm";
+            type = "file";
+            folder = "LLM";
+            allowUiUpdates = false;
+            disableDeletion = true;
+            options.path = ./grafana-dashboards;
+          }
+        ];
+      };
     };
   };
 

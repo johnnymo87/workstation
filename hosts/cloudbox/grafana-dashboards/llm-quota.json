@@ -1,0 +1,590 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Latest metrics from quota-watch. Headroom in account-weeks, burn rate, dry hours projected in next 24h, forecast Vertex cash $, k local refit, next refill, and row age.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "headroom"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Headroom (acct-wks)"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "burn_h"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Burn/h (acct-wks/h)"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "zero_h"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Dry hours in next 24h"
+              },
+              {
+                "id": "unit",
+                "value": "h"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 2
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vertex_usd"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Forecast Vertex cash $"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "k"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "k (local)"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "next_refill_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Next refill time"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "next_refill_amt"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Next refill amount"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "age_s"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Row age"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 900
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts / 1000 AS next_refill_time,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts / 1000 AS next_refill_time,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
+          "refId": "A",
+          "timeColumns": [
+            "next_refill_time"
+          ]
+        }
+      ],
+      "title": "Current Quota Status: Newest Evaluation",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Historical evaluated headroom (H0) and forward 24h projected path from quota_forecast.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Forecast"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 2,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Headroom H0' AS series,\n  AVG(h0) AS headroom\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Headroom H0' AS series,\n  AVG(h0) AS headroom\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Forecast' AS series,\n  AVG(headroom) AS headroom\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Forecast' AS series,\n  AVG(headroom) AS headroom\nFROM quota_forecast\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "refId": "B",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Headroom & 24h Forecast",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Burn rate (account-weeks/hour) and projected zero headroom hours in the next 24h horizon.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 3,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Burn/h' AS series,\n  AVG(burn_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Burn/h' AS series,\n  AVG(burn_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Zero hours' AS series,\n  AVG(zero_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  'Zero hours' AS series,\n  AVG(zero_h) AS value\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\nGROUP BY 1\nORDER BY time",
+          "refId": "B",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Burn Rate & Projected Dry Hours",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "7-day rolling utilization per Max account. Threshold line at 0.98 marks where teamclaude stops routing; 0.90 is warning level.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.9
+              },
+              {
+                "color": "red",
+                "value": 0.98
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 4,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS u7d\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  AVG(u7d) AS u7d\nFROM quota_samples\nWHERE ts >= $__from AND ts < $__to\n  AND u7d IS NOT NULL\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Per-Account 7-Day Utilization (u7d)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Hourly cash cost of requests where desired was Max but backend was Vertex due to pool depletion.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 5,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Max to Vertex Spillover cash $ (Vertex/Enterprise)",
+      "type": "timeseries"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 41,
+  "tags": [
+    "llm",
+    "quota"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now+1d"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Max Quota",
+  "uid": "llm-quota",
+  "version": 1,
+  "weekStart": ""
+}
