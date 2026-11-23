@@ -1571,7 +1571,32 @@ def main(argv: list[str] | None = None) -> int:
     qr_parser.add_argument("--host", default=socket.gethostname())
     qr_parser.add_argument("--record", action="store_true", default=False, help="Record evaluated runs into quota_watch_runs")
 
+    # quota-outlook subcommand
+    qo_parser = subparsers.add_parser("quota-outlook")
+    qo_parser.add_argument("--db", default=DEFAULT_DB)
+
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.command == "quota-outlook":
+        import quota_watch
+        try:
+            db_path = getattr(args, "db", DEFAULT_DB)
+            res = quota_watch.outlook(db=db_path)
+        except Exception as e:
+            res = {
+                "verdict": "unknown",
+                "ts": None,
+                "age_s": None,
+                "h0": None,
+                "burn_h": None,
+                "zero_h": None,
+                "next_refill_ts": None,
+                "next_refill_amt": None,
+                "line": quota_watch.format_line({"verdict": "unknown"}),
+                "error": str(e)[:200],
+            }
+        print(json.dumps(res))
+        return 0
 
     if args.command == "quota-watch":
         import quota_watch

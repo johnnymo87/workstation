@@ -1178,3 +1178,161 @@ def replay(
         print(line)
 
     return events
+
+
+def format_line(d: dict) -> str:
+    """Format single-line quota summary for coordinators (<= 200 bytes)."""
+    verdict = d.get("verdict", "unknown")
+    ts = d.get("ts")
+    now_ms = d.get("now_ms")
+    if ts is not None:
+        dt = datetime.datetime.fromtimestamp(ts / 1000, tz=NY_TZ)
+    elif now_ms is not None:
+        dt = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ)
+    else:
+        dt = datetime.datetime.now(tz=NY_TZ)
+    time_str = dt.strftime("%H:%M")
+
+    if verdict not in ("ample", "tight", "dry"):
+        line = f"quota@{time_str}: unknown (outlook unavailable)"
+    else:
+        clauses: list[str] = []
+        h0 = d.get("h0")
+        if h0 is not None:
+            clauses.append(f"headroom {h0:.2f} acct-wk")
+
+        next_refill_ts = d.get("next_refill_ts")
+        if next_refill_ts is not None:
+            refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
+            refill_str = refill_dt.strftime("%a %H:%M")
+            amt = d.get("next_refill_amt")
+            if amt is not None:
+                clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
+            else:
+                clauses.append(f"next refill {refill_str} ET")
+
+        if verdict == "ample":
+            prefix = f"quota@{time_str}: AMPLE"
+        else:
+            verdict_word = "TIGHT" if verdict == "tight" else "DRY"
+            prefix = f"quota@{time_str}: {verdict_word}"
+            zero_h = d.get("zero_h")
+            if zero_h is not None:
+                prefix += f" — Max forecast dry ~{zero_h:.1f}h in next 24h (forecast over-predicts)"
+
+        if clauses:
+            line = f"{prefix} · " + " · ".join(clauses)
+        else:
+            line = prefix
+
+    encoded = line.encode("utf-8")
+    if len(encoded) > 200:
+        line = encoded[:200].decode("utf-8", errors="ignore")
+    return line
+
+
+def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
+    """Return JSON-serializable quota outlook for coordinators."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    # Deliberately sub-second timeouts (timeout=0.5, busy_timeout=500):
+    # Consumer (stall-watch/agent-wait) kills the command after 3 s total,
+    # so reader timeouts must stay well under 1 s.
+    row = None
+    fetch_error = None
+    for attempt in range(2):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+            try:
+                conn.execute("PRAGMA busy_timeout=500")
+                row = conn.execute(
+                    "SELECT ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, verdict "
+                    "FROM quota_watch_runs WHERE source='live' ORDER BY ts DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            fetch_error = None
+            break
+        except sqlite3.OperationalError as e:
+            fetch_error = e
+            msg = str(e).lower()
+            if attempt == 0 and ("readonly" in msg or "rollback" in msg):
+                time.sleep(1)
+                continue
+            break
+        except Exception as e:
+            fetch_error = e
+            break
+
+    if fetch_error is not None:
+        err_msg = str(fetch_error)[:200]
+        res: dict[str, Any] = {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "error": err_msg,
+        }
+        res["line"] = format_line({"verdict": "unknown", "now_ms": now_ms})
+        return res
+
+    if row is None:
+        res = {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "error": "no live rows",
+        }
+        res["line"] = format_line({"verdict": "unknown", "now_ms": now_ms})
+        return res
+
+    ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
+    ts = int(ts_val) if ts_val is not None else None
+    h0 = float(h0_val) if h0_val is not None else None
+    burn_h = float(burn_val) if burn_val is not None else None
+    zero_h = float(zero_val) if zero_val is not None else None
+    next_refill_ts = int(refill_ts_val) if refill_ts_val is not None else None
+    next_refill_amt = float(refill_amt_val) if refill_amt_val is not None else None
+
+    age_s = (now_ms - ts) // 1000 if ts is not None else None
+
+    if age_s is not None and age_s > 1200:
+        verdict = "unknown"
+        error = f"stale: age_s={age_s}"
+    elif stored_verdict is None:
+        verdict = "unknown"
+        error = "verdict is NULL"
+    elif stored_verdict not in ("ample", "tight", "dry"):
+        verdict = "unknown"
+        error = f"invalid verdict: {stored_verdict}"
+    else:
+        verdict = stored_verdict
+        error = None
+
+    res = {
+        "verdict": verdict,
+        "ts": ts,
+        "age_s": age_s,
+        "h0": h0,
+        "burn_h": burn_h,
+        "zero_h": zero_h,
+        "next_refill_ts": next_refill_ts,
+        "next_refill_amt": next_refill_amt,
+    }
+    line = format_line(res)
+    res["line"] = line
+    if error is not None:
+        res["error"] = error
+    return res
+
+
