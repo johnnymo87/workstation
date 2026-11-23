@@ -399,6 +399,13 @@ lib.mkIf isCloudbox {
     # Downstream gate for a goose binary before cutover (bead workstation-6w7i.27.1):
     # isolated serve + honkd on a sessions.db copy; read-only to production.
     localPkgs.goose-upgrade-probe
+
+    # LLM spend ledger CLI (bead workstation-4si2.1, quota-verdict).
+    # Deployed to home.packages so dev (stall-watch, agent-wait, coordinators)
+    # can run `llm-ledger quota-outlook`. It must NOT go in
+    # environment.systemPackages, because changing system packages restarts
+    # teamclaude.service and drops in-flight Max streaming requests.
+    (pkgs.callPackage ../../pkgs/llm-ledger { })
   ];
 
   # GCP project: read from sops in initExtra below (org-identifying, not in public source)
