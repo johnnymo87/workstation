@@ -1260,16 +1260,19 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
     if now_ms is None:
         now_ms = int(time.time() * 1000)
 
-    # Deliberately sub-second timeouts (timeout=0.5, busy_timeout=500):
-    # Consumer (stall-watch/agent-wait) kills the command after 3 s total,
-    # so reader timeouts must stay well under 1 s.
+    # Busy timeout of 1 s (connect's timeout= and PRAGMA busy_timeout are the
+    # same setting). The consumer (stall-watch/agent-wait) kills the command
+    # after 3 s, and treats a timeout and an error alike as "unknown". 1 s rides
+    # out the ledger writer's commit window, so a stall-watch tick that lands in
+    # it doesn't read "unknown" (which holds nothing) during a tight episode.
+    # Worst case: ~0.1 s startup + 1 s + 0.2 s sleep + 1 s retry ≈ 2.3 s.
     row = None
     fetch_error = None
     for attempt in range(2):
         try:
-            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
             try:
-                conn.execute("PRAGMA busy_timeout=500")
+                conn.execute("PRAGMA busy_timeout=1000")
                 row = conn.execute(
                     "SELECT ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, verdict "
                     "FROM quota_watch_runs WHERE source='live' ORDER BY ts DESC LIMIT 1"
@@ -1282,8 +1285,8 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             fetch_error = e
             msg = str(e).lower()
             if attempt == 0 and ("readonly" in msg or "rollback" in msg):
-                # A hot journal is only left by a crashed writer; consumer kill cap is 3 s;
-                # worst case now ≈ 0.5+0.5+0.2+0.5+0.5 s.
+                # A hot journal is only left by a crashed writer; the writer's next
+                # run rolls it back. Keep the sleep short (budget above).
                 time.sleep(0.2)
                 continue
             break
