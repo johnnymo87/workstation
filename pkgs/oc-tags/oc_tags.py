@@ -11,6 +11,7 @@ docs/plans/2026-09-08-oc-tags-design.md.
 from __future__ import annotations
 
 import argparse
+import bisect
 import collections
 import contextlib
 import datetime
@@ -573,6 +574,22 @@ CLAUDE_PROVIDERS = frozenset({"anthropic", "google-vertex-anthropic"})
 # workstation-ynoq.2. Divisor for `report --account-weeks`.
 ACCOUNT_WEEK_USD = 1520.0
 
+# opus-5-5 list rates, $ per Mtok. The account-week divisor above was fitted
+# against TOKENS priced at these rates, so `--account-weeks` prices tokens with
+# them rather than reusing each row's own $ (a sonnet row's $ is not
+# comparable). Keep in step with GOOSE_MODEL_RATES["claude-opus-5-5"].
+OPUS_5_5_LIST_PER_MTOK = {"input": 4.0, "cache_read": 0.20, "cache_write": 5.0, "output": 20.0}
+
+
+def opus_list_cost(uncached_in, out, cache_read, cache_write) -> float:
+    r = OPUS_5_5_LIST_PER_MTOK
+    return (
+        (uncached_in or 0) * r["input"]
+        + (out or 0) * r["output"]
+        + (cache_read or 0) * r["cache_read"]
+        + (cache_write or 0) * r["cache_write"]
+    ) / 1_000_000
+
 
 def parse_providers(raw: str | None) -> frozenset[str] | None:
     """Parse a `--provider a,b` value. None means "no filter"; an empty list
@@ -619,6 +636,12 @@ class Aggregate:
     em_freshness: str | None = None
     em_ledger_dir_exists: bool = False
     em_missing_msg: str | None = None
+    # tag -> tokens priced at opus-5-5 list (the `--account-weeks` numerator).
+    # Filled for opencode, goose and cfp rows; the lgtm/EM ledgers do not feed it.
+    acct_usd: dict[str, float] = field(default_factory=dict)
+    # Earliest timestamp the source actually has (cfp events retention); None
+    # when the source is not retention-limited.
+    data_start_ms: int | None = None
 
 
 def connect_ro(db_path: str) -> sqlite3.Connection:
@@ -751,8 +774,6 @@ def aggregate(
     newest_row_ms = 0
 
     for sid, ts, cost, model, provider, total_tok, tin, tout, cread, cwrite in rows:
-        if providers is not None and provider not in providers:
-            continue
         cost = cost or 0.0
         dt = datetime.datetime.fromtimestamp(ts / 1000, ET)
         day_str = dt.strftime("%Y-%m-%d")
@@ -764,6 +785,11 @@ def aggregate(
             agg.claude_day[day_str] = agg.claude_day.get(day_str, 0.0) + cost
             if day_accum[day_str] >= 195.0 and day_str not in agg.cap_hits:
                 agg.cap_hits[day_str] = dt.strftime("%H:%M")
+        # After the claude_day/cap block above, on purpose: those are compared
+        # with cfp's all-provider totals (the serve chart's coverage, drift and
+        # cap marker), so a provider filter must not shrink them.
+        if providers is not None and provider not in providers:
+            continue
         root = root_of(sid, parents)
         if root not in tag_cache:
             tag, source = effective_tag(
@@ -783,6 +809,7 @@ def aggregate(
         newest_row_ms = max(newest_row_ms, ts)
         per_bucket[tag][key] += cost
         agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+        agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(tin, tout, cread, cwrite)
 
         if total_tok is not None:
             toks = int(total_tok)
@@ -868,6 +895,7 @@ def aggregate(
             newest_row_ms = max(newest_row_ms, ts)
             per_bucket[tag][key] += cost
             agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+            agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(uncached_in, tout, cread, cwrite)
 
     for root, tag, source, title, ts, cost, unpriced_model, toks in (
         () if providers is not None else
@@ -1271,6 +1299,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
     new_totals = dict(agg.totals)
     new_series = {t: dict(s) for t, s in agg.series.items()}
     new_sources = dict(agg.sources)
+    new_acct = dict(agg.acct_usd)
 
     for prefix in prefixes:
         pattern = f"{prefix}:"
@@ -1282,6 +1311,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
         for b in agg.buckets:
             val = sum(new_series[t].get(b, 0.0) for t in matching_tags) + new_series.get(prefix, {}).get(b, 0.0)
             folded_bucket_series[b] = val
+        new_acct[prefix] = sum(new_acct.pop(t, 0.0) for t in matching_tags) + new_acct.get(prefix, 0.0)
         folded_source = "manual" if any(new_sources.get(t) == "manual" for t in matching_tags) or new_sources.get(prefix) == "manual" else "auto"
 
         for t in matching_tags:
@@ -1302,6 +1332,7 @@ def fold_aggregate(agg: Aggregate, fold_prefixes: list[str] | tuple[str, ...]) -
     new_agg.totals = sorted_totals
     new_agg.series = new_series
     new_agg.sources = new_sources
+    new_agg.acct_usd = new_acct
     return new_agg
 
 
@@ -1497,6 +1528,17 @@ def _is_num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+# A goose-shaped cfp session id that goose-serve has no recent activity for may
+# be one of lgtm's private-root goose runs, whose ids collide with goose-serve's
+# (same YYYYMMDD_N scheme, separate sessions.db). The lgtm ledger records no
+# goose session id (its `session` is lgtm's own `lgr-...` name), so the only
+# link is time: an lgtm row within a day claims the request. goose-serve keeps
+# it only when its own usage_ledger has a row within GOOSE_LEDGER_JOIN_MS.
+GOOSE_LEDGER_JOIN_MS = 600_000
+LGTM_JOIN_MS = 86_400_000
+CFP_GOOSE_UNKNOWN_TAG = "cfp:goose-unknown"
+
+
 def load_cfp_aggregate(
     backend: str,
     events_path: str | None = None,
@@ -1506,21 +1548,25 @@ def load_cfp_aggregate(
     bucket: str | None = None,
     now_ms: int | None = None,
     goose_db: str = DEFAULT_GOOSE_DB,
+    lgtm_ledger: str | None = None,
 ) -> Aggregate:
     """Aggregate built ONLY from claude-failover-proxy events for one backend.
 
     On cloudbox opencode reports the same providerID for Vertex and for Max, so
     the backend is only knowable from cfp: each `usage` event carries `backend`
     and a notional `cost`, and the `route` event with the same `requestId`
-    carries the session. The opencode and goose DB rows would double count the
-    same requests, so they are read for session -> tag resolution only.
+    carries the session and model. The opencode and goose DB rows would double
+    count the same requests, so they are read for session -> tag resolution only.
 
     Usage events with no matching route (or a session id of neither shape) land
-    under CFP_UNROUTED_TAG. Two streaming passes keep memory bounded by the
-    in-window usage events rather than by the whole file.
+    under CFP_UNROUTED_TAG; goose-shaped ids no ledger can place land under
+    CFP_GOOSE_UNKNOWN_TAG (see GOOSE_LEDGER_JOIN_MS). Two streaming passes keep
+    memory bounded by the in-window usage events rather than by the whole file.
     """
     if events_path is None:
         events_path = cfp_events_path()
+    if lgtm_ledger is None:
+        lgtm_ledger = DEFAULT_LGTM_LEDGER
     win = calculate_window(days, now_ms=now_ms)
     agg = Aggregate()
     agg.window = win
@@ -1532,34 +1578,56 @@ def load_cfp_aggregate(
             warn_retired_dir_tags(st)
             s_tags = session_tags(st)
 
-    usage: list[tuple[str | None, int, float]] = []
+    # (requestId, ts, cost, (input, output, cacheRead, cacheWrite), event model)
+    usage: list[tuple] = []
+    earliest: int | None = None
     if not os.path.exists(events_path):
         agg.warnings.append(f"cfp events not found: {events_path}")
     else:
         try:
             for ev in _iter_cfp_events(events_path):
+                ts = ev.get("ts")
+                if not _is_num(ts):
+                    continue
+                earliest = int(ts) if earliest is None else min(earliest, int(ts))
                 if ev.get("type") != "usage" or ev.get("backend") != backend:
                     continue
-                ts = ev.get("ts")
-                if not _is_num(ts) or ts < win.since_ms or ts >= win.until_ms:
+                if ts < win.since_ms or ts >= win.until_ms:
                     continue
                 rid = ev.get("requestId")
                 cost = ev.get("cost")
+                u = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+                toks = tuple(
+                    int(u[k]) if _is_num(u.get(k)) else 0
+                    for k in ("input", "output", "cacheRead", "cacheWrite")
+                )
+                model = ev.get("model") if isinstance(ev.get("model"), str) else None
                 usage.append(
-                    (rid if isinstance(rid, str) else None, int(ts), float(cost) if _is_num(cost) else 0.0)
+                    (rid if isinstance(rid, str) else None, int(ts),
+                     float(cost) if _is_num(cost) else 0.0, toks, model)
                 )
         except OSError as e:
             agg.warnings.append(f"cfp events not counted: {e}")
             usage = []
+    if earliest is not None and earliest > win.since_ms:
+        agg.data_start_ms = earliest
+        fmt = lambda ms: datetime.datetime.fromtimestamp(ms / 1000, ET).strftime("%Y-%m-%d %H:%M")
+        agg.warnings.append(
+            f"cfp events start at {fmt(earliest)} ET, later than the window start "
+            f"{fmt(win.since_ms)} ET: the report covers only from then"
+        )
 
-    wanted = {rid for rid, _ts, _c in usage if rid is not None}
+    wanted = {rid for rid, *_ in usage if rid is not None}
     route_session: dict[str, str] = {}
+    route_model: dict[str, str] = {}
     if wanted:
         try:
             for ev in _iter_cfp_events(events_path):
                 rid = ev.get("requestId")
                 if ev.get("type") == "route" and rid in wanted and isinstance(ev.get("sessionId"), str):
                     route_session[rid] = ev["sessionId"]
+                    if isinstance(ev.get("model"), str):
+                        route_model[rid] = ev["model"]
         except OSError as e:
             agg.warnings.append(f"cfp events not counted: {e}")
             usage = []
@@ -1578,68 +1646,112 @@ def load_cfp_aggregate(
         finally:
             conn.close()
 
+    goose_sids = {x for x in sids if _GOOSE_SESSION_ID.match(x)}
     g_parents: dict[str, str | None] = {}
     g_meta: dict[str, tuple] = {}
-    if any(_GOOSE_SESSION_ID.match(x) for x in sids) and goose_db and os.path.exists(goose_db):
-        try:
-            g_conn = connect_ro(goose_db)
+    g_active: dict[str, list[int]] = {}  # goose-serve usage_ledger times (ms) per session
+    lgtm_rows: list[tuple] = []          # (ts, root, tag, source, title), time-sorted
+    if goose_sids:
+        if goose_db and os.path.exists(goose_db):
             try:
-                for sid, parent, wdir, name, stype, rtitle in g_conn.execute(
-                    "SELECT id, parent_session_id, working_dir, name, session_type, "
-                    "json_extract(recipe_json, '$.title') FROM sessions"
-                ):
-                    g_parents[sid] = parent
-                    g_meta[sid] = (wdir, name, stype, rtitle)
-            finally:
-                g_conn.close()
-        except Exception as e:
-            agg.warnings.append(f"goose sessions not read for cfp join: {e}")
+                g_conn = connect_ro(goose_db)
+                try:
+                    for sid, parent, wdir, name, stype, rtitle in g_conn.execute(
+                        "SELECT id, parent_session_id, working_dir, name, session_type, "
+                        "json_extract(recipe_json, '$.title') FROM sessions"
+                    ):
+                        g_parents[sid] = parent
+                        g_meta[sid] = (wdir, name, stype, rtitle)
+                    for sid, created in g_conn.execute(
+                        "SELECT session_id, created_timestamp FROM usage_ledger "
+                        "WHERE created_timestamp >= ? AND created_timestamp < ?",
+                        ((win.since_ms - GOOSE_LEDGER_JOIN_MS) // 1000,
+                         (win.until_ms + GOOSE_LEDGER_JOIN_MS) // 1000 + 1),
+                    ):
+                        if sid in goose_sids:
+                            g_active.setdefault(sid, []).append(int(created) * 1000)
+                finally:
+                    g_conn.close()
+            except Exception as e:
+                agg.warnings.append(f"goose sessions not read for cfp join: {e}")
+        for sid in g_active:
+            g_active[sid].sort()
+        lgtm_rows = sorted(
+            (ts, root, tag, source, title)
+            for root, tag, source, title, ts, *_rest in read_lgtm_ledger(
+                lgtm_ledger, win.since_ms - LGTM_JOIN_MS, win.until_ms + LGTM_JOIN_MS, s_tags, agg.warnings
+            )
+        )
 
+    def near(times: list[int], ts: int, tol: int) -> int | None:
+        """Nearest element of sorted `times` within tol of ts, else None."""
+        i = bisect.bisect_left(times, ts)
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(times) and abs(times[j] - ts) <= tol:
+                if best is None or abs(times[j] - ts) < abs(best - ts):
+                    best = times[j]
+        return best
+
+    lgtm_times = [r[0] for r in lgtm_rows]
     tag_cache: dict[str, tuple[str, str]] = {}
 
-    def resolve(sid: str | None) -> tuple[str, str]:
-        """(root id, tag) for a cfp session id; fills agg.root_meta/sources."""
+    def register(root, tag, source, title, directory):
+        if root not in tag_cache:
+            tag_cache[root] = (tag, source)
+            agg.root_meta[root] = {"title": title, "directory": directory, "tag": tag, "source": source}
+        return root
+
+    def resolve(sid: str | None, ts: int) -> str:
+        """Root id for a cfp session id at ts; registers its tag."""
         if sid is not None and sid.startswith("ses_"):
             root = root_of(sid, parents)
             if root not in tag_cache:
                 tag, source = effective_tag(root, dirs.get(root), session_tag_map=s_tags)
-                tag_cache[root] = (tag, source)
-                agg.root_meta[root] = {
-                    "title": titles.get(root), "directory": dirs.get(root),
-                    "tag": tag, "source": source,
-                }
-        elif sid is not None and _GOOSE_SESSION_ID.match(sid):
-            root_id = root_of(sid, g_parents)
-            root = f"goose:{root_id}"
-            if root not in tag_cache:
-                wdir, name, stype, rtitle = g_meta.get(root_id, (None, None, None, None))
-                if root in s_tags:
-                    tag, source = s_tags[root], "manual"
-                else:
-                    tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
-                tag_cache[root] = (tag, source)
-                agg.root_meta[root] = {
-                    "title": rtitle or name or stype or "", "directory": wdir,
-                    "tag": tag, "source": source,
-                }
-        else:
-            root = CFP_UNROUTED_TAG
-            if root not in tag_cache:
-                tag_cache[root] = (CFP_UNROUTED_TAG, "manual")
-                agg.root_meta[root] = {
-                    "title": "cfp usage with no route/session", "directory": None,
-                    "tag": CFP_UNROUTED_TAG, "source": "manual",
-                }
-        return root, tag_cache[root][0]
+                register(root, tag, source, titles.get(root), dirs.get(root))
+            return root
+        if sid is not None and _GOOSE_SESSION_ID.match(sid):
+            in_serve = sid in g_meta
+            if in_serve and near(g_active.get(sid, []), ts, GOOSE_LEDGER_JOIN_MS) is not None:
+                lgtm_ts = None  # goose-serve logged this request itself
+            else:
+                lgtm_ts = near(lgtm_times, ts, LGTM_JOIN_MS)
+            if lgtm_ts is not None:
+                _t, root, tag, source, title = lgtm_rows[lgtm_times.index(lgtm_ts)]
+                return register(root, tag, source, title, None)
+            if in_serve:
+                root_id = root_of(sid, g_parents)
+                root = f"goose:{root_id}"
+                if root not in tag_cache:
+                    wdir, name, stype, rtitle = g_meta.get(root_id, (None, None, None, None))
+                    if root in s_tags:
+                        tag, source = s_tags[root], "manual"
+                    else:
+                        tag, source = goose_auto_key(recipe_title=rtitle, name=name, session_type=stype), "auto"
+                    register(root, tag, source, rtitle or name or stype or "", wdir)
+                return root
+            return register(CFP_GOOSE_UNKNOWN_TAG, CFP_GOOSE_UNKNOWN_TAG, "manual",
+                            "goose-shaped cfp session id in no known ledger", None)
+        return register(CFP_UNROUTED_TAG, CFP_UNROUTED_TAG, "manual",
+                        "cfp usage with no route/session", None)
 
     per_bucket = collections.defaultdict(lambda: collections.defaultdict(float))
     newest_row_ms = 0
-    for rid, ts, cost in usage:
-        root, tag = resolve(route_session.get(rid) if rid is not None else None)
-        agg.sources[tag] = tag_cache[root][1]
+    for rid, ts, cost, toks, ev_model in usage:
+        root = resolve(route_session.get(rid) if rid is not None else None, ts)
+        tag, source = tag_cache[root]
+        agg.sources[tag] = source
         per_bucket[tag][bucket_key(ts, b)] += cost
         agg.root_totals[root] = agg.root_totals.get(root, 0.0) + cost
+        agg.acct_usd[tag] = agg.acct_usd.get(tag, 0.0) + opus_list_cost(*toks)
         newest_row_ms = max(newest_row_ms, ts)
+        # Tokens with no usable cost must be LOUD, as in aggregate(): $0 would
+        # silently under-report.
+        if cost <= 0 and sum(toks) > 0:
+            model = (route_model.get(rid) if rid is not None else None) or ev_model or "unknown"
+            u = agg.unpriced.setdefault(model, {"messages": 0, "tokens": 0})
+            u["messages"] += 1
+            u["tokens"] += sum(toks)
 
     # Same tail as aggregate(): enumerate through the newest row, rank by dollars.
     now_epoch_ms = win.now_ms
@@ -2830,6 +2942,7 @@ def cmd_report(args: argparse.Namespace) -> int:
             tags_db=args.tags_db,
             days=args.days,
             goose_db=getattr(args, "goose_db", DEFAULT_GOOSE_DB),
+            lgtm_ledger=getattr(args, "lgtm_ledger", None),
         )
     else:
         agg = load_aggregate(
@@ -2872,20 +2985,27 @@ def cmd_report(args: argparse.Namespace) -> int:
     for tag, dollars in agg.totals.items():
         share = (dollars / total_dollars * 100.0) if total_dollars > 0 else 0.0
         if acct_usd is not None:
-            print(f"{tag:<36} {dollars:>10.2f} {dollars / acct_usd:>8.2f} {share:>6.1f}%")
+            print(f"{tag:<36} {dollars:>10.2f} {agg.acct_usd.get(tag, 0.0) / acct_usd:>8.2f} {share:>6.1f}%")
         else:
             print(f"{tag:<36} {dollars:>10.2f} {share:>6.1f}%")
     print("-" * width)
     if acct_usd is not None:
-        print(f"{'total':<36} {total_dollars:>10.2f} {total_dollars / acct_usd:>8.2f}\n")
+        total_acct = sum(agg.acct_usd.get(t, 0.0) for t in agg.totals) / acct_usd
+        print(f"{'total':<36} {total_dollars:>10.2f} {total_acct:>8.2f}\n")
+        print(
+            f"acct-wk = tokens priced at opus-5-5 list / ${acct_usd:g}; includes any "
+            "usage-billed seat traffic (cloudbox), which draws no Max quota"
+        )
         # Elapsed, not calendar: the window runs to the end of today, which is
         # still in progress, and dividing by the whole span would understate it.
-        elapsed_ms = (min(win.now_ms, win.until_ms) - win.since_ms) if win else 0
+        # And never earlier than the source's own start (cfp retention).
+        start_ms = max(win.since_ms, agg.data_start_ms or 0) if win else 0
+        elapsed_ms = (min(win.now_ms, win.until_ms) - start_ms) if win else 0
         weeks = elapsed_ms / (7 * 86_400_000)
-        rate = f"{total_dollars / acct_usd / weeks:.2f}" if weeks > 0 else "n/a"
+        rate = f"{total_acct / weeks:.2f}" if weeks > 0 else "n/a"
         print(
             f"1 account-week = ${acct_usd:g} list price.  "
-            f"{total_dollars / acct_usd:.2f} account-weeks over {weeks * 7:.1f} days = "
+            f"{total_acct:.2f} account-weeks over {weeks * 7:.1f} days = "
             f"{rate} account-weeks/week"
         )
         print()

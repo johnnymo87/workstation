@@ -3788,6 +3788,26 @@ class TestProviderFilter(unittest.TestCase):
         self.assertNotIn("em-agents:warrior_f", filtered.totals)
         self.assertFalse(filtered.em_ledger_dir_exists)
 
+    def test_provider_filter_leaves_cfp_reference_inputs_unfiltered(self):
+        # claude_day / cap_hits compare against cfp's all-provider totals, so a
+        # filter that drops the Claude rows must not shrink them.
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO message VALUES ('mcap', 'root_a', ?, ?)",
+            (FIXTURE_NOW_MS + 3600 * 1000, json.dumps({
+                "role": "assistant", "cost": 300.0, "modelID": "claude-opus-5-5",
+                "providerID": "google-vertex-anthropic",
+                "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}}})),
+        )
+        conn.commit()
+        conn.close()
+        full = self._agg(None)
+        filt = self._agg(frozenset({"openai"}))
+        self.assertEqual(filt.claude_day, full.claude_day)
+        self.assertEqual(filt.cap_hits, full.cap_hits)
+        self.assertTrue(filt.cap_hits)
+        self.assertEqual(filt.totals, {"auto:astra": 250.0})
+
     def test_parse_providers(self):
         self.assertIsNone(oc_tags.parse_providers(None))
         self.assertEqual(oc_tags.parse_providers("anthropic"), frozenset({"anthropic"}))
@@ -3864,8 +3884,14 @@ class TestCfpBackend(unittest.TestCase):
             "INSERT INTO sessions (id, name, session_type, working_dir, provider_name) "
             "VALUES ('20260908_3', 'Goose Max', 'user', '/home/dev/projects/gx', 'anthropic')"
         )
+        # goose-serve's own record of activity on that session, at T
+        g.execute(
+            "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, cost) "
+            "VALUES ('20260908_3', ?, 'claude-opus-5-5', 1, 1, 0.01)", (self.T // 1000,)
+        )
         g.commit()
         g.close()
+        self.lgtm = os.path.join(self.td.name, "goose-usage.jsonl")
 
     def tearDown(self):
         self.td.cleanup()
@@ -3879,9 +3905,9 @@ class TestCfpBackend(unittest.TestCase):
         return ev
 
     @staticmethod
-    def route(rid, sid):
+    def route(rid, sid, model="claude-opus-5-5"):
         return {"type": "route", "ts": TestCfpBackend.T, "requestId": rid, "sessionId": sid,
-                "desired": "max", "chosen": "max", "model": "claude-opus-5-5"}
+                "desired": "max", "chosen": "max", "model": model}
 
     def write(self, *events, raw=()):
         with open(self.events, "w", encoding="utf-8") as fh:
@@ -3897,8 +3923,13 @@ class TestCfpBackend(unittest.TestCase):
                     oc_tags.set_session_tag(st, k, v)
         return oc_tags.load_cfp_aggregate(
             backend, events_path=self.events, db_path=self.db, tags_db=self.tags_db, days=7,
-            goose_db=self.goose_db, now_ms=self.T, **kw,
+            goose_db=self.goose_db, lgtm_ledger=self.lgtm, now_ms=self.T, **kw,
         )
+
+    def write_lgtm(self, *rows):
+        with open(self.lgtm, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
 
     def test_default_events_path_is_under_cfp_dir(self):
         self.assertEqual(
@@ -3958,6 +3989,87 @@ class TestCfpBackend(unittest.TestCase):
         agg = self.load("max")
         self.assertEqual(agg.series["auto:mono"], {"2026-09-08": 1.0})
 
+    def test_goose_shaped_id_not_in_goose_serve_is_goose_unknown(self):
+        self.write(self.route("r1", "20260908_9"), self.usage("r1", 1.0))
+        agg = self.load("max")
+        self.assertEqual(agg.totals, {"cfp:goose-unknown": 1.0})
+        self.assertNotIn("auto:goose/session", agg.totals)
+
+    def test_goose_id_collision_attributed_to_lgtm(self):
+        # lgtm's private goose root reuses 20260908_3; goose-serve has no
+        # activity on that id near this request, and an lgtm row sits 10 min away.
+        t = self.T + 3_600_000
+        at = datetime.datetime.fromtimestamp((t - 600_000) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        self.write(self.route("r1", "20260908_3"), self.usage("r1", 2.5, ts=t))
+        agg = self.load("max")
+        self.assertEqual(agg.totals, {"lgtm-runs": 2.5})
+        self.assertEqual(agg.root_totals, {"lgtm-goose:lgr-food-truck_mono-7-aaaaaa": 2.5})
+
+    def test_goose_serve_match_wins_when_its_ledger_has_a_row_near(self):
+        # same lgtm row exists, but goose-serve itself logged this request
+        at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        self.write(self.route("r1", "20260908_3"), self.usage("r1", 2.0))
+        self.assertEqual(self.load("max").totals, {"auto:goose/goose-max": 2.0})
+
+    def test_lgtm_row_beyond_a_day_does_not_capture(self):
+        t = self.T + 3_600_000
+        at = datetime.datetime.fromtimestamp((t - 2 * 86_400_000) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        self.write(self.route("r1", "20260908_9"), self.usage("r1", 1.0, ts=t))
+        self.assertEqual(self.load("max").totals, {"cfp:goose-unknown": 1.0})
+
+    def test_usage_tokens_priced_at_opus_list_for_acct_usd(self):
+        self.write(
+            self.route("r1", "ses_root"),
+            self.usage("r1", 0.01, usage={"input": 1_000_000, "output": 1_000_000,
+                                          "cacheRead": 1_000_000, "cacheWrite": 1_000_000}),
+        )
+        agg = self.load("max")
+        self.assertEqual(agg.totals, {"auto:mono": 0.01})
+        self.assertAlmostEqual(agg.acct_usd["auto:mono"], 29.2)
+
+    def test_tokens_without_cost_are_unpriced_by_route_model(self):
+        self.write(
+            self.route("r1", "ses_root", model="claude-new-model"),
+            self.usage("r1", 0, usage={"input": 100, "output": 50, "cacheRead": 10, "cacheWrite": 0}),
+            self.route("r2", "ses_root", model="claude-new-model"),
+            {k: v for k, v in self.usage("r2", 0, usage={"input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0}).items() if k != "cost"},
+            self.route("r3", "ses_root"),
+            self.usage("r3", 0, usage={"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}),  # no tokens: not unpriced
+        )
+        agg = self.load("max")
+        self.assertEqual(agg.unpriced, {"claude-new-model": {"messages": 2, "tokens": 170}})
+
+    def test_events_retention_shorter_than_window(self):
+        first = self.T - 2 * 86400 * 1000
+        self.write(self.route("r1", "ses_root"), {**self.usage("r1", 1.0, ts=first)})
+        agg = self.load("max")
+        self.assertEqual(agg.data_start_ms, first)
+        self.assertTrue(any("start" in w and "window" in w for w in agg.warnings))
+
+    def test_events_covering_window_do_not_warn(self):
+        first = oc_tags.calculate_window(7, now_ms=self.T).since_ms
+        self.write(self.route("r1", "ses_root"), self.usage("r1", 1.0, ts=first))
+        agg = self.load("max")
+        self.assertFalse(any("window" in w for w in agg.warnings))
+
+    def test_report_rate_line_uses_events_start(self):
+        first = self.T - 86400 * 1000  # events begin exactly 1 day before "now"
+        self.write(self.route("r1", "ses_root"),
+                   self.usage("r1", 1.0, ts=first, usage={"input": 380_000_000, "output": 0, "cacheRead": 0, "cacheWrite": 0}))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--days", "7", "--backend", "max", "--cfp-events", self.events,
+                               "--lgtm-ledger", self.lgtm,
+                               "--account-weeks", "1520", "--db", self.db, "--goose-db", self.goose_db,
+                               "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        # 380M x $4/M = $1520 = 1 account-week over 1 day => 7.00/week
+        self.assertIn("1.00 account-weeks over 1.0 days = 7.00 account-weeks/week", out.getvalue())
+        self.assertIn("window", err.getvalue())
+
     def test_missing_events_file_warns(self):
         agg = self.load("max")
         self.assertEqual(agg.totals, {})
@@ -3970,7 +4082,7 @@ class TestCfpBackend(unittest.TestCase):
     def test_report_cli_backend(self):
         self.write(self.route("r1", "ses_root"), self.usage("r1", 3.0), self.usage("r9", 1.0))
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
             rc = oc_tags.main(["report", "--days", "7", "--backend", "max", "--cfp-events", self.events,
                                "--db", self.db, "--goose-db", self.goose_db, "--tags-db", self.tags_db])
         self.assertEqual(rc, 0)
@@ -4005,9 +4117,11 @@ class TestAccountWeeks(unittest.TestCase):
         conn = sqlite3.connect(self.db)
         conn.execute(
             "INSERT INTO message VALUES ('mx1', 'root_b', ?, ?)",
-            (FIXTURE_NOW_MS, json.dumps({"role": "assistant", "cost": 760.0, "modelID": "claude-opus-5-5",
+            # $ column says 100; the TOKENS price to $760 at opus-5-5 list
+            # (190M uncached input x $4/M), which is what acct-wk must use.
+            (FIXTURE_NOW_MS, json.dumps({"role": "assistant", "cost": 100.0, "modelID": "claude-sonnet-5-5",
                                          "providerID": "anthropic",
-                                         "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}}})),
+                                         "tokens": {"input": 190_000_000, "output": 0, "cache": {"read": 0, "write": 0}}})),
         )
         conn.commit()
         conn.close()
@@ -4030,9 +4144,12 @@ class TestAccountWeeks(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("acct-wk", out)
         row = next(l for l in out.splitlines() if l.startswith("auto:mono/w3-pr2"))
-        self.assertIn("760.00", row)
-        self.assertIn("0.50", row.split())  # 760 / 1520
+        self.assertIn("100.00", row)   # $ column unchanged
+        self.assertIn("0.50", row.split())  # tokens at opus-5-5 list: 760 / 1520
         self.assertIn("1 account-week = $1520", out)
+        self.assertIn(
+            "acct-wk = tokens priced at opus-5-5 list / $1520; includes any usage-billed "
+            "seat traffic (cloudbox), which draws no Max quota", out)
         self.assertEqual(err, "")
 
     def test_explicit_divisor(self):
@@ -4040,6 +4157,7 @@ class TestAccountWeeks(unittest.TestCase):
         row = next(l for l in out.splitlines() if l.startswith("auto:mono/w3-pr2"))
         self.assertIn("2.00", row.split())  # 760 / 380
         self.assertIn("1 account-week = $380", out)
+        self.assertIn("/ $380;", out)
 
     def test_rate_line_per_week(self):
         # window start = today_start - 7d; now = 09:30 ET on the last day => 7.39 days
@@ -4051,6 +4169,40 @@ class TestAccountWeeks(unittest.TestCase):
     def test_column_absent_without_flag(self):
         rc, out, _err = self.report()
         self.assertNotIn("acct-wk", out)
+
+    def test_opus_list_cost_rates(self):
+        # $4 input, $5 cache write, $0.20 cache read, $20 output, per Mtok
+        self.assertAlmostEqual(oc_tags.opus_list_cost(1_000_000, 1_000_000, 1_000_000, 1_000_000), 29.2)
+
+    def test_aggregate_acct_usd_opencode_and_goose_tokens(self):
+        td = Path(self.td.name)
+        gdb = str(td / "goose.db")
+        _fixture_goose_db(gdb)
+        g = sqlite3.connect(gdb)
+        g.execute("INSERT INTO sessions (id, name, session_type, working_dir, provider_name) "
+                  "VALUES ('gm', 'Gm', 'user', '/x/gm', 'anthropic')")
+        # goose input INCLUDES cache: uncached = 3M - 1M - 1M = 1M
+        g.execute("INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, "
+                  "cache_read_tokens, cache_write_tokens, cost) VALUES ('gm', ?, 'claude-sonnet-5-5', "
+                  "3000000, 1000000, 1000000, 1000000, 0.01)", (FIXTURE_NOW_MS // 1000,))
+        g.commit()
+        g.close()
+        agg = oc_tags.aggregate(
+            self.db, since_ms=FIXTURE_NOW_MS - 86400000, until_ms=FIXTURE_NOW_MS + 86400000, bucket="day",
+            session_tags={}, now_ms=FIXTURE_NOW_MS, goose_db_path=gdb, providers=frozenset({"anthropic"}),
+        )
+        self.assertAlmostEqual(agg.acct_usd["auto:mono/w3-pr2"], 760.0)
+        self.assertAlmostEqual(agg.acct_usd["auto:goose/gm"], 4.0 + 20.0 + 0.2 + 5.0)
+        self.assertAlmostEqual(agg.totals["auto:goose/gm"], 0.01)
+
+    def test_fold_keeps_acct_usd(self):
+        agg = oc_tags.Aggregate()
+        agg.buckets = ["2026-09-08"]
+        agg.totals = {"em-agents:a": 1.0, "em-agents:b": 2.0, "x": 3.0}
+        agg.series = {"em-agents:a": {"2026-09-08": 1.0}, "em-agents:b": {"2026-09-08": 2.0}, "x": {"2026-09-08": 3.0}}
+        agg.acct_usd = {"em-agents:a": 10.0, "em-agents:b": 20.0, "x": 5.0}
+        folded = oc_tags.fold_aggregate(agg, ["em-agents"])
+        self.assertEqual(folded.acct_usd, {"em-agents": 30.0, "x": 5.0})
 
     def test_warns_without_provider_or_backend(self):
         out, err = io.StringIO(), io.StringIO()
