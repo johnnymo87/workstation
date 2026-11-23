@@ -553,11 +553,12 @@ fi
 # halt (423): she is asked again next pass. Each try is logged; the outcome is
 # added to the quota:pool line, and the sleep itself stands as asleep:<sid>.
 # EM_STACK_QUOTA_SLEEP=0 turns it off. A dry run only says what it would do.
-quota_sleep_sids=()
+quota_sleep_sids=(); pool_active=0
+for k in "${active[@]}"; do [ "$k" != quota:pool ] || pool_active=1; done
 # Only on a reading of this pass (quota_spent): a quota:pool carried over an
 # unreadable state file never puts anyone to sleep.
 if [ "$nostack" = 0 ] && [ "${EM_STACK_QUOTA_SLEEP:-1}" = 1 ] && [ "${quota_spent:-0}" = 1 ] &&
-   [ -n "$presence_body" ] && printf '%s\n' "${active[@]}" | grep -qx 'quota:pool'; then
+   [ -n "$presence_body" ] && [ "$pool_active" = 1 ]; then
   mapfile -t quota_sleep_sids < <(jq -r '.presence | to_entries[]
     | select(.value.agent_driven == true and .value.link == "online" and .value.place == "in_world")
     | .key | select(test("^[A-Za-z0-9_-]+$"))' <<<"$presence_body" 2>/dev/null || true)
