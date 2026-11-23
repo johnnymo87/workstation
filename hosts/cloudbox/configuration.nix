@@ -5478,6 +5478,16 @@ Forensics: $DUMP"
         # pinned to Max for up to CFP_IDLE_MIGRATE_SECONDS after the window
         # closes. Off = remove the line (unset is off, with no warning).
         "CFP_OPUS_MAX_FINAL_WINDOW=true"
+        # Gemini Enterprise agy leg (cfp >= v0.15.0, bead claude-failover-proxy-du9):
+        # routes eligible :streamRawPredict claude-opus-5-5 and claude-sonnet-5-5
+        # requests through businessaicode.googleapis.com ahead of Vertex (after
+        # CFP_OPUS_MAX_FINAL_WINDOW) using the caller's ADC Bearer token, up to
+        # CFP_AGY_BUDGET_DOLLARS/day in notional Vertex-rate spend (spend-agy.json
+        # beside CFP_STATE_PATH). Unsupported shapes (haiku, non-streaming, forced
+        # tool_choice, structured output) decline cleanly to Vertex. Off = remove
+        # CFP_AGY_ENABLED (unset is off, with no warning).
+        "CFP_AGY_ENABLED=true"
+        "CFP_AGY_BUDGET_DOLLARS=100"
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
