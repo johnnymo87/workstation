@@ -2304,8 +2304,8 @@
       } ''
         cd ${self}
         python3 pkgs/goose-host-report/test_goose_host_report.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q 'Ran 12 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected pinned 12 goose-host-report tests." >&2
+        grep -q 'Ran 17 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected pinned 17 goose-host-report tests." >&2
           exit 1
         }
         grep -q 'OK' "$TMPDIR/out.txt" || {

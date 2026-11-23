@@ -456,9 +456,12 @@ lib.mkIf isDarwin {
             GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null || true)"
             [ -n "$GH_TOKEN_VAL" ] && export GH_TOKEN="$GH_TOKEN_VAL"
             unset GH_TOKEN_VAL
-            exec "${localPkgs.goose-host-report}/bin/goose-host-report" publish --host mac
+            exec "${localPkgs.goose-host-report}/bin/goose-host-report" publish --host mac --goose-bin "${config.home.profileDirectory}/bin/goose" --honk-bin "${config.home.profileDirectory}/bin/honk"
           ''
         ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+        };
         RunAtLoad = false;
         StartCalendarInterval = [ { Minute = 25; } ];
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/goose-host-report.out.log";

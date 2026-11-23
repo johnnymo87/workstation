@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 DEFAULT_REPO = "johnnymo87/workstation"
 DEFAULT_HOST_REPORTS_DIR = "/var/lib/goose-cutover/host-reports"
 DEFAULT_CUTOVER_HOSTS = "devbox,mac"
+STALENESS_GATE_SECONDS = 26 * 3600
 
 
 class RunResult:
@@ -45,6 +46,12 @@ class Runner:
     def realpath(self, path: str) -> str:
         raise NotImplementedError
 
+    def exists(self, path: str) -> bool:
+        raise NotImplementedError
+
+    def read_file(self, path: str) -> str:
+        raise NotImplementedError
+
     def now(self) -> float:
         raise NotImplementedError
 
@@ -67,7 +74,10 @@ class RealRunner(Runner):
         full_env = os.environ.copy()
         if env:
             full_env.update(env)
-        p = subprocess.run(argv, env=full_env, capture_output=True, text=True)
+        try:
+            p = subprocess.run(argv, env=full_env, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise RuntimeError(f"Binary not found: {argv[0]}") from None
         res = RunResult(p.returncode, p.stdout, p.stderr)
         if check and res.rc != 0:
             raise RuntimeError(f"Command {' '.join(argv)} failed (exit {res.rc}): {res.stderr.strip()}")
@@ -78,6 +88,13 @@ class RealRunner(Runner):
 
     def realpath(self, path: str) -> str:
         return os.path.realpath(path)
+
+    def exists(self, path: str) -> bool:
+        return os.path.exists(path)
+
+    def read_file(self, path: str) -> str:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
 
     def now(self) -> float:
         return time.time()
@@ -123,7 +140,7 @@ class MockRunner(Runner):
         elif cmd in self.commands:
             res = self.commands[cmd]
         else:
-            res = RunResult(0, "")
+            raise FileNotFoundError(f"MockRunner: unknown command or binary not found: {cmd}")
         if check and res.rc != 0:
             raise RuntimeError(f"Command {' '.join(argv)} failed (exit {res.rc}): {res.stderr.strip()}")
         return res
@@ -133,6 +150,20 @@ class MockRunner(Runner):
 
     def realpath(self, path: str) -> str:
         return self.realpaths.get(path, path)
+
+    def exists(self, path: str) -> bool:
+        return (
+            path in self.files
+            or path in self.binaries
+            or path in self.realpaths
+            or path in self.commands
+            or any(b == path for b in self.binaries.values())
+        )
+
+    def read_file(self, path: str) -> str:
+        if path in self.files:
+            return self.files[path]
+        raise FileNotFoundError(f"MockRunner: file not found: {path}")
 
     def now(self) -> float:
         return self.current_time
@@ -149,7 +180,6 @@ def parse_honk_version(output: str) -> str:
     raw = output.strip()
     if not raw:
         raise ValueError("honk --version produced empty output")
-    # honk typically prints "honk X.Y.Z" or "honk vX.Y.Z"
     parts = raw.split()
     ver = parts[-1].lstrip("v")
     if not re.search(r"\d+\.\d+", ver):
@@ -185,7 +215,13 @@ def generate_report(
 
     if not is_mac:
         # On Linux / devbox: goose-link status is the authoritative source.
-        gl_bin = goose_link_bin or runner.which("goose-link") or "goose-link"
+        if goose_link_bin:
+            if not runner.exists(goose_link_bin):
+                raise RuntimeError(f"goose-link binary missing at {goose_link_bin}")
+            gl_bin = goose_link_bin
+        else:
+            gl_bin = runner.which("goose-link") or "goose-link"
+
         res = runner.run([gl_bin, "status"])
         if res.rc != 0:
             raise RuntimeError(f"goose-link status failed (exit {res.rc}): {res.stderr.strip()}")
@@ -197,26 +233,29 @@ def generate_report(
             raise RuntimeError(f"goose-link status: link_current is <none> or missing in output: {res.stdout.strip()}")
     else:
         # On Mac: resolve the goose binary that runs CLI and serve.
-        g_bin = goose_bin or runner.which("goose")
-        if not g_bin:
-            # Fall back to standard profile locations if which() fails in non-interactive environment
-            for candidate in [
-                "/Users/dev/.nix-profile/bin/goose",
-                "/etc/profiles/per-user/dev/bin/goose",
-                "/run/current-system/sw/bin/goose",
-            ]:
-                if runner.which(candidate) or candidate in getattr(runner, "binaries", {}):
-                    g_bin = candidate
-                    break
-        if not g_bin:
-            raise RuntimeError("mac: goose binary not found on PATH or profile")
+        if goose_bin:
+            if not runner.exists(goose_bin):
+                raise RuntimeError(f"mac: goose binary missing at {goose_bin}")
+            g_bin = goose_bin
+        else:
+            g_bin = runner.which("goose")
+            if not g_bin:
+                raise RuntimeError("mac: goose binary not found on PATH (pass --goose-bin)")
         resolved = runner.realpath(g_bin)
         if not resolved or resolved == "<none>":
             raise RuntimeError(f"mac: could not resolve realpath for goose binary {g_bin}")
         link_current = resolved
 
     # Detect honk version
-    h_bin = honk_bin or runner.which("honk") or "honk"
+    if honk_bin:
+        if not runner.exists(honk_bin):
+            raise RuntimeError(f"honk binary missing at {honk_bin}")
+        h_bin = honk_bin
+    else:
+        h_bin = runner.which("honk")
+        if not h_bin:
+            raise RuntimeError("honk binary not found on PATH (pass --honk-bin)")
+
     res_honk = runner.run([h_bin, "--version"])
     if res_honk.rc != 0:
         raise RuntimeError(f"honk --version failed (exit {res_honk.rc}): {res_honk.stderr.strip()}")
@@ -264,20 +303,28 @@ def fetch_reports(
     hosts: Optional[list[str]] = None,
     repo: str = DEFAULT_REPO,
 ) -> bool:
-    """Fetch reports from GitHub Actions repo variables and write atomically to disk.
+    """Fetch reports from GitHub Actions repo variables, write atomically to disk,
+    and verify all resulting host reports are present and fresh (<= 26h).
 
-    Returns True if all requested host reports were successfully fetched and written.
+    Returns True if all requested host reports were successfully fetched, written,
+    and are fresh within the 26h staleness gate. Returns False (and logs failing hosts) otherwise.
     """
     if hosts is None:
         hosts = [h.strip() for h in DEFAULT_CUTOVER_HOSTS.split(",") if h.strip()]
 
-    all_ok = True
+    fetch_ok = True
     for host in hosts:
         var_name = f"GOOSE_HOST_REPORT_{host.upper()}"
-        res = runner.run(["gh", "variable", "get", var_name, "-R", repo])
+        try:
+            res = runner.run(["gh", "variable", "get", var_name, "-R", repo])
+        except Exception as e:
+            sys.stderr.write(f"goose-host-report: gh variable get failed for {var_name}: {e}\n")
+            fetch_ok = False
+            continue
+
         if res.rc != 0:
             sys.stderr.write(f"goose-host-report: failed to get gh variable {var_name} on {repo}: {res.stderr.strip()}\n")
-            all_ok = False
+            fetch_ok = False
             continue
 
         raw = res.stdout.strip()
@@ -285,7 +332,7 @@ def fetch_reports(
             data = json.loads(raw)
         except Exception as e:
             sys.stderr.write(f"goose-host-report: invalid JSON in {var_name}: {e} (raw: {raw!r})\n")
-            all_ok = False
+            fetch_ok = False
             continue
 
         # Validate schema
@@ -294,15 +341,15 @@ def fetch_reports(
         ver = data.get("honk_version")
         if not isinstance(ts, (int, float)) or ts <= 0:
             sys.stderr.write(f"goose-host-report: invalid ts in {var_name}: {ts!r}\n")
-            all_ok = False
+            fetch_ok = False
             continue
         if not link or link == "<none>":
             sys.stderr.write(f"goose-host-report: invalid link_current in {var_name}: {link!r}\n")
-            all_ok = False
+            fetch_ok = False
             continue
         if not ver:
             sys.stderr.write(f"goose-host-report: invalid honk_version in {var_name}: {ver!r}\n")
-            all_ok = False
+            fetch_ok = False
             continue
 
         dest = os.path.join(reports_dir, f"{host}.json")
@@ -311,9 +358,32 @@ def fetch_reports(
             sys.stdout.write(f"goose-host-report: wrote {dest} for host {host} (ts={ts}, honk={ver})\n")
         except Exception as e:
             sys.stderr.write(f"goose-host-report: failed to write {dest}: {e}\n")
-            all_ok = False
+            fetch_ok = False
 
-    return all_ok
+    # Verification phase: verify each host's report file exists on disk and is not older than 26h
+    now_ts = runner.now()
+    all_healthy = True
+    for host in hosts:
+        dest = os.path.join(reports_dir, f"{host}.json")
+        if not runner.exists(dest):
+            sys.stderr.write(f"goose-host-report: host {host} report is missing after fetch ({dest})\n")
+            all_healthy = False
+            continue
+        try:
+            content = runner.read_file(dest)
+            data = json.loads(content)
+        except Exception as e:
+            sys.stderr.write(f"goose-host-report: host {host} report unreadable on disk ({dest}): {e}\n")
+            all_healthy = False
+            continue
+
+        ts = data.get("ts", 0)
+        age = now_ts - ts
+        if age > STALENESS_GATE_SECONDS:
+            sys.stderr.write(f"goose-host-report: host {host} report is stale ({age / 3600:.1f}h > 26h)\n")
+            all_healthy = False
+
+    return fetch_ok and all_healthy
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -348,7 +418,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.command == "publish":
         host = args.host
         if not host:
-            # Autodetect from hostname or environment
             hname = os.uname().nodename.lower()
             if "devbox" in hname:
                 host = "devbox"

@@ -20,6 +20,11 @@ class TestGooseHostReport(unittest.TestCase):
         self.runner = MockRunner()
         self.runner.current_time = 1700000000.0
 
+    def test_mock_runner_fails_on_unknown_command(self):
+        # Verification that MockRunner fails loudly when an unregistered command is invoked
+        with self.assertRaises(FileNotFoundError):
+            self.runner.run(["nonexistent-cmd"])
+
     def test_parse_honk_version(self):
         self.assertEqual(parse_honk_version("honk 0.5.0\n"), "0.5.0")
         self.assertEqual(parse_honk_version("honk v1.2.3"), "1.2.3")
@@ -35,7 +40,8 @@ class TestGooseHostReport(unittest.TestCase):
             0,
             "current=/nix/store/abc-goose-1.60.2\nprevious=<none>\npinned=/nix/store/abc-goose-1.60.2\npinned_is_current=yes\n",
         )
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/home/dev/.nix-profile/bin/honk"
+        self.runner.commands["/home/dev/.nix-profile/bin/honk"] = RunResult(0, "honk 0.5.0\n")
 
         rep = generate_report(self.runner, host="devbox")
         self.assertEqual(
@@ -48,13 +54,58 @@ class TestGooseHostReport(unittest.TestCase):
             },
         )
 
+    def test_generate_report_with_explicit_bins(self):
+        self.runner.files["/custom/bin/honk"] = "fake-honk"
+        self.runner.commands["/custom/bin/honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.files["/custom/bin/goose"] = "fake-goose"
+        self.runner.realpaths["/custom/bin/goose"] = "/nix/store/custom-goose/bin/goose"
+
+        rep = generate_report(
+            self.runner,
+            host="mac",
+            goose_bin="/custom/bin/goose",
+            honk_bin="/custom/bin/honk",
+        )
+        self.assertEqual(
+            rep,
+            {
+                "host": "mac",
+                "ts": 1700000000,
+                "link_current": "/nix/store/custom-goose/bin/goose",
+                "honk_version": "0.5.0",
+            },
+        )
+
+    def test_generate_report_missing_explicit_honk_bin(self):
+        self.runner.commands["goose-link"] = RunResult(
+            0,
+            "current=/nix/store/abc\npinned=/nix/store/abc\n",
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            generate_report(self.runner, host="devbox", honk_bin="/nonexistent/bin/honk")
+        self.assertIn("honk binary missing at /nonexistent/bin/honk", str(ctx.exception))
+
+    def test_generate_report_missing_explicit_goose_bin(self):
+        self.runner.files["/custom/bin/honk"] = "fake-honk"
+        self.runner.commands["/custom/bin/honk"] = RunResult(0, "honk 0.5.0\n")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            generate_report(
+                self.runner,
+                host="mac",
+                goose_bin="/nonexistent/bin/goose",
+                honk_bin="/custom/bin/honk",
+            )
+        self.assertIn("mac: goose binary missing at /nonexistent/bin/goose", str(ctx.exception))
+
     def test_generate_report_mac_without_goose_link(self):
         # On macOS, goose-link is not present. Real path of goose binary is reported.
-        self.runner.binaries["goose"] = "/Users/dev/.nix-profile/bin/goose"
-        self.runner.realpaths["/Users/dev/.nix-profile/bin/goose"] = (
+        self.runner.binaries["goose"] = "/Users/jonathan.mohrbacher/.nix-profile/bin/goose"
+        self.runner.realpaths["/Users/jonathan.mohrbacher/.nix-profile/bin/goose"] = (
             "/nix/store/xyz-goose-1.54.0.18/bin/goose"
         )
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/Users/jonathan.mohrbacher/.nix-profile/bin/honk"
+        self.runner.commands["/Users/jonathan.mohrbacher/.nix-profile/bin/honk"] = RunResult(0, "honk 0.5.0\n")
 
         rep = generate_report(self.runner, host="mac")
         self.assertEqual(
@@ -69,7 +120,8 @@ class TestGooseHostReport(unittest.TestCase):
 
     def test_generate_report_goose_link_fails(self):
         self.runner.commands["goose-link"] = RunResult(1, "", "goose-link: /var/lib/goose/current is missing")
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/bin/honk"
+        self.runner.commands["/bin/honk"] = RunResult(0, "honk 0.5.0\n")
 
         with self.assertRaises(RuntimeError) as ctx:
             generate_report(self.runner, host="devbox")
@@ -80,7 +132,8 @@ class TestGooseHostReport(unittest.TestCase):
             0,
             "current=<none>\nprevious=<none>\npinned=/nix/store/abc\npinned_is_current=no\n",
         )
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/bin/honk"
+        self.runner.commands["/bin/honk"] = RunResult(0, "honk 0.5.0\n")
 
         with self.assertRaises(RuntimeError) as ctx:
             generate_report(self.runner, host="devbox")
@@ -91,7 +144,8 @@ class TestGooseHostReport(unittest.TestCase):
             0,
             "current=/nix/store/abc\nprevious=<none>\npinned=/nix/store/abc\npinned_is_current=yes\n",
         )
-        self.runner.commands["honk"] = RunResult(1, "", "honk not found")
+        self.runner.binaries["honk"] = "/bin/honk"
+        self.runner.commands["/bin/honk"] = RunResult(1, "", "honk not found")
 
         with self.assertRaises(RuntimeError) as ctx:
             generate_report(self.runner, host="devbox")
@@ -102,7 +156,8 @@ class TestGooseHostReport(unittest.TestCase):
             0,
             "current=/nix/store/abc-goose-1.60.2\nprevious=<none>\npinned=/nix/store/abc-goose-1.60.2\npinned_is_current=yes\n",
         )
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/bin/honk"
+        self.runner.commands["/bin/honk"] = RunResult(0, "honk 0.5.0\n")
         self.runner.commands["gh"] = RunResult(0, "")
 
         publish_report(self.runner, host="devbox", repo="johnnymo87/workstation")
@@ -125,7 +180,8 @@ class TestGooseHostReport(unittest.TestCase):
             0,
             "current=/nix/store/abc\nprevious=<none>\npinned=/nix/store/abc\npinned_is_current=yes\n",
         )
-        self.runner.commands["honk"] = RunResult(0, "honk 0.5.0\n")
+        self.runner.binaries["honk"] = "/bin/honk"
+        self.runner.commands["/bin/honk"] = RunResult(0, "honk 0.5.0\n")
         self.runner.commands["gh"] = RunResult(1, "", "HTTP 403: Forbidden")
 
         with self.assertRaises(RuntimeError) as ctx:
@@ -173,6 +229,32 @@ class TestGooseHostReport(unittest.TestCase):
 
         mac_written = json.loads(self.runner.files["/var/lib/goose-cutover/host-reports/mac.json"])
         self.assertEqual(mac_written, mac_payload)
+
+    def test_fetch_reports_stale_report_fails(self):
+        # Report is 30h old (> 26h gate)
+        stale_ts = self.runner.current_time - (30 * 3600)
+        stale_payload = {
+            "host": "devbox",
+            "ts": stale_ts,
+            "link_current": "/nix/store/devbox-goose",
+            "honk_version": "0.5.0",
+        }
+
+        def gh_handler(argv: list[str]) -> RunResult:
+            return RunResult(0, json.dumps(stale_payload) + "\n")
+
+        self.runner.command_handlers["gh"] = gh_handler
+
+        ok = fetch_reports(
+            self.runner,
+            reports_dir="/var/lib/goose-cutover/host-reports",
+            hosts=["devbox"],
+            repo="johnnymo87/workstation",
+        )
+        # Should return False because resulting report is stale
+        self.assertFalse(ok)
+        # File was still written to disk
+        self.assertIn("/var/lib/goose-cutover/host-reports/devbox.json", self.runner.files)
 
     def test_fetch_reports_gh_get_fails(self):
         def gh_handler(argv: list[str]) -> RunResult:
