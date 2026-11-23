@@ -3696,6 +3696,383 @@ class TestEmSpendLedger(unittest.TestCase):
             self.assertEqual(r["cache_write"], cwrite, f"Mismatch cache_write for {mod}")
 
 
+
+class TestProviderFilter(unittest.TestCase):
+    """--provider: restrict rows to the Max pool (workstation-ynoq.3)."""
+
+    SINCE = FIXTURE_NOW_MS - 86400 * 1000
+    UNTIL = FIXTURE_NOW_MS + 86400 * 1000
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.td.name, "opencode.db")
+        self.goose_db = os.path.join(self.td.name, "goose.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        _fixture_db(self.db)
+        conn = sqlite3.connect(self.db)
+        # A first-party Max row (devbox's providerID) in root_b.
+        conn.execute(
+            "INSERT INTO message VALUES ('mx1', 'root_b', ?, ?)",
+            (FIXTURE_NOW_MS, json.dumps({"role": "assistant", "cost": 7.0, "modelID": "claude-opus-5-5",
+                                         "providerID": "anthropic",
+                                         "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}}})),
+        )
+        conn.commit()
+        conn.close()
+        _fixture_goose_db(self.goose_db)
+        g = sqlite3.connect(self.goose_db)
+        g.execute(
+            "INSERT INTO sessions (id, name, session_type, working_dir, provider_name) "
+            "VALUES ('max_1', 'Max Work', 'user', '/home/dev/projects/maxwork', 'anthropic')"
+        )
+        g.execute(
+            "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, cost) "
+            "VALUES ('max_1', ?, 'claude-opus-5-5', 10, 10, 3.0)",
+            (FIXTURE_NOW_MS // 1000,),
+        )
+        g.commit()
+        g.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _agg(self, providers, **kw):
+        return oc_tags.aggregate(
+            self.db, since_ms=self.SINCE, until_ms=self.UNTIL, bucket="day",
+            session_tags={}, now_ms=FIXTURE_NOW_MS, providers=providers, **kw,
+        )
+
+    def test_opencode_rows_filtered_by_provider_id(self):
+        agg = self._agg(frozenset({"anthropic"}))
+        self.assertEqual(agg.totals, {"auto:mono/w3-pr2": 7.0})
+
+    def test_opencode_multiple_providers(self):
+        agg = self._agg(frozenset({"anthropic", "openai"}))
+        self.assertEqual(agg.totals, {"auto:astra": 250.0, "auto:mono/w3-pr2": 7.0})
+
+    def test_opencode_unfiltered_unchanged(self):
+        agg = self._agg(None)
+        self.assertIn("auto:astra", agg.totals)
+        self.assertIn("auto:mono", agg.totals)
+        self.assertAlmostEqual(agg.totals["auto:mono/w3-pr2"], 9.0)
+
+    def test_goose_rows_filtered_by_provider_name(self):
+        agg = self._agg(frozenset({"anthropic"}), goose_db_path=self.goose_db)
+        self.assertEqual(agg.totals["auto:goose/max-work"], 3.0)
+        self.assertNotIn("auto:goose/alpha-run", agg.totals)
+        self.assertNotIn("auto:goose/beta-task", agg.totals)
+        # ... and the opencode half is filtered in the same call
+        self.assertEqual(agg.totals["auto:mono/w3-pr2"], 7.0)
+        self.assertNotIn("auto:astra", agg.totals)
+
+    def test_goose_other_provider_excludes_max_session(self):
+        agg = self._agg(frozenset({"gcp_vertex_ai"}), goose_db_path=self.goose_db)
+        self.assertNotIn("auto:goose/max-work", agg.totals)
+        self.assertIn("auto:goose/beta-task", agg.totals)
+
+    def test_ledgers_excluded_when_provider_given(self):
+        lgtm = os.path.join(self.td.name, "goose-usage.jsonl")
+        with open(lgtm, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_ledger_row(at="2026-09-08T13:00:00.000Z")) + "\n")
+        em_dir = os.path.join(self.td.name, "em")
+        os.makedirs(em_dir)
+        with open(os.path.join(em_dir, "spend-2026-09.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(_em_row(at="2026-09-08T13:00:00.123+00:00")) + "\n")
+
+        unfiltered = self._agg(None, lgtm_ledger_path=lgtm, em_ledger_path=em_dir)
+        self.assertIn("lgtm-runs", unfiltered.totals)
+        self.assertIn("em-agents:warrior_f", unfiltered.totals)
+
+        filtered = self._agg(frozenset({"anthropic"}), lgtm_ledger_path=lgtm, em_ledger_path=em_dir)
+        self.assertNotIn("lgtm-runs", filtered.totals)
+        self.assertNotIn("em-agents:warrior_f", filtered.totals)
+        self.assertFalse(filtered.em_ledger_dir_exists)
+
+    def test_parse_providers(self):
+        self.assertIsNone(oc_tags.parse_providers(None))
+        self.assertEqual(oc_tags.parse_providers("anthropic"), frozenset({"anthropic"}))
+        self.assertEqual(
+            oc_tags.parse_providers(" anthropic, google-vertex-anthropic ,"),
+            frozenset({"anthropic", "google-vertex-anthropic"}),
+        )
+        with self.assertRaises(ValueError):
+            oc_tags.parse_providers(" , ")
+
+    def test_report_cli_provider(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["report", "--days", "7", "--provider", "anthropic",
+                               "--db", self.db, "--goose-db", self.goose_db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("Provider filter: anthropic", out)
+        self.assertIn("auto:mono/w3-pr2", out)
+        self.assertIn("auto:goose/max-work", out)
+        self.assertNotIn("auto:astra", out)
+
+    def test_top_cli_provider(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["top", "--days", "7", "--provider", "openai",
+                               "--db", self.db, "--goose-db", self.goose_db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("astra subagent", out)
+        self.assertNotIn("w3 pr2", out)
+
+    def test_report_cli_empty_provider_is_an_error(self):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--provider", ",", "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 2)
+        self.assertIn("--provider", err.getvalue())
+
+    def test_serve_request_honours_providers(self):
+        status, _ctype, body = oc_tags.handle_request(
+            "/", "days=7", db_path=self.db, tags_db=self.tags_db, now_ms=FIXTURE_NOW_MS,
+            providers=frozenset({"openai"}),
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("auto:astra", body)
+        self.assertNotIn("auto:mono/w3-pr2", body)
+
+    def test_serve_parses_provider_flag(self):
+        args = oc_tags.parse_args(["serve", "--provider", "anthropic"])
+        self.assertEqual(args.provider, "anthropic")
+
+
+class TestCfpBackend(unittest.TestCase):
+    """--backend max|vertex: build the report from cfp events (workstation-ynoq.3)."""
+
+    T = FIXTURE_NOW_MS  # 2026-09-08 09:30 ET
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.td.name, "opencode.db")
+        self.goose_db = os.path.join(self.td.name, "goose.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        self.events = os.path.join(self.td.name, "events.jsonl")
+        _fixture_db(self.db)
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO session VALUES ('ses_root', NULL, '/home/dev/projects/mono', 'root', 0, 0, 0)")
+        conn.execute("INSERT INTO session VALUES ('ses_kid', 'ses_root', '/home/dev/projects/mono', 'kid', 0, 0, 0)")
+        conn.commit()
+        conn.close()
+        _fixture_goose_db(self.goose_db)
+        g = sqlite3.connect(self.goose_db)
+        g.execute(
+            "INSERT INTO sessions (id, name, session_type, working_dir, provider_name) "
+            "VALUES ('20260908_3', 'Goose Max', 'user', '/home/dev/projects/gx', 'anthropic')"
+        )
+        g.commit()
+        g.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    @staticmethod
+    def usage(rid, cost, backend="max", ts=None, **kw):
+        ev = {"type": "usage", "ts": ts if ts is not None else TestCfpBackend.T, "requestId": rid,
+              "backend": backend, "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0},
+              "cost": cost, "status": 200}
+        ev.update(kw)
+        return ev
+
+    @staticmethod
+    def route(rid, sid):
+        return {"type": "route", "ts": TestCfpBackend.T, "requestId": rid, "sessionId": sid,
+                "desired": "max", "chosen": "max", "model": "claude-opus-5-5"}
+
+    def write(self, *events, raw=()):
+        with open(self.events, "w", encoding="utf-8") as fh:
+            for e in events:
+                fh.write(json.dumps(e) + "\n")
+            for r in raw:
+                fh.write(r + "\n")
+
+    def load(self, backend="max", session_tags=None, **kw):
+        if session_tags:
+            with oc_tags.open_store(self.tags_db) as st:
+                for k, v in session_tags.items():
+                    oc_tags.set_session_tag(st, k, v)
+        return oc_tags.load_cfp_aggregate(
+            backend, events_path=self.events, db_path=self.db, tags_db=self.tags_db, days=7,
+            goose_db=self.goose_db, now_ms=self.T, **kw,
+        )
+
+    def test_default_events_path_is_under_cfp_dir(self):
+        self.assertEqual(
+            oc_tags.cfp_events_path(), os.path.join(oc_tags.CFP_DIR, "events.jsonl")
+        )
+        self.assertEqual(oc_tags.cfp_events_path("/x"), "/x/events.jsonl")
+
+    def test_join_opencode_goose_unrouted_and_malformed(self):
+        self.write(
+            self.route("r1", "ses_kid"), self.usage("r1", 1.25),          # subagent -> root, auto tag
+            self.route("r2", "ses_root"), self.usage("r2", 0.75),
+            self.route("r3", "20260908_3"), self.usage("r3", 2.0),         # goose
+            self.usage("r4", 0.5),                                         # no route
+            self.route("r5", "ses_root"), self.usage("r5", 100.0, backend="vertex"),  # other backend
+            self.route("r6", "ses_root"),                                  # route without usage
+            raw=["{not json", "", '["array"]', '{"type":"usage","ts":"bad"}'],
+        )
+        agg = self.load("max")
+        self.assertEqual(
+            agg.totals,
+            {"auto:goose/goose-max": 2.0, "auto:mono": 2.0, "cfp:unrouted": 0.5},
+        )
+        self.assertEqual(agg.root_totals["ses_root"], 2.0)
+        self.assertEqual(agg.root_totals["goose:20260908_3"], 2.0)
+        self.assertEqual(agg.series["auto:mono"], {"2026-09-08": 2.0})
+        self.assertEqual(agg.sources["auto:mono"], "auto")
+        self.assertEqual(agg.sources["cfp:unrouted"], "manual")
+
+    def test_vertex_backend_selects_other_events(self):
+        self.write(
+            self.route("r1", "ses_root"), self.usage("r1", 1.0, backend="max"),
+            self.route("r2", "ses_root"), self.usage("r2", 4.0, backend="vertex"),
+        )
+        self.assertEqual(self.load("vertex").totals, {"auto:mono": 4.0})
+
+    def test_explicit_tags_apply_to_opencode_root_and_goose_root(self):
+        self.write(
+            self.route("r1", "ses_kid"), self.usage("r1", 1.0),
+            self.route("r2", "20260908_3"), self.usage("r2", 2.0),
+        )
+        agg = self.load("max", session_tags={"ses_root": "billing", "goose:20260908_3": "gx-prog"})
+        self.assertEqual(agg.totals, {"gx-prog": 2.0, "billing": 1.0})
+        self.assertEqual(agg.sources["billing"], "manual")
+
+    def test_opencode_db_rows_are_not_double_counted(self):
+        # The fixture db holds $250 of openai and Claude rows; cfp mode must ignore them.
+        self.write(self.route("r1", "ses_root"), self.usage("r1", 1.0))
+        self.assertEqual(self.load("max").totals, {"auto:mono": 1.0})
+
+    def test_window_and_day_bucket_use_et(self):
+        late = int(datetime.datetime(2026, 9, 9, 3, 30, tzinfo=datetime.timezone.utc).timestamp() * 1000)  # 23:30 ET on the 8th
+        old = self.T - 30 * 86400 * 1000
+        self.write(
+            self.route("r1", "ses_root"), self.usage("r1", 1.0, ts=late),
+            self.route("r2", "ses_root"), self.usage("r2", 9.0, ts=old),
+        )
+        agg = self.load("max")
+        self.assertEqual(agg.series["auto:mono"], {"2026-09-08": 1.0})
+
+    def test_missing_events_file_warns(self):
+        agg = self.load("max")
+        self.assertEqual(agg.totals, {})
+        self.assertTrue(any("events" in w for w in agg.warnings))
+
+    def test_usage_before_route_still_joins(self):
+        self.write(self.usage("r1", 1.5), self.route("r1", "ses_root"))
+        self.assertEqual(self.load("max").totals, {"auto:mono": 1.5})
+
+    def test_report_cli_backend(self):
+        self.write(self.route("r1", "ses_root"), self.usage("r1", 3.0), self.usage("r9", 1.0))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_tags.main(["report", "--days", "7", "--backend", "max", "--cfp-events", self.events,
+                               "--db", self.db, "--goose-db", self.goose_db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("backend=max", out)
+        self.assertIn("auto:mono", out)
+        self.assertIn("cfp:unrouted", out)
+        self.assertNotIn("auto:astra", out)
+
+    def test_report_cli_rejects_backend_with_provider(self):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--backend", "max", "--provider", "anthropic",
+                               "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 2)
+        self.assertIn("--backend", err.getvalue())
+
+    def test_backend_choices(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = oc_tags.main(["report", "--backend", "bogus"])
+        self.assertEqual(rc, 2)
+
+
+class TestAccountWeeks(unittest.TestCase):
+    """--account-weeks: dollars -> Claude Max account-weeks (workstation-ynoq.3)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.td.name, "opencode.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        _fixture_db(self.db)
+        conn = sqlite3.connect(self.db)
+        conn.execute(
+            "INSERT INTO message VALUES ('mx1', 'root_b', ?, ?)",
+            (FIXTURE_NOW_MS, json.dumps({"role": "assistant", "cost": 760.0, "modelID": "claude-opus-5-5",
+                                         "providerID": "anthropic",
+                                         "tokens": {"input": 1, "output": 1, "cache": {"read": 0, "write": 0}}})),
+        )
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def report(self, *extra):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--days", "7", "--provider", "anthropic",
+                               "--db", self.db, "--tags-db", self.tags_db, *extra])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_constant(self):
+        self.assertEqual(oc_tags.ACCOUNT_WEEK_USD, 1520.0)
+
+    def test_default_divisor(self):
+        rc, out, err = self.report("--account-weeks")
+        self.assertEqual(rc, 0)
+        self.assertIn("acct-wk", out)
+        row = next(l for l in out.splitlines() if l.startswith("auto:mono/w3-pr2"))
+        self.assertIn("760.00", row)
+        self.assertIn("0.50", row.split())  # 760 / 1520
+        self.assertIn("1 account-week = $1520", out)
+        self.assertEqual(err, "")
+
+    def test_explicit_divisor(self):
+        rc, out, _err = self.report("--account-weeks", "380")
+        row = next(l for l in out.splitlines() if l.startswith("auto:mono/w3-pr2"))
+        self.assertIn("2.00", row.split())  # 760 / 380
+        self.assertIn("1 account-week = $380", out)
+
+    def test_rate_line_per_week(self):
+        # window start = today_start - 7d; now = 09:30 ET on the last day => 7.39 days
+        rc, out, _err = self.report("--account-weeks", "760")
+        elapsed_days = (FIXTURE_NOW_MS - oc_tags.calculate_window(7, now_ms=FIXTURE_NOW_MS).since_ms) / 86400000
+        expected = 1.0 / (elapsed_days / 7)
+        self.assertIn(f"{expected:.2f} account-weeks/week", out)
+
+    def test_column_absent_without_flag(self):
+        rc, out, _err = self.report()
+        self.assertNotIn("acct-wk", out)
+
+    def test_warns_without_provider_or_backend(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = oc_tags.main(["report", "--days", "7", "--account-weeks",
+                               "--db", self.db, "--tags-db", self.tags_db])
+        self.assertEqual(rc, 0)
+        self.assertIn("--account-weeks", err.getvalue())
+        self.assertIn("--provider", err.getvalue())
+
+    def test_nonpositive_divisor_rejected(self):
+        rc, _out, err = self.report("--account-weeks", "0")
+        self.assertEqual(rc, 2)
+        self.assertIn("--account-weeks", err)
+
+    def test_flag_before_other_option_takes_default(self):
+        args = oc_tags.parse_args(["report", "--account-weeks", "--days", "3"])
+        self.assertEqual(args.account_weeks, oc_tags.ACCOUNT_WEEK_USD)
+        self.assertEqual(args.days, 3)
+        self.assertIsNone(oc_tags.parse_args(["report"]).account_weeks)
+
+
 if __name__ == "__main__":
     unittest.main()
 

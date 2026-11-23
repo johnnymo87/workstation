@@ -22,6 +22,24 @@ session-tags serve                   # then, from the Mac, just open
                                 # LaunchAgents connect on demand
 ```
 
+### Claude Max only: `--provider`, `--backend`, `--account-weeks`
+
+To see consumption of the Claude Max subscription pool alone, in account-weeks (the unit its quota is budgeted in), per program tag.
+
+- **`--provider <id>[,<id>...]`** (`report`, `top`, `serve`): keep only opencode messages whose `providerID` is listed, and goose sessions whose `provider_name` is listed. The lgtm and eternal-machinery ledgers have no provider field, so they are **excluded** whenever `--provider` is given.
+- **`--backend max|vertex`** (`report`): cloudbox's opencode reports `google-vertex-anthropic` for both Vertex and Max, so the split exists only in claude-failover-proxy's events. This builds the report **only** from `/var/lib/claude-failover-proxy/events.jsonl` (override with `--cfp-events`), joining each `usage` event (`backend`, notional `cost`) to its `route` event on `requestId` for the session. `ses_*` sessions resolve to their opencode root and tag, `YYYYMMDD_N` sessions to `goose:<id>`; a usage event with no route lands under `cfp:unrouted`. Dollars are the event's `cost`; opencode/goose/ledger rows are not read (they would double count). Cannot be combined with `--provider`.
+- **`--account-weeks [DOLLARS]`** (`report`): adds an `acct-wk` column (`total / DOLLARS`) and a rate line (account-weeks per week over the elapsed window). The default divisor is `ACCOUNT_WEEK_USD` = 1520 list-price dollars (opus-5-5 rates) per Claude Max 20x account-week, calibrated in `docs/research/2026-11-23-claude-max-quota-budget.md` and refit by `workstation-ynoq.2`. Only meaningful with `--provider` or `--backend`; it warns on stderr otherwise.
+
+```bash
+# devbox: the Max pool is providerID/provider_name `anthropic`
+session-tags report --days 7 --provider anthropic --account-weeks
+session-tags top --days 7 --provider anthropic
+
+# cloudbox: Max vs Vertex split comes from cfp
+session-tags report --days 7 --backend max --account-weeks
+session-tags report --days 7 --backend vertex
+```
+
 ### Goose spend source
 
 In addition to opencode sessions, `session-tags` reads Goose sessions from `~/.local/share/goose/sessions/sessions.db` (override with `--goose-db`). If the database does not exist or is unreadable, it is silently skipped.
