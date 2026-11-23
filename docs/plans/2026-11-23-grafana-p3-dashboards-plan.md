@@ -93,9 +93,17 @@ Two provisioned, non-editable dashboards:
 
 ### T2. Dashboards, provisioning and the guard
 
-Files: `hosts/cloudbox/grafana-dashboards/{llm-spend,llm-quota}.json`,
-`hosts/cloudbox/grafana-dashboards/check_dashboards.py`, edits to
-`hosts/cloudbox/grafana.nix` and `flake.nix`.
+Files: `hosts/cloudbox/grafana-dashboards/{llm-spend,llm-quota}.json` (JSON
+only: the provider reads this directory), `hosts/cloudbox/check_grafana_dashboards.py`,
+edits to `hosts/cloudbox/grafana.nix` and `flake.nix`.
+
+**frser target shape** (from its `module.js`): the frontend sets
+`queryText = templateSrv.replace(rawQueryText)`, so every target carries
+`rawQueryText` (the source of truth; `queryText` identical), `queryType`
+(`"table"` | `"time series"`), `timeColumns` (list), `refId`, `datasource`.
+A query variable's `query` is a plain SQL string; one column gives the values
+(or two named `__text`/`__value`). Grafana 12 still polyfills
+`Array.prototype.toArray`, which frser's `metricFindQuery` uses.
 
 **Provisioning** (`services.grafana.provision.dashboards.settings.providers`):
 one file provider, `options.path` = the dashboards dir in the store,
