@@ -1,5 +1,6 @@
 # Fleet LLM ledger: every host in Grafana, one quota verdict everywhere
 
+Status: adversarial-reviewer-opus approved after two rounds (2026-11-23).
 Bead epic: `eng-agent-platform-ul4.26` (under the stall-watcher epic `eng-agent-platform-ul4`).
 Builds on `workstation-4si2` (ledger, quota-watch, Grafana; design
 `2026-11-23-llm-spend-metrics-design.md`) and `eng-agent-platform-ul4.24`
@@ -95,9 +96,10 @@ of fleet data): §2 fleet `k`, §5 Mac cash rows.
   and insert the file's rows, one transaction, under the ledger lock taken
   **blocking with a timeout** (the writer takes it non-blocking and must not be
   starved). Max rows priced from an **exact-match** model table (opus/sonnet/
-  haiku 5-5 and fable-5-2 at the rates cfp uses; 5m writes at the cache-write
+  haiku 5-5 and fable-5-2 at the rates in cfp's own price table; 5m writes at the cache-write
   rate, 1h at 2× input); a model not in the table → `cost_usd NULL`, counted.
-  Rows without `backend` are Max. Malformed rows skipped and counted. One
+  Rows without `backend` are stored as the literal `'max'` (never NULL: every
+  `backend = 'max'` panel and the `<> 'max'` cash filter would drop NULLs). Malformed rows skipped and counted. One
   summary line; unpriced/malformed counts are reported, not failures.
 - **cloudbox unit** `llm-fleet-import` (system, User=dev, timer `*:14/15`, off
   the writer's `*:2/5` minutes): `git fetch` into
@@ -128,7 +130,9 @@ first changes:
 - `k_fleet = k_local / s`, with `s` = cloudbox's share of fleet Max usage in
   list-price token units (`oc_tags.opus_list_cost` on both sides, so two price
   tables never meet), over a 7-day window ending at the oldest fleet watermark.
-- Remote rows count only if their account maps (explicit email→short-name map)
+- Remote rows count only if their account maps (explicit email→short-name map,
+  kept in the private quota-telemetry repo, never in this public repo; the usage
+  seat gets an explicit ignore entry)
   to a pool member with non-null `u7d`; unmapped accounts warn. The usage seat
   is excluded that way. Residual: cloudbox's own Max $ still include the seat
   (cfp events carry no account) — fixing that needs teamclaude's usage log on
@@ -145,7 +149,9 @@ first changes:
 - **Publish** `llm-outlook-publish` (cloudbox system oneshot, User=dev,
   `OnSuccess=` of `llm-quota-watch`): `llm-ledger quota-outlook`, plus
   `published_at`, `source_host` and `host_share_24h` (each host's share of
-  fleet Max usage, token-based, no $) — the "and vice versa" view. Written into
+  fleet Max usage, token-based, no $, over a 24 h window ending at the oldest
+  fleet watermark, published with each host's `exported_through`) — the "and
+  vice versa" view. Written into
   `/var/lib/llm-fleet/outlook` and force-pushed as one orphan commit to branch
   `outlook` (no history growth), with the configured identity. Up to 3 tries
   inside the unit. No per-failure page: quota-watch alerts when the published
@@ -168,6 +174,10 @@ first changes:
   age 3–7 min steady state against the 20-min stale line.
 
 ### 4. Deploy
+
+Order: cloudbox publishing first, then devbox gets `llm-ledger` (else devbox
+reads `unknown` from the start). Take only #947's `--from-json` reader, not its
+pigeon/R2 fetcher module.
 
 - cloudbox: NixOS switch after `dry-activate` shows none of goose-serve, honkd,
   pigeon-daemon, cfp, teamclaude or the serve pool restarting.
