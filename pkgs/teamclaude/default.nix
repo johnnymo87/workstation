@@ -91,7 +91,7 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.21-balanced-fw-ub-cap-seat"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst
+  version = "1.1.21-balanced-fw-ub-cap-seat-ttl"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst + per-session cache TTL / usage ledger (#6)
 
   src = fetchFromGitHub {
     # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
@@ -230,8 +230,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "9a698c7e00bfd149806c0e6d44ece438aa0e8f83"; # feat/balanced-on-v1121
-    hash = "sha256-ymGTzwIZTVFyIakSo+u0Y0RivJuFvrb60hAt18n/5gI=";
+    rev = "9c2ee1b42c9d3f0abc782bcb33df24cbdf53a627"; # feat/balanced-on-v1121 (+ #6 cache-ttl/usage ledger)
+    hash = "sha256-DQ2FbY1hBuAB90YFwF/bOFEBeyaNWqdvX4cTo8u+RAA=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
