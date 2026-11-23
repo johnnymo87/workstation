@@ -1503,21 +1503,10 @@ def import_events(
             conn.close()
 
 
-def parse_et_datetime(val: str | None) -> int:
+def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int:
     """Parse ISO date or datetime string, interpreting naive datetimes in America/New_York."""
-    if val is None or val == "now":
-        return int(time.time() * 1000)
-    try:
-        dt = datetime.datetime.fromisoformat(val)
-    except Exception as e:
-        raise ValueError(f"Invalid ISO datetime string: {val}") from e
-    from zoneinfo import ZoneInfo
-    ny_tz = ZoneInfo("America/New_York")
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ny_tz)
-    else:
-        dt = dt.astimezone(ny_tz)
-    return int(dt.timestamp() * 1000)
+    import quota_watch
+    return quota_watch.parse_et_datetime(val, end_of_day_for_date=end_of_day_for_date)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1580,8 +1569,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "quota-replay":
         import quota_watch
-        since_ms = parse_et_datetime(args.since)
-        until_ms = parse_et_datetime(args.until)
+        since_ms = quota_watch.parse_et_datetime(args.since, end_of_day_for_date=False)
+        until_ms = quota_watch.parse_et_datetime(args.until, end_of_day_for_date=True)
         excluded = set(args.exclude_account or [])
         events = quota_watch.replay(
             db=args.db,

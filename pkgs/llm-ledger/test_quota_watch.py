@@ -44,12 +44,15 @@ from quota_watch import (
     K_MIN_BURN,
     STALE_INPUT_MS,
     Accumulator,
+    PoolTracker,
     compute_burn_events,
     pool_at,
     estimate_k,
     burn_rate,
     forecast,
     step_alerts,
+    sum_buckets,
+    parse_et_datetime,
     load_inputs,
     run_live,
     replay,
@@ -144,6 +147,14 @@ class TestQuotaWatchMathAndAccumulator(unittest.TestCase):
         self.assertEqual(acc.burn_events[0][0], t0 + 7500000)
         self.assertAlmostEqual(acc.burn_events[0][1], 0.05)
 
+    def test_excluded_account_not_in_accumulator(self):
+        """Accounts in explicit excluded set must not be fed into Accumulator / count burn."""
+        acc = Accumulator(excluded={"ignored_acct"})
+        t0 = 1000000
+        acc.feed(t0, "ignored_acct", 0.50, t0 + 50000)
+        acc.feed(t0 + 300000, "ignored_acct", 0.90, t0 + 50000)
+        self.assertEqual(acc.burn_events, [])
+
 
 class TestPoolAt(unittest.TestCase):
     def test_pool_at_null_carry_and_drop(self):
@@ -202,11 +213,46 @@ class TestPoolAt(unittest.TestCase):
         self.assertIn("acct1", pool)
         self.assertNotIn("acct2", pool)
 
+    def test_pool_tracker_r7d_eff_independent_of_null_u7d(self):
+        """r7d_eff must be latest non-null r7d at any tick <= T, independent of null u7d."""
+        tracker = PoolTracker()
+        t0 = 1000000
+        # Tick t0: u7d = 0.50, r7d = 5000
+        tracker.feed_tick(t0, [("acct1", 0.50, 5000)])
+        # Tick t0 + 5m: u7d = None, r7d = 9000 (updated reset time on null-u tick)
+        tracker.feed_tick(t0 + 300000, [("acct1", None, 9000)])
+        # Tick t0 + 10m: u7d = None, r7d = None
+        tracker.feed_tick(t0 + 600000, [("acct1", None, None)])
+
+        pool = tracker.pool()
+        self.assertIn("acct1", pool)
+        u_eff, r_eff = pool["acct1"]
+        self.assertEqual(u_eff, 0.50)
+        self.assertEqual(r_eff, 9000, "r7d_eff must be 9000 from null-u tick, not 5000")
+
+    def test_pool_tracker_shared_behavior(self):
+        """PoolTracker produces identical result to pool_at."""
+        t0 = 1000000
+        samples = [
+            (t0, "acct1", 0.50, 5000),
+            (t0 + 300000, "acct1", 0.60, 5000),
+            (t0 + 300000, "acct2", 0.40, 6000),
+        ]
+        p1 = pool_at(samples, t0 + 300000)
+        tracker = PoolTracker()
+        tracker.feed_tick(t0, [("acct1", 0.50, 5000)])
+        tracker.feed_tick(t0 + 300000, [("acct1", 0.60, 5000), ("acct2", 0.40, 6000)])
+        p2 = tracker.pool()
+        self.assertEqual(p1, p2)
+
 
 class TestMetricsAndForecast(unittest.TestCase):
     def test_estimate_k(self):
         self.assertIsNone(estimate_k(0.4, 100.0), "burn < K_MIN_BURN (0.5) must return None")
-        self.assertAlmostEqual(estimate_k(1.0, 500.0), 500.0)
+        k_val = estimate_k(1.0, 500.0)
+        self.assertIsNotNone(k_val)
+        assert k_val is not None
+        self.assertAlmostEqual(k_val, 500.0)
 
     def test_burn_rate(self):
         # 6h burn = 0.6, 24h burn = 1.2, no spillover
@@ -218,6 +264,20 @@ class TestMetricsAndForecast(unittest.TestCase):
         # rate(6) = (0.6 + 0.1)/6 = 0.7/6 ≈ 0.1167
         B_spill = burn_rate(0.6, 1.2, 100.0, 0.0, 1000.0)
         self.assertAlmostEqual(B_spill, 0.7 / 6.0)
+
+    def test_sum_buckets_exact_bounds(self):
+        """15-min window = exactly 3 buckets; excludes bucket T starting at T (future leak)."""
+        # Buckets at 0, 300_000, 600_000, 900_000, 1_200_000
+        buckets = {
+            0: 1.0,
+            300_000: 2.0,
+            600_000: 4.0,
+            900_000: 8.0,  # bucket T (starts at 900_000)
+            1_200_000: 16.0,
+        }
+        # Window (900_000 - 900_000, 900_000] -> [0, 900_000) -> buckets 0, 300_000, 600_000
+        val = sum_buckets(buckets, T=900_000, W=900_000)
+        self.assertEqual(val, 1.0 + 2.0 + 4.0)
 
     def test_forecast_and_refills(self):
         """Forecast simulates 24h forward in 5-min steps and applies refills in order."""
@@ -238,8 +298,42 @@ class TestMetricsAndForecast(unittest.TestCase):
         # Total dry hours = 1.4h + 11.4h = 12.8h (in 5-min discrete steps, 12.75h).
         self.assertAlmostEqual(zero_h, 12.75, places=1)
         self.assertIsNotNone(vertex_usd)
+        assert vertex_usd is not None
         self.assertAlmostEqual(vertex_usd, zero_h * B * k, places=1)
         self.assertEqual(next_refill, (r_time, 0.50))
+
+    def test_next_refill_beyond_24h_horizon(self):
+        """next_refill must be earliest refill of any pool account even if beyond 24h horizon."""
+        t0 = 100000000
+        H0 = 0.50
+        B = 0.01
+        r_time = t0 + 30 * 3600 * 1000  # 30 hours out (> 24h horizon)
+        refills = [(r_time, 0.40)]
+        zero_h, vertex_usd, next_refill = forecast(H0, B, refills, k=1000.0, T=t0)
+        self.assertEqual(next_refill, (r_time, 0.40))
+        # Since refill is at 30h, it does not refill within the 24h simulation
+        # h(24h) = 0.50 - 24 * 0.01 = 0.26 > 0.02 -> zero_h is 0.0
+        self.assertEqual(zero_h, 0.0)
+
+    def test_forecast_unsorted_refills(self):
+        """Refills passed unsorted are sorted so stepping order is correct."""
+        t0 = 100000000
+        H0 = 0.05
+        B = 0.05
+        # Refills passed in reverse order: 4h before 2h
+        refills_unsorted = [
+            (t0 + 4 * 3600 * 1000, 0.50),
+            (t0 + 2 * 3600 * 1000, 0.50),
+        ]
+        zero_h, _, next_r = forecast(H0, B, refills_unsorted, k=1000.0, T=t0)
+        self.assertEqual(next_r, (t0 + 2 * 3600 * 1000, 0.50))
+        # Verify it matches sorted forecast
+        refills_sorted = [
+            (t0 + 2 * 3600 * 1000, 0.50),
+            (t0 + 4 * 3600 * 1000, 0.50),
+        ]
+        zero_h_sorted, _, _ = forecast(H0, B, refills_sorted, k=1000.0, T=t0)
+        self.assertEqual(zero_h, zero_h_sorted)
 
 
 class TestAlertsHysteresisAndLatch(unittest.TestCase):
@@ -414,7 +508,7 @@ touch "$1"
 
         conn = sqlite3.connect(self.db_path)
         conn.executescript(llm_ledger.SCHEMA_SQL)
-        t0 = 1700000000000
+        t0 = 1700000100000
         # Seed 7 earlier days of quota samples
         for d in range(7):
             ts = t0 - (7 - d) * 86400 * 1000
@@ -429,6 +523,10 @@ touch "$1"
         )
         conn.commit()
         conn.close()
+
+        # Write existing state so acct1 was not latched (was_latched=False)
+        with open(os.path.join(self.state_dir, "state.json"), "w") as f:
+            json.dump({"pool_dry": False, "shortfall": False, "acct_high": {"acct1": False}}, f)
 
         # Run live
         rc = run_live(self.db_path, self.state_dir, alert_cmd=stub_script, now=t0)
@@ -466,6 +564,150 @@ touch "$1"
         self.assertEqual(rc2, 0)
         # Verify .alert file deleted on clear
         self.assertFalse(os.path.exists(alert_file))
+
+    def test_state_robustness_and_first_run_seeding(self):
+        """State missing/corrupt starts fresh, warns on stderr, and seeds acct_high silently."""
+        cases = [
+            ("missing", None),
+            ("empty", ""),
+            ("array", "[]"),
+            ("null", "null"),
+            ("string", '"x"'),
+            ("malformed_field", '{"acct_high": "foo"}'),
+            ("invalid_json", "{bad json"),
+        ]
+        for name, content in cases:
+            with self.subTest(case=name):
+                state_dir = os.path.join(self.tmp_dir.name, f"state_{name}")
+                os.makedirs(state_dir, exist_ok=True)
+                state_file = os.path.join(state_dir, "state.json")
+                if content is not None:
+                    with open(state_file, "w") as f:
+                        f.write(content)
+
+                # DB with hot account (u7d = 0.95)
+                db_path = os.path.join(self.tmp_dir.name, f"db_{name}.db")
+                conn = sqlite3.connect(db_path)
+                conn.executescript(llm_ledger.SCHEMA_SQL)
+                t0 = 1700000000000
+                conn.execute(
+                    "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                    (t0, "acct1", 0.95, t0 + 86400 * 1000),
+                )
+                conn.commit()
+                conn.close()
+
+                alert_cmd = os.path.join(self.tmp_dir.name, f"stub_{name}.sh")
+                with open(alert_cmd, "w") as f:
+                    f.write("#!/bin/sh\nexit 0\n")
+                os.chmod(alert_cmd, 0o755)
+
+                import io
+                from unittest.mock import patch
+                stderr_buf = io.StringIO()
+                with patch("sys.stderr", stderr_buf):
+                    rc = run_live(db_path, state_dir, alert_cmd=alert_cmd, now=t0)
+                self.assertEqual(rc, 0)
+                self.assertIn("state missing or corrupt", stderr_buf.getvalue())
+
+                # Assert state.json was written and acct1 was seeded
+                with open(state_file) as f:
+                    saved_state = json.load(f)
+                self.assertTrue(saved_state["acct_high"]["acct1"])
+                # Assert .alert file was NOT created (no alert sent on first-run seeding)
+                self.assertFalse(os.path.exists(os.path.join(state_dir, "acct-acct1.alert")))
+
+    def test_alert_command_timeout_and_error(self):
+        """Alert command failure/timeout warns to stderr and continues without crashing; state saved."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_err")
+        os.makedirs(state_dir, exist_ok=True)
+        stub_err = os.path.join(self.tmp_dir.name, "stub_err.sh")
+        with open(stub_err, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(stub_err, 0o755)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_err.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.95, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        # Write pre-existing state with acct1=False so it transitions and triggers send
+        with open(os.path.join(state_dir, "state.json"), "w") as f:
+            json.dump({"pool_dry": False, "shortfall": False, "acct_high": {"acct1": False}}, f)
+
+        import io
+        from unittest.mock import patch
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=stub_err, now=t0)
+        self.assertEqual(rc, 0, "run_live must continue with exit 0 despite alert cmd failure")
+        self.assertIn("warning: alert command exited with code 1", stderr_buf.getvalue())
+        # State must still be saved
+        with open(os.path.join(state_dir, "state.json")) as f:
+            saved_state = json.load(f)
+        self.assertTrue(saved_state["acct_high"]["acct1"])
+
+    def test_run_live_pool_dry_and_shortfall_argv(self):
+        """run_live calls alert_cmd with exact argv for pool-dry and shortfall, and suppresses shortfall when dry."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_log_dry.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_dry.sh")
+        with open(stub_script, "w") as f:
+            f.write(f"""#!/bin/sh
+cat <<EOF >> "{alert_log}"
+{{"argv": ["$1", "$2", "$3", "$4", "$5", "$6"]}}
+EOF
+touch "$1"
+""")
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_dry_test")
+        os.makedirs(state_dir, exist_ok=True)
+        # Pre-seed state so it's not treated as fresh
+        with open(os.path.join(state_dir, "state.json"), "w") as f:
+            json.dump({"pool_dry": False, "shortfall": False, "acct_high": {}}, f)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_dry.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        # acct1 has u7d=0.98 -> H0 = 0.00 (< 0.02)
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.98, t0 + 86400 * 1000),
+        )
+        # Add spillover in the last 15 min: route.desired='max' AND requests.backend='vertex'
+        conn.execute(
+            "INSERT INTO route (request_id, ts, desired) VALUES ('r1', ?, 'max')",
+            (t0 - 60000,),
+        )
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('r1', ?, 'host', 'key', 'vertex', 5.0)",
+            (t0 - 60000,),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0)
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+
+        # pool-dry should fire: argv [alert_file, "quota-pool-dry", text, "900", "14400"]
+        dry_inv = [inv for inv in lines if inv["argv"][1] == "quota-pool-dry"]
+        self.assertEqual(len(dry_inv), 1)
+        self.assertEqual(dry_inv[0]["argv"][3], "900")
+        self.assertEqual(dry_inv[0]["argv"][4], "14400")
+
+        # shortfall should NOT be sent while pool-dry is active
+        short_inv = [inv for inv in lines if inv["argv"][1] == "quota-shortfall"]
+        self.assertEqual(len(short_inv), 0)
 
     def test_fixture_replay_dry_spell_2026_11_22(self):
         """Fixture replay: shortfall fires before 12:00 ET, pool-dry 12:00-12:30, clears 18:00-18:30."""
@@ -592,6 +834,38 @@ class TestCliSubcommands(unittest.TestCase):
             "--until", "2026-11-22",
         ])
         self.assertEqual(ret, 0)
+
+    def test_parse_et_datetime(self):
+        """parse_et_datetime handles naive dates, end_of_day, naive datetimes, DST, and offsets."""
+        # Naive date (start of day)
+        ts_start = parse_et_datetime("2026-11-20")
+        dt_start = datetime.datetime.fromtimestamp(ts_start / 1000, tz=E)
+        self.assertEqual(dt_start.strftime("%Y-%m-%d %H:%M:%S"), "2026-11-20 00:00:00")
+
+        # Naive date with end_of_day_for_date=True (exclusive next midnight)
+        ts_end = parse_et_datetime("2026-11-20", end_of_day_for_date=True)
+        dt_end = datetime.datetime.fromtimestamp(ts_end / 1000, tz=E)
+        self.assertEqual(dt_end.strftime("%Y-%m-%d %H:%M:%S"), "2026-11-21 00:00:00")
+
+        # Naive datetime
+        ts_dt = parse_et_datetime("2026-11-20 14:30")
+        dt_val = datetime.datetime.fromtimestamp(ts_dt / 1000, tz=E)
+        self.assertEqual(dt_val.strftime("%Y-%m-%d %H:%M"), "2026-11-20 14:30")
+
+        # DST-period date (July is EDT -04:00)
+        ts_dst = parse_et_datetime("2026-07-04")
+        dt_dst = datetime.datetime.fromtimestamp(ts_dst / 1000, tz=E)
+        self.assertEqual(dt_dst.strftime("%z"), "-0400")
+
+        # Non-DST date (December is EST -05:00)
+        ts_nodst = parse_et_datetime("2026-12-25")
+        dt_nodst = datetime.datetime.fromtimestamp(ts_nodst / 1000, tz=E)
+        self.assertEqual(dt_nodst.strftime("%z"), "-0500")
+
+        # Explicit offset honoured
+        ts_utc = parse_et_datetime("2026-11-20T19:00:00Z")
+        dt_utc = datetime.datetime.fromtimestamp(ts_utc / 1000, tz=E)
+        self.assertEqual(dt_utc.strftime("%Y-%m-%d %H:%M"), "2026-11-20 14:00")
 
 
 if __name__ == "__main__":

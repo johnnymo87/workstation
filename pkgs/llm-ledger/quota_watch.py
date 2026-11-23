@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Sequence
@@ -70,11 +71,14 @@ class ReplayEvent:
 class Accumulator:
     """High-water mark burn accumulator per account."""
 
-    def __init__(self) -> None:
+    def __init__(self, excluded: set[str] | None = None) -> None:
+        self.excluded: set[str] = set(excluded or [])
         self.st: dict[str, dict[str, Any]] = {}
         self.burn_events: list[tuple[int, float]] = []
 
     def feed(self, ts: int, account: str, u7d: float | None, r7d: int | None) -> None:
+        if account in self.excluded:
+            return
         if u7d is None:
             return
 
@@ -114,93 +118,82 @@ class Accumulator:
 
 def compute_burn_events(
     samples: Sequence[tuple[int, str, float | None, int | None]],
+    excluded: set[str] | None = None,
 ) -> list[tuple[int, float]]:
-    acc = Accumulator()
+    acc = Accumulator(excluded=excluded)
     for ts, account, u7d, r7d in sorted(samples, key=lambda r: r[0]):
         acc.feed(ts, account, u7d, r7d)
     return acc.burn_events
 
 
+class PoolTracker:
+    """Incremental pool tracker across ticks.
+
+    Tracks present accounts, carries u7d <= CARRY_MS, records latest non-null r7d,
+    and excludes both explicitly excluded accounts and accounts with no non-null
+    u7d in the loaded window.
+    """
+
+    def __init__(self, excluded: set[str] | None = None) -> None:
+        self.excluded: set[str] = set(excluded or [])
+        self.seen: collections.Counter[str] = collections.Counter()
+        self.all_null: collections.Counter[str] = collections.Counter()
+        self.last_u: dict[str, tuple[float, int]] = {}  # account -> (u7d, tick_ts)
+        self.latest_r7d: dict[str, int] = {}  # account -> latest non-null r7d
+        self.present_accounts: set[str] = set()
+        self.current_tick: int = 0
+
+    def feed_tick(
+        self,
+        T: int,
+        rows: Sequence[tuple[str, float | None, int | None]],
+    ) -> None:
+        self.current_tick = T
+        self.present_accounts = set()
+        for account, u7d, r7d in rows:
+            self.present_accounts.add(account)
+            self.seen[account] += 1
+            if u7d is None:
+                self.all_null[account] += 1
+            else:
+                self.last_u[account] = (u7d, T)
+
+            if r7d is not None:
+                self.latest_r7d[account] = r7d
+
+    def pool(self) -> dict[str, tuple[float, int | None]]:
+        auto_excluded = {a for a in self.seen if self.seen[a] == self.all_null[a]}
+        full_excluded = auto_excluded | self.excluded
+        res: dict[str, tuple[float, int | None]] = {}
+        for account in self.present_accounts:
+            if account in full_excluded:
+                continue
+            if account in self.last_u:
+                u_val, u_ts = self.last_u[account]
+                if self.current_tick - u_ts <= CARRY_MS:
+                    r_eff = self.latest_r7d.get(account)
+                    res[account] = (u_val, r_eff)
+        return res
+
+
 def pool_at(
-    samples_by_tick: dict[int, list[tuple[str, float | None, int | None]]] | list[tuple[int, str, float | None, int | None]],
+    samples_by_tick: dict[int, list[tuple[str, float | None, int | None]]] | Sequence[tuple[int, str, float | None, int | None]],
     T: int,
     excluded: set[str] | None = None,
 ) -> dict[str, tuple[float, int | None]]:
-    """Determine pool membership and effective (u7d, r7d) at tick T.
-
-    Accounts with no non-null u7d in the loaded window are auto-excluded.
-    Accounts in excluded are excluded.
-    Accounts absent from tick T are excluded.
-    Null u7d at tick T is carried for up to CARRY_MS; otherwise dropped.
-    """
+    """Determine pool membership and effective (u7d, r7d) at tick T."""
+    tracker = PoolTracker(excluded=excluded)
     ticks_map: dict[int, list[tuple[str, float | None, int | None]]]
-    if isinstance(samples_by_tick, list):
+    if isinstance(samples_by_tick, dict):
+        ticks_map = samples_by_tick
+    else:
         ticks_map = collections.defaultdict(list)
         for ts, account, u7d, r7d in samples_by_tick:
             ticks_map[ts].append((account, u7d, r7d))
-    else:
-        ticks_map = samples_by_tick
 
-    # Detect accounts with no non-null u7d in the entire loaded window
-    seen: collections.Counter[str] = collections.Counter()
-    all_null: collections.Counter[str] = collections.Counter()
-    for ts, rows in ticks_map.items():
-        for account, u7d, _ in rows:
-            seen[account] += 1
-            if u7d is None:
-                all_null[account] += 1
-
-    auto_excluded = {a for a in seen if seen[a] == all_null[a]}
-    full_excluded = auto_excluded | (excluded or set())
-
-    current_rows = ticks_map.get(T, [])
-    current_accounts = {r[0]: (r[1], r[2]) for r in current_rows}
-
-    pool: dict[str, tuple[float, int | None]] = {}
-    for account, (u_curr, r_curr) in current_accounts.items():
-        if account in full_excluded:
-            continue
-
-        if u_curr is not None:
-            r_eff = r_curr
-            if r_eff is None:
-                # Find latest non-null r7d up to T
-                for ts in sorted((t for t in ticks_map if t <= T), reverse=True):
-                    for a, _, r in ticks_map[ts]:
-                        if a == account and r is not None:
-                            r_eff = r
-                            break
-                    if r_eff is not None:
-                        break
-            pool[account] = (u_curr, r_eff)
-        else:
-            # Carry forward last non-null u7d within CARRY_MS
-            prev_u: float | None = None
-            prev_r: int | None = None
-            for ts in sorted((t for t in ticks_map if t < T), reverse=True):
-                if T - ts > CARRY_MS:
-                    break
-                for a, u, r in ticks_map[ts]:
-                    if a == account and u is not None:
-                        prev_u = u
-                        prev_r = r
-                        break
-                if prev_u is not None:
-                    break
-
-            if prev_u is not None:
-                # If prev_r is None, look back further for r7d
-                if prev_r is None:
-                    for ts in sorted((t for t in ticks_map if t <= T), reverse=True):
-                        for a, _, r in ticks_map[ts]:
-                            if a == account and r is not None:
-                                prev_r = r
-                                break
-                        if prev_r is not None:
-                            break
-                pool[account] = (prev_u, prev_r)
-
-    return pool
+    for tick in sorted(t for t in ticks_map if t <= T):
+        tracker.feed_tick(tick, ticks_map[tick])
+    return tracker.pool()
 
 
 def estimate_k(burn_7d: float, max_usd_7d: float) -> float | None:
@@ -232,10 +225,13 @@ def forecast(
 ) -> tuple[float, float | None, tuple[int, float] | None]:
     """Forecast zero headroom hours over 24h horizon in 5-min steps.
 
+    next_refill is the earliest upcoming refill of any pool account even if beyond the horizon.
+    The simulation only includes refills within the 24h horizon.
     Returns (zero_h, vertex_usd, next_refill).
     """
-    sorted_refills = sorted(refills, key=lambda r: r[0])
-    next_refill = sorted_refills[0] if sorted_refills else None
+    sorted_all = sorted(refills, key=lambda r: r[0])
+    next_refill = sorted_all[0] if sorted_all else None
+    sim_refills = [ref for ref in sorted_all if ref[0] <= T + HORIZON_MS]
 
     h = H0
     zero_h = 0.0
@@ -246,8 +242,8 @@ def forecast(
     while t < T + HORIZON_MS:
         t += STEP_MS
         h = max(0.0, h - B * step_h)
-        while i < len(sorted_refills) and sorted_refills[i][0] <= t:
-            h += sorted_refills[i][1]
+        while i < len(sim_refills) and sim_refills[i][0] <= t:
+            h += sim_refills[i][1]
             i += 1
         if h < DRY_H:
             zero_h += step_h
@@ -394,10 +390,34 @@ def step_alerts(
 
 
 def sum_buckets(buckets: dict[int, float], T: int, W: int) -> float:
-    """Sum bucket values over window (T - W, T]."""
-    start_b = ((T - W) // STEP_MS) * STEP_MS
+    """Sum bucket values over window (T - W, T] with T - W <= b < T."""
     end_b = (T // STEP_MS) * STEP_MS
-    return sum(buckets.get(b, 0.0) for b in range(start_b, end_b + STEP_MS, STEP_MS))
+    start_b = end_b - W
+    return sum(buckets.get(b, 0.0) for b in range(start_b, end_b, STEP_MS))
+
+
+def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int:
+    """Parse ISO date or datetime string, interpreting naive datetimes in America/New_York.
+
+    If given as date only (YYYY-MM-DD) and end_of_day_for_date=True, returns the next midnight ET.
+    """
+    if val is None or val == "now":
+        return int(time.time() * 1000)
+    val = val.strip()
+    is_date_only = len(val) == 10 and val.count("-") == 2 and "T" not in val and " " not in val
+    try:
+        dt = datetime.datetime.fromisoformat(val)
+    except Exception as e:
+        raise ValueError(f"Invalid ISO datetime string: {val}") from e
+
+    if is_date_only and end_of_day_for_date:
+        dt = dt + datetime.timedelta(days=1)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=NY_TZ)
+    else:
+        dt = dt.astimezone(NY_TZ)
+    return int(dt.timestamp() * 1000)
 
 
 def load_inputs(
@@ -436,6 +456,45 @@ def load_inputs(
     return samples, spill_buckets, max_buckets
 
 
+def load_or_seed_state(
+    state_path: str,
+    pool: dict[str, tuple[float, int | None]],
+) -> tuple[dict[str, Any], bool]:
+    """Load state.json; if missing or corrupt, warn on stderr, start fresh, and seed acct_high silently."""
+    is_fresh = False
+    state: dict[str, Any] = {}
+    if not os.path.exists(state_path):
+        is_fresh = True
+        sys.stderr.write("quota-watch: state missing or corrupt (file not found); starting fresh\n")
+    else:
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                is_fresh = True
+                sys.stderr.write("quota-watch: state missing or corrupt (not a dict); starting fresh\n")
+            elif not isinstance(raw.get("acct_high"), dict):
+                is_fresh = True
+                sys.stderr.write("quota-watch: state missing or corrupt (acct_high not a dict); starting fresh\n")
+            else:
+                state = raw
+        except Exception as e:
+            is_fresh = True
+            sys.stderr.write(f"quota-watch: state missing or corrupt ({e}); starting fresh\n")
+
+    if is_fresh:
+        state = {
+            "pool_dry": False,
+            "shortfall": False,
+            "acct_high": {},
+        }
+        for account, (u_eff, _) in pool.items():
+            if u_eff >= ACCT_HI:
+                state["acct_high"][account] = True
+
+    return state, is_fresh
+
+
 def run_live(
     db: str,
     state_dir: str,
@@ -444,7 +503,7 @@ def run_live(
     excluded: set[str] | None = None,
 ) -> int:
     """Run live quota watch check."""
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
     try:
         row = conn.execute("SELECT max(ts) FROM quota_samples").fetchone()
         if not row or row[0] is None:
@@ -469,16 +528,20 @@ def run_live(
     finally:
         conn.close()
 
-    acc = Accumulator()
+    acc = Accumulator(excluded=excluded)
+    tracker = PoolTracker(excluded=excluded)
+
     samples_by_tick: dict[int, list[tuple[str, float | None, int | None]]] = collections.defaultdict(list)
     for ts, a, u, r in samples:
         samples_by_tick[ts].append((a, u, r))
 
     for ts in sorted(samples_by_tick):
-        for a, u, r in samples_by_tick[ts]:
+        rows = samples_by_tick[ts]
+        tracker.feed_tick(ts, rows)
+        for a, u, r in rows:
             acc.feed(ts, a, u, r)
 
-    pool = pool_at(samples_by_tick, T, excluded)
+    pool = tracker.pool()
     H0 = sum(max(0.0, CAP - u) for u, _ in pool.values())
     burn_7d = acc.burn(T, 7 * 24 * 3600 * 1000)
     max_7d = sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000)
@@ -490,24 +553,18 @@ def run_live(
     spill_24h = sum_buckets(spill_buckets, T, 24 * 3600 * 1000)
     B = burn_rate(burn_6h, burn_24h, spill_6h, spill_24h, k)
 
-    refills = [
+    all_refills = [
         (max(r, T + STEP_MS), min(u, CAP))
         for _, (u, r) in pool.items()
-        if r is not None and r <= T + HORIZON_MS
+        if r is not None
     ]
-    zero_h, vertex_usd, next_refill = forecast(H0, B, refills, k, T)
+    zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
 
     spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
     spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
 
     state_path = os.path.join(state_dir, "state.json")
-    state: dict[str, Any] = {}
-    if os.path.exists(state_path):
-        try:
-            with open(state_path, "r", encoding="utf-8") as f:
-                state = json.load(f)
-        except Exception:
-            state = {}
+    state, is_fresh = load_or_seed_state(state_path, pool)
 
     metrics = {
         "H0": H0,
@@ -550,7 +607,12 @@ def run_live(
                     str(action["ttl"]),
                     str(action["max"]),
                 ]
-                subprocess.run(argv, check=True)
+                try:
+                    res = subprocess.run(argv, timeout=60)
+                    if res.returncode != 0:
+                        sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
+                except subprocess.TimeoutExpired:
+                    sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
             else:
                 print(f"would-alert: {action['signature']} ttl={action['ttl']} max={action['max']} text={action['text']}")
 
@@ -576,7 +638,7 @@ def replay(
     excluded: set[str] | None = None,
 ) -> list[ReplayEvent]:
     """Replay quota watch evaluation tick-by-tick."""
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
     try:
         warmup_since = since_ms - 8 * 24 * 3600 * 1000
         samples, spill_buckets, max_buckets = load_inputs(conn, warmup_since)
@@ -584,46 +646,26 @@ def replay(
         conn.close()
 
     samples_by_tick: dict[int, list[tuple[str, float | None, int | None]]] = collections.defaultdict(list)
-    seen: collections.Counter[str] = collections.Counter()
-    all_null: collections.Counter[str] = collections.Counter()
     for ts, a, u, r in samples:
         samples_by_tick[ts].append((a, u, r))
-        seen[a] += 1
-        if u is None:
-            all_null[a] += 1
 
-    auto_excluded = {a for a in seen if seen[a] == all_null[a]}
-    full_excluded = auto_excluded | (excluded or set())
-
-    acc = Accumulator()
-    cur_pool: dict[str, tuple[float, int | None, int]] = {}  # account -> (u_eff, r7d_eff, last_nonnull_ts)
+    acc = Accumulator(excluded=excluded)
+    tracker = PoolTracker(excluded=excluded)
     alert_state: dict[str, Any] = {}
     events: list[ReplayEvent] = []
 
     for T in sorted(samples_by_tick):
         rows = samples_by_tick[T]
-        present = set()
+        tracker.feed_tick(T, rows)
         for a, u, r in rows:
-            present.add(a)
             acc.feed(T, a, u, r)
-            if u is not None:
-                r_eff = r if r is not None else (cur_pool.get(a, (0.0, None, 0))[1])
-                cur_pool[a] = (u, r_eff, T)
-            elif a in cur_pool and T - cur_pool[a][2] <= CARRY_MS:
-                pass
-            else:
-                cur_pool.pop(a, None)
-
-        for a in list(cur_pool):
-            if a not in present:
-                cur_pool.pop(a)
 
         if T < since_ms:
             continue
         if T > until_ms:
             break
 
-        pool = {a: (v[0], v[1]) for a, v in cur_pool.items() if a not in full_excluded}
+        pool = tracker.pool()
         H0 = sum(max(0.0, CAP - u) for u, _ in pool.values())
         burn_7d = acc.burn(T, 7 * 24 * 3600 * 1000)
         max_7d = sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000)
@@ -635,12 +677,12 @@ def replay(
         spill_24h = sum_buckets(spill_buckets, T, 24 * 3600 * 1000)
         B = burn_rate(burn_6h, burn_24h, spill_6h, spill_24h, k)
 
-        refills = [
+        all_refills = [
             (max(r, T + STEP_MS), min(u, CAP))
             for _, (u, r) in pool.items()
-            if r is not None and r <= T + HORIZON_MS
+            if r is not None
         ]
-        zero_h, vertex_usd, next_refill = forecast(H0, B, refills, k, T)
+        zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
 
         spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
         spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
