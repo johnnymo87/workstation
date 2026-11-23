@@ -671,7 +671,7 @@ at 600; run
 check "quota sleep: the agent's character is put to sleep, the person's is not" \
   '[ "$(posts)" -eq 1 ] && grep -q "^http://127.0.0.1:4002/v1/sessions/jonathan/directive {\"type\":\"sleep\",\"reason\":\"quota\",\"origin\":\"operator\"}$" "$S/post.log"'
 check "quota sleep: the alert says who was put to sleep and when, and the log line too" \
-  'grep -q "the first back is b at 2027-01-15T13:00Z. Put to sleep at 08:10Z: jonathan.$" <<<"$(tglast)" && grep -q "quota sleep: jonathan: accepted at 2027-01-15T08:10Z" "$S/err"'
+  'grep -q "the first back is b at 2027-01-15T13:00Z. Sent to sleep at 08:10Z: jonathan.$" <<<"$(tglast)" && grep -q "quota sleep: jonathan: accepted at 2027-01-15T08:10Z" "$S/err"'
 serve_jq 4002_v1_presence presence.json '.presence.jonathan = {link: "offline", place: "unknown", since: "2027-01-15T08:10:30Z",
   via: "start", wants_out: {why: "quota_sleep", at: "2027-01-15T08:10:30Z"}, agent_driven: true,
   last_close: {cause: "ours", at: "2027-01-15T08:10:30Z", code: null, idle: false, idle_minutes: null, by: "quota_sleep"}}'
@@ -695,6 +695,9 @@ rm "$S/post/4002_v1_sessions_jonathan_directive"; at 1200; run
 check "quota sleep: the next pass asks again" '[ "$(posts)" -eq 2 ]'
 printf '423\n{"error":"automation_halted"}\n' >"$S/post/4002_v1_sessions_jonathan_directive"; at 1800; run
 check "quota sleep: a GM halt is named" 'grep -q "quota sleep: jonathan: not now: a GM halt holds her" "$S/err"'
+touch "$S/quota_bad"; : >"$S/post.log"; at 2400; run
+check "quota sleep: a carried quota:pool (state unreadable) asks nothing" \
+  '[ "$(posts)" -eq 0 ] && [ "$(st ".keys | index(\"quota:pool\") != null")" = true ]'
 
 setup; mkquota "a 0.98 86400"; serve_jq 4002_v1_presence presence.json "$in_world"
 export EM_STACK_QUOTA_SLEEP=0; run; at 600; run; unset EM_STACK_QUOTA_SLEEP

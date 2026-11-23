@@ -116,7 +116,8 @@ agents could not call the model, the game logged Decimian out for idling at
   character in the world would only stand there unattended and be closed
   again. The restart is a person's or the runner's.
 - The quota sleep (EM bead kdubj.126, Jonathan 2026-11-23: "when we run out of
-  quota, we should `sleep` any active character"): once `quota:pool` stands,
+  quota, we should `sleep` any active character"): once `quota:pool` stands
+  and this pass read the quota as spent (never on a carried key),
   each pass POSTs `{"type":"sleep","reason":"quota"}` to the directive of every
   session an agent plays (`agent_driven`) that is online and in the world. The
   BEAM's hands send `sleep` (TEC's safe logout), no model is asked. A session a
