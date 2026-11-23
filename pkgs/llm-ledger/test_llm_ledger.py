@@ -32,8 +32,16 @@ class TestLlmLedger(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
         self.events_path = os.path.join(self.tmpdir.name, "events.jsonl")
         self.raw_dir = os.path.join(self.tmpdir.name, "raw")
+        self.samples_path = os.path.join(self.tmpdir.name, "quota-samples.jsonl")
+        self.samples_archive = os.path.join(self.tmpdir.name, "archive")
+        self.orig_default_samples = llm_ledger.DEFAULT_SAMPLES
+        self.orig_default_samples_archive = llm_ledger.DEFAULT_SAMPLES_ARCHIVE
+        llm_ledger.DEFAULT_SAMPLES = self.samples_path
+        llm_ledger.DEFAULT_SAMPLES_ARCHIVE = self.samples_archive
 
     def tearDown(self):
+        llm_ledger.DEFAULT_SAMPLES = self.orig_default_samples
+        llm_ledger.DEFAULT_SAMPLES_ARCHIVE = self.orig_default_samples_archive
         self.tmpdir.cleanup()
 
     def test_schema_creation_and_pragmas(self):
@@ -714,6 +722,362 @@ class TestLlmLedger(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM requests").fetchone()[0], 1)
         finally:
             conn.close()
+
+    def test_quota_dst_offsets(self):
+        # Line 1: EDT offset (-04:00) -> 2026-07-26T22:00:00-04:00 is 2026-07-27T02:00:00Z (1785117600000 ms)
+        line1 = {
+            "ts": "2026-07-26T22:00:00-04:00",
+            "healthy": 3,
+            "roster": 3,
+            "current": "johnnymo872@gmail.com",
+            "accounts": [
+                {
+                    "n": "jonathan.mohrbacher",
+                    "s": "active",
+                    "u5h": 0.1,
+                    "u7d": 0.5,
+                    "u7dF": 0.1,
+                    "fw": False,
+                }
+            ],
+        }
+        # Line 2: EST offset (-05:00) -> 2026-11-22T22:00:00-05:00 is 2026-11-23T03:00:00Z (1795402800000 ms)
+        line2 = {
+            "ts": "2026-11-22T22:00:00-05:00",
+            "healthy": 6,
+            "canary_healthy": 5,
+            "canary_serving": 5,
+            "roster": 6,
+            "current": "johnnymo873@gmail.com",
+            "fwh": 24,
+            "accounts": [
+                {
+                    "n": "jonathan.mohrbacher",
+                    "s": "active",
+                    "u5h": 0.2,
+                    "u7d": 0.9,
+                    "u7dF": 0.2,
+                    "fw": True,
+                }
+            ],
+        }
+        with open(self.samples_path, "w") as f:
+            f.write(json.dumps(line1) + "\n")
+            f.write(json.dumps(line2) + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            counts = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(counts["quota_rows"], 2)
+            self.assertEqual(counts["quota_pool_rows"], 2)
+
+            pool_rows = conn.execute("SELECT ts, healthy, roster FROM quota_pool ORDER BY ts ASC").fetchall()
+            self.assertEqual(len(pool_rows), 2)
+            self.assertEqual(pool_rows[0][0], 1785117600000)
+            self.assertEqual(pool_rows[1][0], 1795402800000)
+
+            sample_rows = conn.execute(
+                "SELECT ts, account, s, u5h, u7d, u7d_fable, fw FROM quota_samples ORDER BY ts ASC"
+            ).fetchall()
+            self.assertEqual(len(sample_rows), 2)
+            # Row 1 (-04:00)
+            self.assertEqual(sample_rows[0][0], 1785117600000)
+            self.assertEqual(sample_rows[0][1], "jonathan.mohrbacher")
+            self.assertEqual(sample_rows[0][2], "active")
+            self.assertAlmostEqual(sample_rows[0][3], 0.1)
+            self.assertAlmostEqual(sample_rows[0][4], 0.5)
+            self.assertAlmostEqual(sample_rows[0][5], 0.1)
+            self.assertEqual(sample_rows[0][6], 0)  # fw False -> 0
+
+            # Row 2 (-05:00)
+            self.assertEqual(sample_rows[1][0], 1795402800000)
+            self.assertEqual(sample_rows[1][1], "jonathan.mohrbacher")
+            self.assertEqual(sample_rows[1][2], "active")
+            self.assertAlmostEqual(sample_rows[1][3], 0.2)
+            self.assertAlmostEqual(sample_rows[1][4], 0.9)
+            self.assertAlmostEqual(sample_rows[1][5], 0.2)
+            self.assertEqual(sample_rows[1][6], 1)  # fw True -> 1
+        finally:
+            conn.close()
+
+    def test_quota_archives_imported_once(self):
+        os.makedirs(self.samples_archive, exist_ok=True)
+        archive_file = os.path.join(self.samples_archive, "quota-samples-until-20260828T222004.jsonl.gz")
+        line1 = {
+            "ts": "2026-08-28T22:15:00-04:00",
+            "healthy": 3,
+            "roster": 3,
+            "accounts": [{"n": "acc1", "u7d": 0.1}],
+        }
+        line2 = {
+            "ts": "2026-08-28T22:20:00-04:00",
+            "healthy": 3,
+            "roster": 3,
+            "accounts": [{"n": "acc1", "u7d": 0.2}],
+        }
+        with gzip.open(archive_file, "wt") as f:
+            f.write(json.dumps(line1) + "\n" + json.dumps(line2) + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            # First import
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret1["quota_rows"], 2)
+            self.assertEqual(ret1["quota_pool_rows"], 2)
+
+            # Ingest state recorded
+            val = conn.execute(
+                "SELECT value FROM ingest_state WHERE key = 'quota_archive:quota-samples-until-20260828T222004.jsonl.gz'"
+            ).fetchone()
+            self.assertIsNotNone(val)
+
+            # Second import: should be skipped because it's recorded in ingest_state
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret2["quota_rows"], 0)
+            self.assertEqual(ret2["quota_pool_rows"], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 2)
+        finally:
+            conn.close()
+
+    def test_quota_live_file_skip_by_newest_ts(self):
+        line1 = {"ts": "2026-11-20T10:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.1}]}
+        line2 = {"ts": "2026-11-20T11:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.2}]}
+        with open(self.samples_path, "w") as f:
+            f.write(json.dumps(line1) + "\n" + json.dumps(line2) + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret1["quota_rows"], 2)
+
+            # Append an old line (ts1), a duplicate (ts2), and a newer line (ts3)
+            line3 = {"ts": "2026-11-20T12:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.3}]}
+            with open(self.samples_path, "a") as f:
+                f.write(json.dumps(line1) + "\n")
+                f.write(json.dumps(line2) + "\n")
+                f.write(json.dumps(line3) + "\n")
+
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            # Only line3 is newer than ts2, line1 and line2 skipped by newest ts check
+            self.assertEqual(ret2["quota_rows"], 1)
+            self.assertEqual(ret2["quota_pool_rows"], 1)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 3)
+        finally:
+            conn.close()
+
+    def test_quota_old_lines_missing_fields(self):
+        # Old lines lack canary_*, fwh, u7dF, fw, r7d, r5h
+        old_line = {
+            "ts": "2026-07-26T22:45:00-04:00",
+            "healthy": 3,
+            "roster": 3,
+            "current": "johnnymo872@gmail.com",
+            "accounts": [
+                {
+                    "n": "jonathan.mohrbacher",
+                    "s": "active",
+                    "u5h": 0.05,
+                    "u7d": 0.44,
+                }
+            ],
+        }
+        with open(self.samples_path, "w") as f:
+            f.write(json.dumps(old_line) + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            pool_row = conn.execute(
+                "SELECT canary_healthy, canary_serving, fwh FROM quota_pool"
+            ).fetchone()
+            self.assertIsNotNone(pool_row)
+            self.assertIsNone(pool_row[0])  # canary_healthy
+            self.assertIsNone(pool_row[1])  # canary_serving
+            self.assertIsNone(pool_row[2])  # fwh
+
+            sample_row = conn.execute(
+                "SELECT u7d_fable, fw, r7d, r5h FROM quota_samples"
+            ).fetchone()
+            self.assertIsNotNone(sample_row)
+            self.assertIsNone(sample_row[0])  # u7d_fable (u7dF was missing)
+            self.assertIsNone(sample_row[1])  # fw
+            self.assertIsNone(sample_row[2])  # r7d
+            self.assertIsNone(sample_row[3])  # r5h
+        finally:
+            conn.close()
+
+    def test_quota_null_u7d_kept_null(self):
+        line = {
+            "ts": "2026-11-22T22:00:00-05:00",
+            "healthy": 5,
+            "accounts": [
+                {"n": "acc_null", "u7d": None},
+                {"n": "acc_zero", "u7d": 0},
+                {"n": "acc_val", "u7d": 0.75},
+                {"n": "acc_missing"},
+            ],
+        }
+        with open(self.samples_path, "w") as f:
+            f.write(json.dumps(line) + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            rows = dict(conn.execute("SELECT account, u7d FROM quota_samples").fetchall())
+            self.assertIsNone(rows["acc_null"])
+            self.assertEqual(rows["acc_zero"], 0.0)
+            self.assertAlmostEqual(rows["acc_val"], 0.75)
+            self.assertIsNone(rows["acc_missing"])
+        finally:
+            conn.close()
+
+    def test_quota_rewritten_live_file_neither_loses_nor_duplicates(self):
+        # 1. Setup initial live file with 4 lines
+        lines = [
+            {"ts": f"2026-11-20T10:0{i}:00-05:00", "healthy": 5, "accounts": [{"n": "acc1", "u7d": i * 0.1}]}
+            for i in range(4)
+        ]
+        with open(self.samples_path, "w") as f:
+            for l in lines:
+                f.write(json.dumps(l) + "\n")
+
+        # Run 1: imports all 4 lines
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            ret1 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret1["quota_rows"], 4)
+            self.assertEqual(ret1["quota_pool_rows"], 4)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 4)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_samples").fetchone()[0], 4)
+
+            # 2. Canary archives lines 0 and 1 into a new archive
+            os.makedirs(self.samples_archive, exist_ok=True)
+            archive_path = os.path.join(self.samples_archive, "quota-samples-until-20261120T100100.jsonl.gz")
+            with gzip.open(archive_path, "wt") as gz:
+                gz.write(json.dumps(lines[0]) + "\n" + json.dumps(lines[1]) + "\n")
+
+            # Canary rewrites live file to keep only lines 2, 3, and appends a new line 4
+            line4 = {"ts": "2026-11-20T10:04:00-05:00", "healthy": 5, "accounts": [{"n": "acc1", "u7d": 0.4}]}
+            with open(self.samples_path, "w") as f:
+                f.write(json.dumps(lines[2]) + "\n")
+                f.write(json.dumps(lines[3]) + "\n")
+                f.write(json.dumps(line4) + "\n")
+
+            # Run 2:
+            # - Archive lines 0, 1 are ignored by INSERT OR IGNORE because they already exist in DB
+            # - Archive is recorded in ingest_state
+            # - Live lines 2, 3 are skipped because ts <= newest_ts
+            # - Live line 4 is inserted
+            ret2 = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(ret2["quota_rows"], 1)  # Only line 4 added
+            self.assertEqual(ret2["quota_pool_rows"], 1)
+
+            # Total rows in DB is exactly 5
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_pool").fetchone()[0], 5)
+            self.assertEqual(conn.execute("SELECT count(*) FROM quota_samples").fetchone()[0], 5)
+
+            # Ingest state has the archive recorded
+            val = conn.execute(
+                "SELECT value FROM ingest_state WHERE key = 'quota_archive:quota-samples-until-20261120T100100.jsonl.gz'"
+            ).fetchone()
+            self.assertIsNotNone(val)
+        finally:
+            conn.close()
+
+    def test_quota_missing_live_file_and_archive_dir(self):
+        nonexistent_samples = os.path.join(self.tmpdir.name, "does-not-exist.jsonl")
+        nonexistent_archive = os.path.join(self.tmpdir.name, "does-not-exist-dir")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            counts = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=nonexistent_samples,
+                samples_archive=nonexistent_archive,
+            )
+            self.assertEqual(counts["quota_rows"], 0)
+            self.assertEqual(counts["quota_pool_rows"], 0)
+            self.assertEqual(counts["malformed"], 0)
+        finally:
+            conn.close()
+
+    def test_quota_malformed_lines_skipped_and_counted(self):
+        lines = [
+            json.dumps({"ts": "2026-11-20T10:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.1}]}),
+            "not a json",
+            json.dumps([1, 2, 3]),
+            json.dumps({"healthy": 5}),  # missing ts
+            json.dumps({"ts": "invalid-iso-date", "healthy": 5}),  # invalid ts
+        ]
+        with open(self.samples_path, "w") as f:
+            for l in lines:
+                f.write(l + "\n")
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            counts = llm_ledger.step_quota_samples(
+                conn,
+                samples_path=self.samples_path,
+                samples_archive=self.samples_archive,
+            )
+            self.assertEqual(counts["quota_rows"], 1)
+            self.assertEqual(counts["quota_pool_rows"], 1)
+            self.assertEqual(counts["malformed"], 4)
+        finally:
+            conn.close()
+
+    def test_run_ingest_integrates_quota_step(self):
+        # Test that run_ingest calls quota step and returns merged counts
+        line = {"ts": "2026-11-20T10:00:00-05:00", "healthy": 5, "accounts": [{"n": "a1", "u7d": 0.1}]}
+        with open(self.samples_path, "w") as f:
+            f.write(json.dumps(line) + "\n")
+
+        ret = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+            samples_path=self.samples_path,
+            samples_archive=self.samples_archive,
+        )
+        self.assertEqual(ret["quota_rows"], 1)
+        self.assertEqual(ret["new_routes"], 0)
+        self.assertEqual(ret["new_requests"], 0)
 
 
 if __name__ == "__main__":

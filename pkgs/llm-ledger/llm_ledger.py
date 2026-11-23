@@ -88,6 +88,91 @@ def to_float(val: Any) -> float | None:
         return None
 
 
+def to_fw_int(val: Any) -> int | None:
+    if val is True:
+        return 1
+    if val is False:
+        return 0
+    if val == 1 and not isinstance(val, bool):
+        return 1
+    if val == 0 and not isinstance(val, bool):
+        return 0
+    return None
+
+
+def parse_iso_ts(val: Any) -> int | None:
+    if not isinstance(val, str) or not val:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return round(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def parse_quota_sample_line(
+    line_str: str,
+) -> tuple[tuple[Any, ...] | None, list[tuple[Any, ...]], bool]:
+    """Parse one quota sample line.
+
+    Returns:
+        (pool_row | None, sample_rows, is_malformed)
+        pool_row: (ts, healthy, canary_healthy, canary_serving, roster, current, fwh)
+        sample_rows: list of (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h)
+    """
+    stripped = line_str.strip()
+    if not stripped:
+        return None, [], False
+
+    try:
+        obj = json.loads(stripped)
+    except Exception:
+        return None, [], True
+
+    if not isinstance(obj, dict):
+        return None, [], True
+
+    ts_ms = parse_iso_ts(obj.get("ts"))
+    if ts_ms is None:
+        return None, [], True
+
+    pool_row = (
+        ts_ms,
+        to_int(obj.get("healthy")),
+        to_int(obj.get("canary_healthy")),
+        to_int(obj.get("canary_serving")),
+        to_int(obj.get("roster")),
+        str(obj["current"]) if obj.get("current") is not None else None,
+        to_float(obj.get("fwh")),
+    )
+
+    accounts = obj.get("accounts")
+    if accounts is None:
+        accounts = []
+    elif not isinstance(accounts, list):
+        return None, [], True
+
+    sample_rows: list[tuple[Any, ...]] = []
+    for acc in accounts:
+        if not isinstance(acc, dict):
+            continue
+        acc_name = acc.get("n")
+        if not acc_name or not isinstance(acc_name, str):
+            continue
+        s = str(acc["s"]) if acc.get("s") is not None else None
+        u5h = to_float(acc.get("u5h"))
+        u7d = to_float(acc.get("u7d"))
+        u7d_fable = to_float(acc.get("u7dF"))
+        fw = to_fw_int(acc.get("fw"))
+        r7d = to_int(acc.get("r7d"))
+        r5h = to_int(acc.get("r5h"))
+        sample_rows.append((ts_ms, acc_name, s, u5h, u7d, u7d_fable, fw, r7d, r5h))
+
+    return pool_row, sample_rows, False
+
+
 def open_ledger_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -526,6 +611,159 @@ def step_cfp_tail_and_archive(
     }
 
 
+def step_quota_samples(
+    conn: sqlite3.Connection,
+    samples_path: str = DEFAULT_SAMPLES,
+    samples_archive: str = DEFAULT_SAMPLES_ARCHIVE,
+    batch_size: int = 50000,
+) -> dict[str, int]:
+    """Step 3: quota samples import from archives and live file."""
+    state = get_ingest_state(conn)
+    total_pool_rows = 0
+    total_sample_rows = 0
+    total_malformed = 0
+
+    # 1. Archives: import each archive not yet recorded in ingest_state
+    if os.path.isdir(samples_archive):
+        archive_files = sorted(Path(samples_archive).glob("*.jsonl.gz"))
+        for archive_path in archive_files:
+            basename = archive_path.name
+            state_key = f"quota_archive:{basename}"
+            if state_key in state:
+                continue
+
+            pool_rows: list[tuple[Any, ...]] = []
+            sample_rows: list[tuple[Any, ...]] = []
+            cur = conn.cursor()
+
+            try:
+                with gzip.open(archive_path, "rt", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        p_row, s_rows, is_mal = parse_quota_sample_line(line)
+                        if is_mal:
+                            total_malformed += 1
+                            continue
+                        if p_row is not None:
+                            pool_rows.append(p_row)
+                        sample_rows.extend(s_rows)
+
+                        if len(pool_rows) >= batch_size:
+                            cur.executemany(
+                                "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                pool_rows,
+                            )
+                            total_pool_rows += cur.rowcount
+                            pool_rows = []
+
+                        if len(sample_rows) >= batch_size:
+                            cur.executemany(
+                                "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                sample_rows,
+                            )
+                            total_sample_rows += cur.rowcount
+                            sample_rows = []
+            except (OSError, gzip.BadGzipFile):
+                total_malformed += 1
+                continue
+
+            if pool_rows:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    pool_rows,
+                )
+                total_pool_rows += cur.rowcount
+
+            if sample_rows:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    sample_rows,
+                )
+                total_sample_rows += cur.rowcount
+
+            # Record archive in ingest_state in the SAME transaction as its rows
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
+                (state_key, "1"),
+            )
+            conn.commit()
+            state[state_key] = "1"
+
+    # 2. Live file: skipping lines whose ts <= newest quota_pool.ts
+    if os.path.isfile(samples_path):
+        row = conn.execute("SELECT max(ts) FROM quota_pool").fetchone()
+        newest_ts = row[0] if (row and row[0] is not None) else None
+
+        pool_rows = []
+        sample_rows = []
+        cur = conn.cursor()
+
+        try:
+            with open(samples_path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    p_row, s_rows, is_mal = parse_quota_sample_line(line)
+                    if is_mal:
+                        total_malformed += 1
+                        continue
+                    if p_row is None:
+                        continue
+
+                    ts = p_row[0]
+                    if newest_ts is not None and ts <= newest_ts:
+                        continue
+
+                    pool_rows.append(p_row)
+                    sample_rows.extend(s_rows)
+
+                    if len(pool_rows) >= batch_size:
+                        cur.executemany(
+                            "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            pool_rows,
+                        )
+                        total_pool_rows += cur.rowcount
+                        pool_rows = []
+
+                    if len(sample_rows) >= batch_size:
+                        cur.executemany(
+                            "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            sample_rows,
+                        )
+                        total_sample_rows += cur.rowcount
+                        sample_rows = []
+
+            if pool_rows:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO quota_pool (ts, healthy, canary_healthy, canary_serving, roster, current, fwh) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    pool_rows,
+                )
+                total_pool_rows += cur.rowcount
+
+            if sample_rows:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    sample_rows,
+                )
+                total_sample_rows += cur.rowcount
+
+            conn.commit()
+        except OSError:
+            pass
+
+    return {
+        "quota_rows": total_sample_rows,
+        "quota_pool_rows": total_pool_rows,
+        "quota_sample_rows": total_sample_rows,
+        "malformed": total_malformed,
+    }
+
+
 def run_ingest(
     db_path: str = DEFAULT_DB,
     events_path: str = DEFAULT_EVENTS,
@@ -535,8 +773,10 @@ def run_ingest(
     goose_db: str | None = None,
     tags_db: str | None = None,
     lgtm_ledger: str | None = None,
+    samples_path: str = DEFAULT_SAMPLES,
+    samples_archive: str = DEFAULT_SAMPLES_ARCHIVE,
 ) -> dict[str, Any]:
-    """Execute run steps 1-2."""
+    """Execute run steps 1-3."""
     host = host or socket.gethostname()
     actual_raw_dir = raw_dir or os.path.join(os.path.dirname(os.path.abspath(db_path)), "raw")
 
@@ -552,6 +792,15 @@ def run_ingest(
             tags_db=tags_db,
             lgtm_ledger=lgtm_ledger,
         )
+        quota_counts = step_quota_samples(
+            conn=conn,
+            samples_path=samples_path,
+            samples_archive=samples_archive,
+        )
+        counts["malformed"] = counts.get("malformed", 0) + quota_counts.get("malformed", 0)
+        counts["quota_rows"] = quota_counts.get("quota_rows", 0)
+        counts["quota_pool_rows"] = quota_counts.get("quota_pool_rows", 0)
+        counts["quota_sample_rows"] = quota_counts.get("quota_sample_rows", 0)
         return counts
     finally:
         conn.close()
@@ -688,6 +937,8 @@ def main(argv: list[str] | None = None) -> int:
             goose_db=args.goose_db,
             tags_db=args.tags_db,
             lgtm_ledger=args.lgtm_ledger,
+            samples_path=args.samples,
+            samples_archive=args.samples_archive,
         )
     elif args.command == "import-events":
         counts = import_events(
