@@ -74,17 +74,23 @@ CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NU
 """
 
 
+ADVISORY_WARNING_SUBSTRINGS: tuple[str, ...] = ()
+
+
 def is_advisory_warning(warning: str) -> bool:
     """Determine whether a warning is advisory (non-fatal) vs fatal.
 
     Fatal warnings cause exit code 1 so systemd's OnFailure alert fires.
-    Advisory warnings (e.g. rejected rows in lgtm goose ledger due to schema
-    or timestamp noise) indicate non-critical data quality notes that should be
-    reported to stderr without paging/failing the entire ledger service.
+    Advisory warnings are printed but keep exit 0.
+
+    ADVISORY_WARNING_SUBSTRINGS is deliberately empty. On 2026-11-23 the live
+    resolver inputs produced no warnings at all, and the obvious candidate
+    ("lgtm goose ledger: N row(s) not counted") is exactly the signal of an
+    lgtm schema change that would silently misattribute goose traffic for
+    good once the 72 h recheck window passes. Add a substring here only for a
+    condition known to be benign AND persistent, with the evidence beside it.
     """
-    if "lgtm goose ledger:" in warning and "row(s) not counted" in warning:
-        return True
-    return False
+    return any(s in warning for s in ADVISORY_WARNING_SUBSTRINGS)
 
 
 def add_warning(warnings: list[str] | None, msg: str) -> None:

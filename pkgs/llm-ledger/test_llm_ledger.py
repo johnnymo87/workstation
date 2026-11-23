@@ -918,19 +918,23 @@ class TestLlmLedger(unittest.TestCase):
         with open(self.events_path, "w") as f:
             f.write(route_line + "\n" + usage_line + "\n")
 
-        # Mock CfpSessionResolver to inject an advisory warning
+        # Mock CfpSessionResolver to inject a warning. A substring listed in
+        # ADVISORY_WARNING_SUBSTRINGS keeps exit 0; the lgtm "rows not counted"
+        # warning is NOT advisory (it signals an lgtm schema change).
+        injected = ["benign-test-warning: something"]
         orig_resolver = oc_tags.CfpSessionResolver
         def mock_resolver(*args, **kwargs):
             warns = kwargs.get("warnings")
             if warns is not None:
-                warns.append("lgtm goose ledger: 3 row(s) not counted (unknown schema, kind, or timestamp) in /path")
+                warns.append(injected[0])
             return orig_resolver(*args, **kwargs)
 
         import io
         import contextlib
         err = io.StringIO()
         out = io.StringIO()
-        with mock.patch("oc_tags.CfpSessionResolver", side_effect=mock_resolver):
+        with mock.patch("oc_tags.CfpSessionResolver", side_effect=mock_resolver), \
+                mock.patch.object(llm_ledger, "ADVISORY_WARNING_SUBSTRINGS", ("benign-test-warning",)):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exit_code = llm_ledger.main([
                     "run",
@@ -940,7 +944,9 @@ class TestLlmLedger(unittest.TestCase):
                     "--tags-db", tags_db,
                 ])
         self.assertEqual(exit_code, 0)
-        self.assertIn("lgtm goose ledger: 3 row(s) not counted", err.getvalue())
+        self.assertIn("benign-test-warning", err.getvalue())
+        self.assertFalse(llm_ledger.is_advisory_warning(
+            "lgtm goose ledger: 3 row(s) not counted (unknown schema, kind, or timestamp) in /path"))
 
     def test_fatal_resolver_warning_causes_exit_1(self):
         tags_db = os.path.join(self.tmpdir.name, "tags.db")
