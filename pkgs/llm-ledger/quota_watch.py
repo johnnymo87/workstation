@@ -39,6 +39,24 @@ K_MIN_BURN: float = 0.5
 STALE_INPUT_MS: int = 20 * 60 * 1000  # 20 min
 
 NY_TZ = ZoneInfo("America/New_York")
+RECORD_TIMEOUT_S: float = 30.0
+
+QUOTA_WATCH_SCHEMA_SQL: str = """
+CREATE TABLE IF NOT EXISTS quota_watch_runs (
+  ts INTEGER PRIMARY KEY,          -- T, the quota_samples tick evaluated
+  h0 REAL NOT NULL, burn_h REAL NOT NULL,
+  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+  next_refill_ts INTEGER, next_refill_amt REAL,
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
+
+CREATE TABLE IF NOT EXISTS quota_forecast (
+  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
+"""
+
+
+class QuotaRecordError(RuntimeError):
+    """Raised when recording runs into the ledger fails."""
 
 
 @dataclasses.dataclass
@@ -555,12 +573,13 @@ def record_run(
     db: str,
     row: dict[str, Any] | Sequence[Any],
     path: list[tuple[int, float]] | None = None,
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> None:
     """Record quota watch run and forecast path in the ledger.
 
     Best-effort: catches sqlite3.Error and OSError, writes warning to stderr, returns.
     """
+    t = RECORD_TIMEOUT_S if timeout is None else timeout
     try:
         if isinstance(row, dict):
             row_tuple = (
@@ -584,22 +603,13 @@ def record_run(
             row_tuple = tuple(row)
             run_ts = row_tuple[0]
 
-        conn = sqlite3.connect(db, timeout=timeout)
+        conn = sqlite3.connect(db, timeout=t)
         try:
             with conn:
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS quota_watch_runs (
-  ts INTEGER PRIMARY KEY,
-  h0 REAL NOT NULL, burn_h REAL NOT NULL,
-  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
-  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
-  next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL)"""
-                )
-                conn.execute(
-                    """CREATE TABLE IF NOT EXISTS quota_forecast (
-  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL)"""
-                )
+                for stmt in QUOTA_WATCH_SCHEMA_SQL.strip().split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        conn.execute(stmt)
                 conn.execute(
                     """INSERT OR REPLACE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
@@ -607,8 +617,8 @@ def record_run(
   pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     row_tuple,
                 )
-                conn.execute("DELETE FROM quota_forecast")
                 if path:
+                    conn.execute("DELETE FROM quota_forecast")
                     forecast_rows = [(t, h, run_ts) for t, h in path]
                     conn.executemany(
                         "INSERT INTO quota_forecast (ts, headroom, run_ts) VALUES (?, ?, ?)",
@@ -624,7 +634,7 @@ def record_run(
 def record_replay_runs(
     db: str,
     rows: list[tuple[Any, ...]],
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> int:
     """Record replay runs into quota_watch_runs using INSERT OR IGNORE in one transaction.
 
@@ -633,33 +643,29 @@ def record_replay_runs(
     if not rows:
         print("quota-replay: recorded 0 rows")
         return 0
-    conn = sqlite3.connect(db, timeout=timeout)
+    t = RECORD_TIMEOUT_S if timeout is None else timeout
     try:
-        with conn:
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS quota_watch_runs (
-  ts INTEGER PRIMARY KEY,
-  h0 REAL NOT NULL, burn_h REAL NOT NULL,
-  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
-  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
-  next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL)"""
-            )
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS quota_forecast (
-  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL)"""
-            )
-            changes_before = conn.total_changes
-            conn.executemany(
-                """INSERT OR IGNORE INTO quota_watch_runs (
+        conn = sqlite3.connect(db, timeout=t)
+        try:
+            with conn:
+                for stmt in QUOTA_WATCH_SCHEMA_SQL.strip().split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        conn.execute(stmt)
+                changes_before = conn.total_changes
+                conn.executemany(
+                    """INSERT OR IGNORE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
   k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
   pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
-            inserted = conn.total_changes - changes_before
-    finally:
-        conn.close()
+                    rows,
+                )
+                inserted = conn.total_changes - changes_before
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as e:
+        sys.stderr.write(f"quota-replay: could not record: {e}\n")
+        raise QuotaRecordError(str(e)) from e
     print(f"quota-replay: recorded {inserted} rows")
     return inserted
 
@@ -880,8 +886,7 @@ def replay(
     excluded: set[str] | None = None,
     host: str | None = None,
     record: bool = False,
-    return_runs: bool = False,
-) -> Any:
+) -> list[ReplayEvent]:
     """Replay quota watch evaluation tick-by-tick."""
     host = host or socket.gethostname()
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
@@ -1014,6 +1019,4 @@ def replay(
     if record:
         record_replay_runs(db, replay_rows)
 
-    if return_runs:
-        return events, replay_rows
     return events

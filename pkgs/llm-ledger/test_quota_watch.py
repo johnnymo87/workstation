@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 # Redirect HOME to a throwaway dir BEFORE importing oc_tags or llm_ledger.
@@ -1105,13 +1106,8 @@ class TestLiveAndReplay(unittest.TestCase):
         conn.close()
 
     def test_record_run_readonly_db_warns_and_does_not_raise(self):
-        """record_run on a read-only DB file warns on stderr and does not raise."""
-        ro_db = os.path.join(self.tmp_dir.name, "readonly.db")
-        conn = sqlite3.connect(ro_db)
-        conn.execute("CREATE TABLE dummy (x INT)")
-        conn.commit()
-        conn.close()
-        os.chmod(ro_db, 0o444)
+        """record_run on an unwritable DB path (directory) warns on stderr and does not raise."""
+        bad_db = self.tmp_dir.name
 
         row = {
             "ts": 1700000000000,
@@ -1134,17 +1130,65 @@ class TestLiveAndReplay(unittest.TestCase):
         orig_stderr = sys.stderr
         try:
             sys.stderr = stderr_cap
-            quota_watch.record_run(ro_db, row, [(1700000000000, 1.0)])
+            quota_watch.record_run(bad_db, row, [(1700000000000, 1.0)])
         finally:
             sys.stderr = orig_stderr
-            os.chmod(ro_db, 0o644)
 
         err = stderr_cap.getvalue()
         self.assertIn("quota-watch: could not record run:", err)
 
+    def test_record_run_path_none_leaves_existing_forecast_intact(self):
+        """record_run with path=None or empty path leaves existing forecast intact."""
+        db_path = os.path.join(self.tmp_dir.name, "forecast_intact.db")
+        T1 = 1700000000000
+        path1 = [(T1, 2.0), (T1 + 300000, 1.9)]
+        row1 = {
+            "ts": T1,
+            "h0": 2.0,
+            "burn_h": 0.1,
+            "burn_6h": 0.0,
+            "burn_24h": 0.0,
+            "spill_6h": 0.0,
+            "spill_24h": 0.0,
+            "k": None,
+            "zero_h": 0.0,
+            "vertex_usd": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "pool_n": 1,
+            "source": "live",
+        }
+        quota_watch.record_run(db_path, row1, path=path1)
+
+        conn = sqlite3.connect(db_path)
+        fc_before = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
+        self.assertEqual(len(fc_before), 2)
+        conn.close()
+
+        # Second run with path=None leaves quota_forecast intact
+        T2 = T1 + 300000
+        row2 = dict(row1, ts=T2, h0=1.9)
+        quota_watch.record_run(db_path, row2, path=None)
+
+        conn = sqlite3.connect(db_path)
+        fc_after = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
+        conn.close()
+        self.assertEqual(fc_after, fc_before)
+
+        # Third run with path=[] leaves quota_forecast intact
+        T3 = T2 + 300000
+        row3 = dict(row1, ts=T3, h0=1.8)
+        quota_watch.record_run(db_path, row3, path=[])
+
+        conn = sqlite3.connect(db_path)
+        fc_after_empty = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
+        conn.close()
+        self.assertEqual(fc_after_empty, fc_before)
+
     def test_run_live_recording_failure_still_succeeds(self):
         """run_live against a DB where record_run fails still returns 0 and prints summary."""
         conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=DELETE")
         conn.executescript(llm_ledger.SCHEMA_SQL)
         t0 = 1700000100000
         for d in range(7):
@@ -1160,7 +1204,9 @@ class TestLiveAndReplay(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        os.chmod(self.db_path, 0o444)
+        # Hold a RESERVED lock via BEGIN IMMEDIATE: readers proceed, writers fail with busy.
+        lock_conn = sqlite3.connect(self.db_path)
+        lock_conn.execute("BEGIN IMMEDIATE")
 
         import io
         stdout_cap = io.StringIO()
@@ -1170,11 +1216,12 @@ class TestLiveAndReplay(unittest.TestCase):
         try:
             sys.stdout = stdout_cap
             sys.stderr = stderr_cap
-            rc = quota_watch.run_live(self.db_path, self.state_dir, now=t0 + 60000)
+            with mock.patch.object(quota_watch, "RECORD_TIMEOUT_S", 0.05):
+                rc = quota_watch.run_live(self.db_path, self.state_dir, now=t0 + 60000)
         finally:
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
-            os.chmod(self.db_path, 0o644)
+            lock_conn.close()
 
         self.assertEqual(rc, 0)
         self.assertIn("quota-watch: could not record run:", stderr_cap.getvalue())
@@ -1283,6 +1330,50 @@ class TestCliSubcommands(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row[1], 99.0)
         self.assertEqual(row[2], "live")
+
+    def test_replay_record_unwritable_db_returns_nonzero(self):
+        """quota-replay --record returns 1 and warns on stderr when DB cannot be written."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        t0 = 1700000100000
+        for d in range(7):
+            ts = t0 - (7 - d) * 86400 * 1000
+            conn.execute(
+                "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                (ts, "acct1", 0.50, ts + 86400 * 1000),
+            )
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        # Hold BEGIN IMMEDIATE to block record_replay_runs
+        lock_conn = sqlite3.connect(self.db_path)
+        lock_conn.execute("BEGIN IMMEDIATE")
+
+        since_str = datetime.datetime.fromtimestamp((t0 - 3600000) / 1000, tz=E).strftime("%Y-%m-%d %H:%M")
+        until_str = datetime.datetime.fromtimestamp((t0 + 3600000) / 1000, tz=E).strftime("%Y-%m-%d %H:%M")
+        import io
+        stderr_cap = io.StringIO()
+        orig_stderr = sys.stderr
+        try:
+            sys.stderr = stderr_cap
+            with mock.patch.object(quota_watch, "RECORD_TIMEOUT_S", 0.05):
+                ret = llm_ledger.main([
+                    "quota-replay",
+                    "--db", self.db_path,
+                    "--since", since_str,
+                    "--until", until_str,
+                    "--record",
+                ])
+        finally:
+            sys.stderr = orig_stderr
+            lock_conn.close()
+
+        self.assertEqual(ret, 1)
+        self.assertIn("quota-replay: could not record:", stderr_cap.getvalue())
 
     def test_parse_et_datetime(self):
         """parse_et_datetime handles naive dates, end_of_day, naive datetimes, DST, and offsets."""

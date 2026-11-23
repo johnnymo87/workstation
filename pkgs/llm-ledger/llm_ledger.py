@@ -27,6 +27,12 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "oc-tags"))
     import oc_tags
 
+try:
+    import quota_watch
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import quota_watch
+
 DEFAULT_DB = "/var/lib/llm-ledger/ledger.db"
 DEFAULT_EVENTS = "/var/lib/claude-failover-proxy/events.jsonl"
 DEFAULT_SAMPLES = "/var/lib/teamclaude-pool-canary/quota-samples.jsonl"
@@ -71,18 +77,7 @@ CREATE TABLE IF NOT EXISTS quota_samples (
   PRIMARY KEY (ts, account));
 
 CREATE TABLE IF NOT EXISTS ingest_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS quota_watch_runs (
-  ts INTEGER PRIMARY KEY,          -- T, the quota_samples tick evaluated
-  h0 REAL NOT NULL, burn_h REAL NOT NULL,
-  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
-  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
-  next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
-
-CREATE TABLE IF NOT EXISTS quota_forecast (
-  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
-"""
+""" + quota_watch.QUOTA_WATCH_SCHEMA_SQL
 
 
 ADVISORY_WARNING_SUBSTRINGS: tuple[str, ...] = ()
@@ -1516,7 +1511,6 @@ def import_events(
 
 def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int:
     """Parse ISO date or datetime string, interpreting naive datetimes in America/New_York."""
-    import quota_watch
     return quota_watch.parse_et_datetime(val, end_of_day_for_date=end_of_day_for_date)
 
 
@@ -1572,7 +1566,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     if args.command == "quota-watch":
-        import quota_watch
         excluded = set(args.exclude_account or [])
         return quota_watch.run_live(
             db=args.db,
@@ -1583,18 +1576,20 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "quota-replay":
-        import quota_watch
         since_ms = quota_watch.parse_et_datetime(args.since, end_of_day_for_date=False)
         until_ms = quota_watch.parse_et_datetime(args.until, end_of_day_for_date=True)
         excluded = set(args.exclude_account or [])
-        events = quota_watch.replay(
-            db=args.db,
-            since_ms=since_ms,
-            until_ms=until_ms,
-            excluded=excluded,
-            host=args.host,
-            record=args.record,
-        )
+        try:
+            events = quota_watch.replay(
+                db=args.db,
+                since_ms=since_ms,
+                until_ms=until_ms,
+                excluded=excluded,
+                host=args.host,
+                record=args.record,
+            )
+        except quota_watch.QuotaRecordError:
+            return 1
         for e in events:
             print(e)
         import collections

@@ -115,7 +115,10 @@ Check:
       User = "dev";
       Group = "dev";
       SupplementaryGroups = [ "llm-ledger" ];
-      UMask = "0077";
+      # UMask 0027 matches the writer: its ledger.db-journal must come out
+      # group-readable (0640 dev:llm-ledger) like the writer's.
+      # StateDirectoryMode 0700 still keeps its own state private.
+      UMask = "0027";
       MemoryMax = "512M";
       Nice = 10;
       TimeoutStartSec = "5min";
