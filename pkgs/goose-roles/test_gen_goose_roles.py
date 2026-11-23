@@ -140,18 +140,21 @@ class GenTest(unittest.TestCase):
             sys.argv = argv
 
     def test_deployed_roles_model_per_host(self):
-        # cloudbox: sonnet-tier roles on Gemini via the gateway; devbox: Opus everywhere.
+        # The sonnet-tier roles mirror the model opencode gives the same agents on
+        # that host: cloudbox Gemini via the gateway (sddModel); devbox
+        # claude-sonnet-5-5 (the agents' own pin, not rewritten there; Jonathan
+        # 2026-11-23, workstation-6w7i.29). oracle/adversarial-reviewer: Opus on both.
         missing = [k for k in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX") if not os.environ.get(k)]
         if missing:
             self.skipTest(f"set {', '.join(missing)}")
-        gemini_roles = {"implementer", "code-reviewer", "spec-reviewer"}
+        sonnet_tier = {"implementer", "code-reviewer", "spec-reviewer"}
+        tier_model = {"DEPLOYED_ROLES_CLOUDBOX": "gemini-3.8-flash", "DEPLOYED_ROLES_DEVBOX": "claude-sonnet-5-5"}
         for var in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX"):
             for role in g.ROLES:
                 with self.subTest(host=var, role=role):
                     with open(os.path.join(os.environ[var], "roles", f"{role}.yaml")) as fh:
                         model = yaml.safe_load(fh)["settings"]["goose_model"]
-                    gem = var == "DEPLOYED_ROLES_CLOUDBOX" and role in gemini_roles
-                    self.assertEqual(model, "gemini-3.8-flash" if gem else "claude-opus-5-5")
+                    self.assertEqual(model, tier_model[var] if role in sonnet_tier else "claude-opus-5-5")
 
     def test_deployed_roles_provider_per_host(self):
         # What home-manager actually deploys on each host (flake check wiring):

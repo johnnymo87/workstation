@@ -18,7 +18,9 @@
 # session switched to another provider, and fail if that route is down (no
 # fallback in summon.rs). cloudbox: oracle/adversarial-reviewer on Opus (cfp),
 # implementer/code-reviewer/spec-reviewer on gemini-3.8-flash (aigateway, see
-# GCP_VERTEX_GEMINI_HOST in hosts/cloudbox). devbox: all Opus. Omitting
+# GCP_VERTEX_GEMINI_HOST in hosts/cloudbox). devbox: oracle/adversarial-reviewer
+# on Opus, implementer/code-reviewer/spec-reviewer on claude-sonnet-5-5, as
+# devbox's opencode runs them (workstation-6w7i.29). Omitting
 # goose_provider instead would pair the parent's provider (e.g. openai) with the
 # roles' model, which fails.
 # The Mac gets cloudbox's build: its goose-serve is on gcp_vertex_ai too, Claude
