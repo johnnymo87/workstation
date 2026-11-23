@@ -26,16 +26,17 @@ in
     "d /var/lib/llm-ledger/raw 2750 dev llm-ledger -"
   ];
 
-  # One timer, writer -> snapshot -> quota-watch (design "Ordering"): a oneshot
-  # runs its ExecStart lines in order and stops at the first failure, so
-  # quota-watch always sees the rows the writer just committed. quota-watch
-  # (bead workstation-4si2.2, docs/plans/2026-11-23-quota-watch-p1-plan.md)
-  # opens the ledger read-only and keeps its alert state in StateDirectory.
+  # One timer, writer -> snapshot -> quota-watch (design "Ordering"). quota-watch
+  # is its own unit, started by OnSuccess= only after a writer run succeeds, so
+  # it always sees the rows the writer just committed, and the two fail (and
+  # page) separately: a quota-watch bug must not ride the writer's alert
+  # backoff and hide a "ledger going stale" page.
   systemd.services.llm-ledger = {
     description = "Maintain LLM spend ledger database and raw archive";
     after = [ "systemd-tmpfiles-setup.service" ];
     unitConfig = {
       OnFailure = [ "llm-ledger-failure.service" ];
+      OnSuccess = [ "llm-quota-watch.service" ];
     };
     serviceConfig = {
       Type = "oneshot";
@@ -46,12 +47,7 @@ in
       MemoryMax = "1G";
       Nice = 10;
       TimeoutStartSec = "15min";
-      ExecStart = [
-        "${llmLedger}/bin/llm-ledger run"
-        "${llmLedger}/bin/llm-ledger quota-watch --state-dir /var/lib/llm-quota-watch --alert-cmd ${driftAlert}"
-      ];
-      StateDirectory = "llm-quota-watch";
-      StateDirectoryMode = "0700";
+      ExecStart = "${llmLedger}/bin/llm-ledger run";
       # On success, clear the failure alert's backoff state so a later failure pages afresh.
       ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-ledger-failure/alerted";
       Environment = [ "HOME=/home/dev" ];
@@ -74,7 +70,7 @@ in
   };
 
   systemd.services.llm-ledger-failure = {
-    description = "Alert that the LLM spend ledger writer or quota-watch failed";
+    description = "Alert that the LLM spend ledger writer failed";
     serviceConfig = {
       Type = "oneshot";
       User = "dev";
@@ -91,18 +87,73 @@ in
         [ -n "$RESULT" ] || RESULT=unknown
         ${driftAlert} /var/lib/llm-ledger-failure/alerted \
           "llm-ledger:$RESULT" \
-          "LLM spend ledger FAILED (result: $RESULT).
+          "LLM spend ledger writer FAILED (result: $RESULT).
 
-llm-ledger.service did not complete. It runs the ledger writer, then
-quota-watch (Max pool shortfall / pool-dry alerts); the journal says which.
-If the writer failed, /var/lib/llm-ledger/ledger.db is going stale. Nothing is
-lost yet: the writer resumes from its saved offset, and cfp keeps 30 days of
-events. Past 30 days of failure, events are lost for good. If quota-watch
-failed, no Max quota alerts are being sent until it is fixed.
+llm-ledger.service did not complete, so /var/lib/llm-ledger/ledger.db is going
+stale. Nothing is lost yet: the writer resumes from its saved offset, and cfp
+keeps 30 days of events. Past 30 days of failure, events are lost for good.
 
 Check:
   systemctl status llm-ledger.service --no-pager
   journalctl -u llm-ledger.service -n 50 --no-pager" \
+          3600 21600
+      ''}";
+    };
+  };
+
+  # quota-watch: Max pool shortfall / pool-dry / account-high / blind-input alerts
+  # (bead workstation-4si2.2, docs/plans/2026-11-23-quota-watch-p1-plan.md).
+  # Reads the ledger read-only (group llm-ledger); alert state lives in its own
+  # StateDirectory, which the Grafana group cannot read.
+  systemd.services.llm-quota-watch = {
+    description = "Alert on Claude Max pool shortfall from the LLM spend ledger";
+    unitConfig = {
+      OnFailure = [ "llm-quota-watch-failure.service" ];
+    };
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      SupplementaryGroups = [ "llm-ledger" ];
+      UMask = "0077";
+      MemoryMax = "512M";
+      Nice = 10;
+      TimeoutStartSec = "5min";
+      StateDirectory = "llm-quota-watch";
+      StateDirectoryMode = "0700";
+      ExecStart = "${llmLedger}/bin/llm-ledger quota-watch --state-dir /var/lib/llm-quota-watch --alert-cmd ${driftAlert}";
+      ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-quota-watch-failure/alerted";
+      Environment = [ "HOME=/home/dev" ];
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      ReadWritePaths = [ "/var/lib/llm-quota-watch" ];
+    };
+  };
+
+  systemd.services.llm-quota-watch-failure = {
+    description = "Alert that quota-watch failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "llm-quota-watch-failure";
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "llm-quota-watch-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show llm-quota-watch -p Result --value 2>/dev/null || true)"
+        [ -n "$RESULT" ] || RESULT=unknown
+        ${driftAlert} /var/lib/llm-quota-watch-failure/alerted \
+          "llm-quota-watch:$RESULT" \
+          "quota-watch FAILED (result: $RESULT).
+
+No Claude Max pool alerts (shortfall, pool dry, account high, blind inputs)
+are being sent until it is fixed. The ledger writer is separate and unaffected.
+
+Check:
+  systemctl status llm-quota-watch.service --no-pager
+  journalctl -u llm-quota-watch.service -n 50 --no-pager" \
           3600 21600
       ''}";
     };
