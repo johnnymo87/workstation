@@ -1686,6 +1686,82 @@ class TestVerdictAndEpisodes(unittest.TestCase):
         self.assertIn("actual spillover (+24h) $42.00", line2)
         self.assertIn("open", line2)
 
+    def test_ensure_verdict_column_duplicate_race(self):
+        """ensure_verdict_column ignores 'duplicate column name' OperationalError from race."""
+        db_path = os.path.join(self.tmp_dir.name, "db_race.db")
+        real_conn = sqlite3.connect(db_path)
+        real_conn.execute("CREATE TABLE quota_watch_runs (ts INT PRIMARY KEY, verdict TEXT)")
+
+        class RaceConn:
+            def execute(self, sql, *args, **kwargs):
+                if "table_info" in sql:
+                    # Simulate pragma returning without 'verdict'
+                    cur = mock.MagicMock()
+                    cur.fetchall.return_value = [(0, "ts", "INT", 0, None, 1)]
+                    return cur
+                return real_conn.execute(sql, *args, **kwargs)
+
+        race_conn = RaceConn()
+        # Should attempt ALTER TABLE, hit "duplicate column name: verdict", and suppress it.
+        quota_watch.ensure_verdict_column(race_conn)
+
+        class ErrorConn:
+            def execute(self, sql, *args, **kwargs):
+                if "table_info" in sql:
+                    cur = mock.MagicMock()
+                    cur.fetchall.return_value = []
+                    return cur
+                if "ALTER TABLE" in sql:
+                    raise sqlite3.OperationalError("database is locked")
+                return real_conn.execute(sql, *args, **kwargs)
+
+        error_conn = ErrorConn()
+        with self.assertRaises(sqlite3.OperationalError) as ctx:
+            quota_watch.ensure_verdict_column(error_conn)
+        self.assertIn("database is locked", str(ctx.exception))
+        real_conn.close()
+
+    def test_verdict_episodes_bucket_edge_flooring(self):
+        """verdict_episodes floors start_ts to STEP_MS boundary so non-zero second timestamps include the first bucket."""
+        base_tick = (1700000100000 // STEP_MS) * STEP_MS
+        start_ts = base_tick + 123456
+        r0 = (start_ts, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+
+        spill_buckets = {
+            base_tick: 75.0,
+        }
+        episodes = quota_watch.verdict_episodes([r0], spill_buckets)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0].actual_spillover_usd, 75.0)
+
+    def test_verdict_episodes_gap_splitting(self):
+        """verdict_episodes splits an episode if consecutive rows of the same verdict are > STALE_INPUT_MS apart."""
+        t0 = 1700000000000
+        r1 = (t0, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        r2 = (t0 + 300000, 0.0, 0.5, None, None, None, None, None, 10.0, 60.0, None, None, 1, "replay", "tight")
+        gap_ts = t0 + 300000 + quota_watch.STALE_INPUT_MS + 60000
+        r3 = (gap_ts, 0.0, 0.5, None, None, None, None, None, 10.0, 70.0, None, None, 1, "replay", "tight")
+
+        episodes = quota_watch.verdict_episodes([r1, r2, r3])
+        self.assertEqual(len(episodes), 2)
+        self.assertEqual(episodes[0].start_ts, t0)
+        self.assertEqual(episodes[0].end_ts, t0 + 300000)
+        self.assertFalse(episodes[0].is_open)
+        self.assertEqual(episodes[1].start_ts, gap_ts)
+        self.assertEqual(episodes[1].end_ts, gap_ts)
+        self.assertTrue(episodes[1].is_open)
+
+    def test_format_verdict_episodes_header_non_additive(self):
+        """format_verdict_episodes includes a header explaining per-episode [start, end+24h] evaluation and non-additivity."""
+        t0 = 1700000000000
+        r1 = (t0, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        episodes = quota_watch.verdict_episodes([r1])
+        lines = quota_watch.format_verdict_episodes(episodes)
+        self.assertGreaterEqual(len(lines), 2)
+        header = lines[0]
+        self.assertIn("[start, end+24h]", header)
+        self.assertIn("non-additive", header.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

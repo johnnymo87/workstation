@@ -571,11 +571,17 @@ def load_or_seed_state(
     return state, is_fresh
 
 
-def ensure_verdict_column(conn: sqlite3.Connection) -> None:
+def ensure_verdict_column(conn: Any) -> None:
     """Ensure the 'verdict' column exists on quota_watch_runs (migration for existing DBs)."""
     cols = [row[1] for row in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
     if "verdict" not in cols:
-        conn.execute("ALTER TABLE quota_watch_runs ADD COLUMN verdict TEXT")
+        try:
+            conn.execute("ALTER TABLE quota_watch_runs ADD COLUMN verdict TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                raise
 
 
 def record_run(
@@ -945,10 +951,11 @@ def verdict_episodes(
         peak_forecast_usd = max(forecasts) if forecasts else None
         actual_spillover = 0.0
         if spill_buckets:
+            start_b = (start_ts // STEP_MS) * STEP_MS
             window_end = end_ts + 24 * 3600 * 1000
             actual_spillover = sum(
                 cost for b, cost in spill_buckets.items()
-                if start_ts <= b <= window_end
+                if start_b <= b <= window_end
             )
         episodes.append(
             VerdictEpisode(
@@ -976,7 +983,12 @@ def verdict_episodes(
 
         if v in ("tight", "dry"):
             if current_verdict == v:
-                episode_rows.append((ts, v_usd))
+                if episode_rows and (ts - episode_rows[-1][0] > STALE_INPUT_MS):
+                    flush_episode(is_open=False)
+                    current_verdict = v
+                    episode_rows = [(ts, v_usd)]
+                else:
+                    episode_rows.append((ts, v_usd))
             else:
                 if current_verdict:
                     flush_episode(is_open=False)
@@ -1008,8 +1020,15 @@ def format_verdict_episode(ep: VerdictEpisode) -> str:
 
 
 def format_verdict_episodes(episodes: list[VerdictEpisode]) -> list[str]:
-    """Format all verdict episodes."""
-    return [format_verdict_episode(ep) for ep in episodes]
+    """Format all verdict episodes with a header explaining non-additive evaluation windows."""
+    if not episodes:
+        return []
+    lines = [
+        "--- Quota episodes (actual spillover evaluated over [start, end+24h]; windows may overlap, non-additive) ---"
+    ]
+    for ep in episodes:
+        lines.append(format_verdict_episode(ep))
+    return lines
 
 
 def replay(
