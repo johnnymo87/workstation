@@ -4106,6 +4106,235 @@ class TestCfpBackend(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestCfpSessionResolver(unittest.TestCase):
+    """CfpSessionResolver: opencode/goose/lgtm session resolution extracted from load_cfp_aggregate (workstation-4si2.1)."""
+
+    T = FIXTURE_NOW_MS  # 2026-09-08 09:30 ET
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.db = os.path.join(self.td.name, "opencode.db")
+        self.goose_db = os.path.join(self.td.name, "goose.db")
+        self.tags_db = os.path.join(self.td.name, "tags.db")
+        self.lgtm = os.path.join(self.td.name, "goose-usage.jsonl")
+
+        _fixture_db(self.db)
+        conn = sqlite3.connect(self.db)
+        conn.execute("INSERT INTO session VALUES ('ses_root', NULL, '/home/dev/projects/mono', 'root', 0, 0, 0)")
+        conn.execute("INSERT INTO session VALUES ('ses_kid', 'ses_root', '/home/dev/projects/mono', 'kid', 0, 0, 0)")
+        conn.commit()
+        conn.close()
+
+        _fixture_goose_db(self.goose_db)
+        g = sqlite3.connect(self.goose_db)
+        g.execute(
+            "INSERT INTO sessions (id, name, session_type, working_dir, provider_name) "
+            "VALUES ('20260908_3', 'Goose Max', 'user', '/home/dev/projects/gx', 'anthropic')"
+        )
+        g.execute(
+            "INSERT INTO sessions (id, parent_session_id, name, session_type, working_dir, provider_name) "
+            "VALUES ('20260908_4', '20260908_3', 'Goose Child', 'user', '/home/dev/projects/gx', 'anthropic')"
+        )
+        # goose-serve's own record of activity on that session, at T
+        g.execute(
+            "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, cost) "
+            "VALUES ('20260908_3', ?, 'claude-opus-5-5', 1, 1, 0.01)", (self.T // 1000,)
+        )
+        g.commit()
+        g.close()
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def write_lgtm(self, *rows):
+        with open(self.lgtm, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def _resolver(self, session_tags=None, session_ids=None, warnings=None, **kw):
+        sids = session_ids if session_ids is not None else {
+            "ses_root", "ses_kid", "20260908_3", "20260908_4", "20260908_9", "20260908_99"
+        }
+        return oc_tags.CfpSessionResolver(
+            db_path=self.db,
+            goose_db=self.goose_db,
+            session_tags=session_tags or {},
+            lgtm_ledger=self.lgtm,
+            since_ms=self.T - 86_400_000,
+            until_ms=self.T + 86_400_000,
+            session_ids=sids,
+            warnings=warnings if warnings is not None else [],
+            **kw,
+        )
+
+    def test_in_goose_serve(self):
+        res = self._resolver()
+        self.assertTrue(res.in_goose_serve("20260908_3"))
+        self.assertTrue(res.in_goose_serve("20260908_4"))
+        self.assertFalse(res.in_goose_serve("20260908_99"))
+        self.assertFalse(res.in_goose_serve("ses_root"))
+        self.assertFalse(res.in_goose_serve(None))
+
+    def test_in_opencode(self):
+        res = self._resolver()
+        self.assertTrue(res.in_opencode("ses_root"))
+        self.assertTrue(res.in_opencode("ses_kid"))
+        self.assertFalse(res.in_opencode("ses_unknown"))
+        self.assertFalse(res.in_opencode("20260908_3"))
+        self.assertFalse(res.in_opencode(None))
+
+    def test_goose_claim_requires_goose_shaped_id(self):
+        at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        # Even though an lgtm row sits right at self.T, non-goose-shaped sids are never claimed
+        self.assertIsNone(res.goose_claim("ses_root", self.T))
+        self.assertIsNone(res.goose_claim("not_a_goose_id", self.T))
+        self.assertIsNone(res.goose_claim(None, self.T))
+
+    def test_goose_claim_active_in_goose_serve_suppresses_lgtm(self):
+        at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        # Active in goose-serve at self.T, so lgtm claim is suppressed
+        self.assertIsNone(res.goose_claim("20260908_3", self.T))
+
+    def test_goose_claim_inactive_in_goose_serve_claimed_by_lgtm(self):
+        t = self.T + 3_600_000
+        at = datetime.datetime.fromtimestamp((t - 600_000) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        claim = res.goose_claim("20260908_3", t)
+        self.assertIsNotNone(claim)
+        root, tag, source, title = claim
+        self.assertEqual(root, "lgtm-goose:lgr-food-truck_mono-7-aaaaaa")
+        self.assertEqual(tag, "lgtm-runs")
+        self.assertEqual(source, "manual")
+        self.assertEqual(title, "food-truck/mono#7 (goose review)")
+
+    def test_goose_claim_sid_not_in_goose_serve_claimed_by_lgtm(self):
+        at = datetime.datetime.fromtimestamp(self.T / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        claim = res.goose_claim("20260908_9", self.T)
+        self.assertIsNotNone(claim)
+        root, tag, source, title = claim
+        self.assertEqual(root, "lgtm-goose:lgr-food-truck_mono-7-aaaaaa")
+        self.assertEqual(tag, "lgtm-runs")
+        self.assertEqual(source, "manual")
+
+    def test_goose_claim_no_lgtm_row_within_window(self):
+        res = self._resolver()
+        self.assertIsNone(res.goose_claim("20260908_9", self.T))
+
+    def test_goose_claim_boundaries(self):
+        # 1. goose-serve active suppression boundary:
+        # 20260908_3 has usage_ledger row at self.T
+        # An lgtm row exists at self.T + 2 * oc_tags.GOOSE_LEDGER_JOIN_MS
+        lgtm_t = self.T + 2 * oc_tags.GOOSE_LEDGER_JOIN_MS
+        at = datetime.datetime.fromtimestamp(lgtm_t / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+
+        # At exactly GOOSE_LEDGER_JOIN_MS from usage_ledger (self.T):
+        # active suppression triggers -> no claim
+        t_in = self.T + oc_tags.GOOSE_LEDGER_JOIN_MS
+        self.assertIsNone(res.goose_claim("20260908_3", t_in))
+
+        # At GOOSE_LEDGER_JOIN_MS + 1 ms from usage_ledger (self.T):
+        # active suppression no longer triggers; lgtm row at lgtm_t is within LGTM_JOIN_MS -> claimed!
+        t_out = self.T + oc_tags.GOOSE_LEDGER_JOIN_MS + 1
+        claim = res.goose_claim("20260908_3", t_out)
+        self.assertIsNotNone(claim)
+
+        # 2. LGTM_JOIN_MS boundary for sid not in goose-serve:
+        # lgtm row is at lgtm_t
+        # At exactly LGTM_JOIN_MS from lgtm_t: claimed
+        self.assertIsNotNone(res.goose_claim("20260908_9", lgtm_t + oc_tags.LGTM_JOIN_MS))
+        # At LGTM_JOIN_MS + 1 ms from lgtm_t: out of window -> None
+        self.assertIsNone(res.goose_claim("20260908_9", lgtm_t + oc_tags.LGTM_JOIN_MS + 1))
+
+    def test_resolve_opencode_child_to_root_and_tag(self):
+        res = self._resolver()
+        # Child inherits parent root 'ses_root', directory and title
+        resolved = res.resolve("ses_kid", self.T)
+        self.assertEqual(resolved, ("ses_root", "auto:mono", "auto", "root", "/home/dev/projects/mono"))
+
+        # With session tag override on root
+        res_tagged = self._resolver(session_tags={"ses_root": "billing"})
+        self.assertEqual(res_tagged.resolve("ses_kid", self.T), ("ses_root", "billing", "manual", "root", "/home/dev/projects/mono"))
+
+    def test_resolve_goose_serve_auto_and_tags_override(self):
+        res = self._resolver()
+        # goose-serve root session with goose_auto_key fallback
+        resolved = res.resolve("20260908_3", self.T)
+        self.assertEqual(resolved, ("goose:20260908_3", "auto:goose/goose-max", "auto", "Goose Max", "/home/dev/projects/gx"))
+
+        # goose child session resolves to root goose session
+        resolved_child = res.resolve("20260908_4", self.T)
+        self.assertEqual(resolved_child, ("goose:20260908_3", "auto:goose/goose-max", "auto", "Goose Max", "/home/dev/projects/gx"))
+
+        # with tags override
+        res_tagged = self._resolver(session_tags={"goose:20260908_3": "gx-prog"})
+        self.assertEqual(res_tagged.resolve("20260908_3", self.T), ("goose:20260908_3", "gx-prog", "manual", "Goose Max", "/home/dev/projects/gx"))
+
+    def test_resolve_lgtm_claim(self):
+        t = self.T + 3_600_000
+        at = datetime.datetime.fromtimestamp((t - 600_000) / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        self.write_lgtm(_ledger_row(at=at))
+        res = self._resolver()
+        resolved = res.resolve("20260908_3", t)
+        self.assertEqual(
+            resolved,
+            ("lgtm-goose:lgr-food-truck_mono-7-aaaaaa", "lgtm-runs", "manual", "food-truck/mono#7 (goose review)", None)
+        )
+
+    def test_resolve_unknown_goose(self):
+        res = self._resolver()
+        resolved = res.resolve("20260908_99", self.T)
+        self.assertEqual(
+            resolved,
+            (oc_tags.CFP_GOOSE_UNKNOWN_TAG, oc_tags.CFP_GOOSE_UNKNOWN_TAG, "manual",
+             "goose-shaped cfp session id in no known ledger", None)
+        )
+
+    def test_resolve_unrouted_and_none(self):
+        res = self._resolver()
+        self.assertEqual(
+            res.resolve(None, self.T),
+            (oc_tags.CFP_UNROUTED_TAG, oc_tags.CFP_UNROUTED_TAG, "manual", "cfp usage with no route/session", None)
+        )
+        self.assertEqual(
+            res.resolve("not_a_session_id", self.T),
+            (oc_tags.CFP_UNROUTED_TAG, oc_tags.CFP_UNROUTED_TAG, "manual", "cfp usage with no route/session", None)
+        )
+
+    def test_corrupt_goose_db_warning(self):
+        warns = []
+        bad_goose = os.path.join(self.td.name, "corrupt_goose.db")
+        with open(bad_goose, "w", encoding="utf-8") as fh:
+            fh.write("not a sqlite database")
+        res = oc_tags.CfpSessionResolver(
+            session_ids={"ses_root", "20260908_3"},
+            db_path=self.db,
+            goose_db=bad_goose,
+            session_tags={"ses_root": "tagged"},
+            lgtm_ledger=self.lgtm,
+            since_ms=self.T - 1000,
+            until_ms=self.T + 1000,
+            warnings=warns,
+        )
+        self.assertEqual(res.resolve("ses_root", self.T)[1], "tagged")
+        # Unreadable goose DB produced a warning
+        self.assertTrue(any("goose sessions not read" in w for w in warns))
+
+    def test_session_ids_required_keyword(self):
+        with self.assertRaises(TypeError):
+            oc_tags.CfpSessionResolver()
+        with self.assertRaises(TypeError):
+            oc_tags.CfpSessionResolver({"ses_root"})
+
+
 class TestAccountWeeks(unittest.TestCase):
     """--account-weeks: dollars -> Claude Max account-weeks (workstation-ynoq.3)."""
 
