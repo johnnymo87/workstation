@@ -39,6 +39,9 @@ from quota_watch import (
     SHORT_CLEAR_H,
     ACCT_HI,
     ACCT_REARM,
+    ACCT_PAGE_MAX_H,
+    FORECAST_ZERO_H,
+    BLIND_MS,
     HORIZON_MS,
     STEP_MS,
     K_MIN_BURN,
@@ -351,15 +354,15 @@ class TestMetricsAndForecast(unittest.TestCase):
 
 class TestAlertsHysteresisAndLatch(unittest.TestCase):
     def test_pool_dry_hysteresis(self):
-        """pool-dry fires at H0 < 0.02 & spill15 > 0; clears at H0 >= 0.05 or spill30 == 0."""
+        """pool-dry fires at H0 < 0.10 & spill15 > 0; clears at H0 >= 0.15 or spill30 == 0."""
         state = {}
-        # H0 = 0.01, spill15 = 10.0 -> fires
+        # H0 = 0.08 (< 0.10), spill15 = 10.0 -> fires
         metrics_fire = {
-            "H0": 0.01,
+            "H0": 0.08,
             "zero_h": 3.0,
             "spill_15m": 10.0,
             "spill_30m": 10.0,
-            "pool": {"acct1": (0.97, 2000000)},
+            "pool": {"acct1": (0.90, 2000000)},
             "B": 0.05,
             "k": 1000.0,
             "vertex_usd": 150.0,
@@ -370,15 +373,15 @@ class TestAlertsHysteresisAndLatch(unittest.TestCase):
         self.assertTrue(st1["pool_dry"])
         self.assertTrue(any(a["kind"] == "pool-dry" and a["type"] == "send" for a in acts1))
 
-        # H0 rises to 0.03 (above 0.02, but below 0.05) with ongoing spillover -> still active
-        metrics_mid = dict(metrics_fire, H0=0.03)
+        # H0 rises to 0.12 (above 0.10, but below 0.15) with ongoing spillover -> still active
+        metrics_mid = dict(metrics_fire, H0=0.12)
         st2, acts2 = step_alerts(st1, metrics_mid)
         self.assertTrue(st2["pool_dry"])
         # pool-dry is sent on every run while active
         self.assertTrue(any(a["kind"] == "pool-dry" and a["type"] == "send" for a in acts2))
 
-        # H0 rises to 0.06 -> clears
-        metrics_clear = dict(metrics_fire, H0=0.06)
+        # H0 rises to 0.16 (>= 0.15) -> clears
+        metrics_clear = dict(metrics_fire, H0=0.16)
         st3, acts3 = step_alerts(st2, metrics_clear)
         self.assertFalse(st3["pool_dry"])
         self.assertTrue(any(a["kind"] == "pool-dry" and a["type"] == "clear" for a in acts3))
@@ -472,6 +475,67 @@ class TestAlertsHysteresisAndLatch(unittest.TestCase):
         st4, acts4 = step_alerts(st3, metrics_rearm)
         self.assertFalse(st4["acct_high"]["acct_special"])
         self.assertTrue(any(a["kind"] == "account-high" and a["type"] == "clear" for a in acts4))
+
+    def test_account_high_page_condition(self):
+        """Account-high only sends alert at latch if H0 < ACCT_PAGE_MAX_H (1.0); still latches silently."""
+        state = {}
+        # Case 1: H0 = 1.20 (>= 1.0) -> latches silently, NO send action
+        metrics_wide = {
+            "H0": 1.20,
+            "zero_h": 0.0,
+            "spill_15m": 0.0,
+            "spill_30m": 0.0,
+            "pool": {"acct_wide": (0.91, 2000000)},
+            "B": 0.05,
+            "k": None,
+            "vertex_usd": None,
+            "next_refill": None,
+            "T": 1000000,
+        }
+        st1, acts1 = step_alerts(state, metrics_wide)
+        self.assertTrue(st1["acct_high"]["acct_wide"])
+        self.assertEqual(len(acts1), 0, "Must not send account-high alert when H0 >= 1.0")
+
+        # Case 2: H0 = 0.80 (< 1.0) -> latches and sends alert
+        metrics_tight = dict(metrics_wide, H0=0.80, pool={"acct_tight": (0.92, 2000000)})
+        st2, acts2 = step_alerts(state, metrics_tight)
+        self.assertTrue(st2["acct_high"]["acct_tight"])
+        self.assertTrue(any(a["kind"] == "account-high" and a["type"] == "send" for a in acts2))
+
+    def test_hot_accounts_in_pool_dry_and_shortfall_texts(self):
+        """pool-dry and shortfall texts list accounts currently >= 0.90 with u7d."""
+        state = {}
+        metrics = {
+            "H0": 0.05,  # < DRY_H (0.10)
+            "zero_h": 3.0,  # >= SHORT_FIRE_H (2.0)
+            "spill_15m": 10.0,
+            "spill_30m": 10.0,
+            "pool": {
+                "acct_hot1": (0.95, 2000000),
+                "acct_hot2": (0.91, 2000000),
+                "acct_ok": (0.50, 2000000),
+            },
+            "B": 0.05,
+            "k": 1000.0,
+            "vertex_usd": 150.0,
+            "next_refill": (2000000, 0.5),
+            "T": 1000000,
+        }
+        # Test pool-dry text
+        _, acts_dry = step_alerts(state, metrics)
+        dry_act = [a for a in acts_dry if a["kind"] == "pool-dry"][0]
+        self.assertIn("Accounts at or above 0.90:", dry_act["text"])
+        self.assertIn("acct_hot1 0.95", dry_act["text"])
+        self.assertIn("acct_hot2 0.91", dry_act["text"])
+        self.assertNotIn("acct_ok", dry_act["text"])
+
+        # Test shortfall text (when pool-dry not active)
+        metrics_short = dict(metrics, spill_15m=0.0, spill_30m=0.0, H0=0.20)
+        _, acts_short = step_alerts(state, metrics_short)
+        short_act = [a for a in acts_short if a["kind"] == "shortfall"][0]
+        self.assertIn("Accounts at or above 0.90:", short_act["text"])
+        self.assertIn("acct_hot1 0.95", short_act["text"])
+        self.assertIn("acct_hot2 0.91", short_act["text"])
 
 
 class TestLiveAndReplay(unittest.TestCase):
@@ -695,7 +759,7 @@ class TestLiveAndReplay(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0)
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="host")
         self.assertEqual(rc, 0)
 
         with open(alert_log) as f:
@@ -710,6 +774,174 @@ class TestLiveAndReplay(unittest.TestCase):
         # shortfall should NOT be sent while pool-dry is active
         short_inv = [inv for inv in lines if inv["argv"][1] == "quota-shortfall"]
         self.assertEqual(len(short_inv), 0)
+
+    def test_run_live_blind_spot_stale_samples(self):
+        """If samples are > 60 min stale, blind alert is sent and run_live skips quota evaluation."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_blind_samples.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_blind_s.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_blind_s")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_blind_s.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # Samples are 70 min old (> 60 min)
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 - 70 * 60 * 1000, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        # Fresh requests for host
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('r1', ?, 'myhost', 'k', 'max', 1.0)",
+            (t0 - 5 * 60 * 1000,),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="myhost")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        blind_inv = [inv for inv in lines if inv["argv"][1] == "quota-watch-blind"]
+        self.assertEqual(len(blind_inv), 1)
+        self.assertEqual(blind_inv[0]["argv"][0], os.path.join(state_dir, "blind.alert"))
+        self.assertEqual(blind_inv[0]["argv"][3], "3600")
+        self.assertEqual(blind_inv[0]["argv"][4], "14400")
+        self.assertIn("quota_samples is", blind_inv[0]["argv"][2])
+
+    def test_run_live_blind_spot_stale_requests_fresh_samples(self):
+        """If requests are > 60 min stale with fresh samples, blind alert is sent and quota evaluation runs."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_blind_req.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_blind_r.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_blind_r")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, "state.json"), "w") as f:
+            json.dump({"pool_dry": False, "shortfall": False, "acct_high": {}}, f)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_blind_r.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        # Fresh samples (5 min old)
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 - 5 * 60 * 1000, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        # Stale requests for host (70 min old)
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('r1', ?, 'myhost', 'k', 'max', 1.0)",
+            (t0 - 70 * 60 * 1000,),
+        )
+        conn.commit()
+        conn.close()
+
+        import io
+        from unittest.mock import patch
+        stdout_buf = io.StringIO()
+        with patch("sys.stdout", stdout_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="myhost")
+        self.assertEqual(rc, 0)
+
+        # Blind alert must be sent
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        blind_inv = [inv for inv in lines if inv["argv"][1] == "quota-watch-blind"]
+        self.assertEqual(len(blind_inv), 1)
+        self.assertIn("requests for host 'myhost'", blind_inv[0]["argv"][2])
+
+        # Quota evaluation must still have run (summary line printed)
+        self.assertIn("quota-watch T=", stdout_buf.getvalue())
+
+    def test_run_live_blind_spot_fresh_clears_alert(self):
+        """When inputs are fresh again, blind.alert is deleted."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_blind_fresh")
+        os.makedirs(state_dir, exist_ok=True)
+        blind_alert_file = os.path.join(state_dir, "blind.alert")
+        with open(blind_alert_file, "w") as f:
+            f.write("old alert")
+
+        db_path = os.path.join(self.tmp_dir.name, "db_blind_fresh.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        # Fresh samples (5 min old)
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 - 5 * 60 * 1000, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        # Fresh requests (5 min old)
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('r1', ?, 'myhost', 'k', 'max', 1.0)",
+            (t0 - 5 * 60 * 1000,),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="myhost")
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(blind_alert_file), "blind.alert must be removed when inputs are fresh")
+
+    def test_load_inputs_and_run_live_host_filter(self):
+        """load_inputs and newest-request query filter requests by host."""
+        db_path = os.path.join(self.tmp_dir.name, "db_host.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        # host A (cloudbox) has backend=max cost=10.0
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('rA', ?, 'cloudbox', 'k', 'max', 10.0)",
+            (t0 - 60000,),
+        )
+        # host B (devbox) has backend=max cost=50.0
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('rB', ?, 'devbox', 'k', 'max', 50.0)",
+            (t0 - 60000,),
+        )
+        conn.commit()
+
+        # Query with host='cloudbox'
+        _, _, max_b_cb = load_inputs(conn, t0 - 3600000, host="cloudbox")
+        b_key = ((t0 - 60000) // 300000) * 300000
+        self.assertEqual(max_b_cb.get(b_key), 10.0)
+
+        # Query with host='devbox'
+        _, _, max_b_db = load_inputs(conn, t0 - 3600000, host="devbox")
+        self.assertEqual(max_b_db.get(b_key), 50.0)
+        conn.close()
+
+    def test_replay_account_high_page_flag(self):
+        """Replay account-high events carry page=yes/no depending on H0 < 1.0."""
+        db_path = os.path.join(self.tmp_dir.name, "db_acct_page.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # Tick t0: acct1 is 0.95, H0 = max(0, 0.98 - 0.95) = 0.03 (< 1.0) -> page=yes
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.95, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        events = replay(db_path, since_ms=t0, until_ms=t0)
+        acct_events = [e for e in events if e.kind == "account-high"]
+        self.assertEqual(len(acct_events), 1)
+        self.assertTrue(acct_events[0].metrics["page"])
+        self.assertIn("page=yes", str(acct_events[0]))
 
     def test_fixture_replay_dry_spell_2026_11_22(self):
         """Fixture replay: shortfall fires before 12:00 ET, pool-dry 12:00-12:30, clears 18:00-18:30."""
@@ -736,17 +968,18 @@ class TestLiveAndReplay(unittest.TestCase):
         # Synthesize requests and routes from spill_buckets and max_buckets
         req_rows = []
         route_rows = []
+        host_name = "cloudbox"
         # spill_buckets: route.desired='max' AND requests.backend='vertex'
         for i, (b_ms, cost) in enumerate(fixture["spill_buckets"]):
             rid = f"spill_{i}"
             route_rows.append((rid, b_ms, None, None, "max", "vertex"))
-            req_rows.append((rid, b_ms, "host", None, "tag", "vertex", "model", 0, 0, 0, 0, cost, 200, 100))
+            req_rows.append((rid, b_ms, host_name, None, "tag", "vertex", "model", 0, 0, 0, 0, cost, 200, 100))
 
         # max_buckets: requests.backend='max'
         for i, (b_ms, cost) in enumerate(fixture["max_buckets"]):
             rid = f"max_{i}"
             route_rows.append((rid, b_ms, None, None, "max", "max"))
-            req_rows.append((rid, b_ms, "host", None, "tag", "max", "model", 0, 0, 0, 0, cost, 200, 100))
+            req_rows.append((rid, b_ms, host_name, None, "tag", "max", "model", 0, 0, 0, 0, cost, 200, 100))
 
         conn.executemany(
             "INSERT INTO route (request_id, ts, session_id, model, desired, chosen) VALUES (?, ?, ?, ?, ?, ?)",
@@ -836,6 +1069,24 @@ class TestCliSubcommands(unittest.TestCase):
             "--until", "2026-11-22",
         ])
         self.assertEqual(ret, 0)
+
+    def test_cli_subcommands_host_arg(self):
+        """llm-ledger quota-watch and quota-replay accept --host."""
+        ret_qw = llm_ledger.main([
+            "quota-watch",
+            "--db", self.db_path,
+            "--state-dir", self.state_dir,
+            "--host", "customhost",
+        ])
+        self.assertEqual(ret_qw, 0)
+
+        ret_qr = llm_ledger.main([
+            "quota-replay",
+            "--db", self.db_path,
+            "--since", "2026-11-20",
+            "--host", "customhost",
+        ])
+        self.assertEqual(ret_qr, 0)
 
     def test_parse_et_datetime(self):
         """parse_et_datetime handles naive dates, end_of_day, naive datetimes, DST, and offsets."""

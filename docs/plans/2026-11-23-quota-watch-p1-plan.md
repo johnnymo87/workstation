@@ -36,8 +36,9 @@ All times are integer epoch ms. Constants live at module top:
 
 ```
 CAP = 0.98            RESET_DROP = 0.05      CARRY_MS = 15 min
-RESYNC_GAP_MS = 1 h   STALE_HOLD_MS = 15 min DRY_H = 0.02    DRY_CLEAR_H = 0.05
+RESYNC_GAP_MS = 1 h   STALE_HOLD_MS = 15 min DRY_H = 0.10    DRY_CLEAR_H = 0.15
 SHORT_FIRE_H = 2.0    SHORT_CLEAR_H = 0.5    ACCT_HI = 0.90  ACCT_REARM = 0.85
+ACCT_PAGE_MAX_H = 1.0 FORECAST_ZERO_H = 0.02 BLIND_MS = 60 min
 HORIZON_MS = 24 h     STEP_MS = 5 min        K_MIN_BURN = 0.5  STALE_INPUT_MS = 20 min
 ```
 
@@ -67,18 +68,18 @@ an account with neither is dropped from the pool (unknown ≠ free).
 **Forecast**: refills = `(max(r7d_eff, T+STEP), min(u_eff, CAP))` for pool
 accounts with `r7d_eff <= T + HORIZON`. Step `t` from T to T+HORIZON by
 `STEP_MS`: `h = max(0, h − B·STEP/1h)`; add refills with time ≤ t; if
-`h < DRY_H`, `zero_h += STEP/1h`. Output `zero_h`, `vertex_usd = zero_h·B·k`
+`h < FORECAST_ZERO_H`, `zero_h += STEP/1h`. Output `zero_h`, `vertex_usd = zero_h·B·k`
 (None without k), and the next refill (time, amount).
 
 **Alerts** (state persisted between runs as JSON):
 
-- **pool-dry**: fires when `H0 < DRY_H` and spill$ over the last 15 min > 0;
-  clears when `H0 >= DRY_CLEAR_H` or spill$ over the last 30 min is 0.
+- **pool-dry**: fires when `H0 < DRY_H` (0.10) and spill$ over the last 15 min > 0;
+  clears when `H0 >= DRY_CLEAR_H` (0.15) or spill$ over the last 30 min is 0.
 - **shortfall**: fires when `zero_h >= SHORT_FIRE_H`; clears when
   `zero_h < SHORT_CLEAR_H`. Not *sent* while pool-dry is active (the dry text
   carries the forecast), but its state keeps evolving.
 - **account high**: per account, latch when `u_eff >= ACCT_HI` (send once at
-  the latch), re-arm when `u_eff < ACCT_REARM`.
+  the latch if `H0 < ACCT_PAGE_MAX_H` (1.0)), re-arm when `u_eff < ACCT_REARM`.
 
 Sending: on every run while pool-dry / shortfall is active, call
 `drift-alert <state-dir>/<name>.alert <signature> <text> <ttl> <max>` (it owns

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -23,12 +24,15 @@ RESET_DROP: float = 0.05
 CARRY_MS: int = 15 * 60 * 1000  # 15 min
 RESYNC_GAP_MS: int = 60 * 60 * 1000  # 1 h
 STALE_HOLD_MS: int = 15 * 60 * 1000  # 15 min
-DRY_H: float = 0.02
-DRY_CLEAR_H: float = 0.05
+DRY_H: float = 0.10
+DRY_CLEAR_H: float = 0.15
 SHORT_FIRE_H: float = 2.0
 SHORT_CLEAR_H: float = 0.5
 ACCT_HI: float = 0.90
 ACCT_REARM: float = 0.85
+ACCT_PAGE_MAX_H: float = 1.0
+FORECAST_ZERO_H: float = 0.02
+BLIND_MS: int = 60 * 60 * 1000  # 60 min
 HORIZON_MS: int = 24 * 60 * 60 * 1000  # 24 h
 STEP_MS: int = 5 * 60 * 1000  # 5 min
 K_MIN_BURN: float = 0.5
@@ -64,7 +68,8 @@ class ReplayEvent:
             return f"{et} {symbol} zero_h={self.metrics.get('zero_h', 0.0):.1f}"
         elif self.kind == "account-high":
             symbol = "ACCT_HI+" if self.action == "fire" else "ACCT_HI-"
-            return f"{et} {symbol} {self.metrics.get('account')} u7d={self.metrics.get('u7d', 0.0):.2f}"
+            page_str = f" page={'yes' if self.metrics.get('page') else 'no'}" if self.action == "fire" else ""
+            return f"{et} {symbol} {self.metrics.get('account')} u7d={self.metrics.get('u7d', 0.0):.2f}{page_str}"
         return f"{et} {self.kind} {self.action}"
 
 
@@ -245,7 +250,7 @@ def forecast(
         while i < len(sim_refills) and sim_refills[i][0] <= t:
             h += sim_refills[i][1]
             i += 1
-        if h < DRY_H:
+        if h < FORECAST_ZERO_H:
             zero_h += step_h
 
     vertex_usd = (zero_h * B * k) if k is not None else None
@@ -286,6 +291,13 @@ def step_alerts(
     vertex_str = (
         f", about ${round(vertex_usd)} of Vertex cash at the current rate" if vertex_usd is not None else ""
     )
+    hot_accts = sorted(
+        [f"{a} {u:.2f}" for a, (u, _) in pool.items() if u >= ACCT_HI]
+    )
+    hot_str = (
+        f"Accounts at or above {ACCT_HI:.2f}: " + ", ".join(hot_accts) + ".\n"
+        if hot_accts else ""
+    )
     units_note = (
         "Headroom is in account-weeks: the sum over accounts of max(0, "
         f"{CAP:.2f} - u7d); teamclaude stops using an account at about {CAP:.2f}. "
@@ -316,6 +328,7 @@ def step_alerts(
         text = (
             "Claude Max pool is DRY: Max traffic is spilling to Vertex, which is cash.\n"
             f"${spill_15m:.2f} spilled in the last 15 min. Headroom {H0:.3f}, {burn_str}.\n"
+            + hot_str
             + refill_str
             + f"Forecast: {zero_h:.1f} h dry in the next 24 h{vertex_str}.\n"
             + units_note
@@ -350,6 +363,7 @@ def step_alerts(
             f"Claude Max pool is projected to run dry: {zero_h:.1f} h at zero headroom "
             f"in the next 24 h{vertex_str}.\n"
             f"Now: headroom {H0:.3f}, {burn_str}.\n"
+            + hot_str
             + refill_str
             + units_note
         )
@@ -376,22 +390,24 @@ def step_alerts(
         if u_eff >= ACCT_HI:
             if not was_latched:
                 new_acct_high[account] = True
-                reset_text = f"It resets {format_dt_et(r7d_eff)}.\n" if r7d_eff else ""
-                text = (
-                    f"Claude Max account '{account}' is at u7d={u_eff:.2f} "
-                    f"(warning at {ACCT_HI:.2f}; teamclaude stops using it at about {CAP:.2f}).\n"
-                    + reset_text
-                    + f"Pool headroom {H0:.3f} account-weeks, {burn_str}."
-                )
-                actions.append({
-                    "type": "send",
-                    "kind": "account-high",
-                    "name": name,
-                    "signature": sig,
-                    "text": text,
-                    "ttl": 0,
-                    "max": 14400,
-                })
+                should_page = H0 < ACCT_PAGE_MAX_H
+                if should_page:
+                    reset_text = f"It resets {format_dt_et(r7d_eff)}.\n" if r7d_eff else ""
+                    text = (
+                        f"Claude Max account '{account}' is at u7d={u_eff:.2f} "
+                        f"(warning at {ACCT_HI:.2f}; teamclaude stops using it at about {CAP:.2f}).\n"
+                        + reset_text
+                        + f"Pool headroom {H0:.3f} account-weeks, {burn_str}."
+                    )
+                    actions.append({
+                        "type": "send",
+                        "kind": "account-high",
+                        "name": name,
+                        "signature": sig,
+                        "text": text,
+                        "ttl": 0,
+                        "max": 14400,
+                    })
         elif u_eff < ACCT_REARM:
             if was_latched:
                 new_acct_high[account] = False
@@ -439,6 +455,7 @@ def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int
 def load_inputs(
     conn: sqlite3.Connection,
     since_ms: int,
+    host: str | None = None,
 ) -> tuple[list[tuple[int, str, float | None, int | None]], dict[int, float], dict[int, float]]:
     """Load samples and 5-minute buckets of spillover $ and Max $ since since_ms."""
     cur = conn.execute(
@@ -447,24 +464,40 @@ def load_inputs(
     )
     samples = cur.fetchall()
 
-    spill_cur = conn.execute(
-        "SELECT (q.ts / 300000) * 300000 AS b, SUM(q.cost_usd) "
-        "FROM requests q JOIN route r USING(request_id) "
-        "WHERE q.ts >= ? AND r.desired = 'max' AND q.backend = 'vertex' "
-        "GROUP BY b",
-        (since_ms,),
-    )
+    if host is not None:
+        spill_cur = conn.execute(
+            "SELECT (q.ts / 300000) * 300000 AS b, SUM(q.cost_usd) "
+            "FROM requests q JOIN route r USING(request_id) "
+            "WHERE q.ts >= ? AND r.desired = 'max' AND q.backend = 'vertex' AND q.host = ? "
+            "GROUP BY b",
+            (since_ms, host),
+        )
+        max_cur = conn.execute(
+            "SELECT (ts / 300000) * 300000 AS b, SUM(cost_usd) "
+            "FROM requests "
+            "WHERE ts >= ? AND backend = 'max' AND host = ? "
+            "GROUP BY b",
+            (since_ms, host),
+        )
+    else:
+        spill_cur = conn.execute(
+            "SELECT (q.ts / 300000) * 300000 AS b, SUM(q.cost_usd) "
+            "FROM requests q JOIN route r USING(request_id) "
+            "WHERE q.ts >= ? AND r.desired = 'max' AND q.backend = 'vertex' "
+            "GROUP BY b",
+            (since_ms,),
+        )
+        max_cur = conn.execute(
+            "SELECT (ts / 300000) * 300000 AS b, SUM(cost_usd) "
+            "FROM requests "
+            "WHERE ts >= ? AND backend = 'max' "
+            "GROUP BY b",
+            (since_ms,),
+        )
+
     spill_buckets = {
         row[0]: float(row[1]) for row in spill_cur if row[0] is not None and row[1] is not None
     }
-
-    max_cur = conn.execute(
-        "SELECT (ts / 300000) * 300000 AS b, SUM(cost_usd) "
-        "FROM requests "
-        "WHERE ts >= ? AND backend = 'max' "
-        "GROUP BY b",
-        (since_ms,),
-    )
     max_buckets = {
         row[0]: float(row[1]) for row in max_cur if row[0] is not None and row[1] is not None
     }
@@ -517,15 +550,17 @@ def run_live(
     alert_cmd: str | None = None,
     now: float | None = None,
     excluded: set[str] | None = None,
+    host: str | None = None,
 ) -> int:
     """Run live quota watch check."""
+    host = host or socket.gethostname()
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
     try:
         row = conn.execute("SELECT max(ts) FROM quota_samples").fetchone()
-        if not row or row[0] is None:
-            print("quota-watch: no quota samples found; skipping")
-            return 0
-        T: int = row[0]
+        T: int | None = row[0] if (row and row[0] is not None) else None
+
+        req_row = conn.execute("SELECT max(ts) FROM requests WHERE host = ?", (host,)).fetchone()
+        req_T: int | None = req_row[0] if (req_row and req_row[0] is not None) else None
 
         if now is None:
             now_ms = int(time.time() * 1000)
@@ -534,13 +569,64 @@ def run_live(
         else:
             now_ms = int(now)
 
+        # Blind-spot alert check:
+        # if now - T > BLIND_MS = 60 min, OR newest requests.ts for host is older than now - 60 min
+        blind_reasons: list[str] = []
+        if T is None:
+            blind_reasons.append("quota_samples has no rows")
+        elif now_ms - T > BLIND_MS:
+            stale_s_min = (now_ms - T) / 60000.0
+            blind_reasons.append(f"quota_samples is {stale_s_min:.1f} min old")
+
+        if req_T is None:
+            blind_reasons.append(f"requests for host '{host}' has no rows")
+        elif now_ms - req_T > BLIND_MS:
+            stale_r_min = (now_ms - req_T) / 60000.0
+            blind_reasons.append(f"requests for host '{host}' is {stale_r_min:.1f} min old")
+
+        blind_file = os.path.join(state_dir, "blind.alert")
+        if blind_reasons:
+            stale_desc = " and ".join(blind_reasons)
+            blind_text = (
+                f"Claude Max quota watch blind spot: {stale_desc} (threshold {BLIND_MS // 60000} min). "
+                "Quota alerts are not trustworthy until it recovers."
+            )
+            if alert_cmd:
+                argv = [
+                    alert_cmd,
+                    blind_file,
+                    "quota-watch-blind",
+                    blind_text,
+                    "3600",
+                    "14400",
+                ]
+                try:
+                    res = subprocess.run(argv, timeout=60)
+                    if res.returncode != 0:
+                        sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
+                except subprocess.TimeoutExpired:
+                    sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
+            else:
+                print(f"would-alert: quota-watch-blind ttl=3600 max=14400 text={blind_text}")
+        else:
+            if os.path.exists(blind_file):
+                try:
+                    os.remove(blind_file)
+                except OSError:
+                    pass
+
+        # 20-min stale skip
+        if T is None:
+            print("quota-watch: no quota samples found; skipping")
+            return 0
+
         if now_ms - T > STALE_INPUT_MS:
             stale_min = (now_ms - T) / 60000.0
             print(f"quota-watch: stale input (last sample T was {stale_min:.1f} min ago); skipping")
             return 0
 
         since_ms = T - 8 * 24 * 3600 * 1000
-        samples, spill_buckets, max_buckets = load_inputs(conn, since_ms)
+        samples, spill_buckets, max_buckets = load_inputs(conn, since_ms, host=host)
     finally:
         conn.close()
 
@@ -652,12 +738,14 @@ def replay(
     since_ms: int,
     until_ms: int,
     excluded: set[str] | None = None,
+    host: str | None = None,
 ) -> list[ReplayEvent]:
     """Replay quota watch evaluation tick-by-tick."""
+    host = host or socket.gethostname()
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30.0)
     try:
         warmup_since = since_ms - 8 * 24 * 3600 * 1000
-        samples, spill_buckets, max_buckets = load_inputs(conn, warmup_since)
+        samples, spill_buckets, max_buckets = load_inputs(conn, warmup_since, host=host)
     finally:
         conn.close()
 
@@ -738,9 +826,26 @@ def replay(
         for a, latched in new_acct.items():
             was_latched = bool(old_acct.get(a, False))
             if not was_latched and latched:
-                events.append(ReplayEvent(ts=T, kind="account-high", action="fire", metrics={"account": a, "u7d": pool.get(a, (0.0, None))[0]}))
+                u_val = pool.get(a, (0.0, None))[0]
+                should_page = H0 < ACCT_PAGE_MAX_H
+                events.append(
+                    ReplayEvent(
+                        ts=T,
+                        kind="account-high",
+                        action="fire",
+                        metrics={"account": a, "u7d": u_val, "page": should_page},
+                    )
+                )
             elif was_latched and not latched:
-                events.append(ReplayEvent(ts=T, kind="account-high", action="clear", metrics={"account": a, "u7d": pool.get(a, (0.0, None))[0]}))
+                u_val = pool.get(a, (0.0, None))[0]
+                events.append(
+                    ReplayEvent(
+                        ts=T,
+                        kind="account-high",
+                        action="clear",
+                        metrics={"account": a, "u7d": u_val},
+                    )
+                )
 
         alert_state = new_alert_state
 

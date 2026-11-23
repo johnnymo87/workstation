@@ -1547,6 +1547,7 @@ def main(argv: list[str] | None = None) -> int:
     qw_parser.add_argument("--state-dir", default="/var/lib/llm-quota-watch")
     qw_parser.add_argument("--alert-cmd", default=None)
     qw_parser.add_argument("--exclude-account", action="append", default=None)
+    qw_parser.add_argument("--host", default=socket.gethostname())
 
     # quota-replay subcommand
     qr_parser = subparsers.add_parser("quota-replay")
@@ -1554,6 +1555,7 @@ def main(argv: list[str] | None = None) -> int:
     qr_parser.add_argument("--since", required=True)
     qr_parser.add_argument("--until", default="now")
     qr_parser.add_argument("--exclude-account", action="append", default=None)
+    qr_parser.add_argument("--host", default=socket.gethostname())
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1565,6 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
             state_dir=args.state_dir,
             alert_cmd=args.alert_cmd,
             excluded=excluded,
+            host=args.host,
         )
 
     if args.command == "quota-replay":
@@ -1577,6 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
             since_ms=since_ms,
             until_ms=until_ms,
             excluded=excluded,
+            host=args.host,
         )
         for e in events:
             print(e)
