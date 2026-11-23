@@ -30,6 +30,9 @@
 #   EM_STACK_QUOTA_CMD   prints teamclaude's quota state (JSON); exit 3 when
 #                        there is none (no teamclaude here), other non-zero
 #                        when it could not be read.
+#   EM_STACK_POST_CMD    $1 = URL, $2 = JSON body; POSTs it and prints the HTTP
+#                        code on line 1, the body after it; non-zero when
+#                        nothing answered. The one write: the quota sleep.
 #   EM_STACK_SLACK_CMD   reads the Slack message on stdin; non-zero = failed.
 #   EM_STACK_NOW         epoch seconds.
 #
@@ -49,7 +52,7 @@
 #                  carried when stack-health printed no SUMMARY line, or that
 #                  check (api, for session_not_started) reads UNKNOWN
 #   monitor:blind  never carried (it is derived from the stack-health output)
-#   presence:<sid>, idleout:<sid>
+#   presence:<sid>, idleout:<sid>, asleep:<sid>
 #                  carried while the presence fetch failed
 #   gm_halt:<sid>  carried while the presence fetch failed, or this session's
 #                  status fetch failed (a 503 session_not_found is an answer)
@@ -118,6 +121,14 @@ fetch() { # $1: URL. HTTP code on line 1, body after it. Non-zero: no answer.
   if [ -n "${EM_STACK_FETCH_CMD:-}" ]; then "$EM_STACK_FETCH_CMD" "$1"; return; fi
   local raw
   raw=$(curl -sS -m 10 -w '\n%{http_code}' "$1") || return $?
+  printf '%s\n%s\n' "${raw##*$'\n'}" "${raw%$'\n'*}"
+}
+
+post() { # $1: URL, $2: JSON body. HTTP code on line 1, body after it. Non-zero: no answer.
+  if [ -n "${EM_STACK_POST_CMD:-}" ]; then "$EM_STACK_POST_CMD" "$1" "$2"; return; fi
+  local raw
+  raw=$(curl -sS -m 10 -X POST -H 'content-type: application/json' --data-raw "$2" \
+    -w '\n%{http_code}' "$1") || return $?
   printf '%s\n%s\n' "${raw##*$'\n'}" "${raw%$'\n'*}"
 }
 
@@ -211,7 +222,7 @@ source_failed() { # $1: key. 0 when the source behind that key FAILED this pass
     fail:*|session_not_started)
       chk=${1#fail:}; [ "$1" != session_not_started ] || chk=api
       [ "$have_summary" = 0 ] || [ -n "${unknown_set[$chk]+x}" ] ;;
-    presence:*|idleout:*) [ "$presence_state" = failed ] ;;
+    presence:*|idleout:*|asleep:*) [ "$presence_state" = failed ] ;;
     gm_halt:*)
       sid=${1#gm_halt:}
       [ "$presence_state" = failed ] || { [ -n "${sidset[$sid]+x}" ] && [ "${status_state[$sid]:-}" = failed ]; } ;;
@@ -315,9 +326,11 @@ else
 
   # --- Presence ---------------------------------------------------------------------
   sids=()
+  presence_body=""
   if get_json "http://127.0.0.1:4002/v1/presence" && [ "$GOT_CODE" = 200 ] &&
      jq -e '.presence | type == "object"' >/dev/null 2>&1 <<<"$GOT_BODY"; then
     presence_state=answered
+    presence_body=$GOT_BODY
     while IFS= read -r sid; do
       [ -z "$sid" ] || { sids+=("$sid"); sidset["$sid"]=1; }
     done < <(jq -r '.presence | keys[] | select(test("^[A-Za-z0-9_-]+$"))' <<<"$GOT_BODY" 2>/dev/null || true)
@@ -370,6 +383,20 @@ else
               "; model quota is not spent now, so start the session again"
               + " (if the agent stopped on its own, look at agentos and the runner on duty)"
             end)]
+      | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
+    # A character the quota sleep (below) put to sleep (eternal-machinery
+    # kdubj.126): her session closed by: quota_sleep. It stands until the
+    # session is back, at once (the sleep is a fact, not a reading). Nothing
+    # wakes her when quota returns: the restart is the runner's or a person's.
+    while IFS=$'\t' read -r key line; do
+      [ -z "$key" ] || add "$key" "$line" imm
+    done < <(jq -r --argjson quota "$quota_spent" '
+      .presence | to_entries[]
+      | select(.value.link == "offline" and .value.last_close.cause == "ours" and .value.last_close.by == "quota_sleep")
+      | ["asleep:" + .key,
+         "session \(.key): the monitor put the character to sleep at \(.value.last_close.at // "?") because model quota was spent on every account"
+         + (if $quota == 1 then "; she stays asleep, so start the session once quota is back"
+            else "; model quota is not spent now, so start the session again when she should be in the world" end)]
       | @tsv' <<<"$GOT_BODY" 2>/dev/null || true)
     while IFS=$'\t' read -r key line; do
       [ -z "$key" ] || add "$key" "$line" deb
@@ -514,6 +541,68 @@ if [ "$nostack" = 0 ] && [ -z "$sig" ]; then
   exit 1
 fi
 
+# --- The quota sleep (eternal-machinery kdubj.126) -----------------------------------
+# Jonathan, 2026-11-23: "when we run out of quota, we should `sleep` any active
+# character." Once quota:pool stands (debounced: two passes), every character an
+# agent plays that is in the world is put to sleep, TEC's safe logout, through
+# the BEAM's sleep directive: her hands send `sleep`, no model is asked. Nobody
+# can answer a GM for her then, and the game would log her out for idling
+# within the hour anyway. A session no agent plays (manual-live: a person at the
+# keyboard) is never touched. The Character refuses while something attacks
+# her (409 engaged) or a flee is in flight (409 retreating), and under a GM
+# halt (423): she is asked again next pass. Each try is logged; the outcome is
+# added to the quota:pool line, and the sleep itself stands as asleep:<sid>.
+# EM_STACK_QUOTA_SLEEP=0 turns it off. A dry run only says what it would do.
+quota_sleep_sids=(); pool_active=0
+for k in "${active[@]}"; do [ "$k" != quota:pool ] || pool_active=1; done
+# Only on a reading of this pass (quota_spent): a quota:pool carried over an
+# unreadable state file never puts anyone to sleep.
+if [ "$nostack" = 0 ] && [ "${EM_STACK_QUOTA_SLEEP:-1}" = 1 ] && [ "${quota_spent:-0}" = 1 ] &&
+   [ -n "$presence_body" ] && [ "$pool_active" = 1 ]; then
+  mapfile -t quota_sleep_sids < <(jq -r '.presence | to_entries[]
+    | select(.value.agent_driven == true and .value.link == "online" and .value.place == "in_world")
+    | .key | select(test("^[A-Za-z0-9_-]+$"))' <<<"$presence_body" 2>/dev/null || true)
+fi
+slept_now=(); not_yet=()
+for sid in "${quota_sleep_sids[@]}"; do
+  [ -n "$sid" ] || continue
+  if dry; then
+    echo "[dry-run] quota sleep: would put $sid to sleep"
+    continue
+  fi
+  prc=0; praw=$(post "http://127.0.0.1:4002/v1/sessions/$sid/directive" \
+    '{"type":"sleep","reason":"quota","origin":"operator"}') || prc=$?
+  pcode=${praw%%$'\n'*}; pbody=""
+  case "$praw" in *$'\n'*) pbody=${praw#*$'\n'} ;; esac
+  perr=$(jq -r '.error // empty' 2>/dev/null <<<"$pbody" || true)
+  if [ "$prc" -ne 0 ]; then
+    echo "em-stack-monitor: quota sleep: $sid: no answer (curl $prc)" >&2
+    not_yet+=("$sid (no answer)")
+  elif [ "$pcode" = 202 ]; then
+    echo "em-stack-monitor: quota sleep: $sid: accepted at $(date -u -d "@$now" +%Y-%m-%dT%H:%MZ)" >&2
+    slept_now+=("$sid")
+  else
+    case "$perr" in
+      engaged) why="something is fighting her" ;;
+      retreating) why="she is fleeing" ;;
+      automation_halted) why="a GM halt holds her" ;;
+      *) why="HTTP $pcode${perr:+ $perr}" ;;
+    esac
+    echo "em-stack-monitor: quota sleep: $sid: not now: $why" >&2
+    not_yet+=("$sid ($why)")
+  fi
+done
+if [ "${#slept_now[@]}" -gt 0 ] || [ "${#not_yet[@]}" -gt 0 ]; then
+  qs=""
+  [ "${#slept_now[@]}" -eq 0 ] || qs+=" Sent to sleep at $(date -u -d "@$now" +%H:%MZ): ${slept_now[*]}."
+  if [ "${#not_yet[@]}" -gt 0 ]; then
+    qs+=" Not yet, asked again next pass:"
+    for t in "${not_yet[@]}"; do qs+=" $t,"; done
+    qs=${qs%,}.
+  fi
+  text[quota:pool]="${text[quota:pool]}.$qs"
+fi
+
 short_head=$(git -C "$EM_STACK_REPO" rev-parse --short HEAD 2>/dev/null) || short_head=unknown
 # stack-health runs from the main checkout, the one the stack is started from,
 # so its checks match that code. The tree moves only when someone pulls (the
@@ -553,7 +642,7 @@ else
     # not the stack.
     stack_side=0
     for k in "${active[@]}"; do
-      case "$k" in quota:*|idleout:*) ;; *) stack_side=1 ;; esac
+      case "$k" in quota:*|idleout:*|asleep:*) ;; *) stack_side=1 ;; esac
     done
     if [ "$stack_side" = 1 ]; then
       standing="EM stack: problem"

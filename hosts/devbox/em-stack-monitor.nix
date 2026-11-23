@@ -67,6 +67,10 @@ let
       EM_STACK_QUOTA_FILE = "/home/dev/.config/teamclaude.state.json";
       # teamclaude's switch threshold (its default); keep the two equal.
       EM_STACK_QUOTA_FULL = "0.98";
+      # eternal-machinery kdubj.126: while quota:pool stands, put every character
+      # an agent plays to sleep through the BEAM (POST .../directive, type sleep).
+      # "0" turns that off.
+      EM_STACK_QUOTA_SLEEP = "1";
       XDG_RUNTIME_DIR = "/run/user/${uid}";
     } // config.devbox.emAlerts.env // extraEnv;
     serviceConfig = {

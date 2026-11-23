@@ -57,7 +57,18 @@ if [ -e "$S/tg_down" ]; then cat >/dev/null; exit 7; fi
 n=\$(ls "$S/tg" | wc -l)
 cat >"$S/tg/\$n"
 EOF
-  chmod +x "$S/fetch" "$S/gate" "$S/mode_cmd" "$S/health_cmd" "$S/tg_cmd" "$S/quota_cmd"
+  # The one write (the quota sleep): logged, answered from $S/post/<name> (code on
+  # line 1, body after it), 202 when there is none.
+  mkdir -p "$S/post"
+  cat >"$S/post_cmd" <<EOF
+#!$bash_bin
+name=\$(printf '%s' "\${1#http://127.0.0.1:}" | tr '/' '_')
+printf '%s %s\n' "\$1" "\$2" >>"$S/post.log"
+if [ -f "$S/post/\$name" ]; then cat "$S/post/\$name"; else printf '202\n{"type":"sleep"}\n'; fi
+EOF
+  chmod +x "$S/fetch" "$S/gate" "$S/mode_cmd" "$S/health_cmd" "$S/tg_cmd" "$S/quota_cmd" "$S/post_cmd"
+  export EM_STACK_POST_CMD=$S/post_cmd
+  unset EM_STACK_QUOTA_SLEEP
   export EM_STACK_FETCH_CMD=$S/fetch EM_STACK_GATE_CMD=$S/gate EM_STACK_MODE_CMD=$S/mode_cmd \
          EM_STACK_HEALTH_CMD=$S/health_cmd EM_STACK_SLACK_CMD=$S/tg_cmd EM_STACK_QUOTA_CMD=$S/quota_cmd
   unset EM_STACK_QUOTA_FULL
@@ -645,6 +656,57 @@ check "idle close during a quota outage: one agents message, the quota named as 
 mkquota "a 0.98 86400" "b 0.06 604800"; at 1200; run
 check "quota back, character still out: not resolved, says to start it" \
   'm=$(tglast); [ "$(tgn)" -eq 2 ] && ! grep -q resolved <<<"$m" && grep -q "model quota is not spent now, so start the session again" <<<"$m"'
+
+# 13c. The quota sleep (eternal-machinery kdubj.126): once quota:pool stands, every
+# character an agent plays in the world is put to sleep through the BEAM.
+in_world='.presence.jonathan = {link: "online", place: "in_world", since: "2027-01-15T06:00:00Z", via: "start",
+  wants_out: null, last_close: null, agent_driven: true}
+  | .presence.livia = {link: "online", place: "in_world", since: "2027-01-15T06:00:00Z", via: "start",
+  wants_out: null, last_close: null, agent_driven: false}'
+posts() { [ -f "$S/post.log" ] && wc -l <"$S/post.log" || echo 0; }
+setup; mkquota "a 0.98 86400" "b 0.99 18000"; serve_jq 4002_v1_presence presence.json "$in_world"
+run
+check "quota sleep: nothing asked while quota:pool is only pending" '[ "$(posts)" -eq 0 ]'
+at 600; run
+check "quota sleep: the agent's character is put to sleep, the person's is not" \
+  '[ "$(posts)" -eq 1 ] && grep -q "^http://127.0.0.1:4002/v1/sessions/jonathan/directive {\"type\":\"sleep\",\"reason\":\"quota\",\"origin\":\"operator\"}$" "$S/post.log"'
+check "quota sleep: the alert says who was put to sleep and when, and the log line too" \
+  'grep -q "the first back is b at 2027-01-15T13:00Z. Sent to sleep at 08:10Z: jonathan.$" <<<"$(tglast)" && grep -q "quota sleep: jonathan: accepted at 2027-01-15T08:10Z" "$S/err"'
+serve_jq 4002_v1_presence presence.json '.presence.jonathan = {link: "offline", place: "unknown", since: "2027-01-15T08:10:30Z",
+  via: "start", wants_out: {why: "quota_sleep", at: "2027-01-15T08:10:30Z"}, agent_driven: true,
+  last_close: {cause: "ours", at: "2027-01-15T08:10:30Z", code: null, idle: false, idle_minutes: null, by: "quota_sleep"}}'
+at 1200; run
+check "quota sleep: asleep stands at once, under the agents header, and nothing is asked again" \
+  'm=$(tglast); [ "$(tgn)" -eq 2 ] && [ "$(posts)" -eq 1 ] && head -n 1 <<<"$m" | grep -qx "EM agents: not acting (the stack is up)" && grep -q "session jonathan: the monitor put the character to sleep at 2027-01-15T08:10:30Z because model quota was spent on every account; she stays asleep" <<<"$m"'
+mkquota "a 0.98 86400" "b 0.06 604800"; at 1800; run
+check "quota sleep: quota back, she stays asleep and the key stands" \
+  '[ "$(st ".keys | index(\"asleep:jonathan\") != null")" = true ] && [ "$(posts)" -eq 1 ]'
+at $((1800 + 6 * 3600)); run
+check "quota sleep: the reminder says to start her again" 'grep -q "model quota is not spent now, so start the session again" <<<"$(tglast)" && ! grep -q resolved <<<"$(tglast)"'
+serve_jq 4002_v1_presence presence.json "$in_world"; at $((2400 + 6 * 3600)); run
+check "quota sleep: resolved once she is back" 'grep -q "resolved" <<<"$(tglast)"'
+
+setup; mkquota "a 0.98 86400"; serve_jq 4002_v1_presence presence.json "$in_world"
+printf '409\n{"error":"engaged"}\n' >"$S/post/4002_v1_sessions_jonathan_directive"
+run; at 600; run
+check "quota sleep: engaged is not now, said in the alert and asked again next pass" \
+  'grep -q "Not yet, asked again next pass: jonathan (something is fighting her).$" <<<"$(tglast)" && grep -q "quota sleep: jonathan: not now: something is fighting her" "$S/err"'
+rm "$S/post/4002_v1_sessions_jonathan_directive"; at 1200; run
+check "quota sleep: the next pass asks again" '[ "$(posts)" -eq 2 ]'
+printf '423\n{"error":"automation_halted"}\n' >"$S/post/4002_v1_sessions_jonathan_directive"; at 1800; run
+check "quota sleep: a GM halt is named" 'grep -q "quota sleep: jonathan: not now: a GM halt holds her" "$S/err"'
+touch "$S/quota_bad"; : >"$S/post.log"; at 2400; run
+check "quota sleep: a carried quota:pool (state unreadable) asks nothing" \
+  '[ "$(posts)" -eq 0 ] && [ "$(st ".keys | index(\"quota:pool\") != null")" = true ]'
+
+setup; mkquota "a 0.98 86400"; serve_jq 4002_v1_presence presence.json "$in_world"
+export EM_STACK_QUOTA_SLEEP=0; run; at 600; run; unset EM_STACK_QUOTA_SLEEP
+check "quota sleep: EM_STACK_QUOTA_SLEEP=0 asks nothing" '[ "$(posts)" -eq 0 ] && [ "$(tgn)" -eq 1 ]'
+setup; mkquota "a 0.98 86400"; serve_jq 4002_v1_presence presence.json "$in_world"
+run; export EM_STACK_MONITOR_DRY_RUN=1; at 600; run; unset EM_STACK_MONITOR_DRY_RUN
+check "quota sleep: a dry run only says what it would do" '[ "$(posts)" -eq 0 ] && grep -q "would put jonathan to sleep" "$S/out"'
+setup; serve_jq 4002_v1_presence presence.json "$in_world"; run; at 600; run
+check "quota sleep: quota not spent, nothing asked" '[ "$(posts)" -eq 0 ]'
 
 # 14. The footer says how far the checkout trails origin/main (a8gw1).
 setup; mkhealth "postgres FAIL refused"; run; at 600; run
