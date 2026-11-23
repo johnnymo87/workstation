@@ -118,6 +118,9 @@ let
     ];
     Restart = "on-failure";
     RestartPreventExitStatus = 2;
+    # `uv run` exits 143 when systemd stops it with SIGTERM; without this a
+    # clean stop leaves the unit "failed" (and needs reset-failed).
+    SuccessExitStatus = 143;
     RestartSec = 30;
     RestartSteps = 6;
     RestartMaxDelaySec = "30min";
