@@ -833,6 +833,116 @@
           echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 4 script checks passed" > $out
         '';
 
+      # cloudbox Grafana loopback exposure and security wiring (workstation-4si2.3).
+      # Loopback bind on 127.0.0.1:3000 is explicit and guarded because cloudbox
+      # has a public IP and no NixOS firewall. Eval half: module options, secrets,
+      # datasources, and env override immunity. Build half: greps the rendered
+      # grafana.ini that the service daemon script actually passes to -config.
+      cloudbox-grafana-exposure = let
+        cfg = self.nixosConfigurations.cloudbox.config;
+        lib = devboxPkgs.lib;
+        grafana = cfg.services.grafana;
+        settings = grafana.settings or { };
+        server = settings.server or { };
+        analytics = settings.analytics or { };
+        news = settings.news or { };
+        security = settings.security or { };
+        provisionSettings = grafana.provision.datasources.settings or null;
+        datasources =
+          if provisionSettings != null && provisionSettings ? datasources && builtins.isList provisionSettings.datasources
+          then provisionSettings.datasources
+          else [ ];
+        firstDs = if datasources != [ ] then builtins.head datasources else { };
+        firstDsJson = firstDs.jsonData or { };
+
+        sopsAdmin = cfg.sops.secrets.grafana_admin_password or null;
+        sopsSecretKey = cfg.sops.secrets.grafana_secret_key or null;
+
+        userGrafana = cfg.users.users.grafana or null;
+
+        svc = cfg.systemd.services.grafana or null;
+        svcEnv = if svc != null && svc ? environment then svc.environment else { };
+        svcConfig = if svc != null && svc ? serviceConfig then svc.serviceConfig else { };
+        svcConfigEnvList =
+          if svcConfig ? Environment then
+            if builtins.isList svcConfig.Environment then svcConfig.Environment
+            else if builtins.isString svcConfig.Environment then [ svcConfig.Environment ]
+            else [ ]
+          else [ ];
+
+        script = if svc != null && svc ? script then svc.script else "";
+        iniParts = lib.splitString "-config " script;
+        iniPath =
+          if builtins.length iniParts > 1 then
+            builtins.head (lib.splitString " " (builtins.head (lib.splitString "\n" (builtins.elemAt iniParts 1))))
+          else
+            "/dev/null";
+
+        checks = {
+          "grafana enabled" = (grafana.enable or false) == true;
+          "server http_addr is 127.0.0.1" = (server.http_addr or null) == "127.0.0.1";
+          "server http_port is 3000" = (server.http_port or null) == 3000;
+          "server protocol is http" = (server.protocol or null) == "http";
+          "openFirewall is false" = (grafana.openFirewall or null) == false;
+
+          "reporting_enabled is false" = (analytics.reporting_enabled or null) == false;
+          "check_for_updates is false" = (analytics.check_for_updates or null) == false;
+          "check_for_plugin_updates is false" = (analytics.check_for_plugin_updates or null) == false;
+          "feedback_links_enabled is false" = (analytics.feedback_links_enabled or null) == false;
+          "news_feed_enabled is false" = (news.news_feed_enabled or null) == false;
+
+          "admin_password is sops file ref" =
+            sopsAdmin != null && (security.admin_password or null) == "$__file{${sopsAdmin.path}}";
+          "secret_key is sops file ref" =
+            sopsSecretKey != null && (security.secret_key or null) == "$__file{${sopsSecretKey.path}}";
+          "sops admin password secret owned by grafana 0400" =
+            sopsAdmin != null && (sopsAdmin.owner or null) == "grafana" && (sopsAdmin.mode or null) == "0400";
+          "sops secret key secret owned by grafana 0400" =
+            sopsSecretKey != null && (sopsSecretKey.owner or null) == "grafana" && (sopsSecretKey.mode or null) == "0400";
+
+          "grafana in llm-ledger group" =
+            userGrafana != null && builtins.elem "llm-ledger" (userGrafana.extraGroups or [ ]);
+          "declarativePlugins has frser-sqlite-datasource" =
+            builtins.isList (grafana.declarativePlugins or null)
+            && builtins.any (p: (p.pname or "") == "frser-sqlite-datasource") grafana.declarativePlugins;
+
+          "exactly one provisioned datasource" = builtins.length datasources == 1;
+          "datasource is frser-sqlite-datasource" = (firstDs.type or null) == "frser-sqlite-datasource";
+          "datasource path is /var/lib/llm-ledger/ledger.db" = (firstDsJson.path or null) == "/var/lib/llm-ledger/ledger.db";
+          "datasource pathPrefix is file:" = (firstDsJson.pathPrefix or null) == "file:";
+          "datasource pathOptions contains mode=ro" = lib.hasInfix "mode=ro" (firstDsJson.pathOptions or "");
+          "datasource attachLimit is 0" = (firstDsJson.attachLimit or null) == 0;
+          "datasource editable is false" = (firstDs.editable or null) == false;
+
+          "no GF_SERVER_* in systemd environment" =
+            !(builtins.any (name: lib.hasPrefix "GF_SERVER_" name) (builtins.attrNames svcEnv));
+          "no GF_SERVER_* in serviceConfig.Environment" =
+            !(builtins.any (e: lib.hasPrefix "GF_SERVER_" e) svcConfigEnvList);
+          "no EnvironmentFile in serviceConfig" =
+            !(svcConfig ? EnvironmentFile) || svcConfig.EnvironmentFile == null || svcConfig.EnvironmentFile == [ ];
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+        g = "${devboxPkgs.gnugrep}/bin/grep";
+      in
+        assert lib.assertMsg (failed == [ ]) "cloudbox-grafana-exposure failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "cloudbox-grafana-exposure" { } ''
+          ini="${iniPath}"
+          [ -s "$ini" ] || { echo "GATE FAILURE: rendered grafana ini $ini missing or empty" >&2; exit 1; }
+          ${g} -q '^http_addr=127\.0\.0\.1$' "$ini" || {
+            echo "GATE FAILURE: http_addr is not 127.0.0.1 in $ini" >&2; exit 1; }
+          ${g} -q '^http_port=3000$' "$ini" || {
+            echo "GATE FAILURE: http_port is not 3000 in $ini" >&2; exit 1; }
+          ${g} -q '^reporting_enabled=false$' "$ini" || {
+            echo "GATE FAILURE: reporting_enabled is not false in $ini" >&2; exit 1; }
+          ${g} -q '^check_for_updates=false$' "$ini" || {
+            echo "GATE FAILURE: check_for_updates is not false in $ini" >&2; exit 1; }
+          ${g} -q '^check_for_plugin_updates=false$' "$ini" || {
+            echo "GATE FAILURE: check_for_plugin_updates is not false in $ini" >&2; exit 1; }
+          ${g} -q '^admin_password=\$__file{' "$ini" || {
+            echo "GATE FAILURE: admin_password is not a \$__file{ reference in $ini" >&2; exit 1; }
+          echo "cloudbox-grafana-exposure: ${toString (builtins.length (builtins.attrNames checks))} eval + 6 ini checks passed" > $out
+        '';
+
       # Stale credo-diff checkout sweep (devbox credo-diff-sweep).
       # Pinned assertion count; see hosts/devbox/test-credo-diff-sweep.sh.
       credo-diff-sweep-tests = devboxPkgs.runCommand "credo-diff-sweep-tests" {
