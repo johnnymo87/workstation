@@ -33,10 +33,21 @@
 #   REAUTH_CHROME        Chrome binary
 #   REAUTH_CHROME_PROFILE  --user-data-dir
 #   REAUTH_CDP_PORT      default 9223
+#   REAUTH_CHROME_LABEL  prefix for log lines, default gcloud-reauth-chrome
+#
+# ALSO USED FOR THE AGENT CHROME: the agent-chrome launchd agent in
+# users/dev/home.darwin.nix runs this same wrapper with its own profile
+# (Chrome-Agent) and port (9222). The mechanics above apply to it unchanged;
+# the env vars are the only difference. The SECURITY paragraph does NOT: 9222
+# is reverse-forwarded to devbox and cloudbox (scripts/update-ssh-config.sh),
+# and its profile has 1Password linked to the desktop app, so its vault is
+# open whenever the app is. Agents on those hosts can drive it. The human
+# accepted that on 2026-11-23; see the agent-chrome comment in home.darwin.nix.
 
 CHROME="${REAUTH_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 PROFILE="${REAUTH_CHROME_PROFILE:-$HOME/Library/Application Support/Chrome-gcloud}"
 PORT="${REAUTH_CDP_PORT:-9223}"
+LABEL="${REAUTH_CHROME_LABEL:-gcloud-reauth-chrome}"
 
 # Captured, then matched with a here-string rather than piped into grep -q: under
 # pipefail an early-exiting grep can EPIPE the writer and turn a match into a
@@ -98,14 +109,22 @@ running_files_gone() {
 }
 
 # The pid of whatever listens on the port, only if it is our Chrome: a Chrome
-# with this port on its command line. Used for an instance we adopted.
+# with this port AND this profile on its command line. Used for an instance we
+# adopted. The profile check matters on 9222, where other tools (a chrome-debug
+# alias, project scripts) start their own Chrome on the same port: one that
+# grabs the port during a respawn gap must not be adopted as ours. It is left
+# alone, and we launch once it goes away.
 listener_pid() {
   local pid cmd
   pid="$(/usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
   [ -n "$pid" ] || return 1
   cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
   case "$cmd" in
-    *"--remote-debugging-port=$PORT"*) echo "$pid" ;;
+    *"--remote-debugging-port=$PORT"*) ;;
+    *) return 1 ;;
+  esac
+  case "$cmd" in
+    *"--user-data-dir=$PROFILE"*) echo "$pid" ;;
     *) return 1 ;;
   esac
 }
@@ -124,7 +143,7 @@ watch_chrome() {
     if running_files_gone; then
       strikes=$((strikes + 1))
       if [ "$strikes" -ge 2 ]; then
-        echo "gcloud-reauth-chrome: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Killing pid $pid so a fresh one starts." >&2
+        echo "$LABEL: $(date -u +%FT%TZ) running Chrome $STALE_VERSION has no files on disk (an update removed them); every new tab would crash. Killing pid $pid so a fresh one starts." >&2
         # `|| true`: writeShellApplication runs this under errexit, and a kill
         # of a process that has just exited by itself fails.
         kill -KILL "$pid" 2>/dev/null || true
@@ -146,7 +165,7 @@ while cdp_is_chrome; do
 done
 
 if [ ! -x "$CHROME" ]; then
-  echo "gcloud-reauth-chrome: $CHROME missing or not executable" >&2
+  echo "$LABEL: $CHROME missing or not executable" >&2
   exit 1
 fi
 

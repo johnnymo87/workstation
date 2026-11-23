@@ -60,7 +60,9 @@ Host devbox
     # run agents with shell access. The gcloud reauth that needed it now runs
     # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
     # so nothing remote needs a handle on a browser here. Do not re-add it.
-    # 9222 stays: it is a different profile, used deliberately.
+    # 9222 stays, deliberately, though it is NOT a lower-risk profile: it is the
+    # always-on agent Chrome (agent-chrome in home.darwin.nix), and its 1Password
+    # unlocks with the desktop app. The human accepted that exposure 2026-11-23.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -84,7 +86,9 @@ Host devbox-tunnel
     # run agents with shell access. The gcloud reauth that needed it now runs
     # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
     # so nothing remote needs a handle on a browser here. Do not re-add it.
-    # 9222 stays: it is a different profile, used deliberately.
+    # 9222 stays, deliberately, though it is NOT a lower-risk profile: it is the
+    # always-on agent Chrome (agent-chrome in home.darwin.nix), and its 1Password
+    # unlocks with the desktop app. The human accepted that exposure 2026-11-23.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
@@ -238,7 +242,9 @@ $IAP_PROXY
     # run agents with shell access. The gcloud reauth that needed it now runs
     # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
     # so nothing remote needs a handle on a browser here. Do not re-add it.
-    # 9222 stays: it is a different profile, used deliberately.
+    # 9222 stays, deliberately, though it is NOT a lower-risk profile: it is the
+    # always-on agent Chrome (agent-chrome in home.darwin.nix), and its 1Password
+    # unlocks with the desktop app. The human accepted that exposure 2026-11-23.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
 
@@ -277,7 +283,9 @@ Host cloudbox-tunnel cloudbox-tunnel-direct
     # run agents with shell access. The gcloud reauth that needed it now runs
     # from the Mac outward (users/dev/home.darwin.nix, gcloud-reauth-refresh),
     # so nothing remote needs a handle on a browser here. Do not re-add it.
-    # 9222 stays: it is a different profile, used deliberately.
+    # 9222 stays, deliberately, though it is NOT a lower-risk profile: it is the
+    # always-on agent Chrome (agent-chrome in home.darwin.nix), and its 1Password
+    # unlocks with the desktop app. The human accepted that exposure 2026-11-23.
     # chatgpt-relay tunnel (ask-question CLI)
     RemoteForward 3033 localhost:3033
     # gclpr clipboard (remote copy/paste to macOS)
