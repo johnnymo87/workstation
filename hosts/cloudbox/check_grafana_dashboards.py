@@ -286,10 +286,12 @@ def build_fixture_db() -> sqlite3.Connection:
     # 5. quota_watch_runs
     conn.execute(
         """
-        INSERT INTO quota_watch_runs (ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h, k, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source) VALUES
-          (?, 1.25, 0.05, 0.04, 0.05, 0.0, 0.0, 100.0, 0.0, 0.0, ?, 0.4, 5, 'live')
+        INSERT INTO quota_watch_runs (ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h, k, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict) VALUES
+          (?, 0.20, 0.12, 0.10, 0.12, 0.0, 0.0, 100.0, 5.0, 0.0, ?, 0.4, 5, 'live', 'dry'),
+          (?, 0.85, 0.08, 0.07, 0.08, 0.0, 0.0, 100.0, 1.5, 0.0, ?, 0.4, 5, 'live', 'tight'),
+          (?, 1.25, 0.05, 0.04, 0.05, 0.0, 0.0, 100.0, 0.0, 0.0, ?, 0.4, 5, 'live', 'ample')
         """,
-        (t_now, t_next),
+        (t_now - 7200000, t_next, t_now - 3600000, t_next, t_now, t_next),
     )
 
     # 6. quota_forecast

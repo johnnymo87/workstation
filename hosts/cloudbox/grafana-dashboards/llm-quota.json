@@ -236,6 +236,106 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
+      "description": "Evaluated coordinator quota verdict (ample=0, tight=1, dry=2) published by quota-watch.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "ample"
+                },
+                "1": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "tight"
+                },
+                "2": {
+                  "color": "red",
+                  "index": 2,
+                  "text": "dry"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "alignValue": "left",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  ts / 1000 AS time,\n  CASE verdict WHEN 'ample' THEN 0 WHEN 'tight' THEN 1 WHEN 'dry' THEN 2 END AS \"Verdict\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\n  AND verdict IS NOT NULL\nORDER BY ts",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  ts / 1000 AS time,\n  CASE verdict WHEN 'ample' THEN 0 WHEN 'tight' THEN 1 WHEN 'dry' THEN 2 END AS \"Verdict\"\nFROM quota_watch_runs\nWHERE ts >= $__from AND ts < $__to\n  AND verdict IS NOT NULL\nORDER BY ts",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Coordinator quota verdict",
+      "type": "state-timeline"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
       "description": "Historical evaluated headroom (H0) and forward 24h projected path from quota_forecast.",
       "fieldConfig": {
         "defaults": {
@@ -280,7 +380,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "id": 2,
       "interval": "1h",
@@ -375,7 +475,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 4
+        "y": 8
       },
       "id": 3,
       "interval": "1h",
@@ -475,7 +575,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 16
       },
       "id": 4,
       "interval": "1h",
@@ -541,7 +641,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 16
       },
       "id": 5,
       "interval": "1h",

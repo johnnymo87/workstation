@@ -2400,6 +2400,151 @@ class TestLlmLedgerTask4(unittest.TestCase):
         with self.assertRaises(SystemExit):
             llm_ledger.main(["import-events", "dummy.jsonl", "--goose-recheck-hours", "48"])
 
+    def test_quota_outlook_cli_success(self):
+        """llm-ledger quota-outlook prints valid JSON contract, exits 0, acquires no lock."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""CREATE TABLE quota_watch_runs (
+            ts INTEGER PRIMARY KEY,
+            h0 REAL,
+            burn_h REAL,
+            burn_6h REAL,
+            burn_24h REAL,
+            spill_6h REAL,
+            spill_24h REAL,
+            k REAL,
+            zero_h REAL,
+            vertex_usd REAL,
+            next_refill_ts INTEGER,
+            next_refill_amt REAL,
+            pool_n INTEGER,
+            source TEXT DEFAULT 'live',
+            verdict TEXT
+        )""")
+        ts = int(time.time() * 1000) - 60000  # 60s ago (fresh)
+        conn.execute("""INSERT INTO quota_watch_runs (
+            ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            ts, 1.5, 0.02, 0.0, 10.0, ts + 3600000, 0.95, 1, "live", "ample"
+        ))
+        conn.commit()
+        conn.close()
+
+        import io
+        import contextlib
+        import json
+        out_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf):
+            code = llm_ledger.main(["quota-outlook", "--db", self.db_path])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out_buf.getvalue().strip())
+        expected_keys = {
+            "verdict", "ts", "age_s", "h0", "burn_h", "zero_h",
+            "next_refill_ts", "next_refill_amt", "line"
+        }
+        self.assertEqual(set(data.keys()), expected_keys)
+        self.assertEqual(data["verdict"], "ample")
+        self.assertNotIn("error", data)
+        self.assertNotIn("vertex_usd", data)
+        self.assertFalse(os.path.exists(self.db_path + ".lock"))
+
+    def test_quota_outlook_cli_nonexistent_db(self):
+        """llm-ledger quota-outlook on nonexistent DB prints unknown JSON, exits 0, does not create file."""
+        nonexistent_path = os.path.join(self.tmpdir.name, "nonexistent.db")
+        import io
+        import contextlib
+        import json
+        out_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf):
+            code = llm_ledger.main(["quota-outlook", "--db", nonexistent_path])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out_buf.getvalue().strip())
+        expected_keys = {
+            "verdict", "ts", "age_s", "h0", "burn_h", "zero_h",
+            "next_refill_ts", "next_refill_amt", "line", "error"
+        }
+        self.assertEqual(set(data.keys()), expected_keys)
+        self.assertEqual(data["verdict"], "unknown")
+        self.assertIn("error", data)
+        self.assertFalse(os.path.exists(nonexistent_path))
+
+    def test_quota_outlook_cli_default_db(self):
+        """llm-ledger quota-outlook with no --db uses DEFAULT_DB."""
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("""CREATE TABLE quota_watch_runs (
+            ts INTEGER PRIMARY KEY,
+            h0 REAL,
+            burn_h REAL,
+            burn_6h REAL,
+            burn_24h REAL,
+            spill_6h REAL,
+            spill_24h REAL,
+            k REAL,
+            zero_h REAL,
+            vertex_usd REAL,
+            next_refill_ts INTEGER,
+            next_refill_amt REAL,
+            pool_n INTEGER,
+            source TEXT DEFAULT 'live',
+            verdict TEXT
+        )""")
+        ts = int(time.time() * 1000) - 60000
+        conn.execute("""INSERT INTO quota_watch_runs (
+            ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            ts, 1.5, 0.02, 0.0, 10.0, ts + 3600000, 0.95, 1, "live", "ample"
+        ))
+        conn.commit()
+        conn.close()
+
+        import io
+        import contextlib
+        import json
+        out_buf = io.StringIO()
+        with mock.patch.object(llm_ledger, "DEFAULT_DB", self.db_path):
+            with contextlib.redirect_stdout(out_buf):
+                code = llm_ledger.main(["quota-outlook"])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out_buf.getvalue().strip())
+        self.assertEqual(data["verdict"], "ample")
+
+    def test_quota_outlook_cli_broken_pipe(self):
+        """llm-ledger quota-outlook catches BrokenPipeError on write/flush and returns 0."""
+        with mock.patch.object(sys.stdout, "flush", side_effect=BrokenPipeError):
+            code = llm_ledger.main(["quota-outlook", "--db", self.db_path])
+            self.assertEqual(code, 0)
+
+    def test_quota_outlook_cli_json_error_fallback(self):
+        """llm-ledger quota-outlook falls back to inline unknown dict if json serialization fails."""
+        import quota_watch
+        import io
+        import contextlib
+        import json
+        # Mock outlook to return a dict containing float('nan') which raises ValueError with allow_nan=False
+        bad_dict = {
+            "verdict": "ample",
+            "ts": 1795455600000,
+            "age_s": 100,
+            "h0": float("nan"),
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "line": "some line",
+        }
+        out_buf = io.StringIO()
+        with mock.patch.object(quota_watch, "outlook", return_value=bad_dict):
+            with contextlib.redirect_stdout(out_buf):
+                code = llm_ledger.main(["quota-outlook", "--db", self.db_path])
+
+        self.assertEqual(code, 0)
+        data = json.loads(out_buf.getvalue().strip())
+        self.assertEqual(data["verdict"], "unknown")
+        self.assertIn("error", data)
+        self.assertIn("quota@", data["line"])
+
 
 if __name__ == "__main__":
     unittest.main()

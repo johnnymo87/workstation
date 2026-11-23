@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS quota_watch_runs (
   burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
   k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
   next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL, verdict TEXT);   -- 'live' | 'replay'
 
 CREATE TABLE IF NOT EXISTS quota_forecast (
   ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
@@ -1571,7 +1571,56 @@ def main(argv: list[str] | None = None) -> int:
     qr_parser.add_argument("--host", default=socket.gethostname())
     qr_parser.add_argument("--record", action="store_true", default=False, help="Record evaluated runs into quota_watch_runs")
 
+    # quota-outlook subcommand
+    qo_parser = subparsers.add_parser("quota-outlook")
+    qo_parser.add_argument("--db", default=DEFAULT_DB)
+
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.command == "quota-outlook":
+        def _make_fallback(err_str: str) -> dict[str, Any]:
+            try:
+                from zoneinfo import ZoneInfo
+                time_str = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            return {
+                "verdict": "unknown",
+                "ts": None,
+                "age_s": None,
+                "h0": None,
+                "burn_h": None,
+                "zero_h": None,
+                "next_refill_ts": None,
+                "next_refill_amt": None,
+                "line": f"quota@{time_str}: unknown (outlook unavailable)",
+                "error": err_str[:200],
+            }
+
+        try:
+            import quota_watch
+            db_path = getattr(args, "db", DEFAULT_DB)
+            res = quota_watch.outlook(db=db_path)
+            try:
+                payload = json.dumps(res, allow_nan=False) + "\n"
+            except (ValueError, TypeError) as e:
+                res = _make_fallback(str(e))
+                payload = json.dumps(res, allow_nan=False) + "\n"
+        except Exception as e:
+            res = _make_fallback(str(e))
+            payload = json.dumps(res, allow_nan=False) + "\n"
+
+        try:
+            sys.stdout.write(payload)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            try:
+                devnull = open(os.devnull, "w")
+                os.dup2(devnull.fileno(), sys.stdout.fileno())
+                sys.stdout = devnull
+            except Exception:
+                pass
+        return 0
 
     if args.command == "quota-watch":
         import quota_watch

@@ -7,6 +7,7 @@ import collections
 import dataclasses
 import datetime
 import json
+import math
 import os
 import re
 import sqlite3
@@ -271,6 +272,21 @@ def forecast(
 
 def format_dt_et(ts: int) -> str:
     return datetime.datetime.fromtimestamp(ts / 1000, tz=NY_TZ).strftime("%m-%d %H:%M ET")
+
+
+def verdict_from_state(state: dict[str, Any]) -> str:
+    """Return coordinator-facing quota verdict: 'dry' | 'tight' | 'ample'.
+
+    Derived from alert state:
+    - pool_dry -> 'dry'
+    - shortfall -> 'tight'
+    - else -> 'ample'
+    """
+    if state.get("pool_dry"):
+        return "dry"
+    if state.get("shortfall"):
+        return "tight"
+    return "ample"
 
 
 def step_alerts(
@@ -556,6 +572,19 @@ def load_or_seed_state(
     return state, is_fresh
 
 
+def ensure_verdict_column(conn: Any) -> None:
+    """Ensure the 'verdict' column exists on quota_watch_runs (migration for existing DBs)."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+    if "verdict" not in cols:
+        try:
+            conn.execute("ALTER TABLE quota_watch_runs ADD COLUMN verdict TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                raise
+
+
 def record_run(
     db: str,
     row: dict[str, Any] | Sequence[Any],
@@ -586,10 +615,13 @@ def record_run(
                 row.get("next_refill_amt"),
                 row["pool_n"],
                 row.get("source", "live"),
+                row.get("verdict"),
             )
             run_ts = row["ts"]
         else:
             row_tuple = tuple(row)
+            if len(row_tuple) == 14:
+                row_tuple = row_tuple + (None,)
             run_ts = row_tuple[0]
 
         conn = sqlite3.connect(db, timeout=t)
@@ -599,11 +631,12 @@ def record_run(
                     stmt = stmt.strip()
                     if stmt:
                         conn.execute(stmt)
+                ensure_verdict_column(conn)
                 conn.execute(
                     """INSERT OR REPLACE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
   k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
-  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+  pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     row_tuple,
                 )
                 if path:
@@ -624,14 +657,14 @@ def record_replay_runs(
     db: str,
     rows: list[tuple[Any, ...]],
     timeout: float | None = None,
-) -> int:
-    """Record replay runs into quota_watch_runs using INSERT OR IGNORE in one transaction.
+) -> tuple[int, int]:
+    """Record replay runs into quota_watch_runs using INSERT OR IGNORE and backfill verdicts.
 
-    Returns the number of rows inserted and prints how many rows inserted.
+    Returns the number of rows inserted and verdicts filled, and prints the counts.
     """
     if not rows:
-        print("quota-replay: recorded 0 rows")
-        return 0
+        print("quota-replay: recorded 0 rows, filled 0 verdicts")
+        return (0, 0)
     from llm_ledger import QUOTA_WATCH_SCHEMA_SQL
 
     t = RECORD_TIMEOUT_S if timeout is None else timeout
@@ -643,22 +676,36 @@ def record_replay_runs(
                     stmt = stmt.strip()
                     if stmt:
                         conn.execute(stmt)
-                changes_before = conn.total_changes
+                ensure_verdict_column(conn)
+                changes_before_insert = conn.total_changes
+                norm_rows = [r + (None,) if len(r) == 14 else r for r in rows]
                 conn.executemany(
                     """INSERT OR IGNORE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
   k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
-  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    rows,
+  pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    norm_rows,
                 )
-                inserted = conn.total_changes - changes_before
+                inserted = conn.total_changes - changes_before_insert
+
+                changes_before_fill = conn.total_changes
+                update_params = [
+                    (r[14], r[0])
+                    for r in norm_rows
+                    if len(r) > 14 and r[14] is not None
+                ]
+                conn.executemany(
+                    "UPDATE quota_watch_runs SET verdict=? WHERE ts=? AND verdict IS NULL",
+                    update_params,
+                )
+                filled = conn.total_changes - changes_before_fill
         finally:
             conn.close()
     except (sqlite3.Error, OSError) as e:
         sys.stderr.write(f"quota-replay: could not record: {e}\n")
         raise QuotaRecordError(str(e)) from e
-    print(f"quota-replay: recorded {inserted} rows")
-    return inserted
+    print(f"quota-replay: recorded {inserted} rows, filled {filled} verdicts")
+    return (inserted, filled)
 
 
 def run_live(
@@ -852,6 +899,7 @@ def run_live(
         "next_refill_amt": next_refill[1] if next_refill else None,
         "pool_n": len(pool),
         "source": "live",
+        "verdict": verdict_from_state(new_state),
     }
     record_run(db, run_row, forecast_path)
 
@@ -868,6 +916,120 @@ def run_live(
         f"dry_h={zero_h:.1f} vertex≈{v_str} pool_dry={pool_dry_str} short={short_str} acct_hi={acct_hi_cnt}"
     )
     return 0
+
+
+@dataclasses.dataclass
+class VerdictEpisode:
+    verdict: str
+    start_ts: int
+    end_ts: int
+    duration_h: float
+    peak_forecast_usd: float | None
+    actual_spillover_usd: float
+    is_open: bool = False
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+
+def verdict_episodes(
+    rows: list[tuple[Any, ...]] | list[dict[str, Any]],
+    spill_buckets: dict[int, float] | None = None,
+) -> list[VerdictEpisode]:
+    """Group contiguous tight and dry episodes from replay rows."""
+    episodes: list[VerdictEpisode] = []
+    current_verdict: str | None = None
+    episode_rows: list[tuple[int, float | None]] = []
+
+    def flush_episode(is_open: bool) -> None:
+        nonlocal current_verdict, episode_rows
+        if not current_verdict or not episode_rows:
+            return
+        start_ts = episode_rows[0][0]
+        end_ts = episode_rows[-1][0]
+        duration_h = (end_ts - start_ts) / 3600_000.0
+        forecasts = [v for _, v in episode_rows if v is not None]
+        peak_forecast_usd = max(forecasts) if forecasts else None
+        actual_spillover = 0.0
+        if spill_buckets:
+            start_b = (start_ts // STEP_MS) * STEP_MS
+            window_end = end_ts + 24 * 3600 * 1000
+            actual_spillover = sum(
+                cost for b, cost in spill_buckets.items()
+                if start_b <= b <= window_end
+            )
+        episodes.append(
+            VerdictEpisode(
+                verdict=current_verdict,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_h=duration_h,
+                peak_forecast_usd=peak_forecast_usd,
+                actual_spillover_usd=actual_spillover,
+                is_open=is_open,
+            )
+        )
+        current_verdict = None
+        episode_rows = []
+
+    for r in rows:
+        if isinstance(r, dict):
+            ts = r["ts"]
+            v = r.get("verdict")
+            v_usd = r.get("vertex_usd")
+        else:
+            ts = r[0]
+            v = r[14] if len(r) > 14 else None
+            v_usd = r[9] if len(r) > 9 else None
+
+        if v in ("tight", "dry"):
+            if current_verdict == v:
+                if episode_rows and (ts - episode_rows[-1][0] > STALE_INPUT_MS):
+                    flush_episode(is_open=False)
+                    current_verdict = v
+                    episode_rows = [(ts, v_usd)]
+                else:
+                    episode_rows.append((ts, v_usd))
+            else:
+                if current_verdict:
+                    flush_episode(is_open=False)
+                current_verdict = v
+                episode_rows = [(ts, v_usd)]
+        else:
+            if current_verdict:
+                flush_episode(is_open=False)
+
+    if current_verdict:
+        flush_episode(is_open=True)
+
+    return episodes
+
+
+def format_verdict_episode(ep: VerdictEpisode) -> str:
+    """Format one verdict episode into a summary line."""
+    start_str = format_dt_et(ep.start_ts)
+    end_str = format_dt_et(ep.end_ts)
+    open_str = ", open" if ep.is_open else ""
+    v_forecast = f"${round(ep.peak_forecast_usd)}" if ep.peak_forecast_usd is not None else "none"
+    actual_spill = f"${ep.actual_spillover_usd:.2f}"
+    return (
+        f"episode {ep.verdict}: {start_str} to {end_str} "
+        f"({ep.duration_h:.1f}h{open_str}) · "
+        f"peak forecast {v_forecast} · "
+        f"actual spillover (+24h) {actual_spill}"
+    )
+
+
+def format_verdict_episodes(episodes: list[VerdictEpisode]) -> list[str]:
+    """Format all verdict episodes with a header explaining non-additive evaluation windows."""
+    if not episodes:
+        return []
+    lines = [
+        "--- Quota episodes (actual spillover evaluated over [start, end+24h]; windows may overlap, non-additive) ---"
+    ]
+    for ep in episodes:
+        lines.append(format_verdict_episode(ep))
+    return lines
 
 
 def replay(
@@ -927,25 +1089,6 @@ def replay(
         ]
         zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
 
-        replay_rows.append(
-            (
-                T,
-                H0,
-                B,
-                burn_6h,
-                burn_24h,
-                spill_6h,
-                spill_24h,
-                k,
-                zero_h,
-                vertex_usd,
-                next_refill[0] if next_refill else None,
-                next_refill[1] if next_refill else None,
-                len(pool),
-                "replay",
-            )
-        )
-
         spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
         spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
 
@@ -963,6 +1106,27 @@ def replay(
         }
 
         new_alert_state, _ = step_alerts(alert_state, metrics)
+        verdict = verdict_from_state(new_alert_state)
+
+        replay_rows.append(
+            (
+                T,
+                H0,
+                B,
+                burn_6h,
+                burn_24h,
+                spill_6h,
+                spill_24h,
+                k,
+                zero_h,
+                vertex_usd,
+                next_refill[0] if next_refill else None,
+                next_refill[1] if next_refill else None,
+                len(pool),
+                "replay",
+                verdict,
+            )
+        )
 
         # Detect transitions
         was_dry = bool(alert_state.get("pool_dry", False))
@@ -1010,4 +1174,243 @@ def replay(
     if record:
         record_replay_runs(db, replay_rows)
 
+    episodes = verdict_episodes(replay_rows, spill_buckets)
+    for line in format_verdict_episodes(episodes):
+        print(line)
+
     return events
+
+
+def _safe_float(val: Any) -> float | None:
+    """Return float or None for None, NaN, inf, or unparseable values."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return f
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(val: Any) -> int | None:
+    """Return int or None for None or unparseable values."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def format_line(d: dict) -> str:
+    """Format single-line quota summary for coordinators (<= 200 bytes)."""
+    verdict = d.get("verdict", "unknown")
+    ts = _safe_int(d.get("ts"))
+    now_ms = _safe_int(d.get("now_ms"))
+    if ts is not None:
+        dt = datetime.datetime.fromtimestamp(ts / 1000, tz=NY_TZ)
+    elif now_ms is not None:
+        dt = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ)
+    else:
+        dt = datetime.datetime.now(tz=NY_TZ)
+    time_str = dt.strftime("%H:%M")
+
+    if verdict not in ("ample", "tight", "dry"):
+        line = f"quota@{time_str}: unknown (outlook unavailable)"
+    else:
+        clauses: list[str] = []
+        h0 = _safe_float(d.get("h0"))
+        if h0 is not None:
+            clauses.append(f"headroom {h0:.2f} acct-wk")
+
+        next_refill_ts = _safe_int(d.get("next_refill_ts"))
+        if next_refill_ts is not None:
+            refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
+            refill_str = refill_dt.strftime("%a %H:%M")
+            amt = _safe_float(d.get("next_refill_amt"))
+            if amt is not None:
+                clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
+            else:
+                clauses.append(f"next refill {refill_str} ET")
+
+        if verdict == "ample":
+            prefix = f"quota@{time_str}: AMPLE"
+        else:
+            verdict_word = "TIGHT" if verdict == "tight" else "DRY"
+            prefix = f"quota@{time_str}: {verdict_word}"
+            zero_h = _safe_float(d.get("zero_h"))
+            if zero_h is not None:
+                prefix += f" — Max forecast dry ~{zero_h:.1f}h in next 24h (forecast over-predicts)"
+
+        if clauses:
+            line = f"{prefix} · " + " · ".join(clauses)
+        else:
+            line = prefix
+
+    encoded = line.encode("utf-8")
+    if len(encoded) > 200:
+        line = encoded[:200].decode("utf-8", errors="ignore")
+    return line
+
+
+def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
+    """Return JSON-serializable quota outlook for coordinators."""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    # Busy timeout of 1 s (connect's timeout= and PRAGMA busy_timeout are the
+    # same setting). The consumer (stall-watch/agent-wait) kills the command
+    # after 3 s, and treats a timeout and an error alike as "unknown". 1 s rides
+    # out the ledger writer's commit window, so a stall-watch tick that lands in
+    # it doesn't read "unknown" (which holds nothing) during a tight episode.
+    # Worst case: ~0.1 s startup + 1 s + 0.2 s sleep + 1 s retry ≈ 2.3 s.
+    row = None
+    fetch_error = None
+    for attempt in range(2):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                conn.execute("PRAGMA busy_timeout=1000")
+                row = conn.execute(
+                    "SELECT ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, verdict "
+                    "FROM quota_watch_runs WHERE source='live' ORDER BY ts DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            fetch_error = None
+            break
+        except sqlite3.OperationalError as e:
+            fetch_error = e
+            msg = str(e).lower()
+            if attempt == 0 and ("readonly" in msg or "rollback" in msg):
+                # A hot journal is only left by a crashed writer; the writer's next
+                # run rolls it back. Keep the sleep short (budget above).
+                time.sleep(0.2)
+                continue
+            break
+        except Exception as e:
+            fetch_error = e
+            break
+
+    if fetch_error is not None:
+        err_msg = str(fetch_error)[:200]
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "line": line,
+            "error": err_msg,
+        }
+
+    if row is None:
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "line": line,
+            "error": "no live rows",
+        }
+
+    try:
+        ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
+        ts = _safe_int(ts_val)
+        h0 = _safe_float(h0_val)
+        burn_h = _safe_float(burn_val)
+        zero_h = _safe_float(zero_val)
+        next_refill_ts = _safe_int(refill_ts_val)
+        next_refill_amt = _safe_float(refill_amt_val)
+
+        age_s = (now_ms - ts) // 1000 if ts is not None else None
+
+        if age_s is not None and age_s > 1200:
+            verdict = "unknown"
+            error = f"stale: age_s={age_s}"
+        elif age_s is not None and age_s < -60:
+            verdict = "unknown"
+            error = f"clock skew: age_s={age_s}"
+        elif stored_verdict is None:
+            verdict = "unknown"
+            error = "verdict is NULL"
+        elif stored_verdict not in ("ample", "tight", "dry"):
+            verdict = "unknown"
+            error = f"invalid verdict: {stored_verdict}"
+        else:
+            verdict = stored_verdict
+            error = None
+
+        res = {
+            "verdict": verdict,
+            "ts": ts,
+            "age_s": age_s,
+            "h0": h0,
+            "burn_h": burn_h,
+            "zero_h": zero_h,
+            "next_refill_ts": next_refill_ts,
+            "next_refill_amt": next_refill_amt,
+        }
+        try:
+            line = format_line(res)
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(
+                    (ts if ts is not None else now_ms) / 1000, tz=NY_TZ
+                ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        res["line"] = line
+        if error is not None:
+            res["error"] = error
+        return res
+    except Exception as e:
+        err_msg = str(e)[:200]
+        try:
+            line = format_line({"verdict": "unknown", "now_ms": now_ms})
+        except Exception:
+            try:
+                time_str = datetime.datetime.fromtimestamp(now_ms / 1000, tz=NY_TZ).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            line = f"quota@{time_str}: unknown (outlook unavailable)"
+        return {
+            "verdict": "unknown",
+            "ts": None,
+            "age_s": None,
+            "h0": None,
+            "burn_h": None,
+            "zero_h": None,
+            "next_refill_ts": None,
+            "next_refill_amt": None,
+            "line": line,
+            "error": err_msg,
+        }
+
+

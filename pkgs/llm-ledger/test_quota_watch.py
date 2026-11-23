@@ -1082,7 +1082,8 @@ class TestLiveAndReplay(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0][0], T1)
         self.assertEqual(runs[0][1], 2.0)
-        self.assertEqual(runs[0][-1], "live")
+        self.assertEqual(runs[0][13], "live")
+        self.assertIsNone(runs[0][14])
 
         fc = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
         self.assertEqual(len(fc), 289)
@@ -1406,6 +1407,886 @@ class TestCliSubcommands(unittest.TestCase):
         ts_utc = parse_et_datetime("2026-11-20T19:00:00Z")
         dt_utc = datetime.datetime.fromtimestamp(ts_utc / 1000, tz=E)
         self.assertEqual(dt_utc.strftime("%Y-%m-%d %H:%M"), "2026-11-20 14:00")
+
+
+class TestVerdictAndEpisodes(unittest.TestCase):
+    """Tests for verdict determination, schema migration, backfill, and episode reporting."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory(prefix="verdict-test-")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_verdict_from_state(self):
+        """verdict_from_state returns dry/tight/ample based on state flags; both set -> dry."""
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": True, "shortfall": True}), "dry")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": True, "shortfall": False}), "dry")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": False, "shortfall": True}), "tight")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": False, "shortfall": False}), "ample")
+        self.assertEqual(quota_watch.verdict_from_state({}), "ample")
+
+    def test_ensure_verdict_column(self):
+        """ensure_verdict_column adds verdict to an old-schema table and is idempotent."""
+        db_path = os.path.join(self.tmp_dir.name, "db_ensure_verdict.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL
+            )
+        """)
+        cols_before = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertNotIn("verdict", cols_before)
+
+        quota_watch.ensure_verdict_column(conn)
+        cols_after = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertIn("verdict", cols_after)
+
+        # Idempotent: second call does not raise error and preserves schema
+        quota_watch.ensure_verdict_column(conn)
+        cols_idempotent = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertIn("verdict", cols_idempotent)
+        conn.close()
+
+    def test_record_run_verdict_and_migration(self):
+        """record_run writes verdict and handles migration on old-schema DB."""
+        # 1. Normal record_run writes verdict
+        db_path = os.path.join(self.tmp_dir.name, "db_rec_verdict.db")
+        t0 = 1700000000000
+        run_row = {
+            "ts": t0,
+            "h0": 2.5,
+            "burn_h": 0.1,
+            "zero_h": 0.0,
+            "pool_n": 1,
+            "source": "live",
+            "verdict": "tight",
+        }
+        quota_watch.record_run(db_path, run_row)
+        conn = sqlite3.connect(db_path)
+        row = conn.execute("SELECT ts, verdict, source FROM quota_watch_runs WHERE ts = ?", (t0,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[1], "tight")
+        self.assertEqual(row[2], "live")
+
+        # 2. Old-schema DB migration
+        old_db_path = os.path.join(self.tmp_dir.name, "db_old_rec.db")
+        conn = sqlite3.connect(old_db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (t0 - 1000, 1.0, 0.0, 0.0, 1, "live"),
+        )
+        conn.commit()
+        conn.close()
+
+        run_row_migrated = {
+            "ts": t0,
+            "h0": 0.5,
+            "burn_h": 0.2,
+            "zero_h": 12.0,
+            "pool_n": 1,
+            "source": "live",
+            "verdict": "dry",
+        }
+        quota_watch.record_run(old_db_path, run_row_migrated)
+        conn = sqlite3.connect(old_db_path)
+        row2 = conn.execute("SELECT ts, verdict FROM quota_watch_runs WHERE ts = ?", (t0,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row2)
+        self.assertEqual(row2[1], "dry")
+
+    def test_record_replay_runs_backfill(self):
+        """record_replay_runs inserts new rows, fills NULL verdicts on existing rows, preserves existing verdicts."""
+        db_path = os.path.join(self.tmp_dir.name, "db_replay_backfill.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL,
+              verdict TEXT
+            )
+        """)
+        ts_x = 1700000100000
+        ts_y = 1700000200000
+        ts_z = 1700000300000
+        # X: live row with NULL verdict
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts_x, 5.0, 0.1, 0.0, 1, "live", None),
+        )
+        # Y: live row with 'ample' verdict
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts_y, 8.0, 0.0, 0.0, 1, "live", "ample"),
+        )
+        conn.commit()
+        conn.close()
+
+        row_x = (ts_x, 9.9, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "tight")
+        row_y = (ts_y, 9.9, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "dry")
+        row_z = (ts_z, 7.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+
+        import io
+        stdout_cap = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = stdout_cap
+            res = quota_watch.record_replay_runs(db_path, [row_x, row_y, row_z])
+        finally:
+            sys.stdout = orig_stdout
+
+        self.assertEqual(res, (1, 1))
+        self.assertIn("quota-replay: recorded 1 rows, filled 1 verdicts", stdout_cap.getvalue())
+
+        conn = sqlite3.connect(db_path)
+        cur = conn.execute("SELECT ts, h0, source, verdict FROM quota_watch_runs ORDER BY ts")
+        rows = {r[0]: r for r in cur.fetchall()}
+        conn.close()
+
+        # X: live row other columns unchanged, verdict filled with 'tight'
+        self.assertEqual(rows[ts_x][1], 5.0)
+        self.assertEqual(rows[ts_x][2], "live")
+        self.assertEqual(rows[ts_x][3], "tight")
+
+        # Y: live row other columns unchanged, verdict kept 'ample' (not overwritten)
+        self.assertEqual(rows[ts_y][1], 8.0)
+        self.assertEqual(rows[ts_y][2], "live")
+        self.assertEqual(rows[ts_y][3], "ample")
+
+        # Z: inserted replay row
+        self.assertEqual(rows[ts_z][1], 7.0)
+        self.assertEqual(rows[ts_z][2], "replay")
+        self.assertEqual(rows[ts_z][3], "ample")
+
+    def test_replay_records_verdicts_for_shortfall_span(self):
+        """replay with record=True records 'tight' exactly for the shortfall span."""
+        db_path = os.path.join(self.tmp_dir.name, "db_replay_shortfall.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # Warmup samples: acct1 has usage 0.50 for 7 days
+        for d in range(7):
+            ts = t0 - (7 - d) * 86400 * 1000
+            conn.execute(
+                "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                (ts, "acct1", 0.50, ts + 10 * 86400 * 1000),
+            )
+        # T1 (t0): acct1 hits 0.98 (CAP -> H0=0), burn exists -> shortfall fires -> tight
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.98, t0 + 10 * 86400 * 1000),
+        )
+        # T2 (t0 + 5m): acct1 still at 0.98 -> shortfall remains -> tight
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 + 300000, "acct1", 0.98, t0 + 10 * 86400 * 1000),
+        )
+        # T3 (t0 + 10m): acct1 usage drops to 0.10 -> H0=0.88, zero_h=0 -> shortfall clears -> ample
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 + 600000, "acct1", 0.10, t0 + 10 * 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        events = quota_watch.replay(db_path, since_ms=t0, until_ms=t0 + 600000, record=True)
+        short_fires = [e for e in events if e.kind == "shortfall" and e.action == "fire"]
+        short_clears = [e for e in events if e.kind == "shortfall" and e.action == "clear"]
+        self.assertEqual(len(short_fires), 1)
+        self.assertEqual(short_fires[0].ts, t0)
+        self.assertEqual(len(short_clears), 1)
+        self.assertEqual(short_clears[0].ts, t0 + 600000)
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT ts, verdict FROM quota_watch_runs ORDER BY ts").fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0], (t0, "tight"))
+        self.assertEqual(rows[1], (t0 + 300000, "tight"))
+        self.assertEqual(rows[2], (t0 + 600000, "ample"))
+
+    def test_verdict_episodes_and_report(self):
+        """verdict_episodes groups tight and dry episodes, sums actual spillover over [start, end+24h], marks open."""
+        t0 = 1700000000000
+        tight_start = t0 + 300000
+        tight_end = t0 + 600000
+        dry_start = tight_end + 48 * 3600 * 1000
+        dry_end = dry_start
+
+        r0 = (t0, 1.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+        r1 = (tight_start, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        r2 = (tight_end, 0.0, 0.5, None, None, None, None, None, 10.0, 120.0, None, None, 1, "replay", "tight")
+        r3 = (tight_end + 300000, 1.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+        r4 = (dry_start, 0.0, 0.5, None, None, None, None, None, 20.0, 200.0, None, None, 1, "replay", "dry")
+
+        tight_24h_end = tight_end + 24 * 3600 * 1000
+        spill_buckets = {
+            tight_start - 300000: 999.0,   # before start: excluded
+            tight_start: 10.0,              # at start: included
+            tight_end: 25.0,                # at end: included
+            tight_end + 12 * 3600 * 1000: 30.0,  # +12h: included
+            tight_24h_end: 15.0,            # at +24h boundary: included
+            tight_24h_end + 300000: 888.0, # after +24h: excluded
+            dry_start: 42.0,                # during dry: included in dry episode
+        }
+
+        episodes = quota_watch.verdict_episodes([r0, r1, r2, r3, r4], spill_buckets)
+        self.assertEqual(len(episodes), 2)
+
+        # Episode 1: tight
+        ep1 = episodes[0]
+        self.assertEqual(ep1.verdict, "tight")
+        self.assertEqual(ep1.start_ts, tight_start)
+        self.assertEqual(ep1.end_ts, tight_end)
+        self.assertAlmostEqual(ep1.duration_h, (tight_end - tight_start) / 3600000.0, places=4)
+        self.assertEqual(ep1.peak_forecast_usd, 120.0)
+        self.assertAlmostEqual(ep1.actual_spillover_usd, 10.0 + 25.0 + 30.0 + 15.0, places=2)
+        self.assertFalse(ep1.is_open)
+
+        # Episode 2: dry (open-ended)
+        ep2 = episodes[1]
+        self.assertEqual(ep2.verdict, "dry")
+        self.assertEqual(ep2.start_ts, dry_start)
+        self.assertEqual(ep2.end_ts, dry_end)
+        self.assertAlmostEqual(ep2.duration_h, 0.0, places=4)
+        self.assertEqual(ep2.peak_forecast_usd, 200.0)
+        self.assertAlmostEqual(ep2.actual_spillover_usd, 42.0, places=2)
+        self.assertTrue(ep2.is_open)
+
+        # Formatting tests
+        line1 = quota_watch.format_verdict_episode(ep1)
+        self.assertIn("episode tight:", line1)
+        self.assertIn("peak forecast $120", line1)
+        self.assertIn("actual spillover (+24h) $80.00", line1)
+        self.assertNotIn("open", line1)
+
+        line2 = quota_watch.format_verdict_episode(ep2)
+        self.assertIn("episode dry:", line2)
+        self.assertIn("peak forecast $200", line2)
+        self.assertIn("actual spillover (+24h) $42.00", line2)
+        self.assertIn("open", line2)
+
+    def test_ensure_verdict_column_duplicate_race(self):
+        """ensure_verdict_column ignores 'duplicate column name' OperationalError from race."""
+        db_path = os.path.join(self.tmp_dir.name, "db_race.db")
+        real_conn = sqlite3.connect(db_path)
+        real_conn.execute("CREATE TABLE quota_watch_runs (ts INT PRIMARY KEY, verdict TEXT)")
+
+        class RaceConn:
+            def execute(self, sql, *args, **kwargs):
+                if "table_info" in sql:
+                    # Simulate pragma returning without 'verdict'
+                    cur = mock.MagicMock()
+                    cur.fetchall.return_value = [(0, "ts", "INT", 0, None, 1)]
+                    return cur
+                return real_conn.execute(sql, *args, **kwargs)
+
+        race_conn = RaceConn()
+        # Should attempt ALTER TABLE, hit "duplicate column name: verdict", and suppress it.
+        quota_watch.ensure_verdict_column(race_conn)
+
+        class ErrorConn:
+            def execute(self, sql, *args, **kwargs):
+                if "table_info" in sql:
+                    cur = mock.MagicMock()
+                    cur.fetchall.return_value = []
+                    return cur
+                if "ALTER TABLE" in sql:
+                    raise sqlite3.OperationalError("database is locked")
+                return real_conn.execute(sql, *args, **kwargs)
+
+        error_conn = ErrorConn()
+        with self.assertRaises(sqlite3.OperationalError) as ctx:
+            quota_watch.ensure_verdict_column(error_conn)
+        self.assertIn("database is locked", str(ctx.exception))
+        real_conn.close()
+
+    def test_verdict_episodes_bucket_edge_flooring(self):
+        """verdict_episodes floors start_ts to STEP_MS boundary so non-zero second timestamps include the first bucket."""
+        base_tick = (1700000100000 // STEP_MS) * STEP_MS
+        start_ts = base_tick + 123456
+        r0 = (start_ts, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+
+        spill_buckets = {
+            base_tick: 75.0,
+        }
+        episodes = quota_watch.verdict_episodes([r0], spill_buckets)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0].actual_spillover_usd, 75.0)
+
+    def test_verdict_episodes_gap_splitting(self):
+        """verdict_episodes splits an episode if consecutive rows of the same verdict are > STALE_INPUT_MS apart."""
+        t0 = 1700000000000
+        r1 = (t0, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        r2 = (t0 + 300000, 0.0, 0.5, None, None, None, None, None, 10.0, 60.0, None, None, 1, "replay", "tight")
+        gap_ts = t0 + 300000 + quota_watch.STALE_INPUT_MS + 60000
+        r3 = (gap_ts, 0.0, 0.5, None, None, None, None, None, 10.0, 70.0, None, None, 1, "replay", "tight")
+
+        episodes = quota_watch.verdict_episodes([r1, r2, r3])
+        self.assertEqual(len(episodes), 2)
+        self.assertEqual(episodes[0].start_ts, t0)
+        self.assertEqual(episodes[0].end_ts, t0 + 300000)
+        self.assertFalse(episodes[0].is_open)
+        self.assertEqual(episodes[1].start_ts, gap_ts)
+        self.assertEqual(episodes[1].end_ts, gap_ts)
+        self.assertTrue(episodes[1].is_open)
+
+    def test_format_verdict_episodes_header_non_additive(self):
+        """format_verdict_episodes includes a header explaining per-episode [start, end+24h] evaluation and non-additivity."""
+        t0 = 1700000000000
+        r1 = (t0, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        episodes = quota_watch.verdict_episodes([r1])
+        lines = quota_watch.format_verdict_episodes(episodes)
+        self.assertGreaterEqual(len(lines), 2)
+        header = lines[0]
+        self.assertIn("[start, end+24h]", header)
+        self.assertIn("non-additive", header.lower())
+
+
+class TestQuotaOutlook(unittest.TestCase):
+    def test_format_line_templates(self):
+        """format_line formats templates for ample, tight, dry, unknown with correct omissions."""
+        # 1795455600000 -> 2026-11-23 12:40 ET
+        # 1795608000372 -> 2026-11-25 07:00 ET (Wed)
+        ts = 1795455600000
+        refill_ts = 1795608000372
+
+        # Ample full
+        d = {
+            "verdict": "ample",
+            "ts": ts,
+            "h0": 1.47,
+            "next_refill_ts": refill_ts,
+            "next_refill_amt": 0.9,
+        }
+        self.assertEqual(
+            quota_watch.format_line(d),
+            "quota@12:40: AMPLE · headroom 1.47 acct-wk · next refill Wed 07:00 ET (+0.90)",
+        )
+
+        # Ample without refill_ts
+        d_no_refill = {"verdict": "ample", "ts": ts, "h0": 1.47, "next_refill_ts": None}
+        self.assertEqual(
+            quota_watch.format_line(d_no_refill),
+            "quota@12:40: AMPLE · headroom 1.47 acct-wk",
+        )
+
+        # Ample without refill_amt
+        d_no_amt = {"verdict": "ample", "ts": ts, "h0": 1.47, "next_refill_ts": refill_ts, "next_refill_amt": None}
+        self.assertEqual(
+            quota_watch.format_line(d_no_amt),
+            "quota@12:40: AMPLE · headroom 1.47 acct-wk · next refill Wed 07:00 ET",
+        )
+
+        # Ample without h0
+        d_no_h0 = {"verdict": "ample", "ts": ts, "h0": None, "next_refill_ts": refill_ts, "next_refill_amt": 0.9}
+        self.assertEqual(
+            quota_watch.format_line(d_no_h0),
+            "quota@12:40: AMPLE · next refill Wed 07:00 ET (+0.90)",
+        )
+
+        # Tight full
+        d_tight = {
+            "verdict": "tight",
+            "ts": ts,
+            "h0": 1.47,
+            "zero_h": 2.5,
+            "next_refill_ts": refill_ts,
+            "next_refill_amt": 0.9,
+        }
+        self.assertEqual(
+            quota_watch.format_line(d_tight),
+            "quota@12:40: TIGHT — Max forecast dry ~2.5h in next 24h (forecast over-predicts) · headroom 1.47 acct-wk · next refill Wed 07:00 ET (+0.90)",
+        )
+
+        # Tight without zero_h
+        d_tight_no_zero = {
+            "verdict": "tight",
+            "ts": ts,
+            "h0": 1.47,
+            "zero_h": None,
+            "next_refill_ts": refill_ts,
+            "next_refill_amt": 0.9,
+        }
+        self.assertEqual(
+            quota_watch.format_line(d_tight_no_zero),
+            "quota@12:40: TIGHT · headroom 1.47 acct-wk · next refill Wed 07:00 ET (+0.90)",
+        )
+
+        # Dry full
+        d_dry = {
+            "verdict": "dry",
+            "ts": ts,
+            "h0": 0.05,
+            "zero_h": 12.0,
+            "next_refill_ts": refill_ts,
+            "next_refill_amt": 0.9,
+        }
+        self.assertEqual(
+            quota_watch.format_line(d_dry),
+            "quota@12:40: DRY — Max forecast dry ~12.0h in next 24h (forecast over-predicts) · headroom 0.05 acct-wk · next refill Wed 07:00 ET (+0.90)",
+        )
+
+        # Unknown with ts
+        d_unknown = {"verdict": "unknown", "ts": ts}
+        self.assertEqual(
+            quota_watch.format_line(d_unknown),
+            "quota@12:40: unknown (outlook unavailable)",
+        )
+
+        # Unknown without ts (using now_ms)
+        d_unknown_now = {"verdict": "unknown", "now_ms": ts}
+        self.assertEqual(
+            quota_watch.format_line(d_unknown_now),
+            "quota@12:40: unknown (outlook unavailable)",
+        )
+
+    def test_format_line_length_and_no_dollars(self):
+        """format_line line <= 200 bytes under extreme values and contains no dollars."""
+        ts = 1795455600000
+        refill_ts = 1795608000372
+        for verdict in ("ample", "tight", "dry", "unknown"):
+            d = {
+                "verdict": verdict,
+                "ts": ts,
+                "h0": 1e100,
+                "zero_h": 1e100,
+                "next_refill_ts": refill_ts,
+                "next_refill_amt": 1e100,
+            }
+            line = quota_watch.format_line(d)
+            self.assertLessEqual(len(line.encode("utf-8")), 200)
+            self.assertNotIn("$", line)
+
+    def test_outlook_known_verdicts(self):
+        """outlook returns exact contract keys, no error key, no vertex_usd, no $ for known verdicts."""
+        import tempfile
+        contract_keys = {
+            "verdict", "ts", "age_s", "h0", "burn_h", "zero_h",
+            "next_refill_ts", "next_refill_amt", "line"
+        }
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                burn_6h REAL,
+                burn_24h REAL,
+                spill_6h REAL,
+                spill_24h REAL,
+                k REAL,
+                zero_h REAL,
+                vertex_usd REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                pool_n INTEGER,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            # ts = 1795455600000 (12:40 ET)
+            ts = 1795455600000
+            now_ms = ts + 140000  # age_s = 140
+            refill_ts = 1795608000372
+
+            for verdict in ("ample", "tight", "dry"):
+                conn.execute("DELETE FROM quota_watch_runs")
+                conn.execute("""INSERT INTO quota_watch_runs (
+                    ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    ts, 1.47, 0.036, 0.0 if verdict == "ample" else 2.5, 99.99, refill_ts, 0.9, 1, "live", verdict
+                ))
+                conn.commit()
+
+                res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+                self.assertEqual(set(res.keys()), contract_keys)
+                self.assertEqual(res["verdict"], verdict)
+                self.assertEqual(res["ts"], ts)
+                self.assertEqual(res["age_s"], 140)
+                self.assertEqual(res["h0"], 1.47)
+                self.assertEqual(res["burn_h"], 0.036)
+                self.assertEqual(res["next_refill_ts"], refill_ts)
+                self.assertEqual(res["next_refill_amt"], 0.9)
+                self.assertNotIn("error", res)
+                self.assertNotIn("vertex_usd", res)
+                for k, v in res.items():
+                    self.assertNotIn("$", str(v))
+            conn.close()
+
+    def test_outlook_stale(self):
+        """outlook returns unknown with stale error when age_s > 1200."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                burn_6h REAL,
+                burn_24h REAL,
+                spill_6h REAL,
+                spill_24h REAL,
+                k REAL,
+                zero_h REAL,
+                vertex_usd REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                pool_n INTEGER,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            now_ms = ts + 1201 * 1000  # age_s = 1201 (> 1200)
+            conn.execute("""INSERT INTO quota_watch_runs (
+                ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                ts, 1.47, 0.036, 0.0, 99.99, None, None, 1, "live", "ample"
+            ))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertEqual(res["age_s"], 1201)
+            self.assertIn("error", res)
+            self.assertIn("stale", res["error"])
+            self.assertIn("age_s=1201", res["error"])
+            self.assertEqual(res["line"], "quota@12:40: unknown (outlook unavailable)")
+
+    def test_outlook_null_or_invalid_verdict(self):
+        """outlook returns unknown when verdict is NULL or not in {ample, tight, dry}."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                burn_6h REAL,
+                burn_24h REAL,
+                spill_6h REAL,
+                spill_24h REAL,
+                k REAL,
+                zero_h REAL,
+                vertex_usd REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                pool_n INTEGER,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            now_ms = ts + 100000  # age_s = 100
+
+            # NULL verdict
+            conn.execute("""INSERT INTO quota_watch_runs (
+                ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                ts, 1.47, 0.036, 0.0, 99.99, None, None, 1, "live", None
+            ))
+            conn.commit()
+
+            res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertEqual(res["age_s"], 100)
+            self.assertIn("error", res)
+            self.assertIn("verdict is NULL", res["error"])
+
+            # Invalid verdict
+            conn.execute("UPDATE quota_watch_runs SET verdict = 'bogus' WHERE ts = ?", (ts,))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertEqual(res["age_s"], 100)
+            self.assertIn("error", res)
+            self.assertIn("invalid verdict", res["error"])
+
+    def test_outlook_no_rows_and_replay_only(self):
+        """outlook returns unknown with 'no live rows' when empty or only replay rows exist."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                burn_6h REAL,
+                burn_24h REAL,
+                spill_6h REAL,
+                spill_24h REAL,
+                k REAL,
+                zero_h REAL,
+                vertex_usd REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                pool_n INTEGER,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            # Empty table
+            res = quota_watch.outlook(db=db_path, now_ms=1795455600000)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertIsNone(res["ts"])
+            self.assertIsNone(res["age_s"])
+            self.assertIsNone(res["h0"])
+            self.assertEqual(res["error"], "no live rows")
+
+            # Only replay rows
+            conn.execute("""INSERT INTO quota_watch_runs (
+                ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                1795455600000, 1.47, 0.036, 0.0, 99.99, None, None, 1, "replay", "ample"
+            ))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=1795455600000)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertIsNone(res["ts"])
+            self.assertEqual(res["error"], "no live rows")
+
+    def test_outlook_missing_column_and_missing_table(self):
+        """outlook catches missing verdict column or table and returns unknown + error."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            # Create table without verdict column (old schema)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live'
+            )""")
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         (1795455600000, 1.0, 0.1, 0.0, None, None, "live"))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=1795455600000)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertIn("error", res)
+            self.assertIn("verdict", res["error"])
+
+        # DB without table at all
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE other_table (id INT)")
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=1795455600000)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertIn("error", res)
+            self.assertIn("quota_watch_runs", res["error"])
+
+    def test_outlook_nonexistent_db(self):
+        """outlook returns unknown with error and does not create the DB file when it does not exist."""
+        import tempfile
+        import os
+        nonexistent_dir = tempfile.mkdtemp()
+        db_path = os.path.join(nonexistent_dir, "does_not_exist.db")
+        try:
+            res = quota_watch.outlook(db=db_path, now_ms=1795455600000)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertIn("error", res)
+            self.assertFalse(os.path.exists(db_path))
+        finally:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            os.rmdir(nonexistent_dir)
+
+    def test_outlook_readonly_rollback_retry(self):
+        """outlook retries once on readonly/rollback OperationalError after sleeping 1s."""
+        import tempfile
+        from unittest import mock
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (ts, 1.47, 0.036, 0.0, None, None, "live", "ample"))
+            conn.commit()
+            conn.close()
+
+            real_connect = sqlite3.connect
+            attempts = 0
+
+            def connect_with_transient_error(*args, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise sqlite3.OperationalError("attempt to write a readonly database")
+                return real_connect(*args, **kwargs)
+
+            with mock.patch("sqlite3.connect", side_effect=connect_with_transient_error):
+                with mock.patch("time.sleep") as mock_sleep:
+                    res = quota_watch.outlook(db=db_path, now_ms=ts + 1000)
+                    self.assertEqual(res["verdict"], "ample")
+                    self.assertEqual(attempts, 2)
+                    mock_sleep.assert_called_once_with(0.2)
+
+            # Failure on both attempts gives up -> unknown with error
+            attempts = 0
+
+            def connect_always_fails(*args, **kwargs):
+                nonlocal attempts
+                attempts += 1
+                raise sqlite3.OperationalError("cannot rollback - no transaction is active")
+
+            with mock.patch("sqlite3.connect", side_effect=connect_always_fails):
+                with mock.patch("time.sleep") as mock_sleep:
+                    res = quota_watch.outlook(db=db_path, now_ms=ts + 1000)
+                    self.assertEqual(res["verdict"], "unknown")
+                    self.assertIn("error", res)
+                    self.assertIn("rollback", res["error"].lower())
+                    self.assertEqual(attempts, 2)
+                    mock_sleep.assert_called_once_with(0.2)
+
+    def test_outlook_nan_inf_stored_in_db(self):
+        """outlook sanitizes NaN/inf/unparseable values to None, producing strict JSON without 'nan'/'inf'."""
+        import tempfile
+        import json
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            # Insert NaN / Inf into floats and text into integers
+            conn.execute(
+                "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, float("nan"), float("inf"), float("-inf"), 1795608000372, float("nan"), "live", "tight")
+            )
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=ts + 60000)
+            self.assertEqual(res["verdict"], "tight")
+            self.assertIsNone(res["h0"])
+            self.assertIsNone(res["burn_h"])
+            self.assertIsNone(res["zero_h"])
+            self.assertIsNone(res["next_refill_amt"])
+            self.assertEqual(res["ts"], ts)
+
+            # Strict JSON check: parse_constant must not be called
+            def _fail_const(c):
+                raise ValueError(f"Unexpected constant in JSON: {c}")
+
+            dumped = json.dumps(res, allow_nan=False)
+            parsed = json.loads(dumped, parse_constant=_fail_const)
+            self.assertIsNone(parsed["h0"])
+            self.assertNotIn("nan", res["line"].lower())
+            self.assertNotIn("inf", res["line"].lower())
+
+    def test_outlook_clock_skew(self):
+        """outlook treats age_s < -60 as unknown with error 'clock skew: age_s=N'."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            now_ms = ts - 61000  # age_s = -61 (< -60)
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (ts, 1.47, 0.036, 0.0, None, None, "live", "ample"))
+            conn.commit()
+            conn.close()
+
+            res = quota_watch.outlook(db=db_path, now_ms=now_ms)
+            self.assertEqual(res["verdict"], "unknown")
+            self.assertEqual(res["age_s"], -61)
+            self.assertIn("error", res)
+            self.assertIn("clock skew", res["error"])
+            self.assertIn("age_s=-61", res["error"])
+
+    def test_outlook_never_raises_on_corrupt_row_or_format_error(self):
+        """outlook wraps row parsing and format_line so it never raises even on unexpected errors."""
+        import tempfile
+        from unittest import mock
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            db_path = tmp.name
+            conn = sqlite3.connect(db_path)
+            conn.execute("""CREATE TABLE quota_watch_runs (
+                ts INTEGER PRIMARY KEY,
+                h0 REAL,
+                burn_h REAL,
+                zero_h REAL,
+                next_refill_ts INTEGER,
+                next_refill_amt REAL,
+                source TEXT DEFAULT 'live',
+                verdict TEXT
+            )""")
+            ts = 1795455600000
+            conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (ts, 1.47, 0.036, 0.0, None, None, "live", "ample"))
+            conn.commit()
+            conn.close()
+
+            # Mock format_line to raise
+            with mock.patch("quota_watch.format_line", side_effect=RuntimeError("format crashed")):
+                res = quota_watch.outlook(db=db_path, now_ms=ts + 1000)
+                self.assertIsInstance(res, dict)
+                self.assertEqual(res["verdict"], "ample")
+                self.assertIn("quota@", res["line"])
 
 
 if __name__ == "__main__":
