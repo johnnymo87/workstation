@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS quota_watch_runs (
   burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
   k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
   next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
+  pool_n INTEGER NOT NULL, source TEXT NOT NULL, verdict TEXT);   -- 'live' | 'replay'
 
 CREATE TABLE IF NOT EXISTS quota_forecast (
   ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);

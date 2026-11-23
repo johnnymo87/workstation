@@ -2015,8 +2015,8 @@
         }
 
         python3 pkgs/llm-ledger/test_quota_watch.py 2>&1 | tee "$TMPDIR/qw.txt"
-        grep -q '^Ran 47 tests' "$TMPDIR/qw.txt" || {
-          echo "GATE FAILURE: expected 'Ran 47 tests' from test_quota_watch.py. If you" >&2
+        grep -q '^Ran 53 tests' "$TMPDIR/qw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 53 tests' from test_quota_watch.py. If you" >&2
           echo "added or removed tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

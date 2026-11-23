@@ -273,6 +273,21 @@ def format_dt_et(ts: int) -> str:
     return datetime.datetime.fromtimestamp(ts / 1000, tz=NY_TZ).strftime("%m-%d %H:%M ET")
 
 
+def verdict_from_state(state: dict[str, Any]) -> str:
+    """Return coordinator-facing quota verdict: 'dry' | 'tight' | 'ample'.
+
+    Derived from alert state:
+    - pool_dry -> 'dry'
+    - shortfall -> 'tight'
+    - else -> 'ample'
+    """
+    if state.get("pool_dry"):
+        return "dry"
+    if state.get("shortfall"):
+        return "tight"
+    return "ample"
+
+
 def step_alerts(
     state: dict[str, Any],
     metrics: dict[str, Any],
@@ -556,6 +571,13 @@ def load_or_seed_state(
     return state, is_fresh
 
 
+def ensure_verdict_column(conn: sqlite3.Connection) -> None:
+    """Ensure the 'verdict' column exists on quota_watch_runs (migration for existing DBs)."""
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+    if "verdict" not in cols:
+        conn.execute("ALTER TABLE quota_watch_runs ADD COLUMN verdict TEXT")
+
+
 def record_run(
     db: str,
     row: dict[str, Any] | Sequence[Any],
@@ -586,10 +608,13 @@ def record_run(
                 row.get("next_refill_amt"),
                 row["pool_n"],
                 row.get("source", "live"),
+                row.get("verdict"),
             )
             run_ts = row["ts"]
         else:
             row_tuple = tuple(row)
+            if len(row_tuple) == 14:
+                row_tuple = row_tuple + (None,)
             run_ts = row_tuple[0]
 
         conn = sqlite3.connect(db, timeout=t)
@@ -599,11 +624,12 @@ def record_run(
                     stmt = stmt.strip()
                     if stmt:
                         conn.execute(stmt)
+                ensure_verdict_column(conn)
                 conn.execute(
                     """INSERT OR REPLACE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
   k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
-  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+  pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     row_tuple,
                 )
                 if path:
@@ -624,14 +650,14 @@ def record_replay_runs(
     db: str,
     rows: list[tuple[Any, ...]],
     timeout: float | None = None,
-) -> int:
-    """Record replay runs into quota_watch_runs using INSERT OR IGNORE in one transaction.
+) -> tuple[int, int]:
+    """Record replay runs into quota_watch_runs using INSERT OR IGNORE and backfill verdicts.
 
-    Returns the number of rows inserted and prints how many rows inserted.
+    Returns the number of rows inserted and verdicts filled, and prints the counts.
     """
     if not rows:
-        print("quota-replay: recorded 0 rows")
-        return 0
+        print("quota-replay: recorded 0 rows, filled 0 verdicts")
+        return (0, 0)
     from llm_ledger import QUOTA_WATCH_SCHEMA_SQL
 
     t = RECORD_TIMEOUT_S if timeout is None else timeout
@@ -643,22 +669,36 @@ def record_replay_runs(
                     stmt = stmt.strip()
                     if stmt:
                         conn.execute(stmt)
-                changes_before = conn.total_changes
+                ensure_verdict_column(conn)
+                changes_before_insert = conn.total_changes
+                norm_rows = [r + (None,) if len(r) == 14 else r for r in rows]
                 conn.executemany(
                     """INSERT OR IGNORE INTO quota_watch_runs (
   ts, h0, burn_h, burn_6h, burn_24h, spill_6h, spill_24h,
   k, zero_h, vertex_usd, next_refill_ts, next_refill_amt,
-  pool_n, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    rows,
+  pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    norm_rows,
                 )
-                inserted = conn.total_changes - changes_before
+                inserted = conn.total_changes - changes_before_insert
+
+                changes_before_fill = conn.total_changes
+                update_params = [
+                    (r[14], r[0])
+                    for r in norm_rows
+                    if len(r) > 14 and r[14] is not None
+                ]
+                conn.executemany(
+                    "UPDATE quota_watch_runs SET verdict=? WHERE ts=? AND verdict IS NULL",
+                    update_params,
+                )
+                filled = conn.total_changes - changes_before_fill
         finally:
             conn.close()
     except (sqlite3.Error, OSError) as e:
         sys.stderr.write(f"quota-replay: could not record: {e}\n")
         raise QuotaRecordError(str(e)) from e
-    print(f"quota-replay: recorded {inserted} rows")
-    return inserted
+    print(f"quota-replay: recorded {inserted} rows, filled {filled} verdicts")
+    return (inserted, filled)
 
 
 def run_live(
@@ -852,6 +892,7 @@ def run_live(
         "next_refill_amt": next_refill[1] if next_refill else None,
         "pool_n": len(pool),
         "source": "live",
+        "verdict": verdict_from_state(new_state),
     }
     record_run(db, run_row, forecast_path)
 
@@ -868,6 +909,107 @@ def run_live(
         f"dry_h={zero_h:.1f} vertex≈{v_str} pool_dry={pool_dry_str} short={short_str} acct_hi={acct_hi_cnt}"
     )
     return 0
+
+
+@dataclasses.dataclass
+class VerdictEpisode:
+    verdict: str
+    start_ts: int
+    end_ts: int
+    duration_h: float
+    peak_forecast_usd: float | None
+    actual_spillover_usd: float
+    is_open: bool = False
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+
+def verdict_episodes(
+    rows: list[tuple[Any, ...]] | list[dict[str, Any]],
+    spill_buckets: dict[int, float] | None = None,
+) -> list[VerdictEpisode]:
+    """Group contiguous tight and dry episodes from replay rows."""
+    episodes: list[VerdictEpisode] = []
+    current_verdict: str | None = None
+    episode_rows: list[tuple[int, float | None]] = []
+
+    def flush_episode(is_open: bool) -> None:
+        nonlocal current_verdict, episode_rows
+        if not current_verdict or not episode_rows:
+            return
+        start_ts = episode_rows[0][0]
+        end_ts = episode_rows[-1][0]
+        duration_h = (end_ts - start_ts) / 3600_000.0
+        forecasts = [v for _, v in episode_rows if v is not None]
+        peak_forecast_usd = max(forecasts) if forecasts else None
+        actual_spillover = 0.0
+        if spill_buckets:
+            window_end = end_ts + 24 * 3600 * 1000
+            actual_spillover = sum(
+                cost for b, cost in spill_buckets.items()
+                if start_ts <= b <= window_end
+            )
+        episodes.append(
+            VerdictEpisode(
+                verdict=current_verdict,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                duration_h=duration_h,
+                peak_forecast_usd=peak_forecast_usd,
+                actual_spillover_usd=actual_spillover,
+                is_open=is_open,
+            )
+        )
+        current_verdict = None
+        episode_rows = []
+
+    for r in rows:
+        if isinstance(r, dict):
+            ts = r["ts"]
+            v = r.get("verdict")
+            v_usd = r.get("vertex_usd")
+        else:
+            ts = r[0]
+            v = r[14] if len(r) > 14 else None
+            v_usd = r[9] if len(r) > 9 else None
+
+        if v in ("tight", "dry"):
+            if current_verdict == v:
+                episode_rows.append((ts, v_usd))
+            else:
+                if current_verdict:
+                    flush_episode(is_open=False)
+                current_verdict = v
+                episode_rows = [(ts, v_usd)]
+        else:
+            if current_verdict:
+                flush_episode(is_open=False)
+
+    if current_verdict:
+        flush_episode(is_open=True)
+
+    return episodes
+
+
+def format_verdict_episode(ep: VerdictEpisode) -> str:
+    """Format one verdict episode into a summary line."""
+    start_str = format_dt_et(ep.start_ts)
+    end_str = format_dt_et(ep.end_ts)
+    open_str = ", open" if ep.is_open else ""
+    v_forecast = f"${round(ep.peak_forecast_usd)}" if ep.peak_forecast_usd is not None else "none"
+    actual_spill = f"${ep.actual_spillover_usd:.2f}"
+    return (
+        f"episode {ep.verdict}: {start_str} to {end_str} "
+        f"({ep.duration_h:.1f}h{open_str}) · "
+        f"peak forecast {v_forecast} · "
+        f"actual spillover (+24h) {actual_spill}"
+    )
+
+
+def format_verdict_episodes(episodes: list[VerdictEpisode]) -> list[str]:
+    """Format all verdict episodes."""
+    return [format_verdict_episode(ep) for ep in episodes]
 
 
 def replay(
@@ -927,25 +1069,6 @@ def replay(
         ]
         zero_h, vertex_usd, next_refill = forecast(H0, B, all_refills, k, T)
 
-        replay_rows.append(
-            (
-                T,
-                H0,
-                B,
-                burn_6h,
-                burn_24h,
-                spill_6h,
-                spill_24h,
-                k,
-                zero_h,
-                vertex_usd,
-                next_refill[0] if next_refill else None,
-                next_refill[1] if next_refill else None,
-                len(pool),
-                "replay",
-            )
-        )
-
         spill_15m = sum_buckets(spill_buckets, T, 15 * 60 * 1000)
         spill_30m = sum_buckets(spill_buckets, T, 30 * 60 * 1000)
 
@@ -963,6 +1086,27 @@ def replay(
         }
 
         new_alert_state, _ = step_alerts(alert_state, metrics)
+        verdict = verdict_from_state(new_alert_state)
+
+        replay_rows.append(
+            (
+                T,
+                H0,
+                B,
+                burn_6h,
+                burn_24h,
+                spill_6h,
+                spill_24h,
+                k,
+                zero_h,
+                vertex_usd,
+                next_refill[0] if next_refill else None,
+                next_refill[1] if next_refill else None,
+                len(pool),
+                "replay",
+                verdict,
+            )
+        )
 
         # Detect transitions
         was_dry = bool(alert_state.get("pool_dry", False))
@@ -1009,5 +1153,9 @@ def replay(
 
     if record:
         record_replay_runs(db, replay_rows)
+
+    episodes = verdict_episodes(replay_rows, spill_buckets)
+    for line in format_verdict_episodes(episodes):
+        print(line)
 
     return events

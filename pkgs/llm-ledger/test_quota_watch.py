@@ -1082,7 +1082,8 @@ class TestLiveAndReplay(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0][0], T1)
         self.assertEqual(runs[0][1], 2.0)
-        self.assertEqual(runs[0][-1], "live")
+        self.assertEqual(runs[0][13], "live")
+        self.assertIsNone(runs[0][14])
 
         fc = conn.execute("SELECT ts, headroom, run_ts FROM quota_forecast").fetchall()
         self.assertEqual(len(fc), 289)
@@ -1406,6 +1407,284 @@ class TestCliSubcommands(unittest.TestCase):
         ts_utc = parse_et_datetime("2026-11-20T19:00:00Z")
         dt_utc = datetime.datetime.fromtimestamp(ts_utc / 1000, tz=E)
         self.assertEqual(dt_utc.strftime("%Y-%m-%d %H:%M"), "2026-11-20 14:00")
+
+
+class TestVerdictAndEpisodes(unittest.TestCase):
+    """Tests for verdict determination, schema migration, backfill, and episode reporting."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory(prefix="verdict-test-")
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_verdict_from_state(self):
+        """verdict_from_state returns dry/tight/ample based on state flags; both set -> dry."""
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": True, "shortfall": True}), "dry")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": True, "shortfall": False}), "dry")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": False, "shortfall": True}), "tight")
+        self.assertEqual(quota_watch.verdict_from_state({"pool_dry": False, "shortfall": False}), "ample")
+        self.assertEqual(quota_watch.verdict_from_state({}), "ample")
+
+    def test_ensure_verdict_column(self):
+        """ensure_verdict_column adds verdict to an old-schema table and is idempotent."""
+        db_path = os.path.join(self.tmp_dir.name, "db_ensure_verdict.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL
+            )
+        """)
+        cols_before = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertNotIn("verdict", cols_before)
+
+        quota_watch.ensure_verdict_column(conn)
+        cols_after = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertIn("verdict", cols_after)
+
+        # Idempotent: second call does not raise error and preserves schema
+        quota_watch.ensure_verdict_column(conn)
+        cols_idempotent = [r[1] for r in conn.execute("PRAGMA table_info(quota_watch_runs)").fetchall()]
+        self.assertIn("verdict", cols_idempotent)
+        conn.close()
+
+    def test_record_run_verdict_and_migration(self):
+        """record_run writes verdict and handles migration on old-schema DB."""
+        # 1. Normal record_run writes verdict
+        db_path = os.path.join(self.tmp_dir.name, "db_rec_verdict.db")
+        t0 = 1700000000000
+        run_row = {
+            "ts": t0,
+            "h0": 2.5,
+            "burn_h": 0.1,
+            "zero_h": 0.0,
+            "pool_n": 1,
+            "source": "live",
+            "verdict": "tight",
+        }
+        quota_watch.record_run(db_path, run_row)
+        conn = sqlite3.connect(db_path)
+        row = conn.execute("SELECT ts, verdict, source FROM quota_watch_runs WHERE ts = ?", (t0,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[1], "tight")
+        self.assertEqual(row[2], "live")
+
+        # 2. Old-schema DB migration
+        old_db_path = os.path.join(self.tmp_dir.name, "db_old_rec.db")
+        conn = sqlite3.connect(old_db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (t0 - 1000, 1.0, 0.0, 0.0, 1, "live"),
+        )
+        conn.commit()
+        conn.close()
+
+        run_row_migrated = {
+            "ts": t0,
+            "h0": 0.5,
+            "burn_h": 0.2,
+            "zero_h": 12.0,
+            "pool_n": 1,
+            "source": "live",
+            "verdict": "dry",
+        }
+        quota_watch.record_run(old_db_path, run_row_migrated)
+        conn = sqlite3.connect(old_db_path)
+        row2 = conn.execute("SELECT ts, verdict FROM quota_watch_runs WHERE ts = ?", (t0,)).fetchone()
+        conn.close()
+        self.assertIsNotNone(row2)
+        self.assertEqual(row2[1], "dry")
+
+    def test_record_replay_runs_backfill(self):
+        """record_replay_runs inserts new rows, fills NULL verdicts on existing rows, preserves existing verdicts."""
+        db_path = os.path.join(self.tmp_dir.name, "db_replay_backfill.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""
+            CREATE TABLE quota_watch_runs (
+              ts INTEGER PRIMARY KEY,
+              h0 REAL NOT NULL, burn_h REAL NOT NULL,
+              burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
+              k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
+              next_refill_ts INTEGER, next_refill_amt REAL,
+              pool_n INTEGER NOT NULL, source TEXT NOT NULL,
+              verdict TEXT
+            )
+        """)
+        ts_x = 1700000100000
+        ts_y = 1700000200000
+        ts_z = 1700000300000
+        # X: live row with NULL verdict
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts_x, 5.0, 0.1, 0.0, 1, "live", None),
+        )
+        # Y: live row with 'ample' verdict
+        conn.execute(
+            "INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, pool_n, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts_y, 8.0, 0.0, 0.0, 1, "live", "ample"),
+        )
+        conn.commit()
+        conn.close()
+
+        row_x = (ts_x, 9.9, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "tight")
+        row_y = (ts_y, 9.9, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "dry")
+        row_z = (ts_z, 7.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+
+        import io
+        stdout_cap = io.StringIO()
+        orig_stdout = sys.stdout
+        try:
+            sys.stdout = stdout_cap
+            res = quota_watch.record_replay_runs(db_path, [row_x, row_y, row_z])
+        finally:
+            sys.stdout = orig_stdout
+
+        self.assertEqual(res, (1, 1))
+        self.assertIn("quota-replay: recorded 1 rows, filled 1 verdicts", stdout_cap.getvalue())
+
+        conn = sqlite3.connect(db_path)
+        cur = conn.execute("SELECT ts, h0, source, verdict FROM quota_watch_runs ORDER BY ts")
+        rows = {r[0]: r for r in cur.fetchall()}
+        conn.close()
+
+        # X: live row other columns unchanged, verdict filled with 'tight'
+        self.assertEqual(rows[ts_x][1], 5.0)
+        self.assertEqual(rows[ts_x][2], "live")
+        self.assertEqual(rows[ts_x][3], "tight")
+
+        # Y: live row other columns unchanged, verdict kept 'ample' (not overwritten)
+        self.assertEqual(rows[ts_y][1], 8.0)
+        self.assertEqual(rows[ts_y][2], "live")
+        self.assertEqual(rows[ts_y][3], "ample")
+
+        # Z: inserted replay row
+        self.assertEqual(rows[ts_z][1], 7.0)
+        self.assertEqual(rows[ts_z][2], "replay")
+        self.assertEqual(rows[ts_z][3], "ample")
+
+    def test_replay_records_verdicts_for_shortfall_span(self):
+        """replay with record=True records 'tight' exactly for the shortfall span."""
+        db_path = os.path.join(self.tmp_dir.name, "db_replay_shortfall.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # Warmup samples: acct1 has usage 0.50 for 7 days
+        for d in range(7):
+            ts = t0 - (7 - d) * 86400 * 1000
+            conn.execute(
+                "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+                (ts, "acct1", 0.50, ts + 10 * 86400 * 1000),
+            )
+        # T1 (t0): acct1 hits 0.98 (CAP -> H0=0), burn exists -> shortfall fires -> tight
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.98, t0 + 10 * 86400 * 1000),
+        )
+        # T2 (t0 + 5m): acct1 still at 0.98 -> shortfall remains -> tight
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 + 300000, "acct1", 0.98, t0 + 10 * 86400 * 1000),
+        )
+        # T3 (t0 + 10m): acct1 usage drops to 0.10 -> H0=0.88, zero_h=0 -> shortfall clears -> ample
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0 + 600000, "acct1", 0.10, t0 + 10 * 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        events = quota_watch.replay(db_path, since_ms=t0, until_ms=t0 + 600000, record=True)
+        short_fires = [e for e in events if e.kind == "shortfall" and e.action == "fire"]
+        short_clears = [e for e in events if e.kind == "shortfall" and e.action == "clear"]
+        self.assertEqual(len(short_fires), 1)
+        self.assertEqual(short_fires[0].ts, t0)
+        self.assertEqual(len(short_clears), 1)
+        self.assertEqual(short_clears[0].ts, t0 + 600000)
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT ts, verdict FROM quota_watch_runs ORDER BY ts").fetchall()
+        conn.close()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0], (t0, "tight"))
+        self.assertEqual(rows[1], (t0 + 300000, "tight"))
+        self.assertEqual(rows[2], (t0 + 600000, "ample"))
+
+    def test_verdict_episodes_and_report(self):
+        """verdict_episodes groups tight and dry episodes, sums actual spillover over [start, end+24h], marks open."""
+        t0 = 1700000000000
+        tight_start = t0 + 300000
+        tight_end = t0 + 600000
+        dry_start = tight_end + 48 * 3600 * 1000
+        dry_end = dry_start
+
+        r0 = (t0, 1.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+        r1 = (tight_start, 0.0, 0.5, None, None, None, None, None, 10.0, 50.0, None, None, 1, "replay", "tight")
+        r2 = (tight_end, 0.0, 0.5, None, None, None, None, None, 10.0, 120.0, None, None, 1, "replay", "tight")
+        r3 = (tight_end + 300000, 1.0, 0.0, None, None, None, None, None, 0.0, None, None, None, 1, "replay", "ample")
+        r4 = (dry_start, 0.0, 0.5, None, None, None, None, None, 20.0, 200.0, None, None, 1, "replay", "dry")
+
+        tight_24h_end = tight_end + 24 * 3600 * 1000
+        spill_buckets = {
+            tight_start - 300000: 999.0,   # before start: excluded
+            tight_start: 10.0,              # at start: included
+            tight_end: 25.0,                # at end: included
+            tight_end + 12 * 3600 * 1000: 30.0,  # +12h: included
+            tight_24h_end: 15.0,            # at +24h boundary: included
+            tight_24h_end + 300000: 888.0, # after +24h: excluded
+            dry_start: 42.0,                # during dry: included in dry episode
+        }
+
+        episodes = quota_watch.verdict_episodes([r0, r1, r2, r3, r4], spill_buckets)
+        self.assertEqual(len(episodes), 2)
+
+        # Episode 1: tight
+        ep1 = episodes[0]
+        self.assertEqual(ep1.verdict, "tight")
+        self.assertEqual(ep1.start_ts, tight_start)
+        self.assertEqual(ep1.end_ts, tight_end)
+        self.assertAlmostEqual(ep1.duration_h, (tight_end - tight_start) / 3600000.0, places=4)
+        self.assertEqual(ep1.peak_forecast_usd, 120.0)
+        self.assertAlmostEqual(ep1.actual_spillover_usd, 10.0 + 25.0 + 30.0 + 15.0, places=2)
+        self.assertFalse(ep1.is_open)
+
+        # Episode 2: dry (open-ended)
+        ep2 = episodes[1]
+        self.assertEqual(ep2.verdict, "dry")
+        self.assertEqual(ep2.start_ts, dry_start)
+        self.assertEqual(ep2.end_ts, dry_end)
+        self.assertAlmostEqual(ep2.duration_h, 0.0, places=4)
+        self.assertEqual(ep2.peak_forecast_usd, 200.0)
+        self.assertAlmostEqual(ep2.actual_spillover_usd, 42.0, places=2)
+        self.assertTrue(ep2.is_open)
+
+        # Formatting tests
+        line1 = quota_watch.format_verdict_episode(ep1)
+        self.assertIn("episode tight:", line1)
+        self.assertIn("peak forecast $120", line1)
+        self.assertIn("actual spillover (+24h) $80.00", line1)
+        self.assertNotIn("open", line1)
+
+        line2 = quota_watch.format_verdict_episode(ep2)
+        self.assertIn("episode dry:", line2)
+        self.assertIn("peak forecast $200", line2)
+        self.assertIn("actual spillover (+24h) $42.00", line2)
+        self.assertIn("open", line2)
 
 
 if __name__ == "__main__":
