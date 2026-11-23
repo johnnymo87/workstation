@@ -62,6 +62,15 @@ let
         "$url/media/${objectKey}")" || { echo "quota-outlook-fetch: curl failed (http $code)" >&2; exit 1; }
 
       if [ "$code" = 404 ]; then
+        # The router answers an unknown path with the same 404 body as a missing object, so
+        # prove the URL and key with /whoami before calling this "not published yet".
+        who="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+          -H @<(printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$key_file")") \
+          "$url/whoami")" || who=000
+        if [ "$who" != 200 ]; then
+          echo "quota-outlook-fetch: 404 for ${objectKey} and /whoami answered HTTP $who; check the worker URL and key" >&2
+          exit 1
+        fi
         echo "quota-outlook-fetch: cloudbox has not published ${objectKey} yet; leaving the old copy" >&2
         exit 0
       fi

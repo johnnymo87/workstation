@@ -1,6 +1,6 @@
 # devbox reads cloudbox's quota verdict
 
-Bead `workstation-91cw`. Epic `eng-agent-platform-ul4.24`; design is in
+Bead `workstation-91cw` (cloudbox half: `workstation-wvuq`). Epic `eng-agent-platform-ul4.24`; design is in
 eng-agent-platform, `docs/plans/2026-11-23-quota-aware-coordinators-design.md`. Builds on
 #944 (`llm-ledger quota-outlook` on cloudbox).
 
@@ -69,29 +69,44 @@ degrades to `unknown`.
 
 ## cloudbox (stall-watcher program's change; spec)
 
-After each successful `llm-quota-watch` run, publish the outlook. Run it as an
-`OnSuccess=` unit, or best-effort in `ExecStartPost=` with a leading `-`, so that a
-publish failure never fails quota-watch or pages:
+After each successful `llm-quota-watch` run, publish the outlook. Do it best-effort: a
+publish failure must never fail quota-watch or page. Use one of these two forms:
+
+- A separate `llm-quota-outlook-publish` oneshot, started through `OnSuccess=` of
+  `llm-quota-watch`.
+- `ExecStartPost=-<script>`. The leading `-` is what makes it best-effort. The unit's
+  `ProtectHome = true` does no harm, since `/run/secrets` is not under `/home`.
+
+Either way, the command has to be a `pkgs.writeShellScript`, because it uses `<<<` and
+`<(...)`. It must also call the store path of the binary, because a system unit has no
+`llm-ledger` on PATH:
 
 ```bash
-out=$(llm-ledger quota-outlook)                      # always exits 0, one JSON object
-curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
-  -H @<(printf 'Authorization: Bearer %s\n' "$(cat /run/secrets/pigeon_worker_key)") \
+out="$(${llmLedger}/bin/llm-ledger quota-outlook)"   # always exits 0, one JSON object
+code="$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+  -H @<(printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < /run/secrets/pigeon_worker_key)") \
   -F key=state/cloudbox/quota-outlook.json -F mime=application/json \
   -F filename=quota-outlook.json -F "file=@-;type=application/json" \
-  "$(cat /run/secrets/ccr_worker_url)/media/upload" <<<"$out"
+  "$(tr -d '[:space:]' < /run/secrets/ccr_worker_url)/media/upload" <<<"$out")" || code=000
+# Deliberately no --fail and no exit status: log the code and move on. A publish that
+# stops working shows up on devbox as `quota: unknown` within 20 min.
+echo "quota-outlook publish: HTTP $code"
 ```
 
 Requirements:
 
-- The unit can read `/run/secrets/pigeon_worker_key` and `ccr_worker_url` (both `dev`,
-  mode 0400).
-- It must not run under `ProtectHome` or `PrivateNetwork`.
+- Run as `User=dev`, which `llm-quota-watch` already is. Both secrets are owned by `dev`
+  with mode 0400.
+- The unit needs network access, so no `PrivateNetwork` or `IPAddressDeny`.
 - Cadence follows quota-watch, every 5 min. End-to-end age at devbox is then about 5 min
   for quota-watch, plus 2 min for the fetch, plus run times. That is well inside the
   20 min staleness limit.
 - Publish whatever `quota-outlook` prints, including `unknown`. devbox treats it as
   unknown.
+
+Until cloudbox publishes, every devbox wake carries
+`quota: unknown (outlook unavailable)` instead of no quota line at all. stall-watch treats
+unknown as "work as usual".
 
 Check from devbox:
 
