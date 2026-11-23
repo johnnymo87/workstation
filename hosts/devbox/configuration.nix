@@ -738,14 +738,22 @@ in
       # 2026-11-20, users/dev/home.devbox.nix; devbox has
       # no per-command scopes, so there both caps hold the tool commands too). Measured
       # peak over the 45 days to 2026-11-05: 565M (the Nov 4-5 run), so this is
-      # 10x headroom for the coordinators this serve hosts. Worst case with the
-      # user slice at its cap is 26G of 30G.
+      # 10x headroom for the coordinators this serve hosts.
+      #
+      # 10G since 2026-11-23 (workstation-6w7i.30): devbox's program WORKERS
+      # moved here from opencode-serve@ (worker_harness = "goose"), so their
+      # tool commands (mix test, the TEC python suite, pytest) now run in this
+      # cgroup. Coordinators alone reached the 6G cap on Nov 11, 18, 20 and 23
+      # (7.5-9G read from disk on those days: cache thrash at the cap), and two
+      # probe workers took the day's peak from 3.1G to 4.2G. Worst case with the
+      # user slice at its 20G cap is 30G of 30G RAM, with 22G swap behind it;
+      # in practice the opencode serves in that slice shrink as work leaves them.
       #
       # Max-only, no MemoryHigh, for the reason the opencode serves dropped it:
       # memory.high throttles instead of killing and produced multi-minute
       # silent stalls (workstation-94g8). MemorySwapMax=1G so the cap cannot be
       # relieved into zram indefinitely (the cloudbox h1y6 measurement).
-      MemoryMax = "6G";
+      MemoryMax = "10G";
       MemorySwapMax = "1G";
       # OOMPolicy=continue, NOT systemd's default stop: tool shells live in this
       # cgroup, and with `stop` ANY oom kill in it would end every goose turn on
@@ -767,6 +775,13 @@ in
       # daemon-reload re-realizes cgroup limits on the running unit. Check
       # /sys/fs/cgroup/system.slice/goose-serve.service/memory.current first.
       OOMPolicy = "continue";
+      # Soft open-files limit (workstation-6w7i.30). systemd's default is 1024
+      # soft / 524288 hard, and goose's tool shells inherit the soft one, while
+      # opencode bash gets 524288. Measured 2026-11-23 on devbox: eternal-machinery's
+      # TEC suite (1980 tests) passes under opencode and errors once under goose
+      # with "Too many open files". Applies when goose starts (restart or the
+      # nightly), not at switch.
+      LimitNOFILE = 524288;
     };
   };
 
