@@ -945,6 +945,13 @@ in
       # daemon-reload re-realizes cgroup limits on the running unit. Check
       # /sys/fs/cgroup/system.slice/goose-serve.service/memory.current first.
       OOMPolicy = "continue";
+      # Soft open-files limit (workstation-6w7i.30). systemd's default is 1024
+      # soft / 524288 hard, and goose's tool shells inherit the soft one, while
+      # opencode bash gets 524288. Measured 2026-11-23 on devbox: eternal-machinery's
+      # TEC suite (1980 tests) passes under opencode and errors once under goose
+      # with "Too many open files". Applies when goose starts (restart or the
+      # nightly), not at switch.
+      LimitNOFILE = 524288;
     };
   };
 

@@ -2054,7 +2054,11 @@ down and its silence means nothing. This host has no second leg.
       RestartSec = 5;
       RestartSteps = 10;
       RestartMaxDelaySec = 300;
-      MemoryMax = "1G";
+      # 2G since 2026-11-23 (workstation-6w7i.30): at 1G it sat at 846M current,
+      # 889M peak (87%) carrying two coordinators and a handful of sessions, and
+      # it is about to proxy every devbox program worker too. It is not
+      # restarted nightly, so growth accumulates.
+      MemoryMax = "2G";
       MemorySwapMax = "0";
     };
     Install = {
