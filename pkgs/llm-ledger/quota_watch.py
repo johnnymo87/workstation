@@ -41,19 +41,6 @@ STALE_INPUT_MS: int = 20 * 60 * 1000  # 20 min
 NY_TZ = ZoneInfo("America/New_York")
 RECORD_TIMEOUT_S: float = 30.0
 
-QUOTA_WATCH_SCHEMA_SQL: str = """
-CREATE TABLE IF NOT EXISTS quota_watch_runs (
-  ts INTEGER PRIMARY KEY,          -- T, the quota_samples tick evaluated
-  h0 REAL NOT NULL, burn_h REAL NOT NULL,
-  burn_6h REAL, burn_24h REAL, spill_6h REAL, spill_24h REAL,
-  k REAL, zero_h REAL NOT NULL, vertex_usd REAL,
-  next_refill_ts INTEGER, next_refill_amt REAL,
-  pool_n INTEGER NOT NULL, source TEXT NOT NULL);   -- 'live' | 'replay'
-
-CREATE TABLE IF NOT EXISTS quota_forecast (
-  ts INTEGER PRIMARY KEY, headroom REAL NOT NULL, run_ts INTEGER NOT NULL);
-"""
-
 
 class QuotaRecordError(RuntimeError):
     """Raised when recording runs into the ledger fails."""
@@ -577,10 +564,12 @@ def record_run(
 ) -> None:
     """Record quota watch run and forecast path in the ledger.
 
-    Best-effort: catches sqlite3.Error and OSError, writes warning to stderr, returns.
+    Best-effort: catches sqlite3.Error, OSError, and ImportError, writes warning to stderr, returns.
     """
     t = RECORD_TIMEOUT_S if timeout is None else timeout
     try:
+        from llm_ledger import QUOTA_WATCH_SCHEMA_SQL
+
         if isinstance(row, dict):
             row_tuple = (
                 row["ts"],
@@ -626,7 +615,7 @@ def record_run(
                     )
         finally:
             conn.close()
-    except (sqlite3.Error, OSError) as e:
+    except (sqlite3.Error, OSError, ImportError) as e:
         sys.stderr.write(f"quota-watch: could not record run: {e}\n")
         return
 
@@ -643,6 +632,8 @@ def record_replay_runs(
     if not rows:
         print("quota-replay: recorded 0 rows")
         return 0
+    from llm_ledger import QUOTA_WATCH_SCHEMA_SQL
+
     t = RECORD_TIMEOUT_S if timeout is None else timeout
     try:
         conn = sqlite3.connect(db, timeout=t)

@@ -186,17 +186,28 @@ visible)
    `llm-ledger quota-replay --since 2026-10-25 --record` as dev.
 2. Every panel query through `/api/ds/query`, with `$__interval_ms` and
    variables substituted, for 7, 30 and 365 days: status 200, each under 2 s
-   (a reader must stay far from the writer's 30 s busy timeout).
+   (a reader must stay far from the writer's 30 s busy timeout). The ledger holds
+   ~31 days so the 365-day timing is not yet meaningful; record spillover (the
+   one query on `requests`) as a P5 scaling risk with its current timing.
 3. **Agreement, gap defined in advance.** Immediately after an llm-ledger run,
-   compare the program table's per-tag totals over the ET 7-day window with
+   compare per tag by rebuilding the tag as
+   `program || CASE WHEN sub<>'' THEN '/'||sub ELSE '' END` from the
+   program/sub query over oc-tags' exact window (ET midnight 7 days ago .. now,
+   see calculate_window in pkgs/oc-tags/oc_tags.py) with
    `oc-tags report --days 7 --backend max` and `--backend vertex`:
    - per-backend totals within max($1, 0.5%);
    - per-tag within max($1, 1%); a larger difference must be explained by
      a retag between snapshot and report, or it is a bug;
    - the all-source report is **expected to exceed** the ledger's cfp total
      (non-cfp sources); it is recorded, not tested.
-4. `/api/dashboards/uid/llm-spend` and `llm-quota` return `meta.provisioned`
-   true and `meta.canSave` false; anonymous requests still 401.
+4. `/api/dashboards/uid/llm-spend` and `llm-quota` return `meta.provisioned == true`;
+   anonymous requests still 401.
+
+## Decisions
+
+- **Program vs sub**: `program = tag` before the first `'/'`, because `'/'` separates the `auto:` slug.
+- **Tag folding**: oc-tags' `':'` fold is a rendering option and is not applied.
+- **Spillover host filtering**: spillover is not host-filtered yet (P5 decides).
 
 ## Out of scope
 

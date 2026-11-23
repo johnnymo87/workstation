@@ -130,12 +130,16 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "next_refill_time"
+              "options": "next_refill"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Next refill time"
+                "value": "Next refill"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
               }
             ]
           },
@@ -205,7 +209,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/.*/",
           "values": false
         },
         "textMode": "auto"
@@ -217,13 +221,11 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts / 1000 AS next_refill_time,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
+          "queryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts AS next_refill,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts / 1000 AS next_refill_time,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
+          "rawQueryText": "SELECT\n  h0 AS headroom,\n  burn_h AS burn_h,\n  zero_h AS zero_h,\n  vertex_usd AS vertex_usd,\n  k AS k,\n  next_refill_ts AS next_refill,\n  next_refill_amt AS next_refill_amt,\n  (strftime('%s','now')*1000 - ts)/1000 AS age_s\nFROM quota_watch_runs\nORDER BY ts DESC\nLIMIT 1",
           "refId": "A",
-          "timeColumns": [
-            "next_refill_time"
-          ]
+          "timeColumns": []
         }
       ],
       "title": "Current Quota Status: Newest Evaluation",
@@ -513,12 +515,13 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Hourly cash cost of requests where desired was Max but backend was Vertex due to pool depletion.",
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 20,
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
             "gradientMode": "none",
             "lineInterpolation": "linear",
             "lineWidth": 1,
@@ -561,16 +564,16 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) * 3600000.0 / $__interval_ms AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (q.ts / $__interval_ms) * $__interval_ms / 1000 AS time,\n  SUM(q.cost_usd) * 3600000.0 / $__interval_ms AS \"Spillover cash $\"\nFROM requests q\nJOIN route r USING(request_id)\nWHERE r.desired = 'max'\n  AND q.backend = 'vertex'\n  AND q.ts >= $__from\n  AND q.ts < $__to\nGROUP BY 1\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Max to Vertex Spillover cash $ (Vertex/Enterprise)",
+      "title": "Max to Vertex Spillover cash $ per hour",
       "type": "timeseries"
     }
   ],

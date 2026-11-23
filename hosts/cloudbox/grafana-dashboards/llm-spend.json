@@ -150,12 +150,13 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Hourly cash spend (Vertex and Enterprise backends) stacked by program. First partial hour is dropped.",
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 50,
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
             "gradientMode": "none",
             "lineInterpolation": "linear",
             "lineWidth": 1,
@@ -198,16 +199,16 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Cash $ (Vertex/Enterprise) per program",
+      "title": "Cash $ per hour (Vertex/Enterprise) per program",
       "type": "timeseries"
     },
     {
@@ -215,12 +216,13 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Hourly Max list price (notional, drawn from subscription pool) stacked by program. First partial hour is dropped.",
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC",
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 50,
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
             "gradientMode": "none",
             "lineInterpolation": "linear",
             "lineWidth": 1,
@@ -263,16 +265,16 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Max $ (notional) per program",
+      "title": "Max $ per hour (notional) per program",
       "type": "timeseries"
     },
     {
@@ -929,7 +931,7 @@
         "name": "backend",
         "options": [],
         "query": "SELECT DISTINCT backend FROM hourly ORDER BY backend",
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
@@ -950,7 +952,7 @@
         "name": "model",
         "options": [],
         "query": "SELECT DISTINCT model FROM hourly ORDER BY model",
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,
@@ -971,7 +973,7 @@
         "name": "program",
         "options": [],
         "query": "SELECT DISTINCT CASE WHEN instr(tag,'/')>0 THEN substr(tag,1,instr(tag,'/')-1) ELSE tag END AS program FROM session_program UNION SELECT 'unresolved' ORDER BY 1",
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
         "sort": 0,

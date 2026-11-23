@@ -115,8 +115,8 @@ Check:
       User = "dev";
       Group = "dev";
       SupplementaryGroups = [ "llm-ledger" ];
-      # UMask 0027 matches the writer: its ledger.db-journal must come out
-      # group-readable (0640 dev:llm-ledger) like the writer's.
+      # SQLite gives the journal the DB file's mode (0640 dev:llm-ledger);
+      # UMask 0027 is defence in depth, not what makes it 0640.
       # StateDirectoryMode 0700 still keeps its own state private.
       UMask = "0027";
       MemoryMax = "512M";
