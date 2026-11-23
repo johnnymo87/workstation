@@ -445,6 +445,30 @@ lib.mkIf isDarwin {
       };
     };
 
+    # Publish goose host readiness report to GitHub variable for cloudbox goose-cutover (workstation-6w7i.27.12)
+    goose-host-report = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "/bin/sh"
+          "-c"
+          ''
+            GH_TOKEN_VAL="$(/usr/bin/security find-generic-password -s github-api-token -w 2>/dev/null || true)"
+            [ -n "$GH_TOKEN_VAL" ] && export GH_TOKEN="$GH_TOKEN_VAL"
+            unset GH_TOKEN_VAL
+            exec "${localPkgs.goose-host-report}/bin/goose-host-report" publish --host mac --goose-bin "${config.home.profileDirectory}/bin/goose" --honk-bin "${config.home.profileDirectory}/bin/honk"
+          ''
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+        };
+        RunAtLoad = false;
+        StartCalendarInterval = [ { Minute = 25; } ];
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/goose-host-report.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/goose-host-report.err.log";
+      };
+    };
+
     # goose ACP server: the backend honkd (below) fronts for pigeon and honk chat.
     # Same patched goose package as the CLI on PATH (users/dev/goose-config.nix)
     # and every Linux host (pkgs/goose): one binary per host, because the serve
