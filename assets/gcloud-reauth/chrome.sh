@@ -37,8 +37,12 @@
 #
 # ALSO USED FOR THE AGENT CHROME: the agent-chrome launchd agent in
 # users/dev/home.darwin.nix runs this same wrapper with its own profile
-# (Chrome-Agent) and port (9222). Everything above applies to it unchanged;
-# the env vars are the only difference.
+# (Chrome-Agent) and port (9222). The mechanics above apply to it unchanged;
+# the env vars are the only difference. The SECURITY paragraph does NOT: 9222
+# is reverse-forwarded to devbox and cloudbox (scripts/update-ssh-config.sh),
+# and its profile has 1Password linked to the desktop app, so its vault is
+# open whenever the app is. Agents on those hosts can drive it. The human
+# accepted that on 2026-11-23; see the agent-chrome comment in home.darwin.nix.
 
 CHROME="${REAUTH_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 PROFILE="${REAUTH_CHROME_PROFILE:-$HOME/Library/Application Support/Chrome-gcloud}"

@@ -480,7 +480,12 @@ lib.mkIf isDarwin {
     # rely on 9222 being up. It does not hold up logout or restart; launchd
     # does not respawn agents while the GUI session is ending. Its profile is
     # set to clear cookies on exit, so a quit is also how you sign it out of
-    # everything. Stop it for real with:
+    # everything. SECURITY: 9222 is forwarded to devbox and cloudbox, and this
+    # profile's 1Password is linked to the desktop app (see
+    # linkOnePasswordNativeHost), so agents there can drive a browser whose
+    # vault is open whenever the app is, at any hour. That is the exposure the
+    # 9223 forward was removed for; for 9222 the human accepted it on
+    # 2026-11-23. Stop it for real with:
     #   launchctl bootout "gui/$(id -u)/org.nix-community.home.agent-chrome"
     agent-chrome = {
       enable = true;
