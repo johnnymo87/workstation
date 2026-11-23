@@ -418,6 +418,14 @@ in
         "PIGEON_DAEMON_DB_PATH=${routingDbPath}"
         # Goose ACP server endpoint for pigeon goose runner (points at honkd proxy)
         "PIGEON_GOOSE_ACP_URL=ws://127.0.0.1:4280/acp"
+        # A human /launch without --backend starts a goose session on this machine
+        # (pigeon#259; workstation-6w7i.11). Jonathan, 2026-11-23, accepting the
+        # Slack gaps (no /interrupt, attachments or /launch --mcp, bead .13): "Yes".
+        # `--backend opencode` still works per launch. If goose is unconfigured
+        # here (token missing unsets the URL below), unnamed launches are refused
+        # in chat, never silently sent to opencode. swarm_launch is unaffected.
+        # Rollback: delete this line and rebuild (restarts pigeon-daemon).
+        "PIGEON_LAUNCH_DEFAULT_BACKEND=goose"
         # Who may leave a message for a pull-mode session or prompt a topic-bound
         # goose session: the owner's user id in the devbox Slack workspace
         # (pigeon-4ogz.15). The Telegram id went with Telegram (pigeon-4ogz.13).
@@ -746,8 +754,11 @@ in
       # cgroup. Coordinators alone reached the 6G cap on Nov 11, 18, 20 and 23
       # (7.5-9G read from disk on those days: cache thrash at the cap), and two
       # probe workers took the day's peak from 3.1G to 4.2G. Worst case with the
-      # user slice at its 20G cap is 30G of 30G RAM, with 22G swap behind it;
-      # in practice the opencode serves in that slice shrink as work leaves them.
+      # user slice at its 20G cap is 30G of 30G RAM. Swap is zram, inside that
+      # RAM, so it is not extra room; the real backstop is earlyoom at <10%
+      # MemAvailable, which ranks goose tool commands (adj 500) first. The sum
+      # overstates use: both caps count page cache, and the user slice's anon
+      # was 8.6G of 20G on 2026-11-21.
       #
       # Max-only, no MemoryHigh, for the reason the opencode serves dropped it:
       # memory.high throttles instead of killing and produced multi-minute
