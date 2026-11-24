@@ -241,6 +241,18 @@ class TestPricing(unittest.TestCase):
         self.assertAlmostEqual(usd, 1.0 + 0.75 + 0.75)
         self.assertEqual((nl, nc), (1, 2))
 
+    def test_gemini_null_dollar_row_priced_from_card(self):
+        # The gateway ledgers tokens with NULL dollars for models its own price
+        # table lacks (gemini-4-neon on day one). Price those rows from the card.
+        w = []
+        led = [{"client_session_id": "a", "ts_ms": 1, "model": "gemini-4-neon", "dollars": None,
+                "tokens": ws.Tokens(input=1_000_000, output=100_000, cache_read=2_000_000), "region": "global"},
+               {"client_session_id": "a", "ts_ms": 2, "model": "gemini-4-neon", "dollars": None,
+                "tokens": ws.Tokens(input=1_000_000), "region": "us-east5"}]
+        usd, nl, nc = ws.gemini_cost([], led, w)
+        self.assertAlmostEqual(usd, (3.0 + 1.5 + 0.3) + 3.0 * 1.1)
+        self.assertEqual((nl, nc, w), (2, 0, []))
+
     def test_gemini_unpriced_warns(self):
         w = []
         led = [{"client_session_id": "a", "ts_ms": 1, "model": "gemini-3.8-flash", "dollars": None}]
@@ -530,10 +542,13 @@ class TestReviewFixes(unittest.TestCase):
 
 class TestLedger(unittest.TestCase):
     def test_parse_and_sanitise(self):
-        run = FakeRun(ledger_lines=["ses_a\t1000\tgemini-3.8-flash\t0.5", "ses_a\t2000\tgemini-4-carbon\t"])
+        run = FakeRun(ledger_lines=["ses_a\t1000\tgemini-3.8-flash\t0.5\t10\t2\t30\t0\tglobal",
+                                    "ses_a\t2000\tgemini-4-carbon\t\t\t\t\t\tglobal"])
         rows = ws.fetch_gemini_ledger(["ses_a", "bad'; drop table x;--"], "psql -U x", run)
-        self.assertEqual(rows, [{"client_session_id": "ses_a", "ts_ms": 1000, "model": "gemini-3.8-flash", "dollars": 0.5},
-                                {"client_session_id": "ses_a", "ts_ms": 2000, "model": "gemini-4-carbon", "dollars": None}])
+        self.assertEqual(rows, [{"client_session_id": "ses_a", "ts_ms": 1000, "model": "gemini-3.8-flash", "dollars": 0.5,
+                                 "tokens": ws.Tokens(input=10, output=2, cache_read=30, calls=1), "region": "global"},
+                                {"client_session_id": "ses_a", "ts_ms": 2000, "model": "gemini-4-carbon", "dollars": None,
+                                 "tokens": None, "region": "global"}])
         sql = run.calls[0][-1]
         self.assertIn("'ses_a'", sql)
         self.assertNotIn("drop", sql)

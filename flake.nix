@@ -1816,8 +1816,8 @@
 
         # The count is PINNED, following checks.oc-auto-attach. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 143 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 143 tests'. If you added or removed" >&2
+        grep -q '^Ran 144 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 144 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -1973,8 +1973,8 @@
         export HOME="$TMPDIR"
         # unittest writes its summary to STDERR, so 2>&1 is load-bearing here.
         python3 pkgs/worker-scorecard/test_worker_scorecard.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q '^Ran 49 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 49 tests'. If you added or removed" >&2
+        grep -q '^Ran 50 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 50 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -2018,8 +2018,8 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 316 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 316 tests'. If you added or removed" >&2
+        grep -q '^Ran 317 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 317 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -2061,6 +2061,18 @@
         }
         grep -q '^OK$' "$TMPDIR/qw.txt" || {
           echo "GATE FAILURE: quota-watch suite did not report OK." >&2
+          exit 1
+        }
+
+        # aigateway Gemini ingest + GCP-commitment feed (bead ul4.28.4).
+        python3 pkgs/llm-ledger/test_gateway_gemini.py 2>&1 | tee "$TMPDIR/gw.txt"
+        grep -q '^Ran 22 tests' "$TMPDIR/gw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 22 tests' from test_gateway_gemini.py. If you" >&2
+          echo "added or removed tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/gw.txt" || {
+          echo "GATE FAILURE: gateway-gemini suite did not report OK." >&2
           exit 1
         }
         touch $out

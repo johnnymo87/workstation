@@ -47,7 +47,20 @@ in
       MemoryMax = "1G";
       Nice = 10;
       TimeoutStartSec = "15min";
-      ExecStart = "${llmLedger}/bin/llm-ledger run --teamclaude-log /home/dev/.local/state/teamclaude/usage.jsonl";
+      # The gateway step copies aigateway's Gemini rows (Vertex Gemini goes
+      # through it, not cfp) and the run then writes the GCP-commitment spend
+      # feed that the model-switch controller's daily Neon cap reads (bead
+      # eng-agent-platform-ul4.28.4). dev is in group docker. The step never
+      # fails this unit (which gates quota-watch and pages as "cfp ledger
+      # stale"); it records its status, the feed says complete=false, and
+      # quota-watch pages gemini-feed-stale after 30 min of errors.
+      ExecStart = lib.concatStringsSep " " [
+        "${llmLedger}/bin/llm-ledger run"
+        "--teamclaude-log /home/dev/.local/state/teamclaude/usage.jsonl"
+        "--gateway-psql '${config.virtualisation.docker.package}/bin/docker exec -i dev-postgres-1 psql -U aigateway -d aigateway'"
+        "--gateway-flag ${import ./aigateway-flag.nix}"
+        "--commitment-json /var/lib/llm-ledger/commitment-spend.json"
+      ];
       # On success, clear the failure alert's backoff state so a later failure pages afresh.
       ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-ledger-failure/alerted";
       Environment = [ "HOME=/home/dev" ];

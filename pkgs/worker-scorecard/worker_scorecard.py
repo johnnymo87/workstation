@@ -36,7 +36,16 @@ CLAUDE_CARD = {"input": 4.0, "output": 20.0, "cache_read": 0.2, "cache_write": 5
 # The gateway's own gemini-3.8-flash card (same derivation, flat across tiers).
 # Used ONLY for Gemini calls that have no ledger row with a session id: the
 # gateway started recording session ids at 2026-11-16 23:55Z.
-GEMINI_CARD = {"gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0, "cache_write_1h": 0.0}}
+# Also used for ledger rows the gateway recorded with tokens but NULL dollars
+# (a model missing from the gateway's own price table, e.g. gemini-4-neon).
+# Gemini 4 Neon: global list price; cache writes are free until 2027-01-12 and
+# implicit caching reports none per request, so cache_write is 0 here.
+GEMINI_CARD = {
+    "gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0.0, "cache_write_1h": 0.0},
+    "gemini-4-neon": {"input": 3.0, "output": 15.0, "cache_read": 0.15, "cache_write": 0.0, "cache_write_1h": 0.0},
+}
+# Vertex non-global regions list Gemini at +10% over the global price.
+GEMINI_NON_GLOBAL_MULTIPLIER = 1.1
 
 CLAUDE_CARD_MODEL = "claude-opus"
 
@@ -210,9 +219,15 @@ def gemini_cost(calls: list[Call], ledger: list[dict], warnings: list[str]) -> t
         cutoff = min((r["ts_ms"] for r in rows), default=None)
         for r in rows:
             if r.get("dollars") is None:
-                unpriced[r.get("model") or "?"] = unpriced.get(r.get("model") or "?", 0) + 1
-                continue
-            total += float(r["dollars"])
+                card = gemini_card_for(r.get("model") or "")
+                toks = r.get("tokens")
+                if card is None or toks is None:
+                    unpriced[r.get("model") or "?"] = unpriced.get(r.get("model") or "?", 0) + 1
+                    continue
+                mult = 1.0 if (r.get("region") or "global") == "global" else GEMINI_NON_GLOBAL_MULTIPLIER
+                total += price(toks, card) * mult
+            else:
+                total += float(r["dollars"])
             n_ledger += 1
         for c in calls:
             if c.session_id != sid:
@@ -445,7 +460,8 @@ def fetch_gemini_ledger(session_ids: Iterable[str], psql: str, run=subprocess.ru
         return []
     lit = ",".join("'" + i + "'" for i in ids)
     sql = (
-        "SELECT client_session_id, (extract(epoch from request_started_at)*1000)::bigint, model, total_dollars "
+        "SELECT client_session_id, (extract(epoch from request_started_at)*1000)::bigint, model, total_dollars, "
+        "input_tokens, output_tokens, cache_read_tokens, cache_creation_5m_tokens + cache_creation_1h_tokens, region "
         f"FROM gateway_request_log WHERE model LIKE 'gemini%' AND client_session_id IN ({lit})"
     )
     try:
@@ -460,8 +476,14 @@ def fetch_gemini_ledger(session_ids: Iterable[str], psql: str, run=subprocess.ru
     for line in p.stdout.splitlines():
         if not line.strip():
             continue
-        sid, ts, model, dollars = line.split("\t")
-        out.append({"client_session_id": sid, "ts_ms": int(ts), "model": model, "dollars": float(dollars) if dollars else None})
+        f = line.split("\t")
+        sid, ts, model, dollars = f[:4]
+        toks = None
+        if len(f) >= 8 and f[4] != "":
+            toks = Tokens(input=int(f[4]), output=int(f[5]), cache_read=int(f[6]), cache_write=int(f[7] or 0), calls=1)
+        out.append({"client_session_id": sid, "ts_ms": int(ts), "model": model,
+                    "dollars": float(dollars) if dollars else None,
+                    "tokens": toks, "region": f[8] if len(f) >= 9 else None})
     return out
 
 

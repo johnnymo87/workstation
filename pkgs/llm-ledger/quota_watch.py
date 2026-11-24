@@ -34,6 +34,7 @@ ACCT_REARM: float = 0.85
 ACCT_PAGE_MAX_H: float = 1.0
 FORECAST_ZERO_H: float = 0.02
 BLIND_MS: int = 60 * 60 * 1000  # 60 min
+GATEWAY_FEED_ALERT_MS = 30 * 60 * 1000
 HORIZON_MS: int = 24 * 60 * 60 * 1000  # 24 h
 STEP_MS: int = 5 * 60 * 1000  # 5 min
 K_MIN_BURN: float = 0.5
@@ -822,7 +823,12 @@ def run_live(
         row = conn.execute("SELECT max(ts) FROM quota_samples").fetchone()
         T: int | None = row[0] if (row and row[0] is not None) else None
 
-        req_row = conn.execute("SELECT max(ts) FROM requests WHERE host = ?", (host,)).fetchone()
+        # cfp freshness only: aigateway Gemini rows (backend 'vertex-gemini') are
+        # polled by a separate step and would otherwise mask a stalled cfp tail.
+        req_row = conn.execute(
+            "SELECT max(ts) FROM requests WHERE host = ? AND COALESCE(backend, '') <> 'vertex-gemini'",
+            (host,),
+        ).fetchone()
         req_T: int | None = req_row[0] if (req_row and req_row[0] is not None) else None
 
         if now is None:
@@ -856,6 +862,29 @@ def run_live(
         else:
             blind_text = None
         _handle_alert(state_dir, "blind.alert", "quota-watch-blind", blind_text, alert_cmd=alert_cmd)
+
+        # Gemini (aigateway) feed: the writer records poll failures instead of
+        # failing (so they cannot suspend this unit), and they are paged here
+        # under their own name once they have lasted 30 min. The model-switch
+        # controller's Neon cap reads this feed (bead eng-agent-platform-ul4.28.4).
+        try:
+            gw = dict(conn.execute(
+                "SELECT key, value FROM ingest_state WHERE key IN "
+                "('gateway_status', 'gateway_error', 'gateway_error_since_ms')"
+            ).fetchall())
+            gw_text = None
+            if gw.get("gateway_status") == "error" and gw.get("gateway_error_since_ms"):
+                age_ms = now_ms - int(gw["gateway_error_since_ms"])
+                if age_ms > GATEWAY_FEED_ALERT_MS:
+                    gw_text = (
+                        f"Gemini spend feed stale: llm-ledger has failed to read aigateway's ledger for "
+                        f"{age_ms // 60000} min ({gw.get('gateway_error', '?')[:200]}). Neon spend is "
+                        "uncounted, so the model-switch Neon cap reads an incomplete feed. Check: "
+                        "journalctl -u llm-ledger.service -n 50; docker ps | grep dev-postgres"
+                    )
+            _handle_alert(state_dir, "gemini-feed.alert", "gemini-feed-stale", gw_text, alert_cmd=alert_cmd)
+        except Exception as e:
+            sys.stderr.write(f"quota-watch: gemini feed check failed: {e}\n")
 
         # Fleet-stale alert check:
         try:
