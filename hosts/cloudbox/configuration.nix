@@ -4365,6 +4365,10 @@ Check:
         # Pin the config path explicitly so it never depends on XDG_CONFIG_HOME.
         # Matches the default getConfigPath() resolution for the dev user.
         "TEAMCLAUDE_CONFIG=/home/dev/.config/teamclaude.json"
+        # Per-response usage ledger (teamclaude#6): records serving account and
+        # 5m/1h cache-write split so llm-ledger can attribute cloudbox Max rows
+        # by account and exclude the usage-based seat from k (eng-agent-platform-ul4.26).
+        "TEAMCLAUDE_USAGE_LOG=/home/dev/.local/state/teamclaude/usage.jsonl"
       ];
       ExecStart = "${pkgs.writeShellScript "teamclaude-start" ''
         set -euo pipefail
@@ -4372,6 +4376,7 @@ Check:
           echo "teamclaude config missing at ~/.config/teamclaude.json (seed + login first)" >&2
           exit 1
         fi
+        ${pkgs.coreutils}/bin/mkdir -p /home/dev/.local/state/teamclaude
         exec ${teamclaude}/bin/teamclaude server --headless
       ''}";
       Restart = "always";

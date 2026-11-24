@@ -112,10 +112,10 @@ def lint_dashboard(path: Path, raw_text: str, data: dict[str, Any], seen_uids: s
                         f"{path}: panel '{p_title}' target '{t_ref}' queryType is 'time series' but 'time' is not in timeColumns: {time_cols}"
                     )
 
-            # Every query reading requests/hourly/fleet_hourly/remote_hourly/quota_samples must have $__from/${__from} and $__to/${__to}
+            # Every query reading bounded tables/views must have $__from/${__from} and $__to/${__to}
             reads_bounded_tables = bool(
                 re.search(
-                    r"\b(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)?(?:requests|hourly|fleet_hourly|remote_hourly|quota_samples)\b",
+                    r"\b(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)?(?:requests|hourly|fleet_hourly|remote_hourly|teamclaude_usage|teamclaude_hourly|fleet_account_hourly|quota_samples)\b",
                     sql,
                     re.IGNORECASE,
                 )
@@ -269,6 +269,13 @@ def build_fixture_db() -> sqlite3.Connection:
         """
         INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) VALUES
           ('devbox', ?, 'acct-dev', 'max', 'claude-opus-5-5', 6, 600, 300, 120, 30, 30, 1.8)
+        """,
+        (t_now,),
+    )
+    conn.execute(
+        """
+        INSERT INTO teamclaude_hourly (hour, host, account, model, n, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) VALUES
+          (?, 'cloudbox', 'acct-a', 'claude-opus-5-5', 5, 500, 250, 100, 50, 0, 1.5)
         """,
         (t_now,),
     )

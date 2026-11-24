@@ -761,6 +761,153 @@
       ],
       "title": "Fleet freshness",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Fleet Max notional $/h by serving account across cloudbox (teamclaude usage log), devbox, and Mac. Average $/h within each bucket aligned to UTC.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  SUM(cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_account_hourly\nWHERE hour >= $__from AND hour < $__to\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  account,\n  SUM(cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_account_hourly\nWHERE hour >= $__from AND hour < $__to\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Max notional $ per hour by account",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Fleet Max notional spend, requests, and list-price token units (opus-5.5 basis) by account and host over the selected range.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Max $ (notional)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "requests"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Requests"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  account,\n  host,\n  SUM(cost_usd) AS \"Max $ (notional)\",\n  SUM(n) AS requests,\n  ROUND(SUM(input * 4.0 + output * 20.0 + cache_read * 0.2 + cache_write_5m * 5.0 + cache_write_1h * 8.0) / 1000000.0, 2) AS \"List-price units\"\nFROM fleet_account_hourly\nWHERE hour >= $__from AND hour < $__to\nGROUP BY account, host\nORDER BY \"Max $ (notional)\" DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  account,\n  host,\n  SUM(cost_usd) AS \"Max $ (notional)\",\n  SUM(n) AS requests,\n  ROUND(SUM(input * 4.0 + output * 20.0 + cache_read * 0.2 + cache_write_5m * 5.0 + cache_write_1h * 8.0) / 1000000.0, 2) AS \"List-price units\"\nFROM fleet_account_hourly\nWHERE hour >= $__from AND hour < $__to\nGROUP BY account, host\nORDER BY \"Max $ (notional)\" DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Max usage by account & host",
+      "type": "table"
     }
   ],
   "preload": false,
