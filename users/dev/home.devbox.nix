@@ -2056,8 +2056,10 @@ down and its silence means nothing. This host has no second leg.
       RestartMaxDelaySec = 300;
       # 2G since 2026-11-23 (workstation-6w7i.30): at 1G it sat at 846M current,
       # 889M peak (87%) carrying two coordinators and a handful of sessions, and
-      # it is about to proxy every devbox program worker too. It is not
-      # restarted nightly, so growth accumulates.
+      # it is about to proxy every devbox program worker too. honk#52
+      # (honk-9qf.37) removed the growth (Value-tree logs, glibc arenas, parallel
+      # export rebuilds); 2G now stays as a runaway guard, same as cloudbox (see
+      # the honkd unit comment in home.cloudbox.nix for the sizing).
       MemoryMax = "2G";
       MemorySwapMax = "0";
     };
