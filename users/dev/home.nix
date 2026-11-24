@@ -14,6 +14,7 @@
     ./em-test-postgres.nix
     ./tec-codex-bot.nix
     ./tec-codex-wiki-scrape.nix
+    ./tec-codex-forum-scrape.nix
     ./em-skill-curator.nix
     ./hm-deploy-gate.nix
     ./hm-atomic-profile.nix
