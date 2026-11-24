@@ -45,7 +45,9 @@
 #      older history into a first-person memory at turn start. Rewritten as a
 #      pre-inference Operation (R12, commits f03cbbe2d, e2b5080dd).
 #  13. GOOSE_GLOBAL_SKILLS=false limits skill discovery to project skill dirs:
-#      drops the config dir's skills/ and user-scope plugin skill dirs (commit 1c59ef7a2).
+#      drops the config dir's skills/ and user-scope plugin skill dirs (commit 1c59ef7a2),
+#      and goose's built-in skills (web-search, goose-doc-guide), which 1.60 otherwise
+#      advertises to every session with an extension (patched-1.60.2.3, johnnymo87/goose#46).
 #  14. MCP extension startup is bounded by GOOSE_EXTENSION_STARTUP_TIMEOUT
 #      (default 25s) and a failed start kills the server's whole process group
 #      (R14, commits b72aa6410, d73dc1f00). Parallel extension start absorbed upstream #12775.
@@ -142,7 +144,9 @@
 # (aarch64-linux and x86_64-linux); state machine agent loop, schema 18; drops
 # obsolete patches (1, 4, 10, 17, 18, 24); rewrites loop-bound patches (8, 9,
 # 11, 12, 14, 15, 16, 20, 21, 22). Darwin (aarch64-darwin) stays on
-# patched-1.54.0.18 until bead workstation-6w7i.26.15.
+# patched-1.54.0.18 until bead workstation-6w7i.26.15. patched-1.60.2.3
+# (2026-11-24) extends patch 13 to the built-in skills (johnnymo87/goose#46);
+# no schema change.
 #
 # Release assets are byte-for-byte what upstream's workflow produces for the
 # patched source (gnu, default features), so measurements of upstream behaviour
