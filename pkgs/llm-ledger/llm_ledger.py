@@ -2127,7 +2127,7 @@ def commitment_spend(
         f"WHERE q.ts >= ? AND q.ts < ? AND q.backend IN ({ph}) GROUP BY 1, 2, 3",
         (start, end, *COMMITMENT_BACKENDS),
     ).fetchall()
-    neon = {"usd": 0.0, "requests": 0, "unpriced_requests": 0, "no_usage_ok_requests": 0, "by_program": {}}
+    neon = {"usd": 0.0, "requests": 0, "unpriced_requests": 0, "no_usage_ok_requests": 0, "by_backend": {}, "by_program": {}}
     total = {"usd": 0.0, "requests": 0, "by_model": {}, "by_backend": {}, "by_program": {}}
     for backend, model, program, n, usd, unpriced, no_usage in rows:
         usd = float(usd or 0.0)
@@ -2141,6 +2141,9 @@ def commitment_spend(
             neon["requests"] += n
             neon["unpriced_requests"] += int(unpriced or 0)
             neon["no_usage_ok_requests"] += int(no_usage or 0)
+            # agy = the Gemini Enterprise seat via cfp, vertex-gemini = Vertex via
+            # the gateway. neon.usd counts both at list price (the D2 cap).
+            neon["by_backend"][backend] = neon["by_backend"].get(backend, 0.0) + usd
             neon["by_program"][program] = neon["by_program"].get(program, 0.0) + usd
 
     def _round(d: dict[str, Any]) -> dict[str, Any]:

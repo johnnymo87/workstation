@@ -232,19 +232,21 @@ class TestCommitmentSpend(GatewayBase):
         self.add("n4", T0 + 3, "vertex-gemini", "gemini-4-neon", None, inp=None)  # errored, no usage
         self.add("f1", T0, "vertex-gemini", "gemini-3.8-flash", 0.5, attr="ses_c")
         self.add("a1", T0, "agy", "claude-opus-5-5", 4.0)
+        self.add("g1", T0, "agy", "gemini-4-neon", 0.5, attr="ses_b")  # Neon on the seat via cfp
         self.add("v1", T0, "vertex", "claude-opus-5-5", 100.0)  # Claude bucket: excluded
         self.add("m1", T0, "max", "claude-opus-5-5", 100.0)  # Max: excluded
         self.add("y1", T0 - 13 * 3_600_000, "vertex-gemini", "gemini-4-neon", 50.0)  # yesterday ET
         res = llm_ledger.commitment_spend(self.conn, now_ms=T0 + 60_000)
         self.assertEqual(res["day"], "2026-11-24")
         self.assertEqual(res["day_start"], "2026-11-24T05:00:00Z")
-        self.assertEqual(res["neon"], {"usd": 3.0, "requests": 4, "unpriced_requests": 1,
+        self.assertEqual(res["neon"], {"usd": 3.5, "requests": 5, "unpriced_requests": 1,
                                        "no_usage_ok_requests": 0,
-                                       "by_program": {"stall-watcher": 2.0, "lgtm": 1.0}})
+                                       "by_backend": {"vertex-gemini": 3.0, "agy": 0.5},
+                                       "by_program": {"stall-watcher": 2.0, "lgtm": 1.5}})
         self.assertFalse(res["complete"])  # never polled, and an unpriced Neon row
         g = res["gcp_commitment"]
-        self.assertAlmostEqual(g["usd"], 7.5)
-        self.assertEqual(g["by_backend"], {"vertex-gemini": 3.5, "agy": 4.0})
+        self.assertAlmostEqual(g["usd"], 8.0)
+        self.assertEqual(g["by_backend"], {"vertex-gemini": 3.5, "agy": 4.5})
         self.assertEqual(g["by_program"]["unresolved"], 0.5)
         y = llm_ledger.commitment_spend(self.conn, day="2026-11-23", now_ms=T0)
         self.assertEqual(y["neon"]["usd"], 50.0)

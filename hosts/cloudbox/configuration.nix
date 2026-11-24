@@ -841,14 +841,22 @@ in
         export GOOSE_SERVER__SECRET_KEY GCP_PROJECT_ID
 
         # Gemini (the sonnet-tier subagent roles, pkgs/goose-roles) must not follow
-        # GCP_VERTEX_HOST: cfp is Claude-only. With the aigateway intent flag set it
-        # goes to the gateway, which ledgers and prices it like opencode's Gemini
-        # (same rule as injectAigatewayBaseUrl: flag set but gateway down fails
+        # GCP_VERTEX_HOST blindly. With the aigateway intent flag set it goes
+        # through cfp to the gateway (see below), which ledgers and prices it
+        # like opencode's Gemini (same rule as injectAigatewayBaseUrl: flag set but gateway down fails
         # loud, and the canary restarts the gateway). Flag absent: straight to
         # Vertex's global endpoint. Read at start only; the flag changing takes
         # effect at the next goose-serve restart (nightly). Bead workstation-tzzk.
+        #
+        # With the flag set, Gemini goes to cfp (:8789), not straight to the
+        # gateway: cfp >= v0.16.0 sends gemini-4-neon streamGenerateContent to the
+        # Gemini Enterprise seat (agy) under CFP_GEMINI_AGY_BUDGET_DOLLARS and
+        # passes everything else, unchanged, to the gateway (CFP_AIGATEWAY_URL).
+        # That spreads Neon across the seat and Vertex. Seat turns are ledgered
+        # from cfp events (backend agy), Vertex turns by the gateway as before.
+        # Rollback: point this back at :8080. Bead eng-agent-platform-ul4.28.9.
         if [ -e ${aigatewayFlag} ]; then
-          GCP_VERTEX_GEMINI_HOST=http://127.0.0.1:8080
+          GCP_VERTEX_GEMINI_HOST=http://127.0.0.1:8789
         else
           GCP_VERTEX_GEMINI_HOST=https://aiplatform.googleapis.com
         fi
@@ -5494,6 +5502,15 @@ Forensics: $DUMP"
         # CFP_AGY_ENABLED (unset is off, with no warning).
         "CFP_AGY_ENABLED=true"
         "CFP_AGY_BUDGET_DOLLARS=100"
+        # Gemini through cfp (cfp >= v0.16.0, bead eng-agent-platform-ul4.28.9):
+        # goose-serve's GCP_VERTEX_GEMINI_HOST points at cfp, which sends
+        # gemini-4-neon streamGenerateContent to the same seat, sticky per
+        # session+model for an hour, up to CFP_GEMINI_AGY_BUDGET_DOLLARS/day
+        # (default 200, list price, spend-agy-gemini.json), and forwards all
+        # other Gemini traffic unchanged to CFP_AIGATEWAY_URL. Seat failures
+        # before the first byte fall back to the gateway. Off = remove the line:
+        # Gemini then passes straight through to the gateway.
+        "CFP_GEMINI_AGY_ENABLED=true"
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
