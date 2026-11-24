@@ -3905,5 +3905,121 @@ class TestTeamclaudeUsageIngest(unittest.TestCase):
         self.assertTrue(any("teamclaude log disappeared" in w for w in w2))
 
 
+class TestCommitmentJsonIngestState(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+        self.feed_path = os.path.join(self.tmpdir.name, "commitment.json")
+        self.state_path = os.path.join(self.tmpdir.name, "state.json")
+        self.conn = llm_ledger.open_ledger_db(self.db_path)
+        llm_ledger.ensure_fleet_objects(self.conn, "cloudbox")
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def test_write_commitment_json_persists_neon_today_keys(self):
+        with open(self.state_path, "w") as f:
+            json.dump({"daily_cap_usd": 2500}, f)
+
+        # 2026-11-24T12:00:00Z = 1795521600000 ms
+        t0 = 1795521600000
+        llm_ledger.write_commitment_json(
+            self.conn,
+            self.feed_path,
+            now_ms=t0,
+            model_switch_state=self.state_path,
+        )
+
+        state = llm_ledger.get_ingest_state(self.conn)
+        self.assertEqual(state["neon_today_day"], "2026-11-24")
+        self.assertEqual(state["neon_today_usd"], "0.0")
+        self.assertEqual(state["neon_today_requests"], "0")
+        self.assertIn(state["neon_today_complete"], ("0", "1"))
+        self.assertTrue(state["neon_today_day_start"].startswith("2026-11-24T"))
+        _day, _start_ms, expected_day_end_ms = llm_ledger._et_day_bounds("2026-11-24", t0)
+        self.assertEqual(state["neon_today_day_end_ms"], str(expected_day_end_ms))
+        self.assertTrue(state["neon_today_updated_at"].startswith("2026-11-24"))
+        self.assertEqual(state["neon_daily_cap_usd"], "2500")
+        self.assertEqual(state["neon_daily_cap_source"], "state.json")
+
+        # Verify JSON file was also written
+        self.assertTrue(os.path.exists(self.feed_path))
+        with open(self.feed_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["day"], "2026-11-24")
+
+    def test_write_commitment_json_cap_fallback_missing_file(self):
+        missing_path = os.path.join(self.tmpdir.name, "nonexistent_state.json")
+        llm_ledger.write_commitment_json(
+            self.conn,
+            self.feed_path,
+            now_ms=1795521600000,
+            model_switch_state=missing_path,
+        )
+        state = llm_ledger.get_ingest_state(self.conn)
+        self.assertEqual(state["neon_daily_cap_usd"], "1500")
+        self.assertEqual(state["neon_daily_cap_source"], "default")
+
+    def test_write_commitment_json_cap_fallback_corrupt_file(self):
+        with open(self.state_path, "w") as f:
+            f.write("{corrupt: json!@#$")
+        llm_ledger.write_commitment_json(
+            self.conn,
+            self.feed_path,
+            now_ms=1795521600000,
+            model_switch_state=self.state_path,
+        )
+        state = llm_ledger.get_ingest_state(self.conn)
+        self.assertEqual(state["neon_daily_cap_usd"], "1500")
+        self.assertEqual(state["neon_daily_cap_source"], "default")
+
+    def test_write_commitment_json_cap_fallback_invalid_values(self):
+        bad_values = [
+            -100, 0, False, True, "not-a-number", None, [],
+            float("inf"), float("-inf"), float("nan"),
+            "Infinity", "-Infinity", "NaN",
+        ]
+        for bad_cap in bad_values:
+            with open(self.state_path, "w") as f:
+                json.dump({"daily_cap_usd": bad_cap}, f)
+            llm_ledger.write_commitment_json(
+                self.conn,
+                self.feed_path,
+                now_ms=1795521600000,
+                model_switch_state=self.state_path,
+            )
+            state = llm_ledger.get_ingest_state(self.conn)
+            self.assertEqual(state["neon_daily_cap_usd"], "1500", f"failed for {bad_cap!r}")
+            self.assertEqual(state["neon_daily_cap_source"], "default", f"source failed for {bad_cap!r}")
+
+    def test_write_commitment_json_ingest_state_failure_warns_separately(self):
+        t0 = 1795521600000
+        # Trigger an error on INSERT so SQLite write fails while SELECT in commitment_spend works
+        self.conn.execute(
+            "CREATE TRIGGER fail_ingest_state BEFORE INSERT ON ingest_state "
+            "BEGIN SELECT RAISE(FAIL, 'simulated ingest_state write failure'); END;"
+        )
+        warnings: list[str] = []
+        llm_ledger.write_commitment_json(
+            self.conn,
+            self.feed_path,
+            now_ms=t0,
+            model_switch_state=self.state_path,
+            warnings=warnings,
+        )
+        # Verify JSON file was written despite ingest_state failure
+        self.assertTrue(os.path.exists(self.feed_path))
+        with open(self.feed_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["day"], "2026-11-24")
+
+        # Warning accurately says ingest_state, not that commitment-spend wasn't written
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("failed to update neon_today ingest_state", warnings[0])
+        self.assertNotIn("commitment-spend feed not written", warnings[0])
+
+
 if __name__ == "__main__":
     unittest.main()
