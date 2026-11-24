@@ -9,6 +9,7 @@
 let
   script = "${config.home.homeDirectory}/.local/bin/quota-telemetry-export";
   ledger = "${config.home.homeDirectory}/.local/state/teamclaude/usage.jsonl";
+  cfpEvents = "${config.home.homeDirectory}/.local/state/claude-failover-proxy/events.jsonl";
 
   llmOutlookSyncScript = pkgs.writeShellScript "llm-outlook-sync" ''
     set -euo pipefail
@@ -129,7 +130,7 @@ lib.mkIf (isDevbox || isDarwin) (lib.mkMerge [
     launchd.agents.quota-telemetry-export = {
       enable = true;
       config = {
-        ProgramArguments = [ "${pkgs.python3}/bin/python3" script "--host" "mac" ];
+        ProgramArguments = [ "${pkgs.python3}/bin/python3" script "--host" "mac" "--cfp-events" cfpEvents ];
         EnvironmentVariables = {
           HOME = config.home.homeDirectory;
           TEAMCLAUDE_USAGE_LOG = ledger;

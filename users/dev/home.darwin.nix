@@ -1309,6 +1309,13 @@ lib.mkIf isDarwin {
 
           CFP_STATE_PATH = "${config.home.homeDirectory}/.local/state/claude-failover-proxy/spend.json";
 
+          # Per-request route+usage telemetry (same shape as cloudbox) so
+          # quota-telemetry-export --cfp-events exports Mac cash rows
+          # (backend <> 'max') to johnnymo87/quota-telemetry (bead
+          # eng-agent-platform-ul4.26.9).
+          CFP_EVENTS_PATH = "${config.home.homeDirectory}/.local/state/claude-failover-proxy/events.jsonl";
+          CFP_EVENTS_RETENTION_DAYS = "30";
+
           # CFP_ENTERPRISE_API_KEY is deliberately UNSET, as on cloudbox since
           # workstation #820: no enterprise API-key tier, so the chain is
           # Vertex -> Max. cfp logs "enterprise tier: off".

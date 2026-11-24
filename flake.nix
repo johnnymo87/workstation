@@ -2066,6 +2066,28 @@
         touch $out
       '';
 
+      quota-telemetry-export-tests = devboxPkgs.runCommand "quota-telemetry-export-tests" {
+        nativeBuildInputs = [
+          (devboxPkgs.python3.withPackages (ps: [ ps.tzdata ]))
+          devboxPkgs.git
+          devboxPkgs.gnugrep
+        ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        python3 assets/scripts/test_quota_telemetry_export.py 2>&1 | tee "$TMPDIR/qte.txt"
+        grep -q '^Ran 5 tests' "$TMPDIR/qte.txt" || {
+          echo "GATE FAILURE: expected 'Ran 5 tests' from test_quota_telemetry_export.py. If you" >&2
+          echo "added or removed tests deliberately, update the count here in the same commit." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/qte.txt" || {
+          echo "GATE FAILURE: quota-telemetry-export suite did not report OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       ro-shell-tests = let ro = (localPkgsFor devboxSystem).ro-shell; in
         devboxPkgs.runCommand "ro-shell-tests" {
           nativeBuildInputs = [ (devboxPkgs.python3.withPackages (ps: [ ps.mcp ])) devboxPkgs.git devboxPkgs.gnugrep ];
