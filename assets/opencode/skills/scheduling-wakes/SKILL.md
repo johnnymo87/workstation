@@ -94,7 +94,8 @@ agent-wait add --at 2026-11-18T09:00-05:00 --note "11/18 cutoff: re-run the vari
   coordinator; if the coordinator should own it, tell the coordinator.
 - No deadline by default. `--deadline +3d` posts a line in the human's chat when
   it passes and leaves the wait open.
-- **cloudbox only.** On devbox and macOS `agent-wait` exits 2; use
+- **cloudbox only.** On devbox and macOS `agent-wait` exits 2 (except `add --pr
+  --watch`, which relays to cloudbox; see `shepherding-pull-requests`); use
   `swarm_schedule` there.
 
 A wait on a person with no thread or conversation to watch has no checker: that is still a
