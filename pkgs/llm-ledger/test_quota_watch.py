@@ -1878,6 +1878,37 @@ class TestQuotaOutlook(unittest.TestCase):
             self.assertLessEqual(len(line.encode("utf-8")), 200)
             self.assertNotIn("$", line)
 
+    def test_format_line_out_of_range_refill_ts_omits_refill_clause(self):
+        """Out-of-range next_refill_ts omits refill clause instead of degrading line."""
+        for bad_ts in (10**18, 10**25, -10**18):
+            d = {
+                "verdict": "ample",
+                "ts": 1795455600000,
+                "h0": 1.47,
+                "next_refill_ts": bad_ts,
+                "next_refill_amt": 0.9,
+            }
+            line = quota_watch.format_line(d)
+            self.assertEqual(line, "quota@12:40: AMPLE · headroom 1.47 acct-wk")
+
+    def test_safe_helpers_reject_bool(self):
+        """_safe_int and _safe_float reject bool and return None."""
+        self.assertIsNone(quota_watch._safe_int(True))
+        self.assertIsNone(quota_watch._safe_int(False))
+        self.assertIsNone(quota_watch._safe_float(True))
+        self.assertIsNone(quota_watch._safe_float(False))
+        self.assertEqual(quota_watch._safe_int(42), 42)
+        self.assertEqual(quota_watch._safe_int("42"), 42)
+        self.assertEqual(quota_watch._safe_float(3.14), 3.14)
+        self.assertEqual(quota_watch._safe_float("3.14"), 3.14)
+
+    def test_outlook_from_row_ts_null(self):
+        """_outlook_from_row with ts=None returns unknown with error 'ts is NULL'."""
+        row = (None, 1.47, 0.03, 0.0, None, None, "ample")
+        res = quota_watch._outlook_from_row(row, now_ms=1795455600000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertEqual(res["error"], "ts is NULL")
+
     def test_outlook_known_verdicts(self):
         """outlook returns exact contract keys, no error key, no vertex_usd, no $ for known verdicts."""
         import tempfile
@@ -2427,6 +2458,25 @@ class TestOutlookFromJson(unittest.TestCase):
         self.assertEqual(set(res.keys()), self.CONTRACT)
         for k in extra:
             self.assertNotIn(k, res)
+
+    def test_outlook_from_json_expands_tilde(self):
+        """outlook_from_json expands user home directory (tilde) in path."""
+        rel_name = "test_expand_outlook.json"
+        home_path = os.path.expanduser(f"~/{rel_name}")
+        self._write(self._remote("ample"))
+        import shutil
+        shutil.copyfile(self.path, home_path)
+        try:
+            res = quota_watch.outlook_from_json(f"~/{rel_name}", now_ms=self.TS + 1000)
+            self.assertEqual(res["verdict"], "ample")
+        finally:
+            if os.path.exists(home_path):
+                os.remove(home_path)
+
+        res_missing = quota_watch.outlook_from_json(f"~/nonexistent_rel_{self.TS}.json", now_ms=self.TS)
+        self.assertEqual(res_missing["verdict"], "unknown")
+        self.assertFalse(res_missing["error"].startswith("no published outlook at ~"))
+        self.assertTrue(res_missing["error"].startswith("no published outlook at /"))
 
 
 if __name__ == "__main__":

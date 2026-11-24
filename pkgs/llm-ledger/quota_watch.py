@@ -1182,8 +1182,8 @@ def replay(
 
 
 def _safe_float(val: Any) -> float | None:
-    """Return float or None for None, NaN, inf, or unparseable values."""
-    if val is None:
+    """Return float or None for None, bool, NaN, inf, or unparseable values."""
+    if val is None or isinstance(val, bool):
         return None
     try:
         f = float(val)
@@ -1195,8 +1195,8 @@ def _safe_float(val: Any) -> float | None:
 
 
 def _safe_int(val: Any) -> int | None:
-    """Return int or None for None or unparseable values."""
-    if val is None:
+    """Return int or None for None, bool, or unparseable values."""
+    if val is None or isinstance(val, bool):
         return None
     try:
         return int(val)
@@ -1227,13 +1227,16 @@ def format_line(d: dict) -> str:
 
         next_refill_ts = _safe_int(d.get("next_refill_ts"))
         if next_refill_ts is not None:
-            refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
-            refill_str = refill_dt.strftime("%a %H:%M")
-            amt = _safe_float(d.get("next_refill_amt"))
-            if amt is not None:
-                clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
-            else:
-                clauses.append(f"next refill {refill_str} ET")
+            try:
+                refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
+                refill_str = refill_dt.strftime("%a %H:%M")
+                amt = _safe_float(d.get("next_refill_amt"))
+                if amt is not None:
+                    clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
+                else:
+                    clauses.append(f"next refill {refill_str} ET")
+            except (OverflowError, OSError, ValueError):
+                pass
 
         if verdict == "ample":
             prefix = f"quota@{time_str}: AMPLE"
@@ -1371,6 +1374,7 @@ def outlook_from_json(path: str, now_ms: int | None = None) -> dict[str, Any]:
     re-derived here from the reading's own ts, exactly as outlook() does for a DB row, so a
     copy that stops being refreshed turns unknown after 20 min instead of repeating itself.
     """
+    path = os.path.expanduser(path)
     if now_ms is None:
         now_ms = int(time.time() * 1000)
     try:
@@ -1411,7 +1415,10 @@ def _outlook_from_row(row: Sequence[Any], now_ms: int) -> dict[str, Any]:
 
         age_s = (now_ms - ts) // 1000 if ts is not None else None
 
-        if age_s is not None and age_s > 1200:
+        if ts is None:
+            verdict = "unknown"
+            error = "ts is NULL"
+        elif age_s is not None and age_s > 1200:
             verdict = "unknown"
             error = f"stale: age_s={age_s}"
         elif age_s is not None and age_s < -60:
