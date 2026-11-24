@@ -23,15 +23,14 @@ let
 
     mkdir -p "$STATE_DIR"
 
-    if [ ! -d "$REPO_DIR/.git" ]; then
-      rm -rf "$REPO_DIR"
+    if ! git -C "$REPO_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+      rm -rf "''${REPO_DIR:?}"
       git clone --quiet --depth 1 --branch "$BRANCH" "$REMOTE" "$REPO_DIR"
-      REF="HEAD"
     else
       timeout 60 git -C "$REPO_DIR" fetch --quiet --depth 1 origin "$BRANCH"
-      REF="FETCH_HEAD"
+      git -C "$REPO_DIR" update-ref "refs/heads/$BRANCH" FETCH_HEAD
       git -C "$REPO_DIR" reflog expire --expire=now --all
-      git -C "$REPO_DIR" gc --prune=now -q
+      git -C "$REPO_DIR" prune --expire=now
     fi
 
     TARGET_DIR="$(dirname "$OUTLOOK_JSON")"
@@ -39,7 +38,7 @@ let
     TMP_FILE="$(mktemp "$TARGET_DIR/outlook.json.tmp.XXXXXX")"
     trap 'rm -f "$TMP_FILE"' EXIT
 
-    git -C "$REPO_DIR" show "$REF:outlook.json" > "$TMP_FILE"
+    git -C "$REPO_DIR" show "HEAD:outlook.json" > "$TMP_FILE"
 
     python3 -c '
 import json, os, sys
@@ -54,7 +53,7 @@ try:
 except Exception:
     sys.exit(1)
 ' "$TMP_FILE" || {
-      echo "llm-outlook-sync: invalid outlook.json from $REF; keeping previous file" >&2
+      echo "llm-outlook-sync: invalid outlook.json; keeping previous file" >&2
       exit 1
     }
 
