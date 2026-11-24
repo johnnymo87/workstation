@@ -47,7 +47,7 @@ in
       MemoryMax = "1G";
       Nice = 10;
       TimeoutStartSec = "15min";
-      ExecStart = "${llmLedger}/bin/llm-ledger run";
+      ExecStart = "${llmLedger}/bin/llm-ledger run --teamclaude-log /home/dev/.local/state/teamclaude/usage.jsonl";
       # On success, clear the failure alert's backoff state so a later failure pages afresh.
       ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-ledger-failure/alerted";
       Environment = [ "HOME=/home/dev" ];
