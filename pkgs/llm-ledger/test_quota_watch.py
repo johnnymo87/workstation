@@ -942,8 +942,8 @@ class TestLiveAndReplay(unittest.TestCase):
         self.assertEqual(fleet_inv[0]["argv"][4], "14400")
         self.assertIn("devbox", fleet_inv[0]["argv"][2])
         self.assertIn("4.0h old", fleet_inv[0]["argv"][2])
-        self.assertIn("devbox export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
-        self.assertIn("devbox's verdict sync uses the same key", fleet_inv[0]["argv"][2])
+        self.assertIn("That host's quota-telemetry export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox's quota verdict sync uses the same key, so devbox may also read quota unknown", fleet_inv[0]["argv"][2])
 
         alert_file = os.path.join(state_dir, "fleet-stale.alert")
         self.assertTrue(os.path.exists(alert_file))
@@ -989,6 +989,38 @@ class TestLiveAndReplay(unittest.TestCase):
         fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
         self.assertEqual(len(fleet_inv), 1)
         self.assertIn("devbox", fleet_inv[0]["argv"][2])
+
+    def test_run_live_fleet_stale_exported_through_null(self):
+        """When remote_hosts has a row with exported_through=NULL, fleet-stale alert fires."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_null_exp.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_null_exp.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_null_exp")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_null_exp.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 100, NULL, 500)"
+        )
+        conn.commit()
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertIn("host 'devbox' has no export watermark", fleet_inv[0]["argv"][2])
+        self.assertIn("That host's quota-telemetry export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox's quota verdict sync uses the same key, so devbox may also read quota unknown", fleet_inv[0]["argv"][2])
 
     def test_run_live_fleet_stale_empty_list_disables(self):
         """--alert-stale-hosts '' disables fleet-stale check."""

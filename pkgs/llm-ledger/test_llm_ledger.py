@@ -3425,6 +3425,31 @@ class TestOutlookPublish(unittest.TestCase):
         self.assertIsNone(fleet["cloudbox"]["share_24h"])
         self.assertIsNone(fleet["devbox"]["share_24h"])
 
+    def test_outlook_publish_roundtrip_with_outlook_from_json(self):
+        """build_outlook_publish_payload output saved to json and read by outlook_from_json matches verdict and line."""
+        import quota_watch
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        ts = int(time.time() * 1000) - 60000
+        conn.execute("""INSERT INTO quota_watch_runs (
+            ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            ts, 1.5, 0.02, 0.0, 10.0, ts + 3600000, 0.95, 1, "live", "ample"
+        ))
+        conn.commit()
+        conn.close()
+
+        payload = llm_ledger.build_outlook_publish_payload(self.db_path, host="cloudbox", now_ms=ts + 60000)
+        self.assertEqual(payload["verdict"], "ample")
+
+        json_path = os.path.join(self.tmpdir.name, "published_outlook.json")
+        with open(json_path, "w") as f:
+            json.dump(payload, f)
+
+        res = quota_watch.outlook_from_json(json_path, now_ms=ts + 60000)
+        self.assertEqual(res["verdict"], "ample")
+        self.assertEqual(res["line"], payload["line"])
+        self.assertEqual(res["ts"], payload["ts"])
+
 
 if __name__ == "__main__":
     unittest.main()

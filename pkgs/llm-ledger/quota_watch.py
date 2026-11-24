@@ -828,9 +828,11 @@ def run_live(
 
             if stale_entries:
                 stale_desc = "; ".join(stale_entries)
+                subject = "That host's" if len(stale_entries) == 1 else "Those hosts'"
                 fleet_text = (
                     f"Fleet telemetry stale: {stale_desc} (threshold 3h). "
-                    "The devbox export or its GitHub key may be broken, and that devbox's verdict sync uses the same key."
+                    f"{subject} quota-telemetry export or its GitHub key may be broken; "
+                    "devbox's quota verdict sync uses the same key, so devbox may also read quota unknown."
                 )
             else:
                 fleet_text = None

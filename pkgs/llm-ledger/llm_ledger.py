@@ -1894,7 +1894,7 @@ def build_outlook_publish_payload(
             null for the local host (the local host writes directly to the local ledger
             and has no export watermark).
 
-    All '$' and 'usd' keys are stripped from the payload.
+    All keys containing 'usd' are stripped from the payload.
     """
     db_path = db_path or DEFAULT_DB
     host = host or socket.gethostname()
