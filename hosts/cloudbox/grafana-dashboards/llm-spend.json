@@ -13,7 +13,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Stats for the selected range. First partial hour is dropped (h.hour >= $__from AND h.hour < $__to). Max notional and cash (Vertex/Enterprise) are kept separate.",
+      "description": "Stats for the selected range. First partial hour is dropped (h.hour >= $__from AND h.hour < $__to). Max notional and cash (Vertex/agy/enterprise) are kept separate.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -70,36 +70,17 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Vertex $ (cash)"
+              "options": "Cash $"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Vertex $ (cash)"
+                "value": "Cash $"
               },
               {
                 "id": "color",
                 "value": {
                   "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Enterprise $ (cash)"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Enterprise $ (cash)"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
                   "mode": "fixed"
                 }
               }
@@ -135,14 +116,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend = 'vertex' THEN h.cost_usd ELSE 0 END) AS \"Vertex $ (cash)\",\n  SUM(CASE WHEN h.backend = 'enterprise' THEN h.cost_usd ELSE 0 END) AS \"Enterprise $ (cash)\",\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "queryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS \"Cash $\",\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend = 'vertex' THEN h.cost_usd ELSE 0 END) AS \"Vertex $ (cash)\",\n  SUM(CASE WHEN h.backend = 'enterprise' THEN h.cost_usd ELSE 0 END) AS \"Enterprise $ (cash)\",\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "rawQueryText": "SELECT\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS \"Cash $\",\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
           "refId": "A",
           "timeColumns": []
         }
       ],
-      "title": "Overview: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "title": "Overview: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "stat"
     },
     {
@@ -199,16 +180,16 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend <> 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN ('vertex', 'enterprise')\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend <> 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Cash $ per hour (Vertex/Enterprise) per program",
+      "title": "Cash $ per hour (Vertex/agy/enterprise) per program",
       "type": "timeseries"
     },
     {
@@ -265,9 +246,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -276,6 +257,160 @@
       ],
       "title": "Max $ per hour (notional) per program",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Spend per hour by host distinguishing Max notional and cash (aligned to UTC buckets).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 8,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  h.host || ' (Max)' AS host,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  h.host || ' (Max)' AS host,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  h.host || ' (cash)' AS host,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend <> 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  h.host || ' (cash)' AS host,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend <> 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "B",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Spend by host",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Max usage share by host computed from token list-prices (opus-5.5 basis: $4/M input, $20/M output, $0.20/M cache read, $5/M cache write).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 9,
+      "options": {
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "percent",
+            "value"
+          ]
+        },
+        "pieType": "pie",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  h.host,\n  SUM(h.input * 4 + h.output * 20 + h.cache_read * 0.2 + h.cache_write * 5) / 1000000.0 AS \"Tokens ($M list basis)\"\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY h.host\nORDER BY 2 DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  h.host,\n  SUM(h.input * 4 + h.output * 20 + h.cache_read * 0.2 + h.cache_write * 5) / 1000000.0 AS \"Tokens ($M list basis)\"\nFROM fleet_hourly h\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend = 'max'\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\nGROUP BY h.host\nORDER BY 2 DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Max usage share by host (list-price token units, opus-5.5 list basis)",
+      "type": "piechart"
     },
     {
       "datasource": {
@@ -317,7 +452,7 @@
                 "value": [
                   {
                     "title": "Filter by program",
-                    "url": "/d/llm-spend?${__url_time_range}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
+                    "url": "/d/llm-spend?${__url_time_range}&${host:queryparam}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
                   }
                 ]
               }
@@ -351,7 +486,7 @@
               },
               {
                 "id": "displayName",
-                "value": "cash $ (Vertex/Enterprise)"
+                "value": "Cash $ (Vertex/agy/enterprise)"
               }
             ]
           },
@@ -377,7 +512,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 20
       },
       "id": 4,
       "options": {
@@ -398,14 +533,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY (max_usd + cash_usd) DESC",
           "refId": "A",
           "timeColumns": []
         }
       ],
-      "title": "Program Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "title": "Program Breakdown: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "table"
     },
     {
@@ -485,7 +620,7 @@
               },
               {
                 "id": "displayName",
-                "value": "cash $ (Vertex/Enterprise)"
+                "value": "Cash $ (Vertex/agy/enterprise)"
               }
             ]
           },
@@ -511,7 +646,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 20
       },
       "id": 5,
       "options": {
@@ -532,14 +667,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,instr(sp.tag,'/')+1) ELSE '' END AS sub,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY (max_usd + cash_usd) DESC",
           "refId": "A",
           "timeColumns": []
         }
       ],
-      "title": "Program & Sub Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "title": "Program & Sub Breakdown: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "table"
     },
     {
@@ -693,7 +828,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "id": 6,
       "options": {
@@ -714,14 +849,14 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
+          "queryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
+          "rawQueryText": "SELECT\n  h.model AS model,\n  h.backend AS backend,\n  SUM(h.n) AS requests,\n  SUM(h.input) AS input,\n  SUM(h.output) AS output,\n  SUM(h.cache_read) AS cache_read,\n  SUM(h.cache_write) AS cache_write,\n  SUM(h.cost_usd) AS usd\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY usd DESC",
           "refId": "A",
           "timeColumns": []
         }
       ],
-      "title": "Model Breakdown: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "title": "Model Breakdown: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "table"
     },
     {
@@ -788,7 +923,7 @@
                 "value": [
                   {
                     "title": "Filter by program",
-                    "url": "/d/llm-spend?${__url_time_range}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
+                    "url": "/d/llm-spend?${__url_time_range}&${host:queryparam}&${backend:queryparam}&${model:queryparam}&var-program=${__data.fields.program}"
                   }
                 ]
               }
@@ -822,7 +957,7 @@
               },
               {
                 "id": "displayName",
-                "value": "cash $ (Vertex/Enterprise)"
+                "value": "Cash $ (Vertex/agy/enterprise)"
               }
             ]
           },
@@ -872,7 +1007,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 36
       },
       "id": 7,
       "options": {
@@ -893,9 +1028,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
+          "queryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND h.attr_key NOT LIKE 'fleet:%'\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend IN ('vertex','enterprise') THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
+          "rawQueryText": "SELECT\n  h.attr_key AS attr_key,\n  COALESCE(sp.title, '') AS title,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(CASE WHEN h.backend = 'max' THEN h.cost_usd ELSE 0 END) AS max_usd,\n  SUM(CASE WHEN h.backend <> 'max' THEN h.cost_usd ELSE 0 END) AS cash_usd,\n  SUM(h.n) AS requests,\n  MIN(h.hour) / 1000 AS first,\n  MAX(h.hour) / 1000 AS last\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND h.attr_key NOT LIKE 'fleet:%'\nGROUP BY h.attr_key\nORDER BY (max_usd + cash_usd) DESC\nLIMIT 25",
           "refId": "A",
           "timeColumns": [
             "first",
@@ -903,7 +1038,7 @@
           ]
         }
       ],
-      "title": "Top 25 Sessions: Max $ (notional) & cash $ (Vertex/Enterprise)",
+      "title": "Top 25 Sessions: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "table"
     }
   ],
@@ -923,14 +1058,14 @@
           "type": "frser-sqlite-datasource",
           "uid": "llm-ledger"
         },
-        "definition": "SELECT DISTINCT backend FROM hourly ORDER BY backend",
+        "definition": "SELECT DISTINCT host FROM fleet_hourly ORDER BY host",
         "hide": 0,
         "includeAll": true,
-        "label": "Backend",
+        "label": "Host",
         "multi": true,
-        "name": "backend",
+        "name": "host",
         "options": [],
-        "query": "SELECT DISTINCT backend FROM hourly ORDER BY backend",
+        "query": "SELECT DISTINCT host FROM fleet_hourly ORDER BY host",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,
@@ -944,14 +1079,35 @@
           "type": "frser-sqlite-datasource",
           "uid": "llm-ledger"
         },
-        "definition": "SELECT DISTINCT model FROM hourly ORDER BY model",
+        "definition": "SELECT DISTINCT backend FROM fleet_hourly ORDER BY backend",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Backend",
+        "multi": true,
+        "name": "backend",
+        "options": [],
+        "query": "SELECT DISTINCT backend FROM fleet_hourly ORDER BY backend",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      },
+      {
+        "allValue": null,
+        "current": {},
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "llm-ledger"
+        },
+        "definition": "SELECT DISTINCT model FROM fleet_hourly ORDER BY model",
         "hide": 0,
         "includeAll": true,
         "label": "Model",
         "multi": true,
         "name": "model",
         "options": [],
-        "query": "SELECT DISTINCT model FROM hourly ORDER BY model",
+        "query": "SELECT DISTINCT model FROM fleet_hourly ORDER BY model",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,

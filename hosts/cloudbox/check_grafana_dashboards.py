@@ -112,10 +112,10 @@ def lint_dashboard(path: Path, raw_text: str, data: dict[str, Any], seen_uids: s
                         f"{path}: panel '{p_title}' target '{t_ref}' queryType is 'time series' but 'time' is not in timeColumns: {time_cols}"
                     )
 
-            # Every query reading requests/hourly/quota_samples must have $__from/${__from} and $__to/${__to}
+            # Every query reading requests/hourly/fleet_hourly/remote_hourly/quota_samples must have $__from/${__from} and $__to/${__to}
             reads_bounded_tables = bool(
                 re.search(
-                    r"\b(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)?(?:requests|hourly|quota_samples)\b",
+                    r"\b(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)?(?:requests|hourly|fleet_hourly|remote_hourly|quota_samples)\b",
                     sql,
                     re.IGNORECASE,
                 )
@@ -228,6 +228,7 @@ def build_fixture_db() -> sqlite3.Connection:
     """Create in-memory SQLite database and populate with test fixtures."""
     conn = sqlite3.connect(":memory:")
     conn.executescript(llm_ledger.SCHEMA_SQL)
+    llm_ledger.ensure_fleet_objects(conn, "cloudbox")
 
     t_now = 1795000000000  # Nov 2026 ms epoch
     t_next = t_now + 86400 * 1000
@@ -243,17 +244,35 @@ def build_fixture_db() -> sqlite3.Connection:
         (t_now, t_now, t_now),
     )
 
-    # 2. hourly: rows for attr-manual, attr-auto, attr-orphan, and attr-quote
+    # 2. hourly: rows for attr-manual, attr-auto, attr-orphan, attr-quote, and agy
     conn.execute(
         """
         INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) VALUES
           (?, 'attr-manual', 'max', 'claude-opus-5-5', 10, 1000, 500, 200, 100, 1.5),
           (?, 'attr-auto', 'vertex', 'claude-opus-5-5', 5, 500, 250, 100, 50, 2.0),
           (?, 'attr-orphan', 'enterprise', 'claude-haiku-4-5', 2, 200, 100, 50, 20, 0.5),
-          (?, 'attr-quote', 'vertex', 'claude-opus-5-5', 3, 300, 150, 60, 30, 0.8)
+          (?, 'attr-quote', 'vertex', 'claude-opus-5-5', 3, 300, 150, 60, 30, 0.8),
+          (?, 'attr-manual', 'agy', 'claude-opus-5-5', 4, 400, 200, 80, 40, 1.2)
         """,
-        (t_now, t_now, t_now, t_now),
+        (t_now, t_now, t_now, t_now, t_now),
     )
+
+    # 2b. remote_hosts & remote_hourly: devbox fixtures
+    conn.execute(
+        """
+        INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES
+          ('devbox', ?, ?, ?)
+        """,
+        (t_now - 86400 * 1000, t_now - 1800 * 1000, t_now),
+    )
+    conn.execute(
+        """
+        INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) VALUES
+          ('devbox', ?, 'acct-dev', 'max', 'claude-opus-5-5', 6, 600, 300, 120, 30, 30, 1.8)
+        """,
+        (t_now,),
+    )
+    llm_ledger.ensure_fleet_objects(conn, "cloudbox")
 
     # 3. route & requests
     conn.execute(
@@ -506,6 +525,20 @@ def run_self_tests() -> None:
     d_b2["panels"][0]["targets"][0]["rawQueryText"] = "SELECT ts AS time FROM main.requests WHERE ts >= $__from"
     d_b2["panels"][0]["targets"][0]["queryText"] = d_b2["panels"][0]["targets"][0]["rawQueryText"]
     planted_cases.append(("bounded-table FROM schema.requests missing $__to", json.dumps(d_b2), d_b2, set()))
+
+    # 14b. Bounded-table detection: FROM fleet_hourly missing $__to
+    d_fh = copy.deepcopy(base_valid)
+    bad_sql_fh = "SELECT hour AS time FROM fleet_hourly WHERE hour >= $__from"
+    d_fh["panels"][0]["targets"][0]["rawQueryText"] = bad_sql_fh
+    d_fh["panels"][0]["targets"][0]["queryText"] = bad_sql_fh
+    planted_cases.append(("missing $__to on fleet_hourly", json.dumps(d_fh), d_fh, set()))
+
+    # 14c. Bounded-table detection: FROM remote_hourly missing $__from
+    d_rh = copy.deepcopy(base_valid)
+    bad_sql_rh = "SELECT hour AS time FROM remote_hourly WHERE hour < $__to"
+    d_rh["panels"][0]["targets"][0]["rawQueryText"] = bad_sql_rh
+    d_rh["panels"][0]["targets"][0]["queryText"] = bad_sql_rh
+    planted_cases.append(("missing $__from on remote_hourly", json.dumps(d_rh), d_rh, set()))
 
     # 15. (d) Forbidden account != '...'
     d_d1 = copy.deepcopy(base_valid)

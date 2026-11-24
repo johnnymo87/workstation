@@ -675,6 +675,92 @@
       ],
       "title": "Max to Vertex Spillover cash $ per hour",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "How far behind current time each remote host's imported telemetry is, based on exported_through timestamp.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto",
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minutes_behind"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Minutes behind"
+              },
+              {
+                "id": "unit",
+                "value": "m"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "footer": {
+          "enablePagination": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  host,\n  (strftime('%s','now')*1000 - exported_through)/60000.0 AS minutes_behind\nFROM remote_hosts",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  host,\n  (strftime('%s','now')*1000 - exported_through)/60000.0 AS minutes_behind\nFROM remote_hosts",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Fleet freshness",
+      "type": "table"
     }
   ],
   "preload": false,
