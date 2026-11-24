@@ -26,7 +26,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Today's America/New_York Neon commitment spend vs daily cap, read from ingest_state (evaluated by llm-ledger commitment-spend feed). Green below $1,125 (75%), yellow $1,125-$1,500, red at or above $1,500 daily cap.",
+      "description": "Today's America/New_York Neon commitment spend vs daily cap, read from ingest_state (evaluated by llm-ledger commitment-spend feed). Green below $1,125 (75%), yellow $1,125-$1,500, red at or above $1,500 daily cap. Stale feed (>15 min) or past day_end_ms evaluates complete to Incomplete and spend to NULL.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -174,7 +174,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Complete"
+              "options": "Feed Complete"
             },
             "properties": [
               {
@@ -198,6 +198,42 @@
                     "type": "value"
                   }
                 ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Feed Age (min)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Feed Age (min)"
+              },
+              {
+                "id": "unit",
+                "value": "m"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 10
+                    },
+                    {
+                      "color": "red",
+                      "value": 15
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -231,9 +267,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) AS \"Today's Neon Spend\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0) AS \"Daily Cap\",\n  ROUND(100.0 * COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) / NULLIF(COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0), 0), 1) AS \"% of Cap\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS INTEGER), 0) AS \"Requests Today\",\n  COALESCE(MAX(CASE WHEN key = 'neon_today_complete' THEN value END), '1') AS \"Complete\"\nFROM ingest_state",
+          "queryText": "WITH raw AS (\n  SELECT\n    MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS spend_raw,\n    MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS cap_raw,\n    MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS req_raw,\n    MAX(CASE WHEN key = 'neon_today_complete' THEN value END) AS complete_raw,\n    MAX(CASE WHEN key = 'neon_today_day_end_ms' THEN value END) AS day_end_ms_raw,\n    MAX(CASE WHEN key = 'neon_today_updated_at' THEN value END) AS updated_at_raw\n  FROM ingest_state\n),\nparsed AS (\n  SELECT\n    CAST(spend_raw AS REAL) AS spend,\n    COALESCE(CAST(cap_raw AS REAL), 1500.0) AS cap,\n    CAST(req_raw AS INTEGER) AS requests,\n    COALESCE(CAST(complete_raw AS INTEGER), 0) AS complete,\n    CAST(day_end_ms_raw AS INTEGER) AS day_end_ms,\n    updated_at_raw AS updated_at,\n    CASE\n      WHEN updated_at_raw IS NOT NULL\n      THEN ROUND((julianday('now') - julianday(updated_at_raw)) * 1440.0, 1)\n      ELSE NULL\n    END AS feed_age_min,\n    CAST(strftime('%s', 'now') AS INTEGER) * 1000 AS now_ms\n  FROM raw\n)\nSELECT\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN NULL\n    ELSE COALESCE(spend, 0.0)\n  END AS \"Today's Neon Spend\",\n  cap AS \"Daily Cap\",\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms OR spend IS NULL THEN NULL\n    ELSE ROUND(100.0 * spend / NULLIF(cap, 0), 1)\n  END AS \"% of Cap\",\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN NULL\n    ELSE COALESCE(requests, 0)\n  END AS \"Requests Today\",\n  CAST(CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN 0\n    WHEN feed_age_min IS NULL OR feed_age_min > 15.0 THEN 0\n    ELSE complete\n  END AS INTEGER) AS \"Feed Complete\",\n  feed_age_min AS \"Feed Age (min)\"\nFROM parsed",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) AS \"Today's Neon Spend\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0) AS \"Daily Cap\",\n  ROUND(100.0 * COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) / NULLIF(COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0), 0), 1) AS \"% of Cap\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS INTEGER), 0) AS \"Requests Today\",\n  COALESCE(MAX(CASE WHEN key = 'neon_today_complete' THEN value END), '1') AS \"Complete\"\nFROM ingest_state",
+          "rawQueryText": "WITH raw AS (\n  SELECT\n    MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS spend_raw,\n    MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS cap_raw,\n    MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS req_raw,\n    MAX(CASE WHEN key = 'neon_today_complete' THEN value END) AS complete_raw,\n    MAX(CASE WHEN key = 'neon_today_day_end_ms' THEN value END) AS day_end_ms_raw,\n    MAX(CASE WHEN key = 'neon_today_updated_at' THEN value END) AS updated_at_raw\n  FROM ingest_state\n),\nparsed AS (\n  SELECT\n    CAST(spend_raw AS REAL) AS spend,\n    COALESCE(CAST(cap_raw AS REAL), 1500.0) AS cap,\n    CAST(req_raw AS INTEGER) AS requests,\n    COALESCE(CAST(complete_raw AS INTEGER), 0) AS complete,\n    CAST(day_end_ms_raw AS INTEGER) AS day_end_ms,\n    updated_at_raw AS updated_at,\n    CASE\n      WHEN updated_at_raw IS NOT NULL\n      THEN ROUND((julianday('now') - julianday(updated_at_raw)) * 1440.0, 1)\n      ELSE NULL\n    END AS feed_age_min,\n    CAST(strftime('%s', 'now') AS INTEGER) * 1000 AS now_ms\n  FROM raw\n)\nSELECT\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN NULL\n    ELSE COALESCE(spend, 0.0)\n  END AS \"Today's Neon Spend\",\n  cap AS \"Daily Cap\",\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms OR spend IS NULL THEN NULL\n    ELSE ROUND(100.0 * spend / NULLIF(cap, 0), 1)\n  END AS \"% of Cap\",\n  CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN NULL\n    ELSE COALESCE(requests, 0)\n  END AS \"Requests Today\",\n  CAST(CASE\n    WHEN day_end_ms IS NULL OR now_ms >= day_end_ms THEN 0\n    WHEN feed_age_min IS NULL OR feed_age_min > 15.0 THEN 0\n    ELSE complete\n  END AS INTEGER) AS \"Feed Complete\",\n  feed_age_min AS \"Feed Age (min)\"\nFROM parsed",
           "refId": "A",
           "timeColumns": []
         }
@@ -246,7 +282,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Fleet mix across interactive sessions (goose and opencode) for the selected range and program filter.",
+      "description": "Fleet mix across interactive sessions (goose and opencode) for the selected range and program filter. Covers cloudbox (hourly) because remote hosts only export fleet:<host> aggregates. Note: Sessions using both Opus and Neon in the window are counted in both model buckets.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -407,9 +443,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "queryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "rawQueryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
           "refId": "A",
           "timeColumns": []
         }
@@ -422,7 +458,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Active unique sessions per hour bucketed by time interval, broken down by harness and model family.",
+      "description": "Active unique sessions per hour bucketed by time interval, broken down by harness and model family. Covers cloudbox (hourly) because remote hosts only export fleet:<host> aggregates. Note: Sessions using both Opus and Neon in the window are counted in both model buckets.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -471,9 +507,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -488,7 +524,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Rollout progression curves: Goose share of interactive sessions, Neon share of Goose sessions, and Neon share of all interactive sessions.",
+      "description": "Rollout progression curves: Goose share of interactive sessions, Neon share of Goose sessions, and Neon share of all interactive sessions. Covers cloudbox (hourly) because remote hosts only export fleet:<host> aggregates.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -597,9 +633,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -623,9 +659,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "refId": "C",
           "timeColumns": [
             "time"
@@ -640,7 +676,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Average spend in dollars per hour ($/h) across each time bucket, grouped by harness and model.",
+      "description": "Average spend in dollars per hour ($/h) across each time bucket, grouped by harness and model. Covers cloudbox (hourly) because remote hosts only export fleet:<host> aggregates.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -689,9 +725,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -775,9 +811,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
@@ -792,7 +828,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Daily Neon spend in 24h UTC buckets vs the $1,500/day cap (yellow line at 75% = $1,125/day, red line at $1,500/day). Note: The controller cap evaluates by America/New_York day (see Today's Neon Spend stat panel); these 24h UTC buckets show daily trend.",
+      "description": "Daily Neon spend (EST / UTC-5 days; 1h shift in EDT) vs $1,500 cap (yellow line at 75% = $1,125/day, red line at $1,500/day). Note: The controller cap evaluates by America/New_York day (see Today's Neon Spend stat panel); these UTC-5 day buckets show daily trend clamped to the query range.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -861,16 +897,16 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  (h.hour / 86400000) * 86400 AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryText": "SELECT\n  MAX(((h.hour - 18000000) / 86400000) * 86400 + 18000, $__from / 1000) AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "queryType": "time series",
-          "rawQueryText": "SELECT\n  (h.hour / 86400000) * 86400 AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "rawQueryText": "SELECT\n  MAX(((h.hour - 18000000) / 86400000) * 86400 + 18000, $__from / 1000) AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
           "refId": "A",
           "timeColumns": [
             "time"
           ]
         }
       ],
-      "title": "Daily Neon spend (24h UTC buckets) vs $1,500 cap",
+      "title": "Daily Neon spend (EST / UTC-5 days; 1h shift in EDT) vs $1,500 cap",
       "type": "timeseries"
     },
     {
@@ -878,7 +914,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Per-program adoption breakdown: Goose Neon sessions, Goose Opus sessions, Opencode sessions, and spend by model.",
+      "description": "Per-program adoption breakdown: Goose Neon sessions, Goose Opus sessions, Opencode sessions, and spend by model. Covers cloudbox (hourly) because remote hosts only export fleet:<host> aggregates.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1053,7 +1089,7 @@
           "reducer": [
             "sum"
           ],
-          "show": true
+          "show": false
         },
         "showHeader": true,
         "sortBy": [
@@ -1070,9 +1106,9 @@
             "type": "frser-sqlite-datasource",
             "uid": "llm-ledger"
           },
-          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'ses_%' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
           "queryType": "table",
-          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'ses_%' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN substr(h.attr_key, 1, 4) = 'ses_' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
           "refId": "A",
           "timeColumns": []
         }
@@ -1129,7 +1165,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "Fleet Rollout: Goose & Model Switch",
+  "title": "Cloudbox Rollout: Goose & Model Switch",
   "uid": "model-switch",
   "version": 1,
   "weekStart": ""

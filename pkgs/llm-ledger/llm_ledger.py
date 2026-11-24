@@ -10,6 +10,7 @@ import fcntl
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -2189,47 +2190,42 @@ def commitment_spend(
 DEFAULT_MODEL_SWITCH_STATE: str = os.path.expanduser("~/.local/state/model-switch/state.json")
 
 
-def _read_daily_cap_usd(state_path: str | os.PathLike[str] | None = None) -> str:
+def _read_daily_cap_usd(state_path: str | os.PathLike[str] | None = None) -> tuple[str, str]:
     path = os.path.expanduser(str(state_path)) if state_path else DEFAULT_MODEL_SWITCH_STATE
     try:
         if not os.path.exists(path):
-            return "1500"
+            return "1500", "default"
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             cap = data.get("daily_cap_usd")
-            if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0:
-                if isinstance(cap, float) and cap.is_integer():
-                    return str(int(cap))
-                return str(cap)
+            if isinstance(cap, (int, float)) and not isinstance(cap, bool):
+                if math.isfinite(cap) and cap > 0:
+                    if isinstance(cap, float) and cap.is_integer():
+                        return str(int(cap)), "state.json"
+                    return str(cap), "state.json"
             elif isinstance(cap, str):
                 try:
                     cap_f = float(cap)
-                    if cap_f > 0:
+                    if math.isfinite(cap_f) and cap_f > 0:
                         if cap_f.is_integer():
-                            return str(int(cap_f))
-                        return str(cap_f)
+                            return str(int(cap_f)), "state.json"
+                        return str(cap_f), "state.json"
                 except ValueError:
                     pass
     except Exception:
         pass
-    return "1500"
+    return "1500", "default"
 
 
-def write_commitment_json(
+def update_commitment_ingest_state(
     conn: sqlite3.Connection,
-    path: str,
-    now_ms: int | None = None,
+    data: dict[str, Any],
+    now_ms: int,
     model_switch_state: str | os.PathLike[str] | None = None,
 ) -> None:
-    data = commitment_spend(conn, now_ms=now_ms)
-    payload = json.dumps(data, sort_keys=True, allow_nan=False) + "\n"
-    tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w") as f:
-        f.write(payload)
-    os.replace(tmp, path)
-
-    cap_usd = _read_daily_cap_usd(model_switch_state)
+    _day, _start_ms, day_end_ms = _et_day_bounds(data["day"], now_ms)
+    cap_usd, cap_source = _read_daily_cap_usd(model_switch_state)
     conn.executemany(
         "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
         [
@@ -2238,11 +2234,37 @@ def write_commitment_json(
             ("neon_today_requests", str(data["neon"]["requests"])),
             ("neon_today_complete", "1" if data["complete"] else "0"),
             ("neon_today_day_start", str(data["day_start"])),
+            ("neon_today_day_end_ms", str(day_end_ms)),
             ("neon_today_updated_at", str(data["generated_at"])),
             ("neon_daily_cap_usd", cap_usd),
+            ("neon_daily_cap_source", cap_source),
         ],
     )
     conn.commit()
+
+
+def write_commitment_json(
+    conn: sqlite3.Connection,
+    path: str,
+    now_ms: int | None = None,
+    model_switch_state: str | os.PathLike[str] | None = None,
+    warnings: list[str] | None = None,
+) -> None:
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    data = commitment_spend(conn, now_ms=now_ms)
+    payload = json.dumps(data, sort_keys=True, allow_nan=False) + "\n"
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(payload)
+    os.replace(tmp, path)
+
+    try:
+        update_commitment_ingest_state(conn, data, now_ms=now_ms, model_switch_state=model_switch_state)
+    except Exception as e:
+        if warnings is not None:
+            add_warning(warnings, f"failed to update neon_today ingest_state: {e}")
+        else:
+            raise
 
 
 def run_ingest(
@@ -2379,6 +2401,7 @@ def run_ingest(
                         commitment_json,
                         now_ms=now_ms,
                         model_switch_state=model_switch_state,
+                        warnings=warnings_list,
                     )
                 except Exception as e:  # the feed must not take the ledger down with it
                     add_warning(warnings_list, f"commitment-spend feed not written: {e}")
