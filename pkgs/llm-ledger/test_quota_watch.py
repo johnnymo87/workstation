@@ -2771,5 +2771,130 @@ class TestOutlookFromJson(unittest.TestCase):
         self.assertTrue(res_missing["error"].startswith("no published outlook at /"))
 
 
+class TestUsageSeatExclusionInK(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+        self.state_dir = os.path.join(self.tmpdir.name, "state")
+        os.makedirs(self.state_dir, exist_ok=True)
+        # Align base timestamp to 5-min boundary
+        self.T0 = 1795400100000  # divisible by 300000
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _seed_db(self, seat_tc_rows=(), pool_tc_rows=(), include_tc_table=True):
+        conn = sqlite3.connect(self.db_path)
+        if include_tc_table:
+            import llm_ledger
+            conn.executescript(llm_ledger.SCHEMA_SQL)
+        else:
+            # Minimal older schema without teamclaude_usage
+            conn.executescript("""
+                CREATE TABLE route (request_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, session_id TEXT, model TEXT, desired TEXT, chosen TEXT);
+                CREATE TABLE requests (request_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, host TEXT NOT NULL, session_id TEXT, attr_key TEXT NOT NULL, backend TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost_usd REAL, status INTEGER, duration_ms INTEGER);
+                CREATE TABLE quota_samples (ts INTEGER NOT NULL, account TEXT NOT NULL, s TEXT, u5h REAL, u7d REAL, u7d_fable REAL, fw INTEGER, r7d INTEGER, r5h INTEGER, PRIMARY KEY (ts, account));
+                CREATE TABLE remote_hosts (host TEXT PRIMARY KEY, first_hour INTEGER, exported_through INTEGER, imported_at INTEGER NOT NULL);
+            """)
+        # Seed quota_samples: acct-a burns 0.60 over 1 hour (above K_MIN_BURN=0.5),
+        # while usage-seat has u7d=NULL on every tick (auto-excluded).
+        t1 = self.T0
+        t2 = self.T0 + 30 * 60 * 1000
+        t3 = self.T0 + 60 * 60 * 1000
+        r7d = t3 + 3 * 24 * 3600 * 1000
+        conn.executemany(
+            "INSERT INTO quota_samples (ts, account, s, u5h, u7d, u7d_fable, fw, r7d, r5h) VALUES (?, ?, 'active', 0.1, ?, NULL, 0, ?, NULL)",
+            [
+                (t1, "acct-a", 0.10, r7d),
+                (t1, "usage-seat", None, None),
+                (t2, "acct-a", 0.40, r7d),
+                (t2, "usage-seat", None, None),
+                (t3, "acct-a", 0.70, r7d),
+                (t3, "usage-seat", None, None),
+            ],
+        )
+        # Seed requests (cloudbox Max $ total = $900 across the hour: $600 pool + $300 seat)
+        conn.executemany(
+            "INSERT INTO requests (request_id, ts, host, session_id, attr_key, backend, model, input, output, cache_read, cache_write, cost_usd, status, duration_ms) "
+            "VALUES (?, ?, 'cloudbox', 'ses_1', 'ses_1', 'max', 'claude-opus-5-5', 100, 100, 0, 0, ?, 200, 100)",
+            [
+                ("r1", t1 + 60_000, 600.0),
+                ("r2", t2 + 60_000, 300.0),
+            ],
+        )
+        if include_tc_table:
+            for idx, (ts, acct, cost) in enumerate(list(seat_tc_rows) + list(pool_tc_rows)):
+                conn.execute(
+                    "INSERT INTO teamclaude_usage (line_hash, ts, host, account, model, session_id, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+                    "VALUES (?, ?, 'cloudbox', ?, 'claude-opus-5-5', 'ses_1', 100, 100, 0, 0, 0, ?)",
+                    (f"h{idx}", ts, acct, cost),
+                )
+        conn.commit()
+        conn.close()
+        return t3
+
+    def test_run_live_subtracts_auto_excluded_usage_seat_from_k(self):
+        t2 = self.T0 + 30 * 60 * 1000
+        T = self._seed_db(
+            seat_tc_rows=[(t2 + 60_000, "usage-seat@example.com", 300.0)],
+            pool_tc_rows=[(self.T0 + 60_000, "acct-a@example.com", 600.0)],
+        )
+        rc = quota_watch.run_live(
+            db=self.db_path, state_dir=self.state_dir, alert_cmd=None,
+            now=T + 60_000, host="cloudbox", alert_stale_hosts="",
+        )
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(self.db_path)
+        k = conn.execute("SELECT k FROM quota_watch_runs WHERE ts = ?", (T,)).fetchone()[0]
+        conn.close()
+        # Total Max $ = 900, usage-seat $ = 300 -> pool Max $ = 600; burn_7d = 0.60 -> k = 1000.0
+        self.assertAlmostEqual(k, 1000.0, places=3)
+
+    def test_run_live_partial_day1_coverage_smooth_transition(self):
+        # Day 1: requests has $900 over 7d, teamclaude_usage only saw $100 of usage-seat so far.
+        # k should smoothly drop from 900/0.6=1500 to 800/0.6=1333.33, NOT collapse to 0.
+        t2 = self.T0 + 30 * 60 * 1000
+        T = self._seed_db(
+            seat_tc_rows=[(t2 + 60_000, "usage-seat@example.com", 100.0)],
+            pool_tc_rows=[],
+        )
+        rc = quota_watch.run_live(
+            db=self.db_path, state_dir=self.state_dir, alert_cmd=None,
+            now=T + 60_000, host="cloudbox", alert_stale_hosts="",
+        )
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(self.db_path)
+        k = conn.execute("SELECT k FROM quota_watch_runs WHERE ts = ?", (T,)).fetchone()[0]
+        conn.close()
+        self.assertAlmostEqual(k, 800.0 / 0.6, places=3)
+
+    def test_run_live_without_teamclaude_table_is_backwards_compatible(self):
+        T = self._seed_db(include_tc_table=False)
+        rc = quota_watch.run_live(
+            db=self.db_path, state_dir=self.state_dir, alert_cmd=None,
+            now=T + 60_000, host="cloudbox", alert_stale_hosts="",
+        )
+        self.assertEqual(rc, 0)
+        conn = sqlite3.connect(self.db_path)
+        k = conn.execute("SELECT k FROM quota_watch_runs WHERE ts = ?", (T,)).fetchone()[0]
+        conn.close()
+        self.assertAlmostEqual(k, 900.0 / 0.6, places=3)
+
+    def test_replay_subtracts_usage_seat_and_clamps_at_zero(self):
+        t2 = self.T0 + 30 * 60 * 1000
+        # Usage seat exceeds requests (e.g. slight pricing diff) -> clamped at 0.0
+        T = self._seed_db(
+            seat_tc_rows=[(t2 + 60_000, "usage-seat@example.com", 1200.0)],
+        )
+        quota_watch.replay(
+            db=self.db_path, since_ms=T, until_ms=T,
+            host="cloudbox", record=True,
+        )
+        conn = sqlite3.connect(self.db_path)
+        k = conn.execute("SELECT k FROM quota_watch_runs WHERE ts = ?", (T,)).fetchone()[0]
+        conn.close()
+        self.assertEqual(k, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,21 @@ CREATE TABLE IF NOT EXISTS remote_hourly (
 CREATE TABLE IF NOT EXISTS remote_hosts (
   host TEXT PRIMARY KEY, first_hour INTEGER, exported_through INTEGER,
   imported_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS teamclaude_usage (
+  line_hash TEXT PRIMARY KEY,
+  ts INTEGER NOT NULL, host TEXT NOT NULL, account TEXT NOT NULL,
+  model TEXT NOT NULL, session_id TEXT,
+  input INTEGER, output INTEGER, cache_read INTEGER,
+  cache_write_5m INTEGER, cache_write_1h INTEGER, cost_usd REAL);
+CREATE INDEX IF NOT EXISTS teamclaude_usage_ts ON teamclaude_usage(ts, host, account);
+
+CREATE TABLE IF NOT EXISTS teamclaude_hourly (
+  hour INTEGER NOT NULL, host TEXT NOT NULL, account TEXT NOT NULL,
+  model TEXT NOT NULL, n INTEGER,
+  input INTEGER, output INTEGER, cache_read INTEGER,
+  cache_write_5m INTEGER, cache_write_1h INTEGER, cost_usd REAL,
+  PRIMARY KEY (hour, host, account, model));
 """ + QUOTA_WATCH_SCHEMA_SQL
 
 # Source: claude-failover-proxy src/price.ts (standard tier, 2026-11-23).
@@ -1355,12 +1370,317 @@ def step_session_program_snapshot(
     return len(to_upsert)
 
 
+def step_teamclaude_tail_and_archive(
+    conn: sqlite3.Connection,
+    log_path: str | None,
+    raw_dir: str,
+    host: str,
+    batch_size: int = 50000,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Tail local teamclaude usage.jsonl into teamclaude_usage and gzip raw archive.
+
+    Optional input: if log_path is None or does not exist yet, returns 0 rows with no warning.
+    """
+    if not log_path or not os.path.exists(log_path):
+        return {"tc_rows": 0, "tc_malformed": 0, "touched_hours": set()}
+
+    state = get_ingest_state(conn)
+    stored_inode = int(state["tc_inode"]) if "tc_inode" in state else None
+    stored_offset = int(state["tc_offset"]) if "tc_offset" in state else 0
+    stored_archived_ts = (
+        int(state["tc_archived_through_ts"])
+        if "tc_archived_through_ts" in state
+        else None
+    )
+    stored_head_sha = state.get("tc_head_sha")
+    stored_head_len = int(state["tc_head_len"]) if "tc_head_len" in state else None
+
+    try:
+        f = open(log_path, "rb")
+    except OSError as e:
+        add_warning(warnings, f"failed to read teamclaude log {log_path}: {e}")
+        return {"tc_rows": 0, "tc_malformed": 0, "touched_hours": set()}
+
+    with f:
+        st = os.fstat(f.fileno())
+        cur_inode = st.st_ino
+        cur_size = st.st_size
+
+        is_restart = False
+        if stored_inode is not None:
+            if cur_inode != stored_inode or cur_size < stored_offset:
+                is_restart = True
+            else:
+                if stored_head_sha is not None and stored_head_len is not None:
+                    f.seek(0)
+                    head_data = f.read(stored_head_len)
+                    if len(head_data) != stored_head_len or hashlib.sha256(head_data).hexdigest() != stored_head_sha:
+                        is_restart = True
+                if not is_restart and stored_offset > 0:
+                    f.seek(stored_offset - 1)
+                    if f.read(1) != b"\n":
+                        is_restart = True
+
+        read_offset = 0 if (is_restart or stored_inode is None) else stored_offset
+        cutoff = (
+            (stored_archived_ts - 600_000)
+            if (is_restart and stored_archived_ts is not None)
+            else None
+        )
+
+        if cur_size <= read_offset:
+            return {"tc_rows": 0, "tc_malformed": 0, "touched_hours": set()}
+
+        f.seek(read_offset)
+
+        total_rows = 0
+        total_malformed = 0
+        touched_hours: set[int] = set()
+        current_archived_through_ts = stored_archived_ts or 0
+        current_offset = read_offset
+
+        batch_lines: list[bytes] = []
+        batch_bytes_len = 0
+
+        def process_and_commit_batch(lines: list[bytes], byte_len: int) -> None:
+            nonlocal current_offset, total_rows, total_malformed, current_archived_through_ts
+            if not lines:
+                return
+
+            parsed_entries: list[tuple[bytes, tuple[Any, ...] | None, int | None]] = []
+            batch_malformed = 0
+            batch_max_ts = 0
+
+            for raw in lines:
+                try:
+                    line_str = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    batch_malformed += 1
+                    parsed_entries.append((raw, None, None))
+                    continue
+
+                stripped = line_str.strip()
+                if not stripped:
+                    continue
+
+                try:
+                    obj = json.loads(stripped)
+                except Exception:
+                    batch_malformed += 1
+                    parsed_entries.append((raw, None, None))
+                    continue
+
+                if not isinstance(obj, dict):
+                    batch_malformed += 1
+                    parsed_entries.append((raw, None, None))
+                    continue
+
+                ts_ms = parse_iso_ts(obj.get("ts"))
+                model = obj.get("model")
+                if ts_ms is None or not model or not isinstance(model, str):
+                    batch_malformed += 1
+                    parsed_entries.append((raw, None, None))
+                    continue
+
+                if ts_ms > batch_max_ts:
+                    batch_max_ts = ts_ms
+
+                account_val = obj.get("account")
+                account = str(account_val) if isinstance(account_val, str) else ""
+                session_val = obj.get("session")
+                session_id = str(session_val) if isinstance(session_val, str) and session_val else None
+
+                inp = to_int(obj.get("input")) or 0
+                outp = to_int(obj.get("output")) or 0
+                cread = to_int(obj.get("cache_read")) or 0
+                cw = to_int(obj.get("cache_write")) or 0
+                w5 = to_int(obj.get("cache_write_5m")) or 0
+                w1 = to_int(obj.get("cache_write_1h")) or 0
+                if cw and not (w5 or w1):
+                    w5 = cw
+
+                cost_usd = price_remote(model, inp, outp, cread, w5, w1)
+                line_hash = hashlib.sha256(stripped.encode("utf-8")).hexdigest()
+
+                row = (
+                    line_hash, ts_ms, host, account, model, session_id,
+                    inp, outp, cread, w5, w1, cost_usd,
+                )
+                parsed_entries.append((raw, row, ts_ms))
+
+            if is_restart:
+                archive_bytes = b"".join(
+                    raw for raw, row, ts_ms in parsed_entries
+                    if row is not None and ts_ms is not None and (cutoff is None or ts_ms > cutoff)
+                )
+            else:
+                archive_bytes = b"".join(lines)
+
+            if archive_bytes:
+                os.makedirs(raw_dir, exist_ok=True)
+                utc_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+                archive_file = os.path.join(raw_dir, f"teamclaude-usage-{utc_date}.jsonl.gz")
+                with open(archive_file, "ab") as af:
+                    af.write(gzip.compress(archive_bytes))
+
+            rows_to_insert = [row for _, row, _ in parsed_entries if row is not None]
+            new_rows = 0
+            if rows_to_insert:
+                existing_hashes: set[str] = set()
+                for i in range(0, len(rows_to_insert), 500):
+                    chunk = [r[0] for r in rows_to_insert[i : i + 500]]
+                    placeholders = ",".join("?" for _ in chunk)
+                    for r_ex in conn.execute(
+                        f"SELECT line_hash FROM teamclaude_usage WHERE line_hash IN ({placeholders})",
+                        chunk,
+                    ):
+                        existing_hashes.add(r_ex[0])
+
+                seen_hashes = set(existing_hashes)
+                for r in rows_to_insert:
+                    if r[0] not in seen_hashes:
+                        seen_hashes.add(r[0])
+                        touched_hours.add((r[1] // 3_600_000) * 3_600_000)
+
+                cur = conn.cursor()
+                cur.executemany(
+                    "INSERT OR IGNORE INTO teamclaude_usage "
+                    "(line_hash, ts, host, account, model, session_id, "
+                    "input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows_to_insert,
+                )
+                new_rows = cur.rowcount
+
+            total_rows += new_rows
+            total_malformed += batch_malformed
+            if batch_max_ts > current_archived_through_ts:
+                current_archived_through_ts = batch_max_ts
+
+            batch_end_offset = current_offset + byte_len
+
+            saved_pos = f.tell()
+            f.seek(0)
+            cur_head_bytes = f.read(4096)
+            f.seek(saved_pos)
+            cur_head_len = len(cur_head_bytes)
+            cur_head_sha = hashlib.sha256(cur_head_bytes).hexdigest()
+
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('tc_inode', ?)",
+                (str(cur_inode),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('tc_offset', ?)",
+                (str(batch_end_offset),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('tc_archived_through_ts', ?)",
+                (str(current_archived_through_ts),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('tc_head_sha', ?)",
+                (cur_head_sha,),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO ingest_state (key, value) VALUES ('tc_head_len', ?)",
+                (str(cur_head_len),),
+            )
+            conn.commit()
+            current_offset = batch_end_offset
+
+        while True:
+            line = f.readline()
+            if not line:
+                break
+            if not line.endswith(b"\n"):
+                break
+            batch_lines.append(line)
+            batch_bytes_len += len(line)
+            if len(batch_lines) >= batch_size:
+                process_and_commit_batch(batch_lines, batch_bytes_len)
+                batch_lines = []
+                batch_bytes_len = 0
+
+        if batch_lines:
+            process_and_commit_batch(batch_lines, batch_bytes_len)
+
+    return {
+        "tc_rows": total_rows,
+        "tc_malformed": total_malformed,
+        "touched_hours": touched_hours,
+    }
+
+
+def step_teamclaude_hourly_rollup(
+    conn: sqlite3.Connection,
+    touched_hours: set[int] | None = None,
+) -> int:
+    """Rebuild teamclaude_hourly rollup for touched hours (or all hours if fresh/None)."""
+    hourly_empty = conn.execute("SELECT 1 FROM teamclaude_hourly LIMIT 1").fetchone() is None
+    usage_exists = conn.execute("SELECT 1 FROM teamclaude_usage LIMIT 1").fetchone() is not None
+    is_fresh = hourly_empty and usage_exists
+
+    if is_fresh or touched_hours is None:
+        conn.execute("DELETE FROM teamclaude_hourly")
+        conn.execute("""
+            INSERT INTO teamclaude_hourly
+              (hour, host, account, model, n, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd)
+            SELECT
+              (ts / 3600000) * 3600000 AS hour,
+              host,
+              account,
+              model,
+              COUNT(*) AS n,
+              COALESCE(SUM(input), 0) AS input,
+              COALESCE(SUM(output), 0) AS output,
+              COALESCE(SUM(cache_read), 0) AS cache_read,
+              COALESCE(SUM(cache_write_5m), 0) AS cache_write_5m,
+              COALESCE(SUM(cache_write_1h), 0) AS cache_write_1h,
+              SUM(cost_usd) AS cost_usd
+            FROM teamclaude_usage
+            GROUP BY (ts / 3600000) * 3600000, host, account, model
+        """)
+        conn.commit()
+        count_row = conn.execute("SELECT count(DISTINCT hour) FROM teamclaude_hourly").fetchone()
+        return count_row[0] if count_row else 0
+
+    if not touched_hours:
+        return 0
+
+    ranges = coalesce_hour_ranges(touched_hours)
+    for start_ms, end_ms in ranges:
+        conn.execute("DELETE FROM teamclaude_hourly WHERE hour >= ? AND hour < ?", (start_ms, end_ms))
+        conn.execute("""
+            INSERT INTO teamclaude_hourly
+              (hour, host, account, model, n, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd)
+            SELECT
+              (ts / 3600000) * 3600000 AS hour,
+              host,
+              account,
+              model,
+              COUNT(*) AS n,
+              COALESCE(SUM(input), 0) AS input,
+              COALESCE(SUM(output), 0) AS output,
+              COALESCE(SUM(cache_read), 0) AS cache_read,
+              COALESCE(SUM(cache_write_5m), 0) AS cache_write_5m,
+              COALESCE(SUM(cache_write_1h), 0) AS cache_write_1h,
+              SUM(cost_usd) AS cost_usd
+            FROM teamclaude_usage
+            WHERE ts >= ? AND ts < ?
+            GROUP BY (ts / 3600000) * 3600000, host, account, model
+        """, (start_ms, end_ms))
+    conn.commit()
+    return len(touched_hours)
+
+
 def ensure_fleet_objects(
     conn: sqlite3.Connection,
     local_host: str,
     now_ms: int | None = None,
 ) -> None:
-    """Ensure fleet_hourly view and synthetic session_program rows exist."""
+    """Ensure fleet_hourly, fleet_account_hourly views and synthetic session_program rows exist."""
     local_host = local_host or socket.gethostname()
     if now_ms is None:
         now_ms = int(time.time() * 1000)
@@ -1381,6 +1701,26 @@ def ensure_fleet_objects(
     if not row or row[0] != view_sql:
         conn.execute("DROP VIEW IF EXISTS fleet_hourly")
         conn.execute(view_sql)
+
+    acct_view_sql = (
+        "CREATE VIEW fleet_account_hourly AS\n"
+        "  SELECT hour, host,\n"
+        "         CASE WHEN instr(account, '@') > 0 THEN substr(account, 1, instr(account, '@') - 1) ELSE account END AS account,\n"
+        "         model, n, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd\n"
+        "  FROM teamclaude_hourly\n"
+        "  UNION ALL\n"
+        "  SELECT hour, host,\n"
+        "         CASE WHEN instr(account, '@') > 0 THEN substr(account, 1, instr(account, '@') - 1) ELSE account END AS account,\n"
+        "         model, requests AS n, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd\n"
+        "  FROM remote_hourly\n"
+        "  WHERE backend = 'max'"
+    )
+    acct_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_account_hourly'"
+    ).fetchone()
+    if not acct_row or acct_row[0] != acct_view_sql:
+        conn.execute("DROP VIEW IF EXISTS fleet_account_hourly")
+        conn.execute(acct_view_sql)
 
     hosts = [r[0] for r in conn.execute("SELECT DISTINCT host FROM remote_hosts").fetchall()]
     if hosts:
@@ -1426,6 +1766,7 @@ def run_ingest(
     now: float | None = None,
     take_lock: bool = True,
     warnings: list[str] | None = None,
+    teamclaude_log: str | None = None,
 ) -> dict[str, Any]:
     """Execute run steps 1-6 under lock."""
     warnings_list = warnings if warnings is not None else []
@@ -1452,6 +1793,18 @@ def run_ingest(
                 warnings=warnings_list,
             )
             touched_hours: set[int] = counts.pop("touched_hours", set())
+
+            tc_counts = step_teamclaude_tail_and_archive(
+                conn=conn,
+                log_path=teamclaude_log,
+                raw_dir=actual_raw_dir,
+                host=host,
+                warnings=warnings_list,
+            )
+            tc_touched_hours: set[int] = tc_counts.pop("touched_hours", set())
+            counts["tc_rows"] = tc_counts.get("tc_rows", 0)
+            counts["malformed"] = counts.get("malformed", 0) + tc_counts.get("tc_malformed", 0)
+            step_teamclaude_hourly_rollup(conn=conn, touched_hours=tc_touched_hours)
 
             quota_counts = step_quota_samples(
                 conn=conn,
@@ -1513,6 +1866,7 @@ def rebuild_hourly(
         conn = open_ledger_db(db_path)
         try:
             hours_rebuilt = step_hourly_rollup(conn, touched_hours=None)
+            step_teamclaude_hourly_rollup(conn, touched_hours=None)
             return {
                 "new_routes": 0,
                 "new_requests": 0,
@@ -2057,6 +2411,7 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--samples", default=DEFAULT_SAMPLES)
     run_parser.add_argument("--samples-archive", default=DEFAULT_SAMPLES_ARCHIVE)
     run_parser.add_argument("--goose-recheck-hours", type=int, default=72)
+    run_parser.add_argument("--teamclaude-log", default=None)
 
     # import-events subcommand
     import_parser = subparsers.add_parser("import-events")
@@ -2290,6 +2645,7 @@ def main(argv: list[str] | None = None) -> int:
             samples_path=args.samples,
             samples_archive=args.samples_archive,
             goose_recheck_hours=args.goose_recheck_hours,
+            teamclaude_log=args.teamclaude_log,
         )
         if counts.get("locked"):
             return 0
@@ -2309,6 +2665,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     elapsed = time.time() - t0
+    tc_part = f"tc={counts.get('tc_rows', 0)} " if "tc_rows" in counts else ""
     summary = (
         f"routes={counts.get('new_routes', 0)} "
         f"requests={counts.get('new_requests', 0)} "
@@ -2317,6 +2674,7 @@ def main(argv: list[str] | None = None) -> int:
         f"rechecked={counts.get('rechecked', 0)} "
         f"hours={counts.get('hours_rebuilt', 0)} "
         f"snapshot={counts.get('snapshot_rows', 0)} "
+        f"{tc_part}"
         f"elapsed={elapsed:.2f}s"
     )
     print(summary)

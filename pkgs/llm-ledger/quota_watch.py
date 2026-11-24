@@ -172,9 +172,12 @@ class PoolTracker:
             if r7d is not None:
                 self.latest_r7d[account] = r7d
 
-    def pool(self) -> dict[str, tuple[float, int | None]]:
+    def excluded_accounts(self) -> set[str]:
         auto_excluded = {a for a in self.seen if self.seen[a] == self.all_null[a]}
-        full_excluded = auto_excluded | self.excluded
+        return auto_excluded | self.excluded
+
+    def pool(self) -> dict[str, tuple[float, int | None]]:
+        full_excluded = self.excluded_accounts()
         res: dict[str, tuple[float, int | None]] = {}
         for account in self.present_accounts:
             if account in full_excluded:
@@ -533,6 +536,64 @@ def load_inputs(
     return samples, spill_buckets, max_buckets
 
 
+def load_teamclaude_account_buckets(
+    conn: sqlite3.Connection,
+    since_ms: int,
+    host: str | None = None,
+) -> dict[str, dict[int, float]]:
+    """Load 5-minute buckets of local teamclaude Max $ keyed by short account name.
+
+    Returns {} if the teamclaude_usage table does not exist (older DBs).
+    Short account names match quota_samples.account (local-part before '@').
+    """
+    try:
+        if host is not None:
+            cur = conn.execute(
+                "SELECT account, (ts / 300000) * 300000 AS b, SUM(cost_usd) "
+                "FROM teamclaude_usage "
+                "WHERE ts >= ? AND host = ? AND cost_usd IS NOT NULL "
+                "GROUP BY account, b",
+                (since_ms, host),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT account, (ts / 300000) * 300000 AS b, SUM(cost_usd) "
+                "FROM teamclaude_usage "
+                "WHERE ts >= ? AND cost_usd IS NOT NULL "
+                "GROUP BY account, b",
+                (since_ms,),
+            )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return {}
+
+    buckets: dict[str, dict[int, float]] = collections.defaultdict(dict)
+    for acct, b, cost in rows:
+        if not acct or b is None or cost is None:
+            continue
+        short_acct = acct.split("@")[0] if "@" in acct else acct
+        buckets[short_acct][b] = buckets[short_acct].get(b, 0.0) + float(cost)
+    return dict(buckets)
+
+
+def subtract_excluded_max_7d(
+    max_7d: float,
+    T: int,
+    excluded_accounts: set[str],
+    tc_acct_buckets: dict[str, dict[int, float]],
+) -> float:
+    """Subtract 7-day Max $ attributable to excluded/usage-seat accounts from max_7d."""
+    if not excluded_accounts or not tc_acct_buckets:
+        return max_7d
+    excl_short = {a.split("@")[0] if "@" in a else a for a in excluded_accounts if a}
+    excl_7d = sum(
+        sum_buckets(tc_acct_buckets[a], T, 7 * 24 * 3600 * 1000)
+        for a in excl_short
+        if a in tc_acct_buckets
+    )
+    return max(0.0, max_7d - excl_7d)
+
+
 def load_or_seed_state(
     state_path: str,
     pool: dict[str, tuple[float, int | None]],
@@ -884,6 +945,7 @@ def run_live(
 
         since_ms = T - 8 * 24 * 3600 * 1000
         samples, spill_buckets, max_buckets = load_inputs(conn, since_ms, host=host)
+        tc_acct_buckets = load_teamclaude_account_buckets(conn, since_ms, host=host)
     finally:
         conn.close()
 
@@ -903,7 +965,12 @@ def run_live(
     pool = tracker.pool()
     H0 = sum(max(0.0, CAP - u) for u, _ in pool.values())
     burn_7d = acc.burn(T, 7 * 24 * 3600 * 1000)
-    max_7d = sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000)
+    max_7d = subtract_excluded_max_7d(
+        sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000),
+        T,
+        tracker.excluded_accounts(),
+        tc_acct_buckets,
+    )
     k = estimate_k(burn_7d, max_7d)
 
     burn_6h = acc.burn(T, 6 * 3600 * 1000)
@@ -1139,6 +1206,7 @@ def replay(
     try:
         warmup_since = since_ms - 8 * 24 * 3600 * 1000
         samples, spill_buckets, max_buckets = load_inputs(conn, warmup_since, host=host)
+        tc_acct_buckets = load_teamclaude_account_buckets(conn, warmup_since, host=host)
     finally:
         conn.close()
 
@@ -1166,7 +1234,12 @@ def replay(
         pool = tracker.pool()
         H0 = sum(max(0.0, CAP - u) for u, _ in pool.values())
         burn_7d = acc.burn(T, 7 * 24 * 3600 * 1000)
-        max_7d = sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000)
+        max_7d = subtract_excluded_max_7d(
+            sum_buckets(max_buckets, T, 7 * 24 * 3600 * 1000),
+            T,
+            tracker.excluded_accounts(),
+            tc_acct_buckets,
+        )
         k = estimate_k(burn_7d, max_7d)
 
         burn_6h = acc.burn(T, 6 * 3600 * 1000)

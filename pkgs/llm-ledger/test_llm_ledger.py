@@ -3666,5 +3666,221 @@ class TestOutlookPublish(unittest.TestCase):
         self.assertEqual(res["ts"], payload["ts"])
 
 
+class TestTeamclaudeUsageIngest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+        self.raw_dir = os.path.join(self.tmpdir.name, "raw")
+        self.events_path = os.path.join(self.tmpdir.name, "events.jsonl")
+        self.tc_log = os.path.join(self.tmpdir.name, "usage.jsonl")
+        self.samples_path = os.path.join(self.tmpdir.name, "samples.jsonl")
+        with open(self.events_path, "w") as f:
+            f.write("")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _tc_line(self, ts_iso, account="acct-a@example.com", model="claude-opus-5-5",
+                 session="ses_1", inp=1_000_000, outp=500_000, cr=0, w5=0, w1=0, cw=None):
+        obj = {
+            "ts": ts_iso,
+            "account": account,
+            "bucket": "opus",
+            "model": model,
+            "session": session,
+            "parent": None,
+            "input": inp,
+            "cache_read": cr,
+            "cache_write": (w5 + w1) if cw is None else cw,
+            "cache_write_5m": w5,
+            "cache_write_1h": w1,
+            "output": outp,
+        }
+        return json.dumps(obj) + "\n"
+
+    def test_missing_teamclaude_log_is_optional_no_warning(self):
+        warnings = []
+        counts = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+            host="cloudbox",
+            samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+            warnings=warnings,
+        )
+        self.assertEqual(counts["tc_rows"], 0)
+        self.assertEqual(warnings, [])
+
+    def test_ingest_pricing_split_and_unsplit_fallback(self):
+        # Line 1: opus-5-5 (in=4, out=20, cr=0.2, w5=5.0, w1=8.0)
+        # 1M in ($4) + 0.5M out ($10) + 1M cr ($0.2) + 1M w5 ($5) + 0.5M w1 ($4) = $23.20
+        # Line 2: unsplit legacy cache_write=1M with w5=0, w1=0 -> counted as w5 ($5)
+        with open(self.tc_log, "w") as f:
+            f.write(self._tc_line(
+                "2026-11-24T10:15:00.000Z", account="acct-a@example.com",
+                inp=1_000_000, outp=500_000, cr=1_000_000, w5=1_000_000, w1=500_000,
+            ))
+            f.write(self._tc_line(
+                "2026-11-24T10:20:00.000Z", account="seat@example.com",
+                inp=0, outp=0, cr=0, w5=0, w1=0, cw=1_000_000,
+            ))
+
+        counts = llm_ledger.run_ingest(
+            db_path=self.db_path,
+            events_path=self.events_path,
+            raw_dir=self.raw_dir,
+            host="cloudbox",
+            samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+        self.assertEqual(counts["tc_rows"], 2)
+
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute(
+            "SELECT host, account, model, session_id, cache_write_5m, cache_write_1h, cost_usd "
+            "FROM teamclaude_usage ORDER BY ts"
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "cloudbox")
+        self.assertEqual(rows[0][1], "acct-a@example.com")
+        self.assertEqual(rows[0][3], "ses_1")
+        self.assertEqual(rows[0][4], 1_000_000)
+        self.assertEqual(rows[0][5], 500_000)
+        self.assertAlmostEqual(rows[0][6], 23.2, places=6)
+
+        self.assertEqual(rows[1][1], "seat@example.com")
+        self.assertEqual(rows[1][4], 1_000_000)
+        self.assertEqual(rows[1][5], 0)
+        self.assertAlmostEqual(rows[1][6], 5.0, places=6)
+
+        # Raw gzip archive created
+        gz_files = list(Path(self.raw_dir).glob("teamclaude-usage-*.jsonl.gz"))
+        self.assertEqual(len(gz_files), 1)
+        conn.close()
+
+    def test_incremental_tail_partial_line_and_rotation_idempotency(self):
+        line1 = self._tc_line("2026-11-24T11:05:00.000Z", account="acct-a@example.com", inp=1_000_000, outp=0)
+        line2 = self._tc_line("2026-11-24T11:10:00.000Z", account="acct-a@example.com", inp=2_000_000, outp=0)
+        # Write line1 + partial line2 (no newline)
+        with open(self.tc_log, "w") as f:
+            f.write(line1)
+            f.write(line2[:-5])
+
+        c1 = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+        self.assertEqual(c1["tc_rows"], 1)
+
+        # Finish line2
+        with open(self.tc_log, "a") as f:
+            f.write(line2[-5:])
+
+        c2 = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+        self.assertEqual(c2["tc_rows"], 1)
+
+        # Simulate file rotation/rewrite containing overlapping line2 + new line3
+        line3 = self._tc_line("2026-11-24T11:20:00.000Z", account="acct-a@example.com", inp=500_000, outp=0)
+        tmp_new = self.tc_log + ".new"
+        with open(tmp_new, "w") as f:
+            f.write(line2)
+            f.write(line3)
+        os.replace(tmp_new, self.tc_log)
+
+        c3 = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+        # line2 is ignored (same line_hash), only line3 added
+        self.assertEqual(c3["tc_rows"], 1)
+
+        conn = sqlite3.connect(self.db_path)
+        n_usage = conn.execute("SELECT COUNT(*), SUM(input) FROM teamclaude_usage").fetchone()
+        self.assertEqual(n_usage, (3, 3_500_000))
+        hr = conn.execute("SELECT n, input, cost_usd FROM teamclaude_hourly").fetchone()
+        self.assertEqual(hr[0], 3)
+        self.assertEqual(hr[1], 3_500_000)
+        self.assertAlmostEqual(hr[2], 14.0, places=6)
+        conn.close()
+
+    def test_fleet_account_hourly_view_unions_local_and_remote_max_only(self):
+        with open(self.tc_log, "w") as f:
+            f.write(self._tc_line("2026-11-24T12:05:00.000Z", account="acct-a@example.com", inp=1_000_000, outp=0))
+
+        llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+
+        # Add remote devbox Max row and remote mac cash (vertex) row
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        h_ms = llm_ledger.parse_iso_ts("2026-11-24T12:00:00Z")
+        conn.execute(
+            "INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+            "VALUES ('devbox', ?, 'acct-b@example.com', 'max', 'claude-opus-5-5', 2, 500000, 0, 0, 0, 0, 2.0), "
+            "('mac', ?, '', 'vertex', 'claude-opus-5-5', 3, 100000, 0, 0, 0, 0, 5.5)",
+            (h_ms, h_ms),
+        )
+        conn.commit()
+        llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox")
+
+        rows = conn.execute(
+            "SELECT host, account, model, n, cost_usd FROM fleet_account_hourly ORDER BY host, account"
+        ).fetchall()
+        # Both cloudbox and devbox Max rows present with '@' stripped; mac vertex row excluded
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0:4], ("cloudbox", "acct-a", "claude-opus-5-5", 1))
+        self.assertAlmostEqual(rows[0][4], 4.0, places=6)
+        self.assertEqual(rows[1][0:4], ("devbox", "acct-b", "claude-opus-5-5", 2))
+        self.assertAlmostEqual(rows[1][4], 2.0, places=6)
+
+        # Ensure view SQL is not recreated on second call
+        sql1 = conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_account_hourly'").fetchone()[0]
+        stmts: list[str] = []
+        conn.set_trace_callback(stmts.append)
+        try:
+            llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox")
+            self.assertFalse(any("DROP VIEW" in s for s in stmts))
+        finally:
+            conn.set_trace_callback(None)
+        sql2 = conn.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='fleet_account_hourly'").fetchone()[0]
+        self.assertEqual(sql1, sql2)
+        conn.close()
+
+    def test_rebuild_hourly_rebuilds_teamclaude_hourly(self):
+        with open(self.tc_log, "w") as f:
+            f.write(self._tc_line("2026-11-24T13:05:00.000Z", account="acct-a@example.com", inp=1_000_000, outp=0))
+        llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log,
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM teamclaude_hourly")
+        conn.commit()
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM teamclaude_hourly").fetchone()[0], 0)
+        conn.close()
+
+        llm_ledger.rebuild_hourly(db_path=self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM teamclaude_hourly").fetchone()[0], 1)
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
