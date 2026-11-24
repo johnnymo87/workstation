@@ -1865,6 +1865,118 @@ def parse_et_datetime(val: str | None, end_of_day_for_date: bool = False) -> int
     return quota_watch.parse_et_datetime(val, end_of_day_for_date=end_of_day_for_date)
 
 
+def _strip_usd_fields(obj: Any) -> Any:
+    """Recursively remove any dict keys containing 'usd' (case-insensitive)."""
+    if isinstance(obj, dict):
+        return {
+            k: _strip_usd_fields(v)
+            for k, v in obj.items()
+            if "usd" not in k.lower()
+        }
+    elif isinstance(obj, list):
+        return [_strip_usd_fields(v) for v in obj]
+    return obj
+
+
+def build_outlook_publish_payload(
+    db_path: str = DEFAULT_DB,
+    host: str | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Build the quota outlook and fleet share payload for publication.
+
+    The payload combines quota_watch.outlook(db) with:
+      - published_at: current epoch timestamp in milliseconds
+      - source_host: hostname publishing this payload
+      - fleet: dict mapping each host (local host and remote_hosts) to its:
+          - share_24h: fraction of 24h fleet Max usage in opus-list-price token units
+          - exported_through: remote host's telemetry export watermark (epoch ms), or
+            null for the local host (the local host writes directly to the local ledger
+            and has no export watermark).
+
+    All '$' and 'usd' keys are stripped from the payload.
+    """
+    db_path = db_path or DEFAULT_DB
+    host = host or socket.gethostname()
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    import quota_watch
+    try:
+        res = quota_watch.outlook(db_path, now_ms=now_ms)
+    except Exception as e:
+        res = quota_watch._unknown_outlook(now_ms, str(e))
+    res = _strip_usd_fields(res)
+    res.pop("vertex_usd", None)
+
+    remote_entries: dict[str, int | None] = {}
+    hosts_list: list[str] = [host]
+    db_ok = False
+    usage_by_host: dict[str, float] = {}
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=1000")
+            try:
+                rows = conn.execute("SELECT host, exported_through FROM remote_hosts").fetchall()
+                for r_host, r_exp in rows:
+                    remote_entries[r_host] = r_exp
+            except sqlite3.OperationalError:
+                pass
+
+            hosts_list = [host] + [h for h in remote_entries if h != host]
+
+            non_null_exp = [exp for exp in remote_entries.values() if exp is not None]
+            if non_null_exp:
+                W = min(now_ms, min(non_null_exp))
+            else:
+                W = now_ms
+            W_start = W - 24 * 3600 * 1000
+
+            try:
+                f_rows = conn.execute(
+                    "SELECT host, SUM(input), SUM(output), SUM(cache_read), SUM(cache_write) "
+                    "FROM fleet_hourly WHERE backend='max' AND hour >= ? AND hour < ? "
+                    "GROUP BY host",
+                    (W_start, W),
+                ).fetchall()
+                for f_host, inp, out, cr, cw in f_rows:
+                    usage_by_host[f_host] = oc_tags.opus_list_cost(inp or 0, out or 0, cr or 0, cw or 0)
+                    if f_host not in hosts_list:
+                        hosts_list.append(f_host)
+            except sqlite3.OperationalError:
+                pass
+            db_ok = True
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    if not db_ok:
+        hosts_list = [host]
+        usage_by_host = {}
+
+    fleet_total = sum(usage_by_host.values())
+    fleet: dict[str, dict[str, Any]] = {}
+    for h in hosts_list:
+        if fleet_total > 0:
+            share = usage_by_host.get(h, 0.0) / fleet_total
+        else:
+            share = None
+        # Local host's exported_through is null; remote hosts have their exported_through watermark
+        exp = None if h == host else remote_entries.get(h)
+        fleet[h] = {
+            "share_24h": share,
+            "exported_through": exp,
+        }
+
+    res["published_at"] = now_ms
+    res["source_host"] = host
+    res["fleet"] = fleet
+    return res
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="llm-ledger")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1904,6 +2016,8 @@ def main(argv: list[str] | None = None) -> int:
     qw_parser.add_argument("--alert-cmd", default=None)
     qw_parser.add_argument("--exclude-account", action="append", default=None)
     qw_parser.add_argument("--host", default=socket.gethostname())
+    qw_parser.add_argument("--alert-stale-hosts", default="devbox", help="Comma-separated list of hosts to check for stale telemetry (default: devbox; empty string disables)")
+    qw_parser.add_argument("--outlook-pushed-file", default=None, help="Path to file touched on successful outlook push; alerts if missing or older than 15 min")
 
     # quota-replay subcommand
     qr_parser = subparsers.add_parser("quota-replay")
@@ -1928,6 +2042,11 @@ def main(argv: list[str] | None = None) -> int:
     remote_parser.add_argument("--repo", required=True)
     remote_parser.add_argument("--db", default=DEFAULT_DB)
     remote_parser.add_argument("--host", default=socket.gethostname())
+
+    # outlook-publish-json subcommand
+    opj_parser = subparsers.add_parser("outlook-publish-json")
+    opj_parser.add_argument("--db", default=DEFAULT_DB, help="Path to ledger DB")
+    opj_parser.add_argument("--host", default=socket.gethostname(), help="Source host name")
 
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -1989,6 +2108,50 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         return 0
 
+    if args.command == "outlook-publish-json":
+        try:
+            payload_dict = build_outlook_publish_payload(
+                db_path=args.db or DEFAULT_DB,
+                host=args.host,
+            )
+            payload = json.dumps(payload_dict, allow_nan=False) + "\n"
+        except Exception as e:
+            now_ms = int(time.time() * 1000)
+            host = args.host or socket.gethostname()
+            try:
+                from zoneinfo import ZoneInfo
+                time_str = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M")
+            except Exception:
+                time_str = "--:--"
+            fallback = {
+                "verdict": "unknown",
+                "ts": None,
+                "age_s": None,
+                "h0": None,
+                "burn_h": None,
+                "zero_h": None,
+                "next_refill_ts": None,
+                "next_refill_amt": None,
+                "line": f"quota@{time_str}: unknown (outlook unavailable)",
+                "error": str(e)[:200],
+                "published_at": now_ms,
+                "source_host": host,
+                "fleet": {host: {"share_24h": None, "exported_through": None}},
+            }
+            payload = json.dumps(fallback, allow_nan=False) + "\n"
+
+        try:
+            sys.stdout.write(payload)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            try:
+                devnull = open(os.devnull, "w")
+                os.dup2(devnull.fileno(), sys.stdout.fileno())
+                sys.stdout = devnull
+            except Exception:
+                pass
+        return 0
+
     if args.command == "quota-watch":
         import quota_watch
         excluded = set(args.exclude_account or [])
@@ -1998,6 +2161,8 @@ def main(argv: list[str] | None = None) -> int:
             alert_cmd=args.alert_cmd,
             excluded=excluded,
             host=args.host,
+            alert_stale_hosts=args.alert_stale_hosts,
+            outlook_pushed_file=args.outlook_pushed_file,
         )
 
     if args.command == "quota-replay":

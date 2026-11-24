@@ -3264,5 +3264,167 @@ class TestImportRemote(unittest.TestCase):
             self.assertIsNone(lock.fd)
 
 
+class TestOutlookPublish(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(prefix="llm-ledger-publish-")
+        self.db_path = os.path.join(self.tmpdir.name, "ledger.db")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_outlook_publish_json_cli_missing_db(self):
+        """outlook-publish-json on nonexistent DB prints outlook-shaped unknown JSON, exits 0."""
+        import io
+        import contextlib
+        nonexistent = os.path.join(self.tmpdir.name, "absent.db")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = llm_ledger.main(["outlook-publish-json", "--db", nonexistent, "--host", "cloudbox"])
+        self.assertEqual(code, 0)
+        data = json.loads(buf.getvalue().strip())
+        self.assertEqual(data.get("verdict"), "unknown")
+        self.assertEqual(data.get("source_host"), "cloudbox")
+        self.assertIsInstance(data.get("published_at"), int)
+        self.assertEqual(
+            data.get("fleet"),
+            {"cloudbox": {"share_24h": None, "exported_through": None}},
+        )
+        self.assertNotIn("vertex_usd", data)
+        # Assert no key anywhere contains 'usd'
+        def assert_no_usd(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    self.assertNotIn("usd", k.lower())
+                    assert_no_usd(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    assert_no_usd(item)
+        assert_no_usd(data)
+
+    def test_outlook_publish_json_cli_shape_and_no_usd_keys(self):
+        """outlook-publish-json prints outlook fields + published_at + source_host + fleet with no usd keys."""
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        ts = int(time.time() * 1000) - 60000
+        conn.execute("""INSERT INTO quota_watch_runs (
+            ts, h0, burn_h, zero_h, vertex_usd, next_refill_ts, next_refill_amt, pool_n, source, verdict
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            ts, 1.2, 0.05, 12.0, 45.0, ts + 3600000, 0.5, 1, "live", "ample"
+        ))
+        conn.commit()
+        conn.close()
+
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = llm_ledger.main(["outlook-publish-json", "--db", self.db_path, "--host", "cloudbox"])
+        self.assertEqual(code, 0)
+        data = json.loads(buf.getvalue().strip())
+        self.assertEqual(data.get("verdict"), "ample")
+        self.assertEqual(data.get("source_host"), "cloudbox")
+        self.assertIsInstance(data.get("published_at"), int)
+        self.assertIn("fleet", data)
+        self.assertIn("cloudbox", data["fleet"])
+        self.assertNotIn("vertex_usd", data)
+
+        def assert_no_usd(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    self.assertNotIn("usd", k.lower())
+                    assert_no_usd(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    assert_no_usd(item)
+        assert_no_usd(data)
+
+    def test_outlook_publish_fleet_shares(self):
+        """Fleet shares sum to 1.0, window ends at min(now, min(remote exported_through)), local exported_through is null."""
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        now_ms = 1700100000000
+        # devbox exported_through = 1700090000000 (earlier than now_ms -> W = 1700090000000)
+        devbox_exp = 1700090000000
+        macbox_exp = 1700095000000
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 1000, ?, ?)",
+            (devbox_exp, now_ms),
+        )
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('macbox', 1000, ?, ?)",
+            (macbox_exp, now_ms),
+        )
+        conn.commit()
+
+        llm_ledger.ensure_fleet_objects(conn, local_host="cloudbox", now_ms=now_ms)
+
+        W = min(now_ms, devbox_exp, macbox_exp)
+        # Inside window [W - 24h, W):
+        # cloudbox (in hourly): input=1,000,000, output=0 -> opus_list_cost = 4.0
+        h_inside = W - 3600000
+        conn.execute(
+            "INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) "
+            "VALUES (?, 'attr1', 'max', 'claude-opus-5-5', 1, 1000000, 0, 0, 0, 4.0)",
+            (h_inside,),
+        )
+        # devbox (in remote_hourly): input=0, output=100,000 -> opus_list_cost = 2.0
+        conn.execute(
+            "INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+            "VALUES ('devbox', ?, 'acct', 'max', 'claude-opus-5-5', 1, 0, 100000, 0, 0, 0, 2.0)",
+            (h_inside,),
+        )
+        # Row OUTSIDE window (older than W - 24h)
+        h_old = W - 90000000
+        conn.execute(
+            "INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) "
+            "VALUES (?, 'attr1', 'max', 'claude-opus-5-5', 1, 5000000, 0, 0, 0, 20.0)",
+            (h_old,),
+        )
+        # Row with backend != 'max' (vertex) should not count
+        conn.execute(
+            "INSERT INTO hourly (hour, attr_key, backend, model, n, input, output, cache_read, cache_write, cost_usd) "
+            "VALUES (?, 'attr1', 'vertex', 'claude-opus-5-5', 1, 10000000, 0, 0, 0, 40.0)",
+            (h_inside,),
+        )
+        conn.commit()
+        conn.close()
+
+        payload = llm_ledger.build_outlook_publish_payload(self.db_path, host="cloudbox", now_ms=now_ms)
+        fleet = payload["fleet"]
+        self.assertIn("cloudbox", fleet)
+        self.assertIn("devbox", fleet)
+        self.assertIn("macbox", fleet)
+
+        # Local host exported_through is null
+        self.assertIsNone(fleet["cloudbox"]["exported_through"])
+        self.assertEqual(fleet["devbox"]["exported_through"], devbox_exp)
+        self.assertEqual(fleet["macbox"]["exported_through"], macbox_exp)
+
+        # Total Max opus list usage: cloudbox = 4.0, devbox = 2.0, macbox = 0.0 -> total = 6.0
+        # cloudbox share: 4.0 / 6.0 = 2/3
+        # devbox share: 2.0 / 6.0 = 1/3
+        # macbox share: 0.0
+        self.assertAlmostEqual(fleet["cloudbox"]["share_24h"], 4.0 / 6.0, places=5)
+        self.assertAlmostEqual(fleet["devbox"]["share_24h"], 2.0 / 6.0, places=5)
+        self.assertEqual(fleet["macbox"]["share_24h"], 0.0)
+
+        # Shares sum to 1.0
+        total_share = sum(fleet[h]["share_24h"] for h in fleet)
+        self.assertAlmostEqual(total_share, 1.0, places=5)
+
+    def test_outlook_publish_fleet_null_when_no_data(self):
+        """When total usage is 0 or fleet_hourly is missing, share_24h is null for all hosts."""
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 1000, 2000, 3000)"
+        )
+        conn.commit()
+        conn.close()
+
+        # No fleet_hourly view yet
+        payload = llm_ledger.build_outlook_publish_payload(self.db_path, host="cloudbox", now_ms=5000)
+        fleet = payload["fleet"]
+        self.assertIsNone(fleet["cloudbox"]["share_24h"])
+        self.assertIsNone(fleet["devbox"]["share_24h"])
+
+
 if __name__ == "__main__":
     unittest.main()

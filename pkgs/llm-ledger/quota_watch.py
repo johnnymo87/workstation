@@ -708,6 +708,42 @@ def record_replay_runs(
     return (inserted, filled)
 
 
+def _handle_alert(
+    state_dir: str,
+    alert_filename: str,
+    name: str,
+    text: str | None,
+    ttl: str = "3600",
+    max_ttl: str = "14400",
+    alert_cmd: str | None = None,
+) -> None:
+    alert_file = os.path.join(state_dir, alert_filename)
+    if text is not None:
+        if alert_cmd:
+            argv = [
+                alert_cmd,
+                alert_file,
+                name,
+                text,
+                str(ttl),
+                str(max_ttl),
+            ]
+            try:
+                res = subprocess.run(argv, timeout=60)
+                if res.returncode != 0:
+                    sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
+            except subprocess.TimeoutExpired:
+                sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
+        else:
+            print(f"would-alert: {name} ttl={ttl} max={max_ttl} text={text}")
+    else:
+        if os.path.exists(alert_file):
+            try:
+                os.remove(alert_file)
+            except OSError:
+                pass
+
+
 def run_live(
     db: str,
     state_dir: str,
@@ -715,6 +751,8 @@ def run_live(
     now: float | None = None,
     excluded: set[str] | None = None,
     host: str | None = None,
+    alert_stale_hosts: str | Sequence[str] | None = "devbox",
+    outlook_pushed_file: str | None = None,
 ) -> int:
     """Run live quota watch check."""
     host = host or socket.gethostname()
@@ -748,36 +786,83 @@ def run_live(
             stale_r_min = (now_ms - req_T) / 60000.0
             blind_reasons.append(f"requests for host '{host}' is {stale_r_min:.1f} min old")
 
-        blind_file = os.path.join(state_dir, "blind.alert")
         if blind_reasons:
             stale_desc = " and ".join(blind_reasons)
             blind_text = (
                 f"Claude Max quota watch blind spot: {stale_desc} (threshold {BLIND_MS // 60000} min). "
                 "Quota alerts are not trustworthy until it recovers."
             )
-            if alert_cmd:
-                argv = [
-                    alert_cmd,
-                    blind_file,
-                    "quota-watch-blind",
-                    blind_text,
-                    "3600",
-                    "14400",
-                ]
-                try:
-                    res = subprocess.run(argv, timeout=60)
-                    if res.returncode != 0:
-                        sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
-                except subprocess.TimeoutExpired:
-                    sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
-            else:
-                print(f"would-alert: quota-watch-blind ttl=3600 max=14400 text={blind_text}")
         else:
-            if os.path.exists(blind_file):
+            blind_text = None
+        _handle_alert(state_dir, "blind.alert", "quota-watch-blind", blind_text, alert_cmd=alert_cmd)
+
+        # Fleet-stale alert check:
+        if alert_stale_hosts is None:
+            stale_hosts_list: list[str] = []
+        elif isinstance(alert_stale_hosts, str):
+            stale_hosts_list = [h.strip() for h in alert_stale_hosts.split(",") if h.strip()]
+        else:
+            stale_hosts_list = [str(h).strip() for h in alert_stale_hosts if str(h).strip()]
+
+        if stale_hosts_list:
+            host_watermarks: dict[str, int | None] = {}
+            table_exists = False
+            try:
+                rows = conn.execute("SELECT host, exported_through FROM remote_hosts").fetchall()
+                host_watermarks = {r[0]: r[1] for r in rows}
+                table_exists = True
+            except sqlite3.OperationalError:
+                pass
+
+            stale_entries: list[str] = []
+            for h in stale_hosts_list:
+                if not table_exists or h not in host_watermarks or host_watermarks[h] is None:
+                    stale_entries.append(f"host '{h}' has no export watermark")
+                else:
+                    exp = host_watermarks[h]
+                    assert exp is not None
+                    age_ms = now_ms - exp
+                    if age_ms > 3 * 3600 * 1000:
+                        age_h = age_ms / 3600000.0
+                        stale_entries.append(f"host '{h}' is {age_h:.1f}h old")
+
+            if stale_entries:
+                stale_desc = "; ".join(stale_entries)
+                fleet_text = (
+                    f"Fleet telemetry stale: {stale_desc} (threshold 3h). "
+                    "The devbox export or its GitHub key may be broken, and that devbox's verdict sync uses the same key."
+                )
+            else:
+                fleet_text = None
+            _handle_alert(state_dir, "fleet-stale.alert", "fleet-stale", fleet_text, alert_cmd=alert_cmd)
+
+        # Outlook-stale alert check:
+        if outlook_pushed_file is not None:
+            pushed_path = os.path.expanduser(outlook_pushed_file)
+            if not os.path.exists(pushed_path):
+                outlook_text = (
+                    "cloudbox hasn't published its quota outlook (file missing); "
+                    "devbox reads quota unknown after 20 min"
+                )
+            else:
                 try:
-                    os.remove(blind_file)
-                except OSError:
-                    pass
+                    mtime = os.path.getmtime(pushed_path)
+                    now_s = now_ms / 1000.0
+                    age_s = now_s - mtime
+                    if age_s > 15 * 60:
+                        age_min = int(age_s / 60.0)
+                        outlook_text = (
+                            f"cloudbox hasn't published its quota outlook for {age_min} min; "
+                            "devbox reads quota unknown after 20 min"
+                        )
+                    else:
+                        outlook_text = None
+                except OSError as e:
+                    outlook_text = (
+                        f"cloudbox hasn't published its quota outlook (error reading file: {e}); "
+                        "devbox reads quota unknown after 20 min"
+                    )
+            _handle_alert(state_dir, "outlook-stale.alert", "outlook-stale", outlook_text, alert_cmd=alert_cmd)
 
         # 20-min stale skip
         if T is None:

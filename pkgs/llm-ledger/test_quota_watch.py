@@ -907,6 +907,182 @@ class TestLiveAndReplay(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(blind_alert_file), "blind.alert must be removed when inputs are fresh")
 
+    def test_run_live_fleet_stale_fire_and_clear(self):
+        """When a host's export watermark in remote_hosts is > 3h old, fleet-stale alert fires. When updated, it clears."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_fleet_stale.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_fleet_stale.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_fleet_stale")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_fleet_stale.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # devbox exported_through is 4h old (t0 - 4*3600*1000)
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 100, ?, ?)",
+            (t0 - 4 * 3600 * 1000, t0 - 4 * 3600 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertEqual(fleet_inv[0]["argv"][0], os.path.join(state_dir, "fleet-stale.alert"))
+        self.assertEqual(fleet_inv[0]["argv"][3], "3600")
+        self.assertEqual(fleet_inv[0]["argv"][4], "14400")
+        self.assertIn("devbox", fleet_inv[0]["argv"][2])
+        self.assertIn("4.0h old", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox's verdict sync uses the same key", fleet_inv[0]["argv"][2])
+
+        alert_file = os.path.join(state_dir, "fleet-stale.alert")
+        self.assertTrue(os.path.exists(alert_file))
+
+        # Now update devbox to be fresh (10 min old)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE remote_hosts SET exported_through = ? WHERE host = 'devbox'",
+            (t0 - 10 * 60 * 1000,),
+        )
+        conn.commit()
+        conn.close()
+
+        # Run again, alert must be cleared
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(alert_file))
+
+    def test_run_live_fleet_stale_missing_table(self):
+        """When remote_hosts table is missing, treat as no rows and fire fleet-stale alert."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_missing_table.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_missing_table.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_missing_table")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_missing_table.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.execute("DROP TABLE IF EXISTS remote_hosts")
+        conn.commit()
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertIn("devbox", fleet_inv[0]["argv"][2])
+
+    def test_run_live_fleet_stale_empty_list_disables(self):
+        """--alert-stale-hosts '' disables fleet-stale check."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_disables.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_disables.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_disables")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_disables.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="")
+        self.assertEqual(rc, 0)
+
+        if os.path.exists(alert_log):
+            with open(alert_log) as f:
+                lines = [json.loads(line) for line in f]
+            fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+            self.assertEqual(len(fleet_inv), 0)
+
+    def test_run_live_outlook_stale_fire_and_clear(self):
+        """When outlook_pushed_file is missing or older than 15 min, alert fires. When fresh, clears."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_outlook_stale.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_outlook_stale.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_stale")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_stale.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        t0 = 1700000000000
+        pushed_file = os.path.join(self.tmp_dir.name, "outlook-pushed")
+
+        # 1. Missing file -> fires alert
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        inv1 = [inv for inv in lines if inv["argv"][1] == "outlook-stale"]
+        self.assertEqual(len(inv1), 1)
+        self.assertEqual(inv1[0]["argv"][0], os.path.join(state_dir, "outlook-stale.alert"))
+        self.assertIn("cloudbox hasn't published its quota outlook", inv1[0]["argv"][2])
+        self.assertIn("devbox reads quota unknown after 20 min", inv1[0]["argv"][2])
+        self.assertTrue(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+        # 2. File exists but older than 15 min (e.g. 25 min old)
+        t0_s = t0 / 1000.0
+        with open(pushed_file, "w") as f:
+            f.write("pushed")
+        os.utime(pushed_file, (t0_s - 25 * 60, t0_s - 25 * 60))
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        inv2 = [inv for inv in lines if inv["argv"][1] == "outlook-stale"]
+        self.assertEqual(len(inv2), 2)
+        self.assertIn("25 min", inv2[1]["argv"][2])
+        self.assertIn("devbox reads quota unknown after 20 min", inv2[1]["argv"][2])
+
+        # 3. File exists and is fresh (5 min old) -> clears alert
+        os.utime(pushed_file, (t0_s - 5 * 60, t0_s - 5 * 60))
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+    def test_run_live_outlook_stale_absent_flag(self):
+        """When outlook_pushed_file is not given, no check is performed."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_absent")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_absent.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=1700000000000, host="cloudbox")
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
     def test_load_inputs_and_run_live_host_filter(self):
         """load_inputs and newest-request query filter requests by host."""
         db_path = os.path.join(self.tmp_dir.name, "db_host.db")
@@ -1278,6 +1454,17 @@ class TestCliSubcommands(unittest.TestCase):
             "--host", "customhost",
         ])
         self.assertEqual(ret_qr, 0)
+
+    def test_cli_quota_watch_fleet_alerts_args(self):
+        """quota-watch CLI accepts --alert-stale-hosts and --outlook-pushed-file."""
+        ret = llm_ledger.main([
+            "quota-watch",
+            "--db", self.db_path,
+            "--state-dir", self.state_dir,
+            "--alert-stale-hosts", "devbox,macbox",
+            "--outlook-pushed-file", os.path.join(self.state_dir, "pushed"),
+        ])
+        self.assertEqual(ret, 0)
 
     def test_replay_record_does_not_overwrite_live(self):
         """quota-replay --record does not overwrite an existing 'live' row for the same ts."""
