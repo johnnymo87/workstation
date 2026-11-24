@@ -13,7 +13,7 @@
 # and a version gap between two writers of that DB is how a stale-schema panic
 # starts.
 #
-# THE PATCHES (fork branch patched/v1.60.2, on top of tag v1.60.2; darwin stays on patched-1.54.0.18):
+# THE PATCHES (fork branch patched/v1.60.2, on top of tag v1.60.2; all platforms):
 #
 # CARRIED / REWRITTEN FOR v1.60.2:
 #   2. GCP_VERTEX_HOST / GCP_VERTEX_SESSION_HEADER: the gcp_vertex_ai provider's
@@ -143,8 +143,8 @@
 # patched-1.60.2.x (2026-11-22) ports the fork onto upstream v1.60.2 for Linux
 # (aarch64-linux and x86_64-linux); state machine agent loop, schema 18; drops
 # obsolete patches (1, 4, 10, 17, 18, 24); rewrites loop-bound patches (8, 9,
-# 11, 12, 14, 15, 16, 20, 21, 22). Darwin (aarch64-darwin) stays on
-# patched-1.54.0.18 until bead workstation-6w7i.26.15. patched-1.60.2.3
+# 11, 12, 14, 15, 16, 20, 21, 22). Darwin (aarch64-darwin) stayed on
+# patched-1.54.0.18 until patched-1.60.2.3 (bead workstation-6w7i.26.15). patched-1.60.2.3
 # (2026-11-24) extends patch 13 to the built-in skills (johnnymo87/goose#46);
 # no schema change.
 #
@@ -176,8 +176,8 @@ let
   # today. It is kept because the hash is verified and a wrong-arch throw at
   # eval time is a worse failure than a pinned line nobody uses.
   #
-  # Darwin stays pinned to patched-1.54.0.18 while Linux moves to
-  # patched-1.60.2.x (per-platform pin, bead workstation-6w7i.26.15 moves Mac).
+  # Darwin follows the top-level pin again since patched-1.60.2.3 (bead
+  # workstation-6w7i.26.15); an entry with its own version/tag holds a platform back.
   version = "1.60.2-patched.3";
   tag = "patched-1.60.2.3";
 
@@ -193,10 +193,8 @@ let
       hash = "sha256-OlRcvp+HHOHS3WfgUYv/9iQnVrCjyv5mHsTkw/MaLeg=";
     };
     "aarch64-darwin" = {
-      version = "1.54.0-patched.18";
-      tag = "patched-1.54.0.18";
       asset = "goose-aarch64-apple-darwin.tar.gz";
-      hash = "sha256-aWynNerl2diIrrHp4c3UTN704NdP3gVxrotPR0jK1p4=";
+      hash = "sha256-qIztYlEhahqYdf45VKieLzFCZNNnN438ak4w8/Pm6qA=";
     };
   };
 
