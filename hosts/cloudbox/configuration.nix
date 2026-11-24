@@ -191,6 +191,7 @@ in
   imports = [
     ../../modules/goose-cutover.nix
     ./llm-ledger.nix
+    ./llm-fleet.nix
     ./grafana.nix
   ];
 
