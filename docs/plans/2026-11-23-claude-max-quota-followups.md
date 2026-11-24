@@ -111,10 +111,10 @@ Empty the `sessions` list, or delete the file. No restart is needed.
 
 Jonathan has a cloudbox session moving all of devbox from opencode to goose. Goose self-compacts idle sessions above 200k context before the cache goes cold. This mechanism cannot follow sessions there:
 
-- **Goose sessions cannot be matched.** goose reaches teamclaude through cfp-shaper (:3457), which drops `x-session-affinity`/`X-Session-Id`, so the ledger records them as `session: null` and no rule can name them. Matching them would need cfp-shaper to forward a session header, or a rule keyed on something else.
-- **The runner's result stops at the move.** Once the runner moves, the test ends: its sessions fall back to 5m.
-- **The question becomes partly moot.** Goose's compact-before-cold shrinks the context that a cold gap re-caches, the same lever #471 pulls. What remains is the full rewrite of a smaller (≤200k) context after each 5–60 min gap.
-- **Re-measuring on goose.** Measure 1 can be re-run there from the goose sessions DB plus the ledger. Whether 1h is worth wiring through cfp-shaper should be decided on that, not on opencode numbers.
+- **Goose sessions can now be matched (11-23 17:39Z).** cfp #21 (v0.13.2, pinned by #941) makes cfp-shaper forward the session headers and send goose's session id as `x-session-id`. List the goose id (`YYYYMMDD_N`, from `~/.local/share/goose/sessions/sessions.db`), never the `gse_` id. Goose subagents are NOT covered: goose sends no parent header, so they stay on 5m.
+- **Goose 5m baseline (ledger, 11-23 17:39Z to 11-24 08:30Z).** The stall-watch coordinator `20261104_3` had a full rewrite after 35 of 38 gaps of 5–60 min (4.3M tokens). The live-window runner `20261124_1` had 27 of 29 (3.3M tokens in 5.5 h). Goose's compact-before-cold does not stop these. Both were listed for 1h at 11-24 08:35Z, under the same loss rule. Live-window ids change daily, so each new window needs listing.
+- **Goose subagents (delegated tasks) had 0 gaps of 5–60 min** in that window, so 1h would be pure premium for them.
+- **The runner's opencode result carries until it moves.** W25 still ran on opencode. When it moves, list its goose id.
 
 ## (c1) Exhaustion forecast and the token-to-quota refit (`ynoq.2`)
 
