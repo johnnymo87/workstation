@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import gzip
+import io
 import json
 import os
 import sqlite3
@@ -907,6 +908,286 @@ class TestLiveAndReplay(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(blind_alert_file), "blind.alert must be removed when inputs are fresh")
 
+    def test_run_live_fleet_stale_fire_and_clear(self):
+        """When a host's export watermark in remote_hosts is > 3h old, fleet-stale alert fires. When updated, it clears."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_fleet_stale.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_fleet_stale.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_fleet_stale")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_fleet_stale.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000000000
+        # devbox exported_through is 4h old (t0 - 4*3600*1000)
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 100, ?, ?)",
+            (t0 - 4 * 3600 * 1000, t0 - 4 * 3600 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertEqual(fleet_inv[0]["argv"][0], os.path.join(state_dir, "fleet-stale.alert"))
+        self.assertEqual(fleet_inv[0]["argv"][3], "3600")
+        self.assertEqual(fleet_inv[0]["argv"][4], "14400")
+        self.assertIn("devbox", fleet_inv[0]["argv"][2])
+        self.assertIn("4.0h old", fleet_inv[0]["argv"][2])
+        self.assertIn("That host's quota-telemetry export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox's quota verdict sync uses the same key, so devbox may also read quota unknown", fleet_inv[0]["argv"][2])
+
+        alert_file = os.path.join(state_dir, "fleet-stale.alert")
+        self.assertTrue(os.path.exists(alert_file))
+
+        # Now update devbox to be fresh (10 min old)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE remote_hosts SET exported_through = ? WHERE host = 'devbox'",
+            (t0 - 10 * 60 * 1000,),
+        )
+        conn.commit()
+        conn.close()
+
+        # Run again, alert must be cleared
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(alert_file))
+
+    def test_run_live_fleet_stale_missing_table(self):
+        """When remote_hosts table is missing, treat as no rows and fire fleet-stale alert."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_missing_table.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_missing_table.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_missing_table")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_missing_table.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.execute("DROP TABLE IF EXISTS remote_hosts")
+        conn.commit()
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertIn("devbox", fleet_inv[0]["argv"][2])
+
+    def test_run_live_fleet_stale_exported_through_null(self):
+        """When remote_hosts has a row with exported_through=NULL, fleet-stale alert fires."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_null_exp.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_null_exp.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_null_exp")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_null_exp.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO remote_hosts (host, first_hour, exported_through, imported_at) VALUES ('devbox', 100, NULL, 500)"
+        )
+        conn.commit()
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+        self.assertEqual(len(fleet_inv), 1)
+        self.assertIn("host 'devbox' has no export watermark", fleet_inv[0]["argv"][2])
+        self.assertIn("That host's quota-telemetry export or its GitHub key may be broken", fleet_inv[0]["argv"][2])
+        self.assertIn("devbox's quota verdict sync uses the same key, so devbox may also read quota unknown", fleet_inv[0]["argv"][2])
+
+    def test_run_live_fleet_stale_empty_list_disables(self):
+        """--alert-stale-hosts '' disables fleet-stale check."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_disables.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_disables.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_disables")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_disables.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        t0 = 1700000000000
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", alert_stale_hosts="")
+        self.assertEqual(rc, 0)
+
+        if os.path.exists(alert_log):
+            with open(alert_log) as f:
+                lines = [json.loads(line) for line in f]
+            fleet_inv = [inv for inv in lines if inv["argv"][1] == "fleet-stale"]
+            self.assertEqual(len(fleet_inv), 0)
+
+    def test_run_live_outlook_stale_fire_and_clear(self):
+        """When outlook_pushed_file is missing or older than 15 min, alert fires. When fresh, clears."""
+        alert_log = os.path.join(self.tmp_dir.name, "alert_outlook_stale.jsonl")
+        stub_script = os.path.join(self.tmp_dir.name, "stub_outlook_stale.sh")
+        with open(stub_script, "w") as f:
+            f.write(_python_stub(alert_log))
+        os.chmod(stub_script, 0o755)
+
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_stale")
+        os.makedirs(state_dir, exist_ok=True)
+
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_stale.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        t0 = 1700000000000
+        pushed_file = os.path.join(self.tmp_dir.name, "outlook-pushed")
+
+        # 1. Missing file -> fires alert
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        inv1 = [inv for inv in lines if inv["argv"][1] == "outlook-stale"]
+        self.assertEqual(len(inv1), 1)
+        self.assertEqual(inv1[0]["argv"][0], os.path.join(state_dir, "outlook-stale.alert"))
+        self.assertIn("cloudbox hasn't published its quota outlook", inv1[0]["argv"][2])
+        self.assertIn("devbox reads quota unknown after 20 min", inv1[0]["argv"][2])
+        self.assertTrue(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+        # 2. File exists but older than 15 min (e.g. 25 min old)
+        t0_s = t0 / 1000.0
+        with open(pushed_file, "w") as f:
+            f.write("pushed")
+        os.utime(pushed_file, (t0_s - 25 * 60, t0_s - 25 * 60))
+
+        rc = run_live(db_path, state_dir, alert_cmd=stub_script, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+
+        with open(alert_log) as f:
+            lines = [json.loads(line) for line in f]
+        inv2 = [inv for inv in lines if inv["argv"][1] == "outlook-stale"]
+        self.assertEqual(len(inv2), 2)
+        self.assertIn("25 min", inv2[1]["argv"][2])
+        self.assertIn("devbox reads quota unknown after 20 min", inv2[1]["argv"][2])
+
+        # 3. File exists and is fresh (5 min old) -> clears alert
+        os.utime(pushed_file, (t0_s - 5 * 60, t0_s - 5 * 60))
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+    def test_run_live_outlook_stale_absent_flag(self):
+        """When outlook_pushed_file is not given, no check is performed."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_absent")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_absent.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        conn.close()
+
+        rc = run_live(db_path, state_dir, alert_cmd=None, now=1700000000000, host="cloudbox")
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+    def test_run_live_fleet_stale_exception_isolated(self):
+        """Exceptions in fleet-stale check write to stderr and do not abort verdict/recording."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_fleet_exc")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_fleet_exc.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        def boom_fleet(*args, **kwargs):
+            if len(args) >= 3 and args[2] == "fleet-stale":
+                raise RuntimeError("simulated fleet-stale error")
+            return None
+
+        stderr_buf = io.StringIO()
+        with mock.patch("quota_watch._handle_alert", side_effect=boom_fleet), mock.patch("sys.stderr", stderr_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+
+        self.assertEqual(rc, 0)
+        self.assertIn("quota-watch: fleet check failed: simulated fleet-stale error", stderr_buf.getvalue())
+        # Confirm run was recorded
+        conn = sqlite3.connect(db_path)
+        try:
+            runs = conn.execute("SELECT count(*) FROM quota_watch_runs").fetchone()[0]
+            self.assertEqual(runs, 1)
+        finally:
+            conn.close()
+
+    def test_run_live_outlook_stale_exception_isolated(self):
+        """Exceptions in outlook-stale check write to stderr and do not abort verdict/recording."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_exc")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_exc.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        def boom_outlook(*args, **kwargs):
+            if len(args) >= 3 and args[2] == "outlook-stale":
+                raise RuntimeError("simulated outlook-stale error")
+            return None
+
+        stderr_buf = io.StringIO()
+        pushed_file = os.path.join(self.tmp_dir.name, "dummy_pushed.json")
+        with open(pushed_file, "w") as f:
+            f.write("{}")
+
+        with mock.patch("quota_watch._handle_alert", side_effect=boom_outlook), mock.patch("sys.stderr", stderr_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("quota-watch: fleet check failed: simulated outlook-stale error", stderr_buf.getvalue())
+        # Confirm run was recorded
+        conn = sqlite3.connect(db_path)
+        try:
+            runs = conn.execute("SELECT count(*) FROM quota_watch_runs").fetchone()[0]
+            self.assertEqual(runs, 1)
+        finally:
+            conn.close()
+
     def test_load_inputs_and_run_live_host_filter(self):
         """load_inputs and newest-request query filter requests by host."""
         db_path = os.path.join(self.tmp_dir.name, "db_host.db")
@@ -1278,6 +1559,17 @@ class TestCliSubcommands(unittest.TestCase):
             "--host", "customhost",
         ])
         self.assertEqual(ret_qr, 0)
+
+    def test_cli_quota_watch_fleet_alerts_args(self):
+        """quota-watch CLI accepts --alert-stale-hosts and --outlook-pushed-file."""
+        ret = llm_ledger.main([
+            "quota-watch",
+            "--db", self.db_path,
+            "--state-dir", self.state_dir,
+            "--alert-stale-hosts", "devbox,macbox",
+            "--outlook-pushed-file", os.path.join(self.state_dir, "pushed"),
+        ])
+        self.assertEqual(ret, 0)
 
     def test_replay_record_does_not_overwrite_live(self):
         """quota-replay --record does not overwrite an existing 'live' row for the same ts."""
@@ -1878,6 +2170,37 @@ class TestQuotaOutlook(unittest.TestCase):
             self.assertLessEqual(len(line.encode("utf-8")), 200)
             self.assertNotIn("$", line)
 
+    def test_format_line_out_of_range_refill_ts_omits_refill_clause(self):
+        """Out-of-range next_refill_ts omits refill clause instead of degrading line."""
+        for bad_ts in (10**18, 10**25, -10**18):
+            d = {
+                "verdict": "ample",
+                "ts": 1795455600000,
+                "h0": 1.47,
+                "next_refill_ts": bad_ts,
+                "next_refill_amt": 0.9,
+            }
+            line = quota_watch.format_line(d)
+            self.assertEqual(line, "quota@12:40: AMPLE · headroom 1.47 acct-wk")
+
+    def test_safe_helpers_reject_bool(self):
+        """_safe_int and _safe_float reject bool and return None."""
+        self.assertIsNone(quota_watch._safe_int(True))
+        self.assertIsNone(quota_watch._safe_int(False))
+        self.assertIsNone(quota_watch._safe_float(True))
+        self.assertIsNone(quota_watch._safe_float(False))
+        self.assertEqual(quota_watch._safe_int(42), 42)
+        self.assertEqual(quota_watch._safe_int("42"), 42)
+        self.assertEqual(quota_watch._safe_float(3.14), 3.14)
+        self.assertEqual(quota_watch._safe_float("3.14"), 3.14)
+
+    def test_outlook_from_row_ts_null(self):
+        """_outlook_from_row with ts=None returns unknown with error 'ts is NULL'."""
+        row = (None, 1.47, 0.03, 0.0, None, None, "ample")
+        res = quota_watch._outlook_from_row(row, now_ms=1795455600000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertEqual(res["error"], "ts is NULL")
+
     def test_outlook_known_verdicts(self):
         """outlook returns exact contract keys, no error key, no vertex_usd, no $ for known verdicts."""
         import tempfile
@@ -2287,6 +2610,165 @@ class TestQuotaOutlook(unittest.TestCase):
                 self.assertIsInstance(res, dict)
                 self.assertEqual(res["verdict"], "ample")
                 self.assertIn("quota@", res["line"])
+
+
+
+class TestOutlookFromJson(unittest.TestCase):
+    """outlook_from_json: a host without a ledger (devbox) reads a copy of another
+    host's quota-outlook JSON and re-derives age and staleness at read time."""
+
+    CONTRACT = {
+        "verdict", "ts", "age_s", "h0", "burn_h", "zero_h",
+        "next_refill_ts", "next_refill_amt", "line",
+    }
+    TS = 1795455600000  # 12:40 ET
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmpdir.name, "cloudbox.json")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, obj):
+        with open(self.path, "w") as f:
+            if isinstance(obj, str):
+                f.write(obj)
+            else:
+                json.dump(obj, f)
+
+    def _remote(self, verdict="tight", **over):
+        d = {
+            "verdict": verdict, "ts": self.TS, "age_s": 30, "h0": 1.47, "burn_h": 0.036,
+            "zero_h": 2.5, "next_refill_ts": 1795608000372, "next_refill_amt": 0.9,
+            "line": "remote line, not trusted",
+        }
+        d.update(over)
+        return d
+
+    def test_known_verdicts_recompute_age_and_line(self):
+        for verdict in ("ample", "tight", "dry"):
+            self._write(self._remote(verdict))
+            res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 400_000)
+            self.assertEqual(set(res.keys()), self.CONTRACT)
+            self.assertEqual(res["verdict"], verdict)
+            self.assertEqual(res["age_s"], 400)  # from ts at read time, not the remote age_s
+            self.assertEqual(res["h0"], 1.47)
+            self.assertEqual(res["line"], quota_watch.format_line(res))
+            self.assertTrue(res["line"].startswith("quota@12:40: "))
+
+    def test_fresh_copy_same_verdict_and_line_as_source(self):
+        db_path = os.path.join(self.tmpdir.name, "source.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE quota_watch_runs (
+            ts INTEGER PRIMARY KEY,
+            h0 REAL,
+            burn_h REAL,
+            zero_h REAL,
+            next_refill_ts INTEGER,
+            next_refill_amt REAL,
+            source TEXT DEFAULT 'live',
+            verdict TEXT
+        )""")
+        conn.execute("INSERT INTO quota_watch_runs (ts, h0, burn_h, zero_h, next_refill_ts, next_refill_amt, source, verdict) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                     (self.TS, 1.47, 0.036, 2.5, 1795608000372, 0.9, "live", "tight"))
+        conn.commit()
+        conn.close()
+
+        source = quota_watch.outlook(db=db_path, now_ms=self.TS + 60_000)
+        self._write(source)
+        copy_res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 60_000)
+
+        self.assertEqual(copy_res["verdict"], source["verdict"])
+        self.assertEqual(copy_res["line"], source["line"])
+        self.assertEqual(copy_res["age_s"], source["age_s"])
+        self.assertEqual(copy_res["h0"], source["h0"])
+
+    def test_stale_reading_is_unknown(self):
+        self._write(self._remote("ample"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1201_000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("stale", res["error"])
+        self.assertEqual(res["line"], "quota@12:40: unknown (outlook unavailable)")
+
+    def test_future_reading_is_unknown(self):
+        self._write(self._remote("ample"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS - 120_000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("clock skew", res["error"])
+
+    def test_remote_unknown_stays_unknown(self):
+        self._write(self._remote("unknown", error="no live rows"))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("remote", res["error"])
+        self.assertIn("no live rows", res["error"])
+
+    def test_missing_file_is_unknown(self):
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertEqual(res["error"], f"no published outlook at {self.path}")
+        self.assertIn("quota@", res["line"])
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_garbage_is_unknown(self):
+        for bad in ("not json", "[1, 2]", json.dumps(self._remote("plenty")),
+                    json.dumps(self._remote("ample", ts="soon")), json.dumps(self._remote("ample", ts=None))):
+            self._write(bad)
+            res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+            self.assertEqual(res["verdict"], "unknown", bad)
+            self.assertIn("error", res)
+            json.dumps(res, allow_nan=False)
+
+    def test_non_finite_numbers_sanitized(self):
+        self._write('{"verdict": "ample", "ts": %d, "h0": NaN, "burn_h": Infinity}' % self.TS)
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "ample")
+        self.assertIsNone(res["h0"])
+        self.assertIsNone(res["burn_h"])
+        json.dumps(res, allow_nan=False)
+
+    def test_oversized_file_is_unknown(self):
+        self._write(" " * (70 * 1024) + json.dumps(self._remote("ample")))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 1000)
+        self.assertEqual(res["verdict"], "unknown")
+        self.assertIn("too large", res["error"])
+
+    def test_extra_keys_ignored(self):
+        """Extra keys (published_at, host_share_24h, fleet, source_host) are ignored."""
+        extra = {
+            "published_at": self.TS + 30000,
+            "host_share_24h": {"cloudbox": 0.75, "devbox": 0.25},
+            "fleet": {"devbox": {"share_24h": 0.25}},
+            "source_host": "cloudbox",
+            "custom_metadata": "foo",
+        }
+        self._write(self._remote("ample", **extra))
+        res = quota_watch.outlook_from_json(self.path, now_ms=self.TS + 400_000)
+        self.assertEqual(res["verdict"], "ample")
+        self.assertEqual(set(res.keys()), self.CONTRACT)
+        for k in extra:
+            self.assertNotIn(k, res)
+
+    def test_outlook_from_json_expands_tilde(self):
+        """outlook_from_json expands user home directory (tilde) in path."""
+        rel_name = "test_expand_outlook.json"
+        home_path = os.path.expanduser(f"~/{rel_name}")
+        self._write(self._remote("ample"))
+        import shutil
+        shutil.copyfile(self.path, home_path)
+        try:
+            res = quota_watch.outlook_from_json(f"~/{rel_name}", now_ms=self.TS + 1000)
+            self.assertEqual(res["verdict"], "ample")
+        finally:
+            if os.path.exists(home_path):
+                os.remove(home_path)
+
+        res_missing = quota_watch.outlook_from_json(f"~/nonexistent_rel_{self.TS}.json", now_ms=self.TS)
+        self.assertEqual(res_missing["verdict"], "unknown")
+        self.assertFalse(res_missing["error"].startswith("no published outlook at ~"))
+        self.assertTrue(res_missing["error"].startswith("no published outlook at /"))
 
 
 if __name__ == "__main__":

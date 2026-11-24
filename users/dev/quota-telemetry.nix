@@ -9,6 +9,57 @@
 let
   script = "${config.home.homeDirectory}/.local/bin/quota-telemetry-export";
   ledger = "${config.home.homeDirectory}/.local/state/teamclaude/usage.jsonl";
+
+  llmOutlookSyncScript = pkgs.writeShellScript "llm-outlook-sync" ''
+    set -euo pipefail
+
+    STATE_DIR="''${LLM_LEDGER_STATE_DIR:-$HOME/.local/state/llm-ledger}"
+    REPO_DIR="''${LLM_OUTLOOK_REPO_DIR:-$STATE_DIR/outlook-repo}"
+    OUTLOOK_JSON="''${LLM_LEDGER_OUTLOOK_JSON:-$STATE_DIR/outlook.json}"
+    REMOTE="''${LLM_OUTLOOK_REMOTE:-git@github.com:johnnymo87/quota-telemetry.git}"
+    BRANCH="''${LLM_OUTLOOK_BRANCH:-outlook}"
+
+    export GIT_SSH_COMMAND="''${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15}"
+
+    mkdir -p "$STATE_DIR"
+
+    if ! git -C "$REPO_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+      rm -rf "''${REPO_DIR:?}"
+      git clone --quiet --depth 1 --branch "$BRANCH" "$REMOTE" "$REPO_DIR"
+    else
+      timeout 60 git -C "$REPO_DIR" fetch --quiet --depth 1 origin "$BRANCH"
+      git -C "$REPO_DIR" update-ref "refs/heads/$BRANCH" FETCH_HEAD
+      git -C "$REPO_DIR" reflog expire --expire=now --all
+      git -C "$REPO_DIR" prune --expire=now
+    fi
+
+    TARGET_DIR="$(dirname "$OUTLOOK_JSON")"
+    mkdir -p "$TARGET_DIR"
+    TMP_FILE="$(mktemp "$TARGET_DIR/outlook.json.tmp.XXXXXX")"
+    trap 'rm -f "$TMP_FILE"' EXIT
+
+    git -C "$REPO_DIR" show "HEAD:outlook.json" > "$TMP_FILE"
+
+    python3 -c '
+import json, os, sys
+path = sys.argv[1]
+try:
+    if os.path.getsize(path) > 65536:
+        sys.exit(1)
+    with open(path, "rb") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        sys.exit(1)
+except Exception:
+    sys.exit(1)
+' "$TMP_FILE" || {
+      echo "llm-outlook-sync: invalid outlook.json; keeping previous file" >&2
+      exit 1
+    }
+
+    mv -f "$TMP_FILE" "$OUTLOOK_JSON"
+    trap - EXIT
+  '';
 in
 lib.mkIf (isDevbox || isDarwin) (lib.mkMerge [
   {
@@ -19,6 +70,34 @@ lib.mkIf (isDevbox || isDarwin) (lib.mkMerge [
   }
 
   (lib.mkIf isDevbox {
+    home.packages = [
+      (pkgs.callPackage ../../pkgs/llm-ledger { })
+    ];
+
+    systemd.user.services.llm-outlook-sync = {
+      Unit.Description = "Sync Claude quota outlook JSON from telemetry repo";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${llmOutlookSyncScript}";
+        Environment = [
+          "HOME=%h"
+          "PATH=${lib.makeBinPath [ pkgs.git pkgs.openssh pkgs.coreutils pkgs.python3 ]}"
+          "\"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15\""
+        ];
+        Nice = 10;
+        TimeoutStartSec = "90s";
+      };
+    };
+
+    systemd.user.timers.llm-outlook-sync = {
+      Unit.Description = "Sync Claude quota outlook JSON every 2 minutes";
+      Timer = {
+        OnCalendar = "*:0/2";
+        Persistent = true;
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
+
     systemd.user.services.quota-telemetry-export = {
       Unit.Description = "Export hourly Claude Max usage rows to quota-telemetry";
       Service = {

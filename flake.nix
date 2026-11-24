@@ -2004,8 +2004,8 @@
 
         # The count is PINNED, following checks.oc-cost-tests. "OK" alone is
         # also what a suite that silently stopped collecting tests prints.
-        grep -q '^Ran 68 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 68 tests'. If you added or removed" >&2
+        grep -q '^Ran 103 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 103 tests'. If you added or removed" >&2
           echo "tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -2015,8 +2015,8 @@
         }
 
         python3 pkgs/llm-ledger/test_quota_watch.py 2>&1 | tee "$TMPDIR/qw.txt"
-        grep -q '^Ran 69 tests' "$TMPDIR/qw.txt" || {
-          echo "GATE FAILURE: expected 'Ran 69 tests' from test_quota_watch.py. If you" >&2
+        grep -q '^Ran 92 tests' "$TMPDIR/qw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 92 tests' from test_quota_watch.py. If you" >&2
           echo "added or removed tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

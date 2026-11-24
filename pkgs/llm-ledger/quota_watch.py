@@ -708,6 +708,42 @@ def record_replay_runs(
     return (inserted, filled)
 
 
+def _handle_alert(
+    state_dir: str,
+    alert_filename: str,
+    name: str,
+    text: str | None,
+    ttl: str = "3600",
+    max_ttl: str = "14400",
+    alert_cmd: str | None = None,
+) -> None:
+    alert_file = os.path.join(state_dir, alert_filename)
+    if text is not None:
+        if alert_cmd:
+            argv = [
+                alert_cmd,
+                alert_file,
+                name,
+                text,
+                str(ttl),
+                str(max_ttl),
+            ]
+            try:
+                res = subprocess.run(argv, timeout=60)
+                if res.returncode != 0:
+                    sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
+            except subprocess.TimeoutExpired:
+                sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
+        else:
+            print(f"would-alert: {name} ttl={ttl} max={max_ttl} text={text}")
+    else:
+        if os.path.exists(alert_file):
+            try:
+                os.remove(alert_file)
+            except OSError:
+                pass
+
+
 def run_live(
     db: str,
     state_dir: str,
@@ -715,6 +751,8 @@ def run_live(
     now: float | None = None,
     excluded: set[str] | None = None,
     host: str | None = None,
+    alert_stale_hosts: str | Sequence[str] | None = "devbox",
+    outlook_pushed_file: str | None = None,
 ) -> int:
     """Run live quota watch check."""
     host = host or socket.gethostname()
@@ -748,36 +786,91 @@ def run_live(
             stale_r_min = (now_ms - req_T) / 60000.0
             blind_reasons.append(f"requests for host '{host}' is {stale_r_min:.1f} min old")
 
-        blind_file = os.path.join(state_dir, "blind.alert")
         if blind_reasons:
             stale_desc = " and ".join(blind_reasons)
             blind_text = (
                 f"Claude Max quota watch blind spot: {stale_desc} (threshold {BLIND_MS // 60000} min). "
                 "Quota alerts are not trustworthy until it recovers."
             )
-            if alert_cmd:
-                argv = [
-                    alert_cmd,
-                    blind_file,
-                    "quota-watch-blind",
-                    blind_text,
-                    "3600",
-                    "14400",
-                ]
-                try:
-                    res = subprocess.run(argv, timeout=60)
-                    if res.returncode != 0:
-                        sys.stderr.write(f"warning: alert command exited with code {res.returncode}: {argv}\n")
-                except subprocess.TimeoutExpired:
-                    sys.stderr.write(f"warning: alert command timed out after 60s: {argv}\n")
-            else:
-                print(f"would-alert: quota-watch-blind ttl=3600 max=14400 text={blind_text}")
         else:
-            if os.path.exists(blind_file):
+            blind_text = None
+        _handle_alert(state_dir, "blind.alert", "quota-watch-blind", blind_text, alert_cmd=alert_cmd)
+
+        # Fleet-stale alert check:
+        try:
+            if alert_stale_hosts is None:
+                stale_hosts_list: list[str] = []
+            elif isinstance(alert_stale_hosts, str):
+                stale_hosts_list = [h.strip() for h in alert_stale_hosts.split(",") if h.strip()]
+            else:
+                stale_hosts_list = [str(h).strip() for h in alert_stale_hosts if str(h).strip()]
+
+            if stale_hosts_list:
+                host_watermarks: dict[str, int | None] = {}
+                table_exists = False
                 try:
-                    os.remove(blind_file)
-                except OSError:
+                    rows = conn.execute("SELECT host, exported_through FROM remote_hosts").fetchall()
+                    host_watermarks = {r[0]: r[1] for r in rows}
+                    table_exists = True
+                except sqlite3.OperationalError:
                     pass
+
+                stale_entries: list[str] = []
+                for h in stale_hosts_list:
+                    if not table_exists or h not in host_watermarks or host_watermarks[h] is None:
+                        stale_entries.append(f"host '{h}' has no export watermark")
+                    else:
+                        exp = host_watermarks[h]
+                        assert exp is not None
+                        age_ms = now_ms - exp
+                        if age_ms > 3 * 3600 * 1000:
+                            age_h = age_ms / 3600000.0
+                            stale_entries.append(f"host '{h}' is {age_h:.1f}h old")
+
+                if stale_entries:
+                    stale_desc = "; ".join(stale_entries)
+                    subject = "That host's" if len(stale_entries) == 1 else "Those hosts'"
+                    fleet_text = (
+                        f"Fleet telemetry stale: {stale_desc} (threshold 3h). "
+                        f"{subject} quota-telemetry export or its GitHub key may be broken; "
+                        "devbox's quota verdict sync uses the same key, so devbox may also read quota unknown."
+                    )
+                else:
+                    fleet_text = None
+                _handle_alert(state_dir, "fleet-stale.alert", "fleet-stale", fleet_text, alert_cmd=alert_cmd)
+        except Exception as e:
+            sys.stderr.write(f"quota-watch: fleet check failed: {e}\n")
+
+        # Outlook-stale alert check:
+        try:
+            if outlook_pushed_file is not None:
+                pushed_path = os.path.expanduser(outlook_pushed_file)
+                if not os.path.exists(pushed_path):
+                    outlook_text = (
+                        "cloudbox hasn't published its quota outlook (file missing); "
+                        "devbox reads quota unknown after 20 min"
+                    )
+                else:
+                    try:
+                        mtime = os.path.getmtime(pushed_path)
+                        now_s = now_ms / 1000.0
+                        age_s = now_s - mtime
+                        if age_s > 15 * 60:
+                            age_min = int(age_s / 60.0)
+                            outlook_text = (
+                                f"cloudbox hasn't published its quota outlook for {age_min} min; "
+                                "devbox reads quota unknown after 20 min"
+                            )
+                        else:
+                            outlook_text = None
+                    except OSError as e:
+                        outlook_text = (
+                            f"cloudbox hasn't published its quota outlook (error reading file: {e}); "
+                            "devbox reads quota unknown after 20 min"
+                        )
+                _handle_alert(state_dir, "outlook-stale.alert", "outlook-stale", outlook_text, alert_cmd=alert_cmd)
+        except Exception as e:
+            sys.stderr.write(f"quota-watch: fleet check failed: {e}\n")
 
         # 20-min stale skip
         if T is None:
@@ -1182,8 +1275,8 @@ def replay(
 
 
 def _safe_float(val: Any) -> float | None:
-    """Return float or None for None, NaN, inf, or unparseable values."""
-    if val is None:
+    """Return float or None for None, bool, NaN, inf, or unparseable values."""
+    if val is None or isinstance(val, bool):
         return None
     try:
         f = float(val)
@@ -1195,8 +1288,8 @@ def _safe_float(val: Any) -> float | None:
 
 
 def _safe_int(val: Any) -> int | None:
-    """Return int or None for None or unparseable values."""
-    if val is None:
+    """Return int or None for None, bool, or unparseable values."""
+    if val is None or isinstance(val, bool):
         return None
     try:
         return int(val)
@@ -1227,13 +1320,16 @@ def format_line(d: dict) -> str:
 
         next_refill_ts = _safe_int(d.get("next_refill_ts"))
         if next_refill_ts is not None:
-            refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
-            refill_str = refill_dt.strftime("%a %H:%M")
-            amt = _safe_float(d.get("next_refill_amt"))
-            if amt is not None:
-                clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
-            else:
-                clauses.append(f"next refill {refill_str} ET")
+            try:
+                refill_dt = datetime.datetime.fromtimestamp(next_refill_ts / 1000, tz=NY_TZ)
+                refill_str = refill_dt.strftime("%a %H:%M")
+                amt = _safe_float(d.get("next_refill_amt"))
+                if amt is not None:
+                    clauses.append(f"next refill {refill_str} ET (+{amt:.2f})")
+                else:
+                    clauses.append(f"next refill {refill_str} ET")
+            except (OverflowError, OSError, ValueError):
+                pass
 
         if verdict == "ample":
             prefix = f"quota@{time_str}: AMPLE"
@@ -1339,6 +1435,68 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
             "error": "no live rows",
         }
 
+    return _outlook_from_row(row, now_ms)
+
+
+def _unknown_outlook(now_ms: int, error: str) -> dict[str, Any]:
+    try:
+        line = format_line({"verdict": "unknown", "now_ms": now_ms})
+    except Exception:
+        line = "quota@--:--: unknown (outlook unavailable)"
+    return {
+        "verdict": "unknown",
+        "ts": None,
+        "age_s": None,
+        "h0": None,
+        "burn_h": None,
+        "zero_h": None,
+        "next_refill_ts": None,
+        "next_refill_amt": None,
+        "line": line,
+        "error": str(error)[:200],
+    }
+
+
+OUTLOOK_JSON_MAX_BYTES: int = 64 * 1024
+
+
+def outlook_from_json(path: str, now_ms: int | None = None) -> dict[str, Any]:
+    """Outlook from a copy of another host's `quota-outlook` JSON (devbox reads cloudbox's).
+
+    The copy is only a carrier for the reading: age, staleness, clock skew and the line are
+    re-derived here from the reading's own ts, exactly as outlook() does for a DB row, so a
+    copy that stops being refreshed turns unknown after 20 min instead of repeating itself.
+    """
+    path = os.path.expanduser(path)
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(OUTLOOK_JSON_MAX_BYTES + 1)
+        if len(raw) > OUTLOOK_JSON_MAX_BYTES:
+            return _unknown_outlook(now_ms, f"published outlook too large (> {OUTLOOK_JSON_MAX_BYTES} bytes)")
+        d = json.loads(raw.decode("utf-8"))
+    except FileNotFoundError:
+        return _unknown_outlook(now_ms, f"no published outlook at {path}")
+    except Exception as e:
+        return _unknown_outlook(now_ms, f"published outlook unreadable: {e}")
+    if not isinstance(d, dict):
+        return _unknown_outlook(now_ms, "published outlook is not a JSON object")
+    verdict = d.get("verdict")
+    if verdict not in ("ample", "tight", "dry"):
+        detail = d.get("error")
+        detail = f": {str(detail)[:150]}" if detail else ""
+        return _unknown_outlook(now_ms, f"remote verdict {str(verdict)[:20]!r}{detail}")
+    if _safe_int(d.get("ts")) is None:
+        return _unknown_outlook(now_ms, "published outlook has no ts")
+    row = (
+        d.get("ts"), d.get("h0"), d.get("burn_h"), d.get("zero_h"),
+        d.get("next_refill_ts"), d.get("next_refill_amt"), verdict,
+    )
+    return _outlook_from_row(row, now_ms)
+
+
+def _outlook_from_row(row: Sequence[Any], now_ms: int) -> dict[str, Any]:
     try:
         ts_val, h0_val, burn_val, zero_val, refill_ts_val, refill_amt_val, stored_verdict = row
         ts = _safe_int(ts_val)
@@ -1350,7 +1508,10 @@ def outlook(db: str, now_ms: int | None = None) -> dict[str, Any]:
 
         age_s = (now_ms - ts) // 1000 if ts is not None else None
 
-        if age_s is not None and age_s > 1200:
+        if ts is None:
+            verdict = "unknown"
+            error = "ts is NULL"
+        elif age_s is not None and age_s > 1200:
             verdict = "unknown"
             error = f"stale: age_s={age_s}"
         elif age_s is not None and age_s < -60:

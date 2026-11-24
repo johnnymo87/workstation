@@ -109,6 +109,7 @@ Check:
     description = "Alert on Claude Max pool shortfall from the LLM spend ledger";
     unitConfig = {
       OnFailure = [ "llm-quota-watch-failure.service" ];
+      OnSuccess = [ "llm-outlook-publish.service" ];
     };
     serviceConfig = {
       Type = "oneshot";
@@ -124,7 +125,7 @@ Check:
       TimeoutStartSec = "5min";
       StateDirectory = "llm-quota-watch";
       StateDirectoryMode = "0700";
-      ExecStart = "${llmLedger}/bin/llm-ledger quota-watch --state-dir /var/lib/llm-quota-watch --alert-cmd ${driftAlert}";
+      ExecStart = "${llmLedger}/bin/llm-ledger quota-watch --state-dir /var/lib/llm-quota-watch --alert-cmd ${driftAlert} --outlook-pushed-file /var/lib/llm-fleet/outlook-pushed --alert-stale-hosts devbox";
       ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/llm-quota-watch-failure/alerted";
       Environment = [ "HOME=/home/dev" ];
       NoNewPrivileges = true;
