@@ -597,6 +597,16 @@ class TestRateBookAndCostForMessage(unittest.TestCase):
         self.assertAlmostEqual(cost, 1.5 + 7.5, places=6)
         self.assertEqual(tier, "base")
 
+    def test_gemini_4_neon_rates_and_cache_write_phase(self):
+        # 3 / 15 / cache 0.15; cache writes free until 2027-01-12, then 3.75.
+        for provider in ("google-vertex", "google"):
+            before = oc_cost.rate_for(provider, "gemini-4-neon", "2027-01-11")
+            after = oc_cost.rate_for(provider, "gemini-4-neon", "2027-01-12")
+            self.assertEqual(
+                (before["input"], before["output"], before["cache_read"], before["cache_write"]),
+                (3, 15, 0.15, 0), provider)
+            self.assertEqual(after["cache_write"], 3.75, provider)
+
     def test_gemini_flash_last_intro_day_is_still_intro(self):
         e = oc_cost.rate_for("google-vertex", "gemini-3.8-flash", "2026-12-31")
         self.assertEqual(e["input"], 0.75)

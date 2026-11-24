@@ -2414,6 +2414,13 @@ class TestGoosePricingAndRates(unittest.TestCase):
             (rate["input"], rate["output"], rate["cache_read"]),
             (1.5, 7.5, 0.075))
 
+    def test_dated_gemini_4_neon_rates(self):
+        rate = oc_tags.goose_rate_for("gemini-4-neon", day="2026-11-24")
+        self.assertEqual(
+            (rate["input"], rate["output"], rate["cache_read"], rate["cache_write"]),
+            (3.0, 15.0, 0.15, 0.0))
+        self.assertEqual(oc_tags.goose_rate_for("gemini-4-neon", day="2027-01-12")["cache_write"], 3.75)
+
 
 class TestGooseRateDrift(unittest.TestCase):
     """Assert GOOSE_MODEL_RATES stays in sync with pkgs/oc-cost/oc_cost.py."""

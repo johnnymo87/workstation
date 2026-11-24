@@ -859,6 +859,12 @@ class TestLiveAndReplay(unittest.TestCase):
             "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('r1', ?, 'myhost', 'k', 'max', 1.0)",
             (t0 - 70 * 60 * 1000,),
         )
+        # A fresh aigateway Gemini row must not mask a stalled cfp ingest: the
+        # check is about cfp's events, and the gateway is polled separately.
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, host, attr_key, backend, cost_usd) VALUES ('gw:1', ?, 'myhost', 'k', 'vertex-gemini', 1.0)",
+            (t0 - 5 * 60 * 1000,),
+        )
         conn.commit()
         conn.close()
 

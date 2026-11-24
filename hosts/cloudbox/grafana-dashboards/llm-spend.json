@@ -1040,6 +1040,277 @@
       ],
       "title": "Top 25 Sessions: Max $ (notional) & cash $ (Vertex/agy/enterprise)",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "List-price $ by billing bucket for the selected range (Jonathan, 2026-11-23). GCP commitment = Vertex Gemini through aigateway (backend vertex-gemini) + agy; it is the org's large GCP commitment. Claude Vertex bucket = cfp's Vertex leg, a smaller bucket that costs extra once full. Max is flat-rate (notional). The model-switch controller's $1,500/day Neon cap (design D2) reads the same rows through /var/lib/llm-ledger/commitment-spend.json, by America/New_York day.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "GCP commitment $"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "of which Neon $"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Claude Vertex bucket $"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Max $ (notional)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unbucketed $"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  SUM(CASE WHEN b.bucket = 'gcp-commitment' THEN h.cost_usd ELSE 0 END) AS \"GCP commitment $\",\n  SUM(CASE WHEN h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END) AS \"of which Neon $\",\n  SUM(CASE WHEN b.bucket = 'claude-vertex' THEN h.cost_usd ELSE 0 END) AS \"Claude Vertex bucket $\",\n  SUM(CASE WHEN b.bucket = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN b.bucket IS NULL THEN h.cost_usd ELSE 0 END) AS \"Unbucketed $\"\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "rawQueryText": "SELECT\n  SUM(CASE WHEN b.bucket = 'gcp-commitment' THEN h.cost_usd ELSE 0 END) AS \"GCP commitment $\",\n  SUM(CASE WHEN h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END) AS \"of which Neon $\",\n  SUM(CASE WHEN b.bucket = 'claude-vertex' THEN h.cost_usd ELSE 0 END) AS \"Claude Vertex bucket $\",\n  SUM(CASE WHEN b.bucket = 'max' THEN h.cost_usd ELSE 0 END) AS \"Max $ (notional)\",\n  SUM(CASE WHEN b.bucket IS NULL THEN h.cost_usd ELSE 0 END) AS \"Unbucketed $\"\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "refId": "A",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "title": "Billing buckets: GCP commitment (Gemini + agy) vs Claude Vertex bucket vs Max",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "average $ per hour within each bucket; buckets widen with the range and are aligned to UTC. Commitment draw only: Vertex Gemini via aigateway plus agy.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "id": 11,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND b.bucket = 'gcp-commitment'\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND b.bucket = 'gcp-commitment'\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "GCP commitment $ per hour per program (Vertex Gemini + agy)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "average $ per hour within each bucket, aligned to UTC. The D2 cap is $1,500 per America/New_York day of this series, summed fleet-wide (about $62.50/h sustained); the controller reads it from /var/lib/llm-ledger/commitment-spend.json.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 12,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND h.model LIKE '%gemini-4-neon%'\nGROUP BY 1, 2\nORDER BY time",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS program,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM fleet_hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nLEFT JOIN backend_bucket b ON b.backend = h.backend\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.host IN (${host:sqlstring})\n  AND h.backend IN (${backend:sqlstring})\n  AND h.model IN (${model:sqlstring})\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\n  AND h.model LIKE '%gemini-4-neon%'\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Gemini 4 Neon $ per hour per program",
+      "type": "timeseries"
     }
   ],
   "preload": false,

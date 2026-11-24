@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS remote_hourly (
   requests INTEGER, input INTEGER, output INTEGER, cache_read INTEGER,
   cache_write_5m INTEGER, cache_write_1h INTEGER, cost_usd REAL,
   PRIMARY KEY (host, hour, account, backend, model));
+CREATE TABLE IF NOT EXISTS backend_bucket (
+  backend TEXT PRIMARY KEY, bucket TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS remote_hosts (
   host TEXT PRIMARY KEY, first_hour INTEGER, exported_through INTEGER,
   imported_at INTEGER NOT NULL);
@@ -1728,6 +1730,11 @@ def ensure_fleet_objects(
     if not acct_row or acct_row[0] != acct_view_sql:
         conn.execute("DROP VIEW IF EXISTS fleet_account_hourly")
         conn.execute(acct_view_sql)
+    want_buckets = sorted(BACKEND_BUCKETS.items())
+    have_buckets = sorted(conn.execute("SELECT backend, bucket FROM backend_bucket").fetchall())
+    if have_buckets != want_buckets:
+        conn.execute("DELETE FROM backend_bucket")
+        conn.executemany("INSERT INTO backend_bucket (backend, bucket) VALUES (?, ?)", want_buckets)
 
     hosts = [r[0] for r in conn.execute("SELECT DISTINCT host FROM remote_hosts").fetchall()]
     if hosts:
@@ -1758,6 +1765,432 @@ def ensure_fleet_objects(
     conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# Gateway Gemini ingest and the GCP-commitment spend feed
+# (bead eng-agent-platform-ul4.28.4, model-switch design P3 / D2).
+#
+# cfp is Claude-only, so before this step the ledger had no Gemini rows at all.
+# Every Vertex Gemini call on cloudbox (opencode's google-vertex provider and
+# goose's gcp_vertex_ai Gemini leg) goes through aigateway, which writes one
+# row per request to gateway_request_log with the caller's session id. This
+# step copies the Gemini rows into `requests` under backend 'vertex-gemini'.
+# Claude rows in that table are skipped: cfp's Vertex leg forwards through the
+# gateway too, and cfp already ledgers those requests.
+# ---------------------------------------------------------------------------
+
+GATEWAY_BACKEND = "vertex-gemini"
+GATEWAY_FLAG = "/var/lib/aigateway/enabled"
+DEFAULT_GATEWAY_PSQL = "docker exec -i dev-postgres-1 psql -U aigateway -d aigateway"
+DEFAULT_COMMITMENT_JSON = "/var/lib/llm-ledger/commitment-spend.json"
+# Re-read this much before the cursor each run: a row is written when its
+# request completes, so a long stream can land after a shorter, later one.
+GATEWAY_OVERLAP_MS = 2 * 3600 * 1000
+# A gateway poll never fails the writer: llm-ledger.service gates quota-watch
+# (OnSuccess) and its failure page means "cfp ledger going stale", so a Gemini
+# outage must not ride either. The step records its status in ingest_state
+# instead; quota-watch pages "gemini-feed-stale" once an error has lasted
+# GATEWAY_ALERT_AFTER_MS, and the feed reports complete=false at once.
+GATEWAY_ALERT_AFTER_MS = 30 * 60 * 1000
+# The feed calls itself complete only if the gateway was polled this recently.
+FEED_COMPLETE_MAX_AGE_MS = 15 * 60 * 1000
+# A first-ever poll (or one after the cursor is lost) backfills this far, in
+# pages, so the step's memory stays bounded under the unit's MemoryMax.
+GATEWAY_BACKFILL_MS = 35 * 86400 * 1000
+GATEWAY_PAGE_ROWS = 20000
+# Vertex lists Gemini in non-global regions at +10% over the global price.
+GEMINI_NON_GLOBAL_MULTIPLIER = 1.1
+
+# Billing buckets (Jonathan, 2026-11-23): Vertex Gemini and agy draw on the
+# org's large GCP commitment; Vertex Claude draws on a smaller bucket that costs
+# extra once full; Max is flat-rate. ensure_fleet_objects exposes this mapping
+# to Grafana as the backend_bucket table.
+BACKEND_BUCKETS: dict[str, str] = {
+    "max": "max",
+    "vertex": "claude-vertex",
+    "agy": "gcp-commitment",
+    GATEWAY_BACKEND: "gcp-commitment",
+}
+COMMITMENT_BACKENDS: tuple[str, ...] = tuple(
+    b for b, bucket in BACKEND_BUCKETS.items() if bucket == "gcp-commitment"
+)
+NEON_MODEL_PREFIX = "gemini-4-neon"
+FEED_TZ = "America/New_York"
+
+_GATEWAY_COLS = (
+    "request_id", "started_ms", "completed_ms", "model", "region", "http_status",
+    "client_session_id", "input", "output", "cache_read", "cache_write", "total_dollars",
+)
+
+
+def price_gemini(
+    model: str | None,
+    region: str | None,
+    input_tokens: int | None,
+    output: int | None,
+    cache_read: int | None,
+    cache_write: int | None,
+    ts_ms: int,
+) -> float | None:
+    """List-price one gateway Gemini row from the session-tags rate table.
+
+    Gateway token semantics: input is UNCACHED prompt tokens (promptTokenCount
+    minus cachedContentTokenCount), output includes thinking tokens. Returns
+    None when the row has no tokens or the model has no rate.
+    """
+    if input_tokens is None or output is None:
+        return None
+    day = datetime.datetime.fromtimestamp(ts_ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%d")
+    rate = oc_tags.goose_rate_for(model, day=day)
+    if rate is None:
+        return None
+    usd = (
+        input_tokens * float(rate["input"])
+        + output * float(rate["output"])
+        + (cache_read or 0) * float(rate["cache_read"])
+        + (cache_write or 0) * float(rate["cache_write"])
+    ) / 1_000_000.0
+    if (region or "global") != "global":
+        usd *= GEMINI_NON_GLOBAL_MULTIPLIER
+    return usd
+
+
+def _pg_text(col: str) -> str:
+    # Client-supplied text (the session id header above all) must not be able
+    # to carry the field or record separator into psql's unaligned output.
+    return f"translate(coalesce({col}, ''), E'\\t\\n\\r', '   ')"
+
+
+def fetch_gateway_rows(
+    psql: str,
+    since_ms: int,
+    run: Any = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """SELECT the gateway's non-Claude rows completed at or after since_ms,
+    oldest completion first (at most `limit` rows).
+
+    Every non-Claude row is taken, not just model LIKE 'gemini%': for a spend
+    cap a Gemini call logged under an odd model name must still be counted.
+    Claude is excluded because cfp, which already ledgers it, forwards its
+    Vertex leg through the gateway. Raises RuntimeError on any failure.
+    """
+    import shlex
+    import subprocess
+
+    run = run or subprocess.run
+    where = (
+        "model NOT LIKE 'claude%' "
+        f"AND request_completed_at >= to_timestamp({int(since_ms) / 1000.0:.3f})"
+    )
+    sql = (
+        "SELECT request_id, "
+        "(extract(epoch from request_started_at)*1000)::bigint, "
+        # floor, not ::bigint (which rounds): the paging key must never sit
+        # after a row it stands for, or a page boundary could skip rows.
+        "floor(extract(epoch from request_completed_at)*1000)::bigint, "
+        f"{_pg_text('model')}, {_pg_text('region')}, http_status, {_pg_text('client_session_id')}, "
+        "input_tokens, output_tokens, cache_read_tokens, "
+        "cache_creation_5m_tokens + cache_creation_1h_tokens, total_dollars "
+        f"FROM gateway_request_log WHERE {where} ORDER BY request_completed_at, id"
+        + (f" LIMIT {int(limit)}" if limit else "")
+    )
+    try:
+        p = run(
+            shlex.split(psql) + ["-X", "-At", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(f"gateway ledger unreachable: {e}") from e
+    if p.returncode != 0:
+        raise RuntimeError(f"gateway ledger query failed (rc={p.returncode}): {(p.stderr or '').strip()[:300]}")
+
+    def _i(v: str) -> int | None:
+        return int(v) if v != "" else None
+
+    rows: list[dict[str, Any]] = []
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        f = line.split("\t")
+        if len(f) != len(_GATEWAY_COLS):
+            raise RuntimeError(f"gateway ledger row has {len(f)} fields, expected {len(_GATEWAY_COLS)}")
+        try:
+            rows.append(_gateway_row(f, _i))
+        except ValueError as e:
+            raise RuntimeError(f"gateway ledger row unparseable: {e}") from e
+    return rows
+
+
+def _gateway_row(f: list[str], _i: Any) -> dict[str, Any]:
+    return {
+        "request_id": f[0],
+        "started_ms": int(f[1]),
+        "completed_ms": int(f[2]),
+        "model": f[3],
+        "region": f[4],
+        "http_status": _i(f[5]),
+        "client_session_id": f[6] or None,
+        "input": _i(f[7]),
+        "output": _i(f[8]),
+        "cache_read": _i(f[9]),
+        "cache_write": _i(f[10]),
+        "total_dollars": float(f[11]) if f[11] != "" else None,
+    }
+
+
+def _set_state(conn: sqlite3.Connection, **kv: Any) -> None:
+    for k, v in kv.items():
+        if v is None:
+            conn.execute("DELETE FROM ingest_state WHERE key = ?", (k,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)", (k, str(v)))
+
+
+def step_gateway_gemini(
+    conn: sqlite3.Connection,
+    host: str,
+    psql: str | None,
+    flag_path: str = GATEWAY_FLAG,
+    opencode_db: str | None = None,
+    goose_db: str | None = None,
+    tags_db: str | None = None,
+    lgtm_ledger: str | None = None,
+    now_ms: int | None = None,
+    warnings: list[str] | None = None,
+    run: Any = None,
+) -> dict[str, Any]:
+    """Copy new gateway (non-Claude) rows into `requests`.
+
+    Never raises and never adds a warning (warnings fail the writer). The
+    outcome is recorded in ingest_state as gateway_status = ok | error |
+    disabled, with gateway_error_since_ms marking when an error run began.
+    """
+    out: dict[str, Any] = {"gateway_rows": 0, "gateway_unpriced": 0, "touched_hours": set()}
+    if not psql:
+        return out
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    if flag_path and not os.path.exists(flag_path):
+        # The gateway is off on purpose, so Gemini goes straight to Vertex and
+        # nobody sees it. Say so (the feed reports complete=false), and clear
+        # any error clock so re-enabling starts a fresh grace period.
+        _set_state(conn, gateway_status="disabled", gateway_error=None, gateway_error_since_ms=None)
+        conn.commit()
+        out["gateway_status"] = "disabled"
+        return out
+    # Attribution warnings raised by gateway rows stay local (stderr and
+    # ingest_state) rather than failing the writer; the rows are still kept,
+    # since misattributed spend is better than uncounted spend.
+    local_warnings: list[str] = []
+    try:
+        res = _gateway_ingest(conn, host, psql, opencode_db, goose_db, tags_db, lgtm_ledger,
+                              now_ms, local_warnings, run)
+    except Exception as e:  # noqa: BLE001 -- see docstring
+        conn.rollback()
+        state = get_ingest_state(conn)
+        since = state.get("gateway_error_since_ms") if state.get("gateway_status") == "error" else None
+        _set_state(conn, gateway_status="error", gateway_error=f"{type(e).__name__}: {e}"[:500],
+                   gateway_error_since_ms=since or now_ms)
+        conn.commit()
+        sys.stderr.write(f"warning: aigateway Gemini ingest failed: {e}\n")
+        out["gateway_status"] = "error"
+        out["gateway_error"] = str(e)
+        return out
+    for w in local_warnings:
+        sys.stderr.write(f"warning: aigateway Gemini attribution: {w}\n")
+    _set_state(conn, gateway_status="ok", gateway_last_ok_ms=now_ms, gateway_error=None,
+               gateway_error_since_ms=None,
+               gateway_warning=("; ".join(local_warnings)[:500] if local_warnings else None))
+    conn.commit()
+    out.update(res)
+    out["gateway_status"] = "ok"
+    if res["gateway_unpriced"]:
+        sys.stderr.write(
+            f"warning: aigateway Gemini ingest: {res['gateway_unpriced']} row(s) on a model with no price (cost NULL)\n")
+    return out
+
+
+def _gateway_ingest(
+    conn: sqlite3.Connection,
+    host: str,
+    psql: str,
+    opencode_db: str | None,
+    goose_db: str | None,
+    tags_db: str | None,
+    lgtm_ledger: str | None,
+    now_ms: int,
+    warnings: list[str] | None,
+    run: Any,
+) -> dict[str, Any]:
+    state = get_ingest_state(conn)
+    cursor = int(state["gateway_completed_through"]) if "gateway_completed_through" in state else None
+    since = now_ms - GATEWAY_BACKFILL_MS if cursor is None else cursor - GATEWAY_OVERLAP_MS
+    tag_map: dict[str, str] | None = None
+    touched: set[int] = set()
+    new = unpriced = 0
+    while True:
+        rows = fetch_gateway_rows(psql, since, run=run, limit=GATEWAY_PAGE_ROWS)
+        goose_rows = [r for r in rows
+                      if r["client_session_id"] and oc_tags._GOOSE_SESSION_ID.match(r["client_session_id"])]
+        resolver = None
+        if goose_rows:
+            if tag_map is None:
+                tag_map, _ok = load_session_tags(conn, tags_db, warnings)
+            resolver = oc_tags.CfpSessionResolver(
+                session_ids={r["client_session_id"] for r in goose_rows},
+                db_path=opencode_db or oc_tags.DEFAULT_OPENCODE_DB,
+                goose_db=goose_db or oc_tags.DEFAULT_GOOSE_DB,
+                session_tags=tag_map,
+                lgtm_ledger=lgtm_ledger,
+                since_ms=min(r["started_ms"] for r in goose_rows),
+                until_ms=max(r["started_ms"] for r in goose_rows) + 1,
+                warnings=warnings,
+            )
+        for r in rows:
+            ts = r["started_ms"]
+            cost = r["total_dollars"]
+            if cost is None:
+                cost = price_gemini(r["model"], r["region"], r["input"], r["output"],
+                                    r["cache_read"], r["cache_write"], ts)
+            row = (
+                "gw:" + r["request_id"], ts, host, r["client_session_id"],
+                compute_attr_key(r["client_session_id"], ts, resolver),
+                GATEWAY_BACKEND, r["model"], r["input"], r["output"], r["cache_read"],
+                r["cache_write"], cost, r["http_status"], r["completed_ms"] - ts,
+            )
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO requests (request_id, ts, host, session_id, attr_key, backend, model, "
+                "input, output, cache_read, cache_write, cost_usd, status, duration_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+            if cur.rowcount:
+                new += 1
+                touched.add((ts // 3_600_000) * 3_600_000)
+                if cost is None and r["input"] is not None:
+                    unpriced += 1
+        if rows:
+            last = rows[-1]["completed_ms"]
+            if cursor is None or last > cursor:
+                cursor = last
+                _set_state(conn, gateway_completed_through=cursor)
+        if len(rows) < GATEWAY_PAGE_ROWS:
+            break
+        # A full page: continue from its last completion time (inclusive; the
+        # overlap is deduplicated by request id). A page that cannot advance
+        # would loop forever, so treat it as a failure.
+        nxt = rows[-1]["completed_ms"]
+        if nxt <= since:
+            raise RuntimeError(f"gateway paging stuck: {GATEWAY_PAGE_ROWS} rows completed at {nxt}")
+        since = nxt
+    return {"gateway_rows": new, "gateway_unpriced": unpriced, "touched_hours": touched}
+
+
+def _et_day_bounds(day: str | None, now_ms: int) -> tuple[str, int, int]:
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(FEED_TZ)
+    if day is None:
+        d = datetime.datetime.fromtimestamp(now_ms / 1000, tz).date()
+    else:
+        d = datetime.date.fromisoformat(day)
+    start = datetime.datetime.combine(d, datetime.time(0), tzinfo=tz)
+    end = datetime.datetime.combine(d + datetime.timedelta(days=1), datetime.time(0), tzinfo=tz)
+    return d.isoformat(), int(start.timestamp() * 1000), int(end.timestamp() * 1000)
+
+
+def _iso(ms: int | None) -> str | None:
+    if ms is None:
+        return None
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def commitment_spend(
+    conn: sqlite3.Connection,
+    day: str | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """GCP-commitment spend for one America/New_York day, with Neon broken out.
+
+    The model-switch controller's D2 cap reads neon.usd. Dollars are list
+    price (gateway-recorded where it priced the row, else the session-tags
+    rate table), not the billing export, which lags by hours.
+    """
+    now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    day_s, start, end = _et_day_bounds(day, now_ms)
+    ph = ",".join("?" for _ in COMMITMENT_BACKENDS)
+    rows = conn.execute(
+        "SELECT q.backend, COALESCE(q.model, ''), "
+        "COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved'), "
+        "COUNT(*), SUM(q.cost_usd), SUM(CASE WHEN q.cost_usd IS NULL AND q.input IS NOT NULL THEN 1 ELSE 0 END), "
+        "SUM(CASE WHEN q.input IS NULL AND q.status = 200 THEN 1 ELSE 0 END) "
+        "FROM requests q LEFT JOIN session_program sp ON sp.attr_key = q.attr_key "
+        f"WHERE q.ts >= ? AND q.ts < ? AND q.backend IN ({ph}) GROUP BY 1, 2, 3",
+        (start, end, *COMMITMENT_BACKENDS),
+    ).fetchall()
+    neon = {"usd": 0.0, "requests": 0, "unpriced_requests": 0, "no_usage_ok_requests": 0, "by_program": {}}
+    total = {"usd": 0.0, "requests": 0, "by_model": {}, "by_backend": {}, "by_program": {}}
+    for backend, model, program, n, usd, unpriced, no_usage in rows:
+        usd = float(usd or 0.0)
+        total["usd"] += usd
+        total["requests"] += n
+        total["by_model"][model] = total["by_model"].get(model, 0.0) + usd
+        total["by_backend"][backend] = total["by_backend"].get(backend, 0.0) + usd
+        total["by_program"][program] = total["by_program"].get(program, 0.0) + usd
+        if NEON_MODEL_PREFIX in model:
+            neon["usd"] += usd
+            neon["requests"] += n
+            neon["unpriced_requests"] += int(unpriced or 0)
+            neon["no_usage_ok_requests"] += int(no_usage or 0)
+            neon["by_program"][program] = neon["by_program"].get(program, 0.0) + usd
+
+    def _round(d: dict[str, Any]) -> dict[str, Any]:
+        return {k: (round(v, 4) if isinstance(v, float) else (_round(v) if isinstance(v, dict) else v)) for k, v in d.items()}
+
+    state = get_ingest_state(conn)
+    newest = conn.execute(
+        "SELECT max(ts) FROM requests WHERE backend = ?", (GATEWAY_BACKEND,)
+    ).fetchone()[0]
+    last_ok = state.get("gateway_last_ok_ms")
+    status = state.get("gateway_status", "never_polled")
+    if status != "ok":
+        reason = {"disabled": "aigateway is disabled, so Gemini bypasses it and is not counted",
+                  "error": f"last gateway poll failed: {state.get('gateway_error', '?')}",
+                  "never_polled": "the gateway has never been polled"}.get(status, status)
+    elif not last_ok or now_ms - int(last_ok) > FEED_COMPLETE_MAX_AGE_MS:
+        reason = "last successful gateway poll is older than 15 min"
+    elif neon["unpriced_requests"]:
+        reason = "some Neon requests have no price"
+    else:
+        reason = None
+    return {
+        "schema": 1,
+        "generated_at": _iso(now_ms),
+        "day": day_s,
+        "tz": FEED_TZ,
+        "day_start": _iso(start),
+        # complete=false means neon.usd may be an UNDERCOUNT. A cap reader
+        # should fail closed on it, and on a generated_at older than ~15 min
+        # (the ledger writer itself stopped).
+        "complete": reason is None,
+        "incomplete_reason": reason,
+        "gateway_status": status,
+        "gateway_error_since": _iso(int(state["gateway_error_since_ms"])) if state.get("gateway_error_since_ms") else None,
+        "gateway_polled_at": _iso(int(last_ok)) if last_ok else None,
+        "source_through": _iso(newest),
+        "basis": "list price; gateway Gemini rows + cfp agy rows",
+        "neon": _round(neon),
+        "gcp_commitment": _round(total),
+    }
+
+
+def write_commitment_json(conn: sqlite3.Connection, path: str, now_ms: int | None = None) -> None:
+    payload = json.dumps(commitment_spend(conn, now_ms=now_ms), sort_keys=True, allow_nan=False) + "\n"
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(payload)
+    os.replace(tmp, path)
+
+
 def run_ingest(
     db_path: str = DEFAULT_DB,
     events_path: str = DEFAULT_EVENTS,
@@ -1774,8 +2207,16 @@ def run_ingest(
     take_lock: bool = True,
     warnings: list[str] | None = None,
     teamclaude_log: str | None = None,
+    gateway_psql: str | None = None,
+    gateway_flag: str = GATEWAY_FLAG,
+    commitment_json: str | None = None,
+    gateway_run: Any = None,
 ) -> dict[str, Any]:
-    """Execute run steps 1-6 under lock."""
+    """Execute run steps 1-6 under lock.
+
+    gateway_psql=None (the library default, and every test that does not ask
+    for it) skips the aigateway Gemini step; the CLI turns it on.
+    """
     warnings_list = warnings if warnings is not None else []
     lock_ctx: Any = LedgerLock(db_path, blocking=False) if take_lock else contextlib.nullcontext()
     with lock_ctx as lock:
@@ -1812,6 +2253,26 @@ def run_ingest(
             counts["tc_rows"] = tc_counts.get("tc_rows", 0)
             counts["malformed"] = counts.get("malformed", 0) + tc_counts.get("tc_malformed", 0)
             step_teamclaude_hourly_rollup(conn=conn, touched_hours=tc_touched_hours)
+            now_ms_gw = (
+                int(now * 1000)
+                if (now is not None and now <= 1e11)
+                else (int(now) if now is not None else int(time.time() * 1000))
+            )
+            gw = step_gateway_gemini(
+                conn=conn,
+                host=host,
+                psql=gateway_psql,
+                flag_path=gateway_flag,
+                opencode_db=opencode_db,
+                goose_db=goose_db,
+                tags_db=tags_db,
+                lgtm_ledger=lgtm_ledger,
+                now_ms=now_ms_gw,
+                warnings=warnings_list,
+                run=gateway_run,
+            )
+            touched_hours.update(gw.pop("touched_hours"))
+            counts.update(gw)
 
             quota_counts = step_quota_samples(
                 conn=conn,
@@ -1856,6 +2317,11 @@ def run_ingest(
                 else (int(now) if now is not None else int(time.time() * 1000))
             )
             ensure_fleet_objects(conn=conn, local_host=host, now_ms=now_ms)
+            if commitment_json:
+                try:
+                    write_commitment_json(conn, commitment_json, now_ms=now_ms)
+                except Exception as e:  # the feed must not take the ledger down with it
+                    add_warning(warnings_list, f"commitment-spend feed not written: {e}")
             counts["warnings"] = warnings_list
 
             return counts
@@ -2419,6 +2885,21 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--samples-archive", default=DEFAULT_SAMPLES_ARCHIVE)
     run_parser.add_argument("--goose-recheck-hours", type=int, default=72)
     run_parser.add_argument("--teamclaude-log", default=None)
+    # Both off unless asked for: the systemd unit (hosts/cloudbox/llm-ledger.nix)
+    # passes them, so a hand-run or a test never polls the live gateway or
+    # overwrites the live feed by accident.
+    run_parser.add_argument("--gateway-psql", default="",
+                            help=f"command that runs psql against the aigateway DB (cloudbox: {DEFAULT_GATEWAY_PSQL!r}); empty skips the Gemini step")
+    run_parser.add_argument("--gateway-flag", default=GATEWAY_FLAG,
+                            help="aigateway operator-intent flag; the step is skipped (feed incomplete) while it is absent")
+    run_parser.add_argument("--commitment-json", default="",
+                            help=f"where each run writes the GCP-commitment spend feed (cloudbox: {DEFAULT_COMMITMENT_JSON}); empty skips it")
+
+    # commitment-spend subcommand
+    cs_parser = subparsers.add_parser("commitment-spend", help="GCP-commitment (Gemini + agy) list-price $ for one ET day, Neon broken out")
+    cs_parser.add_argument("--db", default=DEFAULT_DB)
+    cs_parser.add_argument("--day", default=None, help="YYYY-MM-DD (America/New_York); default today")
+    cs_parser.add_argument("--json", action="store_true", help="print the feed JSON")
 
     # import-events subcommand
     import_parser = subparsers.add_parser("import-events")
@@ -2577,6 +3058,23 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         return 0
 
+    if args.command == "commitment-spend":
+        conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+        try:
+            res = commitment_spend(conn, day=args.day)
+        finally:
+            conn.close()
+        if args.json:
+            sys.stdout.write(json.dumps(res, sort_keys=True, allow_nan=False) + "\n")
+        else:
+            n = res["neon"]
+            g = res["gcp_commitment"]
+            print(f"{res['day']} ({res['tz']}): GCP commitment ${g['usd']:.2f} over {g['requests']} request(s); "
+                  f"Neon ${n['usd']:.2f} over {n['requests']} request(s); gateway polled {res['gateway_polled_at']}")
+            for prog, usd in sorted(n["by_program"].items(), key=lambda kv: -kv[1]):
+                print(f"  neon  {prog:<32} ${usd:.2f}")
+        return 0
+
     if args.command == "quota-watch":
         import quota_watch
         excluded = set(args.exclude_account or [])
@@ -2653,6 +3151,9 @@ def main(argv: list[str] | None = None) -> int:
             samples_archive=args.samples_archive,
             goose_recheck_hours=args.goose_recheck_hours,
             teamclaude_log=args.teamclaude_log,
+            gateway_psql=args.gateway_psql or None,
+            gateway_flag=args.gateway_flag,
+            commitment_json=args.commitment_json or None,
         )
         if counts.get("locked"):
             return 0
@@ -2682,6 +3183,7 @@ def main(argv: list[str] | None = None) -> int:
         f"hours={counts.get('hours_rebuilt', 0)} "
         f"snapshot={counts.get('snapshot_rows', 0)} "
         f"{tc_part}"
+        f"gemini={counts.get('gateway_rows', 0)} "
         f"elapsed={elapsed:.2f}s"
     )
     print(summary)

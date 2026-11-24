@@ -54,6 +54,20 @@ GEMINI_4_ARGON_PHASES: list[dict] = [
 GEMINI_4_HYDROGEN_PHASES: list[dict] = [
     {"from": "0001-01-01", "input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 0},
 ]
+# Gemini 4 Neon (GA 2026-11-18). $3 in / $15 out / $0.15 cache read per 1M on
+# Vertex *global*; non-global regions add 10%. No >200K tier is published
+# (design P9 measures this against the billing export rather than assuming).
+# Cache writes are free until 2027-01-12, then $3.75/1M. Gemini's implicit
+# cache reports no per-request cache-write tokens today, so the dated phase is
+# carried for completeness and costs nothing until a write is reported.
+# Neon draws on the org's GCP commitment, not the Claude bucket.
+# Sources: https://cloud.google.com/model-garden/pricing and the Vertex model
+# page .../models/gemini/4-neon (fetched 2026-11-23; bead
+# eng-agent-platform-ul4.28.4).
+GEMINI_4_NEON_PHASES: list[dict] = [
+    {"from": "0001-01-01", "input": 3, "output": 15, "cache_read": 0.15, "cache_write": 0},
+    {"from": "2027-01-12", "input": 3, "output": 15, "cache_read": 0.15, "cache_write": 3.75},
+]
 # Shared 3.5 Flash rate (undated: no introductory phase).
 GEMINI_35_FLASH: dict = {"input": 1.5, "output": 9, "cache_read": 0.15, "cache_write": 1.5}
 
@@ -146,6 +160,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google-vertex", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     ("google-vertex", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
     ("google-vertex", "gemini-4-hydrogen"): GEMINI_4_HYDROGEN_PHASES,
+    ("google-vertex", "gemini-4-neon"): GEMINI_4_NEON_PHASES,
     # gemini-3.1-pro-preview: 200K tier VERIFIED REAL via official Google Vertex
     # pricing (whole-request selection above 200K input tokens).
     ("google-vertex", "gemini-3.1-pro-preview"): {
@@ -172,6 +187,7 @@ RATES: dict[tuple[str, str], object] = {
     ("google", "gemini-3.8-flash"): GEMINI_FLASH_PHASES,
     ("google", "gemini-4-argon"): GEMINI_4_ARGON_PHASES,
     ("google", "gemini-4-hydrogen"): GEMINI_4_HYDROGEN_PHASES,
+    ("google", "gemini-4-neon"): GEMINI_4_NEON_PHASES,
     # --- OpenAI ---
     ("openai", "gpt-5.5"): {
         "input": 5, "output": 30, "cache_read": 0.50, "cache_write": 0,
