@@ -12,7 +12,10 @@
 # 2026-11-19 (`GOOSE_PROVIDER=gcp_vertex_ai GOOSE_MODEL=<id> goose run
 # --no-session --text "Reply with exactly: ok"`). Mirrors the Vertex Claude and
 # Gemini models in opencode's config (users/dev/opencode-config.nix) minus the
-# superseded ones. Bead honk-9qf.15.7.
+# superseded ones. Bead honk-9qf.15.7. gemini-4-neon (GA 2026-11-18) is listed
+# for the goose fleet's move to Neon (bead eng-agent-platform-ul4.28.4); it
+# needs goose >= 1.60.2, whose registry knows its 1M context and 64K output;
+# it answered the same check through goose 1.60.2 on 2026-11-24.
 { pkgs }:
 pkgs.writeText "honk-models.json" (builtins.toJSON {
   providers.gcp_vertex_ai = [
@@ -23,6 +26,7 @@ pkgs.writeText "honk-models.json" (builtins.toJSON {
     { id = "claude-fable-5-2"; name = "Claude Fable 5.2"; }
     { id = "claude-fable-5-1"; name = "Claude Fable 5.1"; }
     { id = "claude-haiku-5-5"; name = "Claude Haiku 5.5"; }
+    { id = "gemini-4-neon"; name = "Gemini 4 Neon"; }
     { id = "gemini-3.8-flash"; name = "Gemini 3.8 Flash"; }
     { id = "gemini-3.7-flash"; name = "Gemini 3.7 Flash"; }
     { id = "gemini-4-hydrogen"; name = "Gemini 4 Hydrogen"; }
