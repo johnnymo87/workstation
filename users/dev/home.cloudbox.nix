@@ -1210,6 +1210,9 @@ lib.mkIf isCloudbox {
   #   extension's command per session and re-spawns it after restarts, so a /nix/store path
   #   would break once garbage-collected. Existing sessions get the tools once their swarm server
   #   respawns (`/mcp disable swarm` then `/mcp enable swarm`).
+  # - --on-load-model-cmd: on unheld session activation, ask the model-switch policy whether the
+  #   session is cold and due for a model switch before its first prompt, failing open on any
+  #   error or timeout (honk#54). Needs honk with honk#54: an older honkd refuses the flag.
   systemd.user.services.honkd = {
     Unit = {
       Description = "honkd - durable ACP proxy for goose";
@@ -1219,7 +1222,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma ${import ./honk-mcp-allow-tools.nix { inherit lib; }} --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma ${import ./honk-mcp-allow-tools.nix { inherit lib; }} --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token --on-load-model-cmd ${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/model-switch-on-load.sh";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;
