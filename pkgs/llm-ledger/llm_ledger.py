@@ -2186,12 +2186,63 @@ def commitment_spend(
     }
 
 
-def write_commitment_json(conn: sqlite3.Connection, path: str, now_ms: int | None = None) -> None:
-    payload = json.dumps(commitment_spend(conn, now_ms=now_ms), sort_keys=True, allow_nan=False) + "\n"
+DEFAULT_MODEL_SWITCH_STATE: str = os.path.expanduser("~/.local/state/model-switch/state.json")
+
+
+def _read_daily_cap_usd(state_path: str | os.PathLike[str] | None = None) -> str:
+    path = os.path.expanduser(str(state_path)) if state_path else DEFAULT_MODEL_SWITCH_STATE
+    try:
+        if not os.path.exists(path):
+            return "1500"
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            cap = data.get("daily_cap_usd")
+            if isinstance(cap, (int, float)) and not isinstance(cap, bool) and cap > 0:
+                if isinstance(cap, float) and cap.is_integer():
+                    return str(int(cap))
+                return str(cap)
+            elif isinstance(cap, str):
+                try:
+                    cap_f = float(cap)
+                    if cap_f > 0:
+                        if cap_f.is_integer():
+                            return str(int(cap_f))
+                        return str(cap_f)
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return "1500"
+
+
+def write_commitment_json(
+    conn: sqlite3.Connection,
+    path: str,
+    now_ms: int | None = None,
+    model_switch_state: str | os.PathLike[str] | None = None,
+) -> None:
+    data = commitment_spend(conn, now_ms=now_ms)
+    payload = json.dumps(data, sort_keys=True, allow_nan=False) + "\n"
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
         f.write(payload)
     os.replace(tmp, path)
+
+    cap_usd = _read_daily_cap_usd(model_switch_state)
+    conn.executemany(
+        "INSERT OR REPLACE INTO ingest_state (key, value) VALUES (?, ?)",
+        [
+            ("neon_today_day", str(data["day"])),
+            ("neon_today_usd", str(data["neon"]["usd"])),
+            ("neon_today_requests", str(data["neon"]["requests"])),
+            ("neon_today_complete", "1" if data["complete"] else "0"),
+            ("neon_today_day_start", str(data["day_start"])),
+            ("neon_today_updated_at", str(data["generated_at"])),
+            ("neon_daily_cap_usd", cap_usd),
+        ],
+    )
+    conn.commit()
 
 
 def run_ingest(
@@ -2214,6 +2265,7 @@ def run_ingest(
     gateway_flag: str = GATEWAY_FLAG,
     commitment_json: str | None = None,
     gateway_run: Any = None,
+    model_switch_state: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Execute run steps 1-6 under lock.
 
@@ -2322,7 +2374,12 @@ def run_ingest(
             ensure_fleet_objects(conn=conn, local_host=host, now_ms=now_ms)
             if commitment_json:
                 try:
-                    write_commitment_json(conn, commitment_json, now_ms=now_ms)
+                    write_commitment_json(
+                        conn,
+                        commitment_json,
+                        now_ms=now_ms,
+                        model_switch_state=model_switch_state,
+                    )
                 except Exception as e:  # the feed must not take the ledger down with it
                     add_warning(warnings_list, f"commitment-spend feed not written: {e}")
             counts["warnings"] = warnings_list

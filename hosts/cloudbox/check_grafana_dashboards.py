@@ -239,9 +239,12 @@ def build_fixture_db() -> sqlite3.Connection:
         INSERT INTO session_program (attr_key, tag, source, root, title, updated_at) VALUES
           ('attr-manual', 'lgtm', 'manual', 'ses_1', 'Manual Session', ?),
           ('attr-auto', 'auto:mono/branch-fix', 'auto', 'ses_2', 'Auto Session', ?),
-          ('attr-quote', "team's-feature", 'manual', 'ses_3', 'Quote Session', ?)
+          ('attr-quote', "team's-feature", 'manual', 'ses_3', 'Quote Session', ?),
+          ('ses_1', 'platform-core', 'manual', 'ses_1', 'Dev Opencode Session', ?),
+          ('goose:20261124_1', 'stall-watcher', 'manual', 'goose:20261124_1', 'Goose Session', ?),
+          ('lgtm-goose:test', 'lgtm', 'manual', 'lgtm-goose:test', 'LGTM Goose Session', ?)
         """,
-        (t_now, t_now, t_now),
+        (t_now, t_now, t_now, t_now, t_now, t_now),
     )
 
     # 2. hourly: rows for attr-manual, attr-auto, attr-orphan, attr-quote, and agy
@@ -252,9 +255,13 @@ def build_fixture_db() -> sqlite3.Connection:
           (?, 'attr-auto', 'vertex', 'claude-opus-5-5', 5, 500, 250, 100, 50, 2.0),
           (?, 'attr-orphan', 'enterprise', 'claude-haiku-4-5', 2, 200, 100, 50, 20, 0.5),
           (?, 'attr-quote', 'vertex', 'claude-opus-5-5', 3, 300, 150, 60, 30, 0.8),
-          (?, 'attr-manual', 'agy', 'claude-opus-5-5', 4, 400, 200, 80, 40, 1.2)
+          (?, 'attr-manual', 'agy', 'claude-opus-5-5', 4, 400, 200, 80, 40, 1.2),
+          (?, 'goose:20261124_1', 'vertex-gemini', 'gemini-4-neon', 8, 800, 400, 160, 80, 2.5),
+          (?, 'goose:20261124_1', 'vertex', 'claude-opus-5-5', 12, 1200, 600, 240, 120, 4.0),
+          (?, 'ses_1', 'max', 'claude-opus-5-5', 6, 600, 300, 120, 60, 2.0),
+          (?, 'lgtm-goose:test', 'vertex', 'claude-opus-5-5', 4, 400, 200, 80, 40, 1.0)
         """,
-        (t_now, t_now, t_now, t_now, t_now),
+        (t_now, t_now, t_now, t_now, t_now, t_now, t_now, t_now, t_now),
     )
 
     # 2b. remote_hosts & remote_hourly: devbox fixtures
@@ -328,6 +335,20 @@ def build_fixture_db() -> sqlite3.Connection:
           (?, 1.20, ?)
         """,
         (t_now, t_now, t_now + 300000, t_now),
+    )
+
+    # 7. ingest_state
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO ingest_state (key, value) VALUES
+          ('neon_today_usd', '125.50'),
+          ('neon_daily_cap_usd', '1500'),
+          ('neon_today_requests', '35'),
+          ('neon_today_complete', '1'),
+          ('neon_today_day', '2026-11-24'),
+          ('neon_today_day_start', '2026-11-24T05:00:00Z'),
+          ('neon_today_updated_at', '2026-11-24T17:00:00Z')
+        """
     )
 
     conn.commit()

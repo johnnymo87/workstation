@@ -1,0 +1,1136 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Today's America/New_York Neon commitment spend vs daily cap, read from ingest_state (evaluated by llm-ledger commitment-spend feed). Green below $1,125 (75%), yellow $1,125-$1,500, red at or above $1,500 daily cap.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1125
+              },
+              {
+                "color": "red",
+                "value": 1500
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Today's Neon Spend"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Today's Neon Spend (ET)"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1125
+                    },
+                    {
+                      "color": "red",
+                      "value": 1500
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Daily Cap"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Daily Cap"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% of Cap"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "% of Daily Cap"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 75
+                    },
+                    {
+                      "color": "red",
+                      "value": 100
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Requests Today"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Requests Today"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "text",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Complete"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Feed Complete"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "options": {
+                      "0": {
+                        "color": "red",
+                        "text": "Incomplete"
+                      },
+                      "1": {
+                        "color": "green",
+                        "text": "Complete"
+                      }
+                    },
+                    "type": "value"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) AS \"Today's Neon Spend\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0) AS \"Daily Cap\",\n  ROUND(100.0 * COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) / NULLIF(COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0), 0), 1) AS \"% of Cap\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS INTEGER), 0) AS \"Requests Today\",\n  COALESCE(MAX(CASE WHEN key = 'neon_today_complete' THEN value END), '1') AS \"Complete\"\nFROM ingest_state",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) AS \"Today's Neon Spend\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0) AS \"Daily Cap\",\n  ROUND(100.0 * COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_usd' THEN value END) AS REAL), 0.0) / NULLIF(COALESCE(CAST(MAX(CASE WHEN key = 'neon_daily_cap_usd' THEN value END) AS REAL), 1500.0), 0), 1) AS \"% of Cap\",\n  COALESCE(CAST(MAX(CASE WHEN key = 'neon_today_requests' THEN value END) AS INTEGER), 0) AS \"Requests Today\",\n  COALESCE(MAX(CASE WHEN key = 'neon_today_complete' THEN value END), '1') AS \"Complete\"\nFROM ingest_state",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Today's Neon Spend (ET) vs Daily Cap",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Fleet mix across interactive sessions (goose and opencode) for the selected range and program filter.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% Goose (sessions)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "% Goose (sessions)"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 50
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "% Neon of Goose (sessions)"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "% Neon of Goose"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 50
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Neon sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Neon Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Opus sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Opus Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Opencode Opus sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Opencode Opus Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"% Goose (sessions)\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"% Neon of Goose (sessions)\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Opencode Opus sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Interactive Fleet Mix (selected range): Goose vs Opencode & Neon vs Opus",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Active unique sessions per hour bucketed by time interval, broken down by harness and model family.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "sessions",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  COUNT(DISTINCT h.attr_key) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Active sessions per hour: Harness x Model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Rollout progression curves: Goose share of interactive sessions, Neon share of Goose sessions, and Neon share of all interactive sessions.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "%",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose % of interactive sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose % of interactive sessions"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Neon % of Goose sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Neon % of Goose sessions"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Neon % of all interactive sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Neon % of all interactive sessions"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 4,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Goose % of interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "refId": "B",
+          "timeColumns": [
+            "time"
+          ]
+        },
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN (h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%') AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' OR h.attr_key LIKE 'ses_%' THEN h.attr_key END), 0), 1) AS \"Neon % of all interactive sessions\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "refId": "C",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Rollout share over time (% of active sessions)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Average spend in dollars per hour ($/h) across each time bucket, grouped by harness and model.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 5,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%claude-opus-5-5%' THEN 'opencode / opus'\n    WHEN h.attr_key LIKE 'ses_%' AND h.model LIKE '%gemini-4-neon%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN 'goose-lgtm / opus'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' AND h.model LIKE '%gemini-4-neon%' THEN 'goose-lgtm / neon'\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / other'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / other'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / other'\n    ELSE 'other'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Hourly spend ($/h): Harness x Model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Neon spend pace ($/h) by harness against the $1,500/day ET cap pace ($62.50/h = $1,500/day, yellow line at 75% pace = $46.875/h).",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/h",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 46.875
+              },
+              {
+                "color": "red",
+                "value": 62.5
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 6,
+      "interval": "1h",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / $__interval_ms) * $__interval_ms / 1000 AS time,\n  CASE\n    WHEN h.attr_key LIKE 'goose:%' THEN 'goose / neon'\n    WHEN h.attr_key LIKE 'ses_%' THEN 'opencode / neon'\n    WHEN h.attr_key LIKE 'lgtm-goose:%' THEN 'goose-lgtm / neon'\n    ELSE 'other / neon'\n  END AS series,\n  SUM(h.cost_usd) * 3600000.0 / $__interval_ms AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1, 2\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Neon spend per hour vs daily cap pace ($62.50/h = $1,500/day)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Daily Neon spend in 24h UTC buckets vs the $1,500/day cap (yellow line at 75% = $1,125/day, red line at $1,500/day). Note: The controller cap evaluates by America/New_York day (see Today's Neon Spend stat panel); these 24h UTC buckets show daily trend.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "$/day",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1125
+              },
+              {
+                "color": "red",
+                "value": 1500
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 7,
+      "interval": "1d",
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  (h.hour / 86400000) * 86400 AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "queryType": "time series",
+          "rawQueryText": "SELECT\n  (h.hour / 86400000) * 86400 AS time,\n  SUM(h.cost_usd) AS Value\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND h.model LIKE '%gemini-4-neon%'\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY time",
+          "refId": "A",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "title": "Daily Neon spend (24h UTC buckets) vs $1,500 cap",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "llm-ledger"
+      },
+      "description": "Per-program adoption breakdown: Goose Neon sessions, Goose Opus sessions, Opencode sessions, and spend by model.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Program"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Program"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Neon sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Neon Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Opus sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Opus Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Opencode sessions"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Opencode Sessions"
+              },
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Neon $"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Neon $"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Goose Opus $"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Goose Opus $"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Opencode $"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Opencode $"
+              },
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Neon % of Goose"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Neon % of Goose"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "blue",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 50
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": true
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Goose Neon $"
+          }
+        ]
+      },
+      "pluginVersion": "12.3.6",
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "llm-ledger"
+          },
+          "queryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'ses_%' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
+          "queryType": "table",
+          "rawQueryText": "SELECT\n  COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') AS \"Program\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) AS \"Goose Neon sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.attr_key END) AS \"Goose Opus sessions\",\n  COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'ses_%' THEN h.attr_key END) AS \"Opencode sessions\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Neon $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%claude-opus-5-5%' THEN h.cost_usd ELSE 0 END), 2) AS \"Goose Opus $\",\n  ROUND(SUM(CASE WHEN h.attr_key LIKE 'ses_%' THEN h.cost_usd ELSE 0 END), 2) AS \"Opencode $\",\n  ROUND(100.0 * COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' AND h.model LIKE '%gemini-4-neon%' THEN h.attr_key END) / NULLIF(COUNT(DISTINCT CASE WHEN h.attr_key LIKE 'goose:%' THEN h.attr_key END), 0), 1) AS \"Neon % of Goose\"\nFROM hourly h\nLEFT JOIN session_program sp ON sp.attr_key = h.attr_key\nWHERE h.hour >= $__from AND h.hour < $__to\n  AND COALESCE(CASE WHEN instr(sp.tag,'/')>0 THEN substr(sp.tag,1,instr(sp.tag,'/')-1) ELSE sp.tag END,'unresolved') IN (${program:sqlstring})\nGROUP BY 1\nORDER BY \"Goose Neon $\" DESC, \"Goose Opus $\" DESC",
+          "refId": "A",
+          "timeColumns": []
+        }
+      ],
+      "title": "Per-Program Rollout (selected range)",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "tags": [
+    "llm",
+    "goose",
+    "model-switch"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": null,
+        "current": {},
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "llm-ledger"
+        },
+        "definition": "SELECT DISTINCT CASE WHEN instr(tag,'/')>0 THEN substr(tag,1,instr(tag,'/')-1) ELSE tag END AS program FROM session_program UNION SELECT 'unresolved' ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Program",
+        "multi": true,
+        "name": "program",
+        "options": [],
+        "query": "SELECT DISTINCT CASE WHEN instr(tag,'/')>0 THEN substr(tag,1,instr(tag,'/')-1) ELSE tag END AS program FROM session_program UNION SELECT 'unresolved' ORDER BY 1",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Fleet Rollout: Goose & Model Switch",
+  "uid": "model-switch",
+  "version": 1,
+  "weekStart": ""
+}
