@@ -305,7 +305,11 @@ pkgs.writeShellApplication {
       shift
       for port in "$@"; do
         id="$(get_unit_invocation_id "$scope" "$port")"
-        if [ -n "$id" ]; then ids="''${ids:+$ids,}$id"; fi
+        if [ -n "$id" ]; then
+          ids="''${ids:+$ids,}$id"
+        else
+          log "turn-cut: could not read the InvocationID of opencode-serve@$port; its cut turns may go untold"
+        fi
       done
       mkdir -p "$TURN_CUT_DIR" 2>/dev/null || true
       rm -f "$TURN_CUT_OC" 2>/dev/null || true

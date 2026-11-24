@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 SENDER = "reset-workspace"
@@ -48,6 +49,19 @@ FALLBACK_UPDATED_WINDOW_S = 30 * 60
 # A user message with no reply yet, this fresh, was accepted and not started.
 USER_LAST_WINDOW_S = 10 * 60
 QUESTION_TEXT_CAP = 600
+# pigeon refuses a payload containing its envelope's close tag (400), which
+# would lose the whole notice over one agent-written question.
+CLOSE_TAG = "</swarm_message>"
+# Sessions whose owner already retries a cut turn by itself. A notice there
+# would start a SECOND run of the same work (and a coordinator's reply is
+# posted to the human's chat at 03:0x):
+#  - stall-watch coordinators: a cancelled run is CoordinatorBusy, and the
+#    wake is kept and retried on the next tick (stallwatch/tick.py).
+#  - lgtm review dispatches (pigeon session-origin "lgtm"): lgtm's watchdog
+#    judges a dispatch by session liveness and re-dispatches a dead one.
+STALL_WATCH_COORD_DIR = "/stall-watch/coord-sessions/"
+STALL_WATCH_TITLE_PREFIX = "stallwatch-"
+SELF_RETRYING_ORIGINS = {"lgtm"}
 
 
 def log(msg: str) -> None:
@@ -98,7 +112,7 @@ def question_texts(conn: sqlite3.Connection, message_id: str) -> list[str]:
         qs = (state.get("input") or {}).get("questions") or []
         for q in qs:
             if isinstance(q, dict) and isinstance(q.get("question"), str):
-                out.append(q["question"][:QUESTION_TEXT_CAP])
+                out.append(q["question"].replace(CLOSE_TAG, "</swarm-message>")[:QUESTION_TEXT_CAP])
     return out
 
 
@@ -253,7 +267,7 @@ def notice_text(harness: str, taken_at: int, questions: list[str] | None = None,
             "it again:"
         )
         for q in questions:
-            lines.append(f"  - {q}")
+            lines.append(f"  - {q.replace(CLOSE_TAG, '</swarm-message>')}")
     elif pending_requests:
         lines.append("")
         lines.append(
@@ -306,6 +320,20 @@ class Pigeon:
                 out[native] = sid
         return out
 
+    def origin(self, session_id: str) -> str | None:
+        """pigeon's declared origin for an opencode session (e.g. "lgtm"), or
+        None when none is recorded (404)."""
+        try:
+            _, body = self._req(
+                "GET", "/session-origin?session_id=" + urllib.parse.quote(session_id)
+            )
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+        o = body.get("origin")
+        return o if isinstance(o, str) else None
+
     def send(self, to: str, payload: str) -> str:
         status, body = self._req(
             "POST", "/swarm/send",
@@ -316,7 +344,14 @@ class Pigeon:
         return str(body.get("msg_id"))
 
 
-def plan_notices(snapshots: list[dict], db: str | None, goose_ids: dict[str, str] | None):
+def is_stall_watch_coordinator(entry: dict) -> bool:
+    return STALL_WATCH_COORD_DIR in str(entry.get("cwd") or "") or str(
+        entry.get("title") or ""
+    ).startswith(STALL_WATCH_TITLE_PREFIX)
+
+
+def plan_notices(snapshots: list[dict], db: str | None, goose_ids: dict[str, str] | None,
+                 origin_of=None):
     """Yield (to, harness, label, payload) for every snapshot entry that still
     needs a notice, and (None, harness, label, reason) for each skip."""
     conn = None
@@ -333,12 +368,24 @@ def plan_notices(snapshots: list[dict], db: str | None, goose_ids: dict[str, str
                         if not opencode_still_cut(conn, e):
                             yield None, harness, label, "turn finished or session re-prompted before the notice"
                             continue
+                    origin = None
+                    if origin_of is not None:
+                        try:
+                            origin = origin_of(e["id"])
+                        except Exception as err:  # noqa: BLE001 -- unknown origin: notify
+                            log(f"WARNING: could not read pigeon session-origin for {e['id']} ({err}); notifying anyway")
+                    if origin in SELF_RETRYING_ORIGINS:
+                        yield None, harness, label, f"owned by {origin}, which recovers its own cut runs"
+                        continue
                     yield e["id"], harness, label, notice_text(
                         "opencode", taken_at, questions=e.get("questions") or []
                     )
                 elif harness == "goose":
                     native = e["native_id"]
                     label = f"{native} ({e.get('title') or ''})"
+                    if is_stall_watch_coordinator(e):
+                        yield None, harness, label, "stall-watch coordinator; stall-watch retries its own cut runs"
+                        continue
                     to = (goose_ids or {}).get(native)
                     if not to:
                         yield None, harness, label, "pigeon does not know this goose session; cannot message it"
@@ -366,7 +413,7 @@ def notify(snapshots: list[dict], db: str | None, pigeon: Pigeon, max_n: int,
             goose_ids = {}
     sent = skipped = 0
     seen: set[str] = set()
-    for to, harness, label, payload in plan_notices(snapshots, db, goose_ids):
+    for to, harness, label, payload in plan_notices(snapshots, db, goose_ids, pigeon.origin):
         if to is None:
             skipped += 1
             log(f"skip {harness} {label}: {payload}")

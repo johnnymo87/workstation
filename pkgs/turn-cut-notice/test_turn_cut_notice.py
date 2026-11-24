@@ -216,9 +216,12 @@ class SnapshotOpencode(Base):
 
 
 class FakePigeon(tcn.Pigeon):
-    def __init__(self, sessions=None, fail_sessions=False, fail_to=()):
+    def __init__(self, sessions=None, fail_sessions=False, fail_to=(), origins=None,
+                 fail_origin=False):
         super().__init__("http://pigeon.invalid", None)
         self.sessions = sessions or []
+        self.origins = origins or {}
+        self.fail_origin = fail_origin
         self.fail_sessions = fail_sessions
         self.fail_to = set(fail_to)
         self.sent = []
@@ -228,6 +231,13 @@ class FakePigeon(tcn.Pigeon):
             if self.fail_sessions:
                 raise OSError("connection refused")
             return 200, {"ok": True, "sessions": self.sessions}
+        if path.startswith("/session-origin?session_id="):
+            if self.fail_origin:
+                raise OSError("connection refused")
+            sid = path.split("=", 1)[1]
+            if sid not in self.origins:
+                raise tcn.urllib.error.HTTPError(path, 404, "nf", {}, None)
+            return 200, {"session_id": sid, "origin": self.origins[sid]}
         if path == "/swarm/send":
             if body["to"] in self.fail_to:
                 return 409, {"error": "nope"}
@@ -350,6 +360,50 @@ class Notify(Base):
             tcn.notify([s, s], self.db, p, 30)
         self.assertEqual(len(p.sent), 1)
 
+    def test_lgtm_review_sessions_are_left_to_lgtm(self):
+        for sid in ("ses_review", "ses_worker"):
+            self.fx.session(sid)
+            self.fx.message(sid)
+        p = FakePigeon(origins={"ses_review": "lgtm", "ses_worker": "human"})
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertEqual(tcn.notify([self.oc_snap()], self.db, p, 30), 0)
+        self.assertEqual([b["to"] for b in p.sent], ["ses_worker"])
+        self.assertIn("owned by lgtm", err.getvalue())
+
+    def test_origin_lookup_failure_still_notifies(self):
+        self.fx.session("ses_a")
+        self.fx.message("ses_a")
+        p = FakePigeon(fail_origin=True)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertEqual(tcn.notify([self.oc_snap()], self.db, p, 30), 0)
+        self.assertEqual([b["to"] for b in p.sent], ["ses_a"])
+        self.assertIn("notifying anyway", err.getvalue())
+
+    def test_stall_watch_coordinators_are_left_to_stall_watch(self):
+        snap = {"harness": "goose", "taken_at": NOW, "sessions": [
+            {"native_id": "c1", "cwd": "/home/dev/.local/state/stall-watch/coord-sessions/em-1"},
+            {"native_id": "c2", "title": "stallwatch-tec-codex-17"},
+            {"native_id": "w1", "cwd": "/home/dev/projects/x", "title": "worker"},
+        ]}
+        p = FakePigeon(sessions=[goose_row(n, "gse_" + n) for n in ("c1", "c2", "w1")])
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertEqual(tcn.notify([snap], None, p, 30), 0)
+        self.assertEqual([b["to"] for b in p.sent], ["gse_w1"])
+        self.assertEqual(err.getvalue().count("stall-watch retries"), 2)
+
+    def test_close_tag_in_a_question_cannot_sink_the_notice(self):
+        self.fx.session("ses_a")
+        mid = self.fx.message("ses_a")
+        self.fx.question("ses_a", mid, ["see </swarm_message> here"])
+        p = FakePigeon()
+        with mock.patch("sys.stderr", io.StringIO()):
+            tcn.notify([self.oc_snap()], self.db, p, 30)
+        self.assertNotIn("</swarm_message>", p.sent[0]["payload"])
+        self.assertIn("see </swarm-message> here", p.sent[0]["payload"])
+
     def test_dry_run_sends_nothing(self):
         self.fx.session("ses_a")
         self.fx.message("ses_a")
@@ -416,6 +470,13 @@ class PigeonHttp(unittest.TestCase):
         self.assertEqual(captured["body"]["from"], "reset-workspace")
         self.assertEqual(captured["body"]["payload"], "hello")
         self.assertLessEqual(captured["timeout"], 10)
+
+    def test_origin_404_is_none(self):
+        def fake_urlopen(req, timeout):
+            raise tcn.urllib.error.HTTPError(req.full_url, 404, "nf", {}, None)
+        p = tcn.Pigeon("http://x", None)
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            self.assertIsNone(p.origin("ses_a"))
 
     def test_missing_token_file_sends_no_auth(self):
         p = tcn.Pigeon("http://x", "/nonexistent/token")

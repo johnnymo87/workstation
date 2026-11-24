@@ -78,6 +78,15 @@ timeout):
     route for both harnesses; pigeon owns retries, queueing behind a busy turn and
     goose delivery through honkd.
   - Cap 30 notices per run (most recent first); the rest are logged.
+  - Sessions whose owner already retries a cut run are left to it, because a
+    notice would start a second run of the same work: stall-watch coordinators
+    (cwd under `stall-watch/coord-sessions/` or title `stallwatch-*`; stall-watch
+    keeps a cancelled run's wake and retries it next tick, and a coordinator's
+    reply lands in the human's chat) and lgtm review dispatches (pigeon
+    `GET /session-origin` says `lgtm`; lgtm's watchdog re-dispatches a dead
+    review). An unreadable origin notifies anyway.
+  - The literal `</swarm_message>` in agent-written question text is defanged, or
+    pigeon would refuse the whole notice.
 
 The notice says: when and why the turn was cut; that running tool calls may or may
 not have completed; the lost question text, if any, and to re-ask it; to check
@@ -103,6 +112,15 @@ The snapshot files are kept at `$XDG_STATE_HOME/reset-workspace/turn-cut-*.json`
   only (no prompt text).
 - An answer the human gave to a question after the restart is still rejected; the
   agent re-asks.
+- A reset that dies in the pool health poll after issuing the restart: the turns
+  were cut but Step 7 never runs (the pool is down, so nothing could receive the
+  messages anyway). The snapshot stays in `$XDG_STATE_HOME/reset-workspace/`.
+- A turn whose loop crashed earlier inside a serve that stayed up: it is stamped
+  with a live InvocationID, so it is told it was cut at reset time. The prompt to
+  continue is still right; only the stated time is wrong.
+- Goose entries are not re-checked before sending (honkd has no cheap
+  per-session "re-prompted since" signal); a session re-prompted in the ~20 s
+  between its restart and Step 7 gets a notice queued behind that turn.
 - Non-reset restarts (canary SIGKILL, OOM, deploys): unchanged (6w7i.16 for goose;
   the phantom-busy sweeper + stall-watch for opencode).
 
