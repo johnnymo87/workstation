@@ -56,6 +56,19 @@ Your **sessions** survive — they live in `opencode.db`, not in the TUI (see
    and the reset waits up to 20s for its `re-initialized successfully` log line,
    warning (not failing) on a miss. Consequence: a honk upgrade or a rotated
    `pigeon_goose_acp_token` still needs a manual `systemctl --user restart honkd`.
+8. Tells every session whose turn steps 6-7 cut (workstation-dg6). Just
+   before each restart, `turn-cut-notice` records the turns in flight
+   (opencode: the latest message is an unfinished assistant row stamped with a
+   pool serve's current `InvocationID`, plus any pending `question` text;
+   goose: `honk list --json` sessions with `running: true`). Once both serves
+   are back, each of those sessions gets a pigeon swarm message
+   (`from=reset-workspace`, `kind=reset.turn_cut`) saying its turn was cut, to
+   check side effects before redoing them, to re-ask a lost question, and to
+   carry on. Snapshots are kept in `~/.local/state/reset-workspace/turn-cut-*.json`;
+   the reset's log has one `turn-cut-notice:` line per session. Never fatal: a
+   failure is a WARNING. Goose sessions pigeon does not know (a bare `honk chat`
+   nobody registered) are skipped. Design:
+   `docs/plans/2026-11-24-reset-turn-cut-notice.md`.
 
 Concurrent runs are blocked by `flock /tmp/reset-workspace.lock`.
 

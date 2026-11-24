@@ -1,4 +1,7 @@
-{ pkgs, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { } }:
+{ pkgs
+, opencode-serve-auth-sh ? pkgs.callPackage ../opencode-serve-auth-sh { }
+, turn-cut-notice ? pkgs.callPackage ../turn-cut-notice { }
+}:
 
 pkgs.writeShellApplication {
   name = "reset-workspace";
@@ -12,6 +15,7 @@ pkgs.writeShellApplication {
     gnugrep        # grep (ShaDa parse check)
     systemd        # systemd-run for cgroup re-exec
     inotify-tools  # inotifywait (self-verifying ShaDa concurrency report)
+    turn-cut-notice  # tell sessions whose turn a restart cut (workstation-dg6)
   ];
   text = ''
     # reset-workspace [--yes]
@@ -263,6 +267,92 @@ pkgs.writeShellApplication {
       fi
     }
 
+    # ---- Turn-cut notices (workstation-dg6) ----
+    # A turn running when Step 5 or Step 6 restarts its serve dies with the
+    # process: the agent loop is in memory, a pending `question` is lost, and
+    # nothing re-prompts the agent, so a worker mid-task just stops. Right before
+    # each restart we record which sessions had a turn in flight; once the serves
+    # are back, each one gets a swarm message (via pigeon) saying its turn was cut
+    # and what to do. Every step here is NON-FATAL: a failure logs a WARNING and
+    # the reset carries on. Design: docs/plans/2026-11-24-reset-turn-cut-notice.md
+    TURN_CUT_DIR="''${XDG_STATE_HOME:-$HOME/.local/state}/reset-workspace"
+    TURN_CUT_OC="$TURN_CUT_DIR/turn-cut-opencode.json"
+    TURN_CUT_GOOSE="$TURN_CUT_DIR/turn-cut-goose.json"
+    TURN_CUT_DB="''${OPENCODE_DB:-$HOME/.local/share/opencode/opencode.db}"
+    TURN_CUT_SNAPS=()
+
+    # get_unit_invocation_id <scope> <port>: systemd InvocationID of
+    # opencode-serve@<port>.service, which the serve stamps on every message it
+    # runs (serve.invocationId); empty if unreadable.
+    get_unit_invocation_id() {
+      local scope="$1" port="$2" id=""
+      if [ "$scope" = "user" ]; then
+        id="$(systemctl --user show -p InvocationID --value "opencode-serve@$port.service" 2>/dev/null || true)"
+      else
+        id="$(systemctl show -p InvocationID --value "opencode-serve@$port.service" 2>/dev/null || true)"
+        if [ -z "$id" ]; then
+          id="$(/run/wrappers/bin/sudo -n systemctl show -p InvocationID --value "opencode-serve@$port.service" 2>/dev/null || true)"
+        fi
+      fi
+      if [[ "$id" =~ ^[0-9a-f]{32}$ ]]; then printf '%s\n' "$id"; else printf '\n'; fi
+    }
+
+    # turn_cut_snapshot_opencode <scope> <port>...: record opencode turns in
+    # flight on these serves. Call immediately before restarting them. Returns 0
+    # only when a snapshot file was written.
+    turn_cut_snapshot_opencode() {
+      local scope="$1" port id ids=""
+      shift
+      for port in "$@"; do
+        id="$(get_unit_invocation_id "$scope" "$port")"
+        if [ -n "$id" ]; then ids="''${ids:+$ids,}$id"; fi
+      done
+      mkdir -p "$TURN_CUT_DIR" 2>/dev/null || true
+      rm -f "$TURN_CUT_OC" 2>/dev/null || true
+      if [ ! -f "$TURN_CUT_DB" ]; then
+        log "turn-cut: no opencode.db at $TURN_CUT_DB; opencode turns cut by this restart will not be told"
+        return 1
+      fi
+      if timeout 60 turn-cut-notice snapshot-opencode --db "$TURN_CUT_DB" \
+           --live-invocation-ids "$ids" --out "$TURN_CUT_OC"; then
+        return 0
+      fi
+      log "WARNING: turn-cut: opencode snapshot failed; opencode turns cut by this restart will not be told"
+      return 1
+    }
+
+    # turn_cut_snapshot_goose: record goose turns in flight (honk list). Call
+    # immediately before restarting goose-serve.
+    turn_cut_snapshot_goose() {
+      mkdir -p "$TURN_CUT_DIR" 2>/dev/null || true
+      rm -f "$TURN_CUT_GOOSE" 2>/dev/null || true
+      if ! command -v honk >/dev/null 2>&1; then
+        log "turn-cut: honk not on PATH; goose turns cut by this restart will not be told"
+        return 1
+      fi
+      if timeout 30 turn-cut-notice snapshot-goose --out "$TURN_CUT_GOOSE"; then
+        return 0
+      fi
+      log "WARNING: turn-cut: goose snapshot failed; goose turns cut by this restart will not be told"
+      return 1
+    }
+
+    # turn_cut_notify: message every session recorded by a snapshot whose
+    # restart actually happened (callers append to TURN_CUT_SNAPS only then).
+    turn_cut_notify() {
+      local args=() s
+      if [ "''${#TURN_CUT_SNAPS[@]}" -eq 0 ]; then
+        log "turn-cut: no snapshot to act on"
+        return 0
+      fi
+      for s in "''${TURN_CUT_SNAPS[@]}"; do args+=(--snapshot "$s"); done
+      if [ -f "$TURN_CUT_DB" ]; then args+=(--db "$TURN_CUT_DB"); fi
+      if ! timeout 180 turn-cut-notice notify "''${args[@]}"; then
+        log "WARNING: turn-cut: some notices were not sent (see turn-cut-notice lines above; snapshots in $TURN_CUT_DIR)"
+      fi
+      return 0
+    }
+
     # restart_pool_target <scope>: issue systemctl restart on opencode-serve-pool.target
     # with bounded 3 attempts and 1s backoff (cheap insurance, not the fix).
     restart_pool_target() {
@@ -404,6 +494,7 @@ EOF
       log "  1. Exit all dev-owned nvim processes one at a time (SIGKILL only stragglers)"
       log "  2. Restart opencode-serve-pool.target (this Claude session's TUI will reconnect)"
       log "  3. Restart $GOOSE_UNIT if this host has one (kills any in-flight goose turn)"
+      log "  4. Message every session whose turn steps 2-3 cut, via pigeon (workstation-dg6)"
       log ""
 
       if [ "$YES" -ne 1 ]; then
@@ -1059,7 +1150,17 @@ EOF2
       fi
     fi
 
+    # As late as possible before the restart, so a turn that finishes in
+    # between is the only thing it can get wrong (and notify re-checks that).
+    turn_cut_oc_ok=0
+    if turn_cut_snapshot_opencode "$POOL_SCOPE" ''${pool_ports[@]+"''${pool_ports[@]}"}; then
+      turn_cut_oc_ok=1
+    fi
+
     restart_pool_target "$POOL_SCOPE"
+    # restart_pool_target dies unless the restart was issued, so the turns in
+    # the snapshot were cut; the health poll below decides nothing about that.
+    if [ "$turn_cut_oc_ok" -eq 1 ]; then TURN_CUT_SNAPS+=("$TURN_CUT_OC"); fi
 
     update_sentinel "started" "health-poll"
     # mn9r M7: confirm readiness for EVERY serve in the pool, not just serve-0.
@@ -1197,9 +1298,13 @@ EOF2
     else
       goose_before="$(systemctl show -p ExecMainStartTimestampMonotonic --value "$GOOSE_UNIT" 2>/dev/null || true)"
       goose_restart_at="$(date '+%Y-%m-%d %H:%M:%S')"
+      turn_cut_goose_ok=0
+      if turn_cut_snapshot_goose; then turn_cut_goose_ok=1; fi
       log "restarting $GOOSE_UNIT (ExecMainStartTimestampMonotonic before: ''${goose_before:-unreadable})..."
       if ! /run/wrappers/bin/sudo -n systemctl restart "$GOOSE_UNIT"; then
         GOOSE_FAILED="systemctl restart $GOOSE_UNIT failed"
+        # A failed restart may have left those turns running: tell nobody.
+        turn_cut_goose_ok=0
       elif [ "$(systemctl show -p ConditionResult --value "$GOOSE_UNIT" 2>/dev/null || true)" = "no" ]; then
         # devbox gates the unit on ConditionPathExists=~/.local/bin/goose; a
         # restart then "succeeds" with nothing running. Not a failure.
@@ -1253,6 +1358,16 @@ EOF2
       fi
     fi
     [ -z "$GOOSE_FAILED" ] || log "WARNING: goose restart failed: $GOOSE_FAILED (raised after the ShaDa report)"
+    if [ "''${turn_cut_goose_ok:-0}" -eq 1 ]; then TURN_CUT_SNAPS+=("$TURN_CUT_GOOSE"); fi
+
+    # ---- Step 7: Tell the sessions whose turn Steps 5-6 cut (workstation-dg6) ----
+    # After both restarts, so the serves (and honkd's reconnect, waited for
+    # above) are up to receive the messages pigeon delivers. Never fatal.
+    update_sentinel "started" "turn-cut-notify"
+    turn_cut_notify
+    # Back to restart-goose: a goose failure is raised at the very end and must
+    # still read "failed ... phase=restart-goose" in the sentinel.
+    update_sentinel "started" "restart-goose"
 
     # Stop measuring and report. This sits at the very END of the run, not right
     # after the walk, because the invariant is "max concurrent == 1 across the
