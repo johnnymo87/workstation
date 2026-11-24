@@ -1993,24 +1993,25 @@ EOF
   # connects to :4710 / :4711. Kick-starting them would force-run an `ssh -W`
   # with no accepted socket on stdin, which just exits.
   #
-  # The `timeout` is load-bearing, not defensive dressing. `kickstart -k` kills
-  # the instance and then BLOCKS until launchd restarts it. On the first switch
-  # after adding an agent, that was observed stalling activation for ~2 minutes
-  # with no output explaining why.
+  # Plain `kickstart`, NOT `kickstart -k`. This block exists to start a tunnel
+  # that is not running; without -k that is exactly what it does, and on a
+  # running agent it is a no-op (verified: same pid, same `runs` count).
   #
-  # The stall duration matched ThrottleInterval (120s), and the likeliest
-  # explanation is that the kill lands inside that window for an agent
-  # setupLaunchAgents started seconds earlier. Treat that as unconfirmed: the
-  # exact launchd behaviour here is not documented, and reproducing it means
-  # kickstarting live tunnels. The bound does not depend on the diagnosis being
-  # right -- whatever the cause, activation stops waiting, and KeepAlive plus
-  # StartInterval bring the agent up within ~30-120s regardless.
+  # `-k` killed a HEALTHY tunnel on every home-switch, plist changed or not.
+  # The far end does not notice the dead client at once: sshd keeps the old
+  # session's RemoteForwards (2850 gclpr, 9222, 3033) bound until its
+  # ClientAlive check reaps it (~90-120s). Until then every reconnect dies on
+  # ExitOnForwardFailure, the retry loop backs off and detours through the
+  # direct transport, and the result was a 2-5 minute clipboard/CDP outage
+  # after each switch. A plist that DID change is still restarted by
+  # setupLaunchAgents' own bootout/bootstrap, which is the only restart needed.
   #
-  # (`kickstart -p` is not the fix -- -p prints the new PID, it does not
-  # detach, and awaiting a PID can block for longer rather than less.)
+  # The `timeout` stays as a cheap bound. It was added because `kickstart -k`
+  # blocked activation for ~2 minutes once (likely ThrottleInterval); plain
+  # kickstart should not block, but the bound costs nothing.
   home.activation.startDevTunnels = lib.hm.dag.entryAfter [ "setupLaunchAgents" ] ''
     for agent in devbox-dev-tunnel cloudbox-dev-tunnel; do
-      ${pkgs.coreutils}/bin/timeout 10 /bin/launchctl kickstart -k "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
+      ${pkgs.coreutils}/bin/timeout 10 /bin/launchctl kickstart "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
     done
   '';
 

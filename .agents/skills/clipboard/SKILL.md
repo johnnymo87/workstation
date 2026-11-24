@@ -119,6 +119,16 @@ printf '\033]52;c;%s\007' "$(printf 'test-raw' | base64 | tr -d '\n')"
 2. Verify the public key matches: compare `xxd ~/.gclpr/key.pub` on remote with the hex in `~/.gclpr/trusted` on macOS
 3. Re-deploy keys: `nix run home-manager -- switch --flake .#dev` on remote
 
+**Clipboard dies for a few minutes, then recovers on its own:**
+Check `~/Library/Logs/cloudbox-dev-tunnel.err.log` (or `devbox-…`) on the Mac. Repeated
+`Error: remote port forwarding failed for listen port 9222` means the remote sshd still
+holds the previous tunnel session's forwards. It releases them when ClientAlive reaps
+the dead session (~90-120s), then the next retry connects. A `starting … tunnel` line
+with no `exited` line before it means the agent itself was restarted from outside the
+loop. Until Nov 2026 every `home-switch` did that (`kickstart -k` in
+`startDevTunnels`); if it recurs, look for another restart source. To see who holds
+the ports: `ssh -o ClearAllForwardings=yes cloudbox 'sudo ss -tlnp | grep -E ":(2850|9222) "'`.
+
 **Port Conflicts:**
 If port 2850 is already in use on either end, the tunnel will fail to bind. Check for stale SSH sessions holding the port.
 
