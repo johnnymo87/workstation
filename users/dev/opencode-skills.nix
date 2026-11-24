@@ -118,11 +118,12 @@ let
   # it, exec'ing the ROOT checkout's script (never a worktree), so the CLI
   # tracks that checkout without a rebuild.
   #
-  # On every host, though the registry runs on cloudbox only: elsewhere the CLI
-  # itself refuses with exit 2 ("runs on cloudbox only"), and with no checkout
-  # this wrapper exits 2 too, so a skill can treat 2 as "no registry here, use
-  # swarm_schedule" on any host. Without the wrapper the same agent would get
-  # 127, which a skill cannot tell apart from a typo.
+  # On every host, though the registry runs on cloudbox: elsewhere `add --pr
+  # --watch` relays to cloudbox via pigeon when the checkout exists (other
+  # subcommands refuse with exit 2), and with no checkout this wrapper exits 2
+  # too, so a skill can treat 2 off cloudbox as "no checkout, or cloudbox-only
+  # subcommand (use swarm_schedule)". Without the wrapper the same agent would
+  # get 127, which a skill cannot tell apart from a typo.
   #
   # The registry's timers are NOT installed here: agent-wait*.{service,timer}
   # are imperative user units from that repo's systemd/, restored by hand with
@@ -138,7 +139,7 @@ let
       ${if isCloudbox then ''
       echo "agent-wait: the wait registry's checkout is MISSING on cloudbox (no $script), so no wait can be registered or fire. Tell the human; use swarm_schedule meanwhile." >&2
       '' else ''
-      echo "agent-wait: no wait registry on THIS host (no $script). It runs on cloudbox only; use swarm_schedule here." >&2
+      echo "agent-wait: no eng-agent-platform checkout on THIS host (no $script). The wait registry runs on cloudbox (\`add --pr --watch\` relays there when the checkout exists); use swarm_schedule here." >&2
       ''}
       exit 2
     fi
