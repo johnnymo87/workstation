@@ -1168,7 +1168,14 @@ lib.mkIf isCloudbox {
   #   so a honk bump takes effect at the next restart of any kind (crash, OOM, reboot), and
   #   the honk CLI on PATH updates immediately — honk bumps should be treated as deploys.
   #   An explicit `systemctl --user restart honkd` in a quiet window applies a binary upgrade immediately.
-  # - MemoryMax=1G, MemorySwapMax=0: bounds cgroup resources and prevents swap churn.
+  # - MemoryMax=2G, MemorySwapMax=0: a runaway guard, not a budget; no swap churn. honkd
+  #   was OOM-killed at 1G twice on 2026-11-23/24 (workstation-6w7i.26.24): Value-tree
+  #   logs (~7x), glibc per-thread arenas that never gave memory back, and every held
+  #   session rebuilding its export at once after a goose restart. honk#52 (honk-9qf.37)
+  #   bounds all three: logs ~1x their on-disk size, one malloc arena trimmed every 60s,
+  #   at most 2 export rebuilds (~15x one transcript each) at a time. Worst case now:
+  #   every session log on disk held (~120M on 2026-11-24) + 2 x 15 x the largest log
+  #   (~10M) = ~0.5G. 2G is 4x that and matches devbox; a honkd far past 0.5G is a bug.
   # - Excluded from nightly reset-workspace restarts (honkd is a relay daemon, not an
   #   opencode serve pool instance). reset-workspace DOES bounce goose-serve, and honkd
   #   rides that out by re-initializing its upstream connection with backoff.
@@ -1217,7 +1224,7 @@ lib.mkIf isCloudbox {
       RestartSec = 5;
       RestartSteps = 10;
       RestartMaxDelaySec = 300;
-      MemoryMax = "1G";
+      MemoryMax = "2G";
       MemorySwapMax = "0";
     };
     Install = {
