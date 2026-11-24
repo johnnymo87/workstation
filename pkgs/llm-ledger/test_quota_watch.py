@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import gzip
+import io
 import json
 import os
 import sqlite3
@@ -1114,6 +1115,78 @@ class TestLiveAndReplay(unittest.TestCase):
         rc = run_live(db_path, state_dir, alert_cmd=None, now=1700000000000, host="cloudbox")
         self.assertEqual(rc, 0)
         self.assertFalse(os.path.exists(os.path.join(state_dir, "outlook-stale.alert")))
+
+    def test_run_live_fleet_stale_exception_isolated(self):
+        """Exceptions in fleet-stale check write to stderr and do not abort verdict/recording."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_fleet_exc")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_fleet_exc.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        def boom_fleet(*args, **kwargs):
+            if len(args) >= 3 and args[2] == "fleet-stale":
+                raise RuntimeError("simulated fleet-stale error")
+            return None
+
+        stderr_buf = io.StringIO()
+        with mock.patch("quota_watch._handle_alert", side_effect=boom_fleet), mock.patch("sys.stderr", stderr_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", alert_stale_hosts="devbox")
+
+        self.assertEqual(rc, 0)
+        self.assertIn("quota-watch: fleet check failed: simulated fleet-stale error", stderr_buf.getvalue())
+        # Confirm run was recorded
+        conn = sqlite3.connect(db_path)
+        try:
+            runs = conn.execute("SELECT count(*) FROM quota_watch_runs").fetchone()[0]
+            self.assertEqual(runs, 1)
+        finally:
+            conn.close()
+
+    def test_run_live_outlook_stale_exception_isolated(self):
+        """Exceptions in outlook-stale check write to stderr and do not abort verdict/recording."""
+        state_dir = os.path.join(self.tmp_dir.name, "state_outlook_exc")
+        os.makedirs(state_dir, exist_ok=True)
+        db_path = os.path.join(self.tmp_dir.name, "db_outlook_exc.db")
+        conn = sqlite3.connect(db_path)
+        conn.executescript(llm_ledger.SCHEMA_SQL)
+        t0 = 1700000100000
+        conn.execute(
+            "INSERT INTO quota_samples (ts, account, u7d, r7d) VALUES (?, ?, ?, ?)",
+            (t0, "acct1", 0.50, t0 + 86400 * 1000),
+        )
+        conn.commit()
+        conn.close()
+
+        def boom_outlook(*args, **kwargs):
+            if len(args) >= 3 and args[2] == "outlook-stale":
+                raise RuntimeError("simulated outlook-stale error")
+            return None
+
+        stderr_buf = io.StringIO()
+        pushed_file = os.path.join(self.tmp_dir.name, "dummy_pushed.json")
+        with open(pushed_file, "w") as f:
+            f.write("{}")
+
+        with mock.patch("quota_watch._handle_alert", side_effect=boom_outlook), mock.patch("sys.stderr", stderr_buf):
+            rc = run_live(db_path, state_dir, alert_cmd=None, now=t0, host="cloudbox", outlook_pushed_file=pushed_file)
+
+        self.assertEqual(rc, 0)
+        self.assertIn("quota-watch: fleet check failed: simulated outlook-stale error", stderr_buf.getvalue())
+        # Confirm run was recorded
+        conn = sqlite3.connect(db_path)
+        try:
+            runs = conn.execute("SELECT count(*) FROM quota_watch_runs").fetchone()[0]
+            self.assertEqual(runs, 1)
+        finally:
+            conn.close()
 
     def test_load_inputs_and_run_live_host_filter(self):
         """load_inputs and newest-request query filter requests by host."""

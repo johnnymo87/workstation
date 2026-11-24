@@ -100,13 +100,13 @@ CREATE TABLE IF NOT EXISTS remote_hosts (
 
 # Source: claude-failover-proxy src/price.ts (standard tier, 2026-11-23).
 # Rates are $/MTok: (input, output, cache_read, cache_write_5m).
-# Note: hourly aggregates can't apply haiku's 100k long-context tier (understates haiku);
-# fable-5-2 has no cfp rate → unpriced.
+# Note: hourly aggregates can't apply haiku's 100k long-context tier (understates haiku).
 REMOTE_PRICES: dict[str, tuple[float, float, float, float]] = {
     "claude-opus-5-5": (4.0, 20.0, 0.2, 5.0),
     "claude-sonnet-5-5": (2.0, 10.0, 0.1, 2.5),
     "claude-haiku-5-5": (0.1, 0.5, 0.01, 0.125),
     "claude-opus-5": (5.0, 25.0, 0.5, 6.25),
+    "claude-fable-5-2": (8.0, 40.0, 0.2, 10.0),
     "claude-fable-5-1": (10.0, 50.0, 0.25, 12.5),
     "claude-fable-5": (10.0, 50.0, 1.0, 12.5),
 }
@@ -1656,6 +1656,46 @@ def import_events(
             conn.close()
 
 
+class RejectedFiles(list):
+    """List of rejected file names (host/file) that also behaves as an integer count."""
+
+    def __int__(self) -> int:
+        return len(self)
+
+    def __index__(self) -> int:
+        return len(self)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) == other
+        return super().__eq__(other)
+
+    def __ne__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) != other
+        return super().__ne__(other)
+
+    def __gt__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) > other
+        return super().__gt__(other)  # type: ignore[operator]
+
+    def __ge__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) >= other
+        return super().__ge__(other)  # type: ignore[operator]
+
+    def __lt__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) < other
+        return super().__lt__(other)  # type: ignore[operator]
+
+    def __le__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return len(self) <= other
+        return super().__le__(other)  # type: ignore[operator]
+
+
 def import_remote(
     db_path: str = DEFAULT_DB,
     repo_dir: str = "",
@@ -1663,7 +1703,7 @@ def import_remote(
     now_ms: int | None = None,
     warnings: list[str] | None = None,
     take_lock: bool = True,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Import remote usage JSONL files into remote_hourly and update fleet objects."""
     if not os.path.isdir(repo_dir):
         raise FileNotFoundError(f"repo dir not found: {repo_dir}")
@@ -1684,6 +1724,7 @@ def import_remote(
             total_unpriced = 0
             total_dupes = 0
             processed_hosts = 0
+            rejected_files = RejectedFiles()
 
             for entry in sorted(os.listdir(repo_dir)):
                 if entry.startswith("."):
@@ -1727,36 +1768,42 @@ def import_remote(
 
                     file_rows = []
                     seen_pks = set()
+                    non_blank_lines = 0
+                    file_malformed = 0
+                    file_unpriced = 0
+                    file_dupes = 0
+
                     for raw_line in content.splitlines():
                         line_str = raw_line.decode("utf-8", errors="replace").strip()
                         if not line_str:
                             continue
+                        non_blank_lines += 1
                         try:
                             row_dict = json.loads(line_str)
                             if not isinstance(row_dict, dict):
-                                total_malformed += 1
+                                file_malformed += 1
                                 continue
                         except Exception:
-                            total_malformed += 1
+                            file_malformed += 1
                             continue
 
                         if row_dict.get("host") != host:
-                            total_malformed += 1
+                            file_malformed += 1
                             continue
 
                         hour_utc = row_dict.get("hour_utc")
                         hour = parse_iso_ts(hour_utc)
                         if hour is None:
-                            total_malformed += 1
+                            file_malformed += 1
                             continue
 
                         if hour < week_start or hour >= week_end:
-                            total_malformed += 1
+                            file_malformed += 1
                             continue
 
                         model = row_dict.get("model")
                         if not model or not isinstance(model, str):
-                            total_malformed += 1
+                            file_malformed += 1
                             continue
 
                         account = row_dict.get("account") or ""
@@ -1778,18 +1825,33 @@ def import_remote(
                             cost_usd = None
 
                         if cost_usd is None:
-                            total_unpriced += 1
+                            file_unpriced += 1
 
                         pk = (host, hour, account, backend, model)
                         if pk in seen_pks:
-                            total_dupes += 1
+                            file_dupes += 1
                         seen_pks.add(pk)
 
-                        total_rows += 1
                         file_rows.append((
                             host, hour, account, backend, model,
                             reqs, inp, out, c_read, cw5m, cw1h, cost_usd
                         ))
+
+                    if non_blank_lines > 0 and (len(file_rows) == 0 or file_malformed * 2 > non_blank_lines):
+                        total_malformed += file_malformed
+                        file_id = f"{host}/{fname}"
+                        rejected_files.append(file_id)
+                        sys.stderr.write(
+                            f"llm-ledger: rejected {file_id}: valid={len(file_rows)} "
+                            f"malformed={file_malformed} of {non_blank_lines} non-blank lines "
+                            f"(>50% malformed or 0 valid rows); keeping previous rows\n"
+                        )
+                        continue
+
+                    total_rows += len(file_rows)
+                    total_malformed += file_malformed
+                    total_unpriced += file_unpriced
+                    total_dupes += file_dupes
 
                     with conn:
                         conn.execute(
@@ -1854,6 +1916,7 @@ def import_remote(
                 "unpriced": total_unpriced,
                 "dupes": total_dupes,
                 "hosts": processed_hosts,
+                "rejected_files": rejected_files,
             }
         finally:
             conn.close()
@@ -2205,6 +2268,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"malformed={res.get('malformed', 0)} "
                 f"unpriced={res.get('unpriced', 0)}"
             )
+            if res.get("rejected_files", 0) > 0:
+                return 1
             return 0
         except Exception as e:
             sys.stderr.write(f"llm-ledger: import-remote failed: {e}\n")

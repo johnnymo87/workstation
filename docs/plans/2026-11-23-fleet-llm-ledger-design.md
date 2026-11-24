@@ -35,7 +35,7 @@ Builds on `workstation-4si2` (ledger, quota-watch, Grafana; design
   |---|---|---|---|
   | cloudbox | via cfp | via cfp | cfp `events.jsonl` → `requests` (per request, with program) |
   | devbox | teamclaude `usage.jsonl` | none (no Vertex) | hourly rows in quota-telemetry |
-  | Mac | teamclaude `usage.jsonl` | cfp, Vertex-first to $100/day | Max: hourly rows; cash: **nowhere today** (cfp events disabled) |
+  | Mac | teamclaude `usage.jsonl` | cfp, Vertex-first under a daily cap | Max: hourly rows; cash: **nowhere today** (cfp events disabled) |
 - **The forecast is already fleet-wide where it matters**: `u7d` is per account
   from Anthropic, so it includes every host's draw. What is cloudbox-only is
   `k` (notional Max $ per account-week, used to convert spilled Vertex $ back to
@@ -141,8 +141,7 @@ first changes:
 - `quota_watch_runs` gains `k_fleet` and `k_scope` as the **last** columns
   (replay code indexes `r[14]`). Flag `--fleet-k` off by default; flipped after
   a forward replay over the first full week shows the verdict difference.
-- Expected effect is small: `k_local` is ~1.8× low (11-23: cloudbox $632 vs
-  devbox $526 Max), which moves burn ~15% in a spill episode, <2% otherwise.
+- Expected effect is small: `k_local` is ~1.8× low (11-23: devbox Max usage was ~45% of the fleet's), which moves burn ~15% in a spill episode, <2% otherwise.
 
 ### 3. Verdict out (every host reads the same line)
 

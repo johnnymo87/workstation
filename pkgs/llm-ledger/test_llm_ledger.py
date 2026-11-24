@@ -2706,7 +2706,7 @@ class TestImportRemote(unittest.TestCase):
         # Unknown model -> None
         self.assertIsNone(
             llm_ledger.price_remote(
-                "claude-fable-5-2",
+                "claude-unknown-99",
                 input_tokens=100,
                 output=100,
                 cache_read=0,
@@ -2714,6 +2714,34 @@ class TestImportRemote(unittest.TestCase):
                 cw1h=0,
             )
         )
+
+    def test_price_remote_fable_5_2(self):
+        # claude-fable-5-2: (8.0, 40.0, 0.2, 10.0) in $/MTok, cw1h = 2 * 8.0 = 16.0
+        # 1M tokens each -> 8.0 + 40.0 + 0.2 + 10.0 + 16.0 = 74.2 USD
+        cost = llm_ledger.price_remote(
+            "claude-fable-5-2",
+            input_tokens=1_000_000,
+            output=1_000_000,
+            cache_read=1_000_000,
+            cw5m=1_000_000,
+            cw1h=1_000_000,
+        )
+        self.assertIsNotNone(cost)
+        assert cost is not None
+        self.assertAlmostEqual(cost, 74.2, places=6)
+
+        # Suffix stripping: claude-fable-5-2@20261123
+        cost_suffixed = llm_ledger.price_remote(
+            "claude-fable-5-2@20261123",
+            input_tokens=1_000_000,
+            output=0,
+            cache_read=0,
+            cw5m=0,
+            cw1h=0,
+        )
+        self.assertIsNotNone(cost_suffixed)
+        assert cost_suffixed is not None
+        self.assertAlmostEqual(cost_suffixed, 8.0, places=6)
 
     def test_ledger_lock_timeout(self):
         with llm_ledger.LedgerLock(self.db_path, blocking=True):
@@ -3004,6 +3032,22 @@ class TestImportRemote(unittest.TestCase):
                 "model": "claude-opus-5-5",
                 "requests": 2,
             }),
+            json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T01:00Z",
+                "backend": "max",
+                "model": "claude-opus-5-5",
+                "requests": 5,
+            }),
+            json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T02:00Z",
+                "backend": "max",
+                "model": "claude-opus-5-5",
+                "requests": 10,
+            }),
         ]
         with open(os.path.join(devbox_dir, "2026-W48.jsonl"), "w") as f:
             f.write("\n".join(lines) + "\n")
@@ -3015,12 +3059,183 @@ class TestImportRemote(unittest.TestCase):
         )
         self.assertEqual(res["malformed"], 4)
         self.assertEqual(res["dupes"], 1)
-        self.assertEqual(res["rows"], 2)
+        self.assertEqual(res["rows"], 4)
+        self.assertEqual(res["rejected_files"], 0)
 
         conn = llm_ledger.open_ledger_db(self.db_path)
         try:
-            reqs = conn.execute("SELECT requests FROM remote_hourly").fetchall()
-            self.assertEqual(reqs, [(2,)])
+            reqs = sorted(conn.execute("SELECT requests FROM remote_hourly").fetchall())
+            self.assertEqual(reqs, [(2,), (5,), (10,)])
+        finally:
+            conn.close()
+
+    def test_import_remote_all_malformed_preserves_week(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        w48_path = os.path.join(devbox_dir, "2026-W48.jsonl")
+
+        # 1. Initial valid import
+        valid_row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            "requests": 42,
+        }
+        with open(w48_path, "w") as f:
+            f.write(json.dumps(valid_row) + "\n")
+
+        res1 = llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+        self.assertEqual(res1["rows"], 1)
+        self.assertEqual(res1["rejected_files"], 0)
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            rows1 = conn.execute("SELECT requests FROM remote_hourly WHERE host='devbox'").fetchall()
+            self.assertEqual(rows1, [(42,)])
+            orig_blob = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W48.jsonl'").fetchone()
+            self.assertIsNotNone(orig_blob)
+        finally:
+            conn.close()
+
+        # 2. Rewrite with all-malformed non-blank lines (zero valid rows)
+        with open(w48_path, "w") as f:
+            f.write("not json at all\n{\"bad\": 1}\n")
+
+        import io
+        import contextlib
+        err_buf = io.StringIO()
+        with contextlib.redirect_stderr(err_buf):
+            res2 = llm_ledger.import_remote(
+                db_path=self.db_path,
+                repo_dir=self.repo_dir,
+                local_host="cloudbox",
+            )
+
+        self.assertEqual(res2["rejected_files"], 1)
+        self.assertIn("devbox/2026-W48.jsonl", list(res2["rejected_files"]))
+        self.assertIn("devbox/2026-W48.jsonl", err_buf.getvalue())
+
+        # Previous rows must be preserved, blob must NOT be updated
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            rows2 = conn.execute("SELECT requests FROM remote_hourly WHERE host='devbox'").fetchall()
+            self.assertEqual(rows2, [(42,)])
+            blob_after = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W48.jsonl'").fetchone()
+            self.assertEqual(blob_after, orig_blob)
+        finally:
+            conn.close()
+
+    def test_import_remote_over_fifty_percent_malformed_preserves_week(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+        w48_path = os.path.join(devbox_dir, "2026-W48.jsonl")
+
+        # 1. Initial valid import
+        valid_row = {
+            "account": "user@example.com",
+            "host": "devbox",
+            "hour_utc": "2026-11-23T00:00Z",
+            "model": "claude-opus-5-5",
+            "requests": 99,
+        }
+        with open(w48_path, "w") as f:
+            f.write(json.dumps(valid_row) + "\n")
+
+        llm_ledger.import_remote(
+            db_path=self.db_path,
+            repo_dir=self.repo_dir,
+            local_host="cloudbox",
+        )
+
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            orig_blob = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W48.jsonl'").fetchone()
+            self.assertIsNotNone(orig_blob)
+        finally:
+            conn.close()
+
+        # 2. Rewrite with >50% malformed lines (2 malformed, 1 valid -> 2/3 = 66.7%)
+        lines = [
+            "corrupt line 1",
+            "corrupt line 2",
+            json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-23T05:00Z",
+                "model": "claude-opus-5-5",
+                "requests": 1,
+            }),
+        ]
+        with open(w48_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        import io
+        import contextlib
+        err_buf = io.StringIO()
+        with contextlib.redirect_stderr(err_buf):
+            res = llm_ledger.import_remote(
+                db_path=self.db_path,
+                repo_dir=self.repo_dir,
+                local_host="cloudbox",
+            )
+
+        self.assertEqual(res["rejected_files"], 1)
+        self.assertIn("devbox/2026-W48.jsonl", err_buf.getvalue())
+
+        # Previous rows must survive untouched; new row (req=1) not added; blob not updated
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            rows = conn.execute("SELECT requests FROM remote_hourly WHERE host='devbox'").fetchall()
+            self.assertEqual(rows, [(99,)])
+            blob_after = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W48.jsonl'").fetchone()
+            self.assertEqual(blob_after, orig_blob)
+        finally:
+            conn.close()
+
+    def test_import_remote_cli_rejected_file_exits_one_and_processes_other_files(self):
+        devbox_dir = os.path.join(self.repo_dir, "devbox")
+        os.makedirs(devbox_dir, exist_ok=True)
+
+        # File 1: 2026-W47.jsonl (valid)
+        w47_path = os.path.join(devbox_dir, "2026-W47.jsonl")
+        with open(w47_path, "w") as f:
+            f.write(json.dumps({
+                "account": "user@example.com",
+                "host": "devbox",
+                "hour_utc": "2026-11-16T00:00Z",
+                "model": "claude-opus-5-5",
+                "requests": 123,
+            }) + "\n")
+
+        # File 2: 2026-W48.jsonl (all-malformed -> rejected)
+        w48_path = os.path.join(devbox_dir, "2026-W48.jsonl")
+        with open(w48_path, "w") as f:
+            f.write("totally broken line\n")
+
+        import io
+        import contextlib
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            code = llm_ledger.main(["import-remote", "--repo", self.repo_dir, "--db", self.db_path, "--host", "cloudbox"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("rejected devbox/2026-W48.jsonl", err_buf.getvalue())
+
+        # Other file (W47) still imported normally!
+        conn = llm_ledger.open_ledger_db(self.db_path)
+        try:
+            w47_rows = conn.execute("SELECT requests FROM remote_hourly WHERE host='devbox'").fetchall()
+            self.assertEqual(w47_rows, [(123,)])
+            w47_blob = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W47.jsonl'").fetchone()
+            self.assertIsNotNone(w47_blob)
+            w48_blob = conn.execute("SELECT value FROM ingest_state WHERE key='remote_blob:devbox/2026-W48.jsonl'").fetchone()
+            self.assertIsNone(w48_blob)
         finally:
             conn.close()
 
