@@ -18,7 +18,7 @@ let
     "HOME=/home/dev"
     "\"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15\""
   ];
-  commonPath = [ pkgs.git pkgs.openssh pkgs.coreutils pkgs.jq llmLedger ];
+  commonPath = [ pkgs.git pkgs.openssh pkgs.coreutils pkgs.findutils llmLedger ];
 
   fleetImportScript = pkgs.writeShellScript "llm-fleet-import" ''
     set -euo pipefail
@@ -31,12 +31,19 @@ let
     export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15"
 
     if [ ! -d "$TELEMETRY_DIR/.git" ]; then
-      if [ -d "$TELEMETRY_DIR" ] && [ -n "$(ls -A "$TELEMETRY_DIR" 2>/dev/null)" ]; then
-        rm -rf "$TELEMETRY_DIR"
+      if [ -d "$TELEMETRY_DIR" ]; then
+        find "$TELEMETRY_DIR" -mindepth 1 -delete
       fi
       git clone --quiet --single-branch --branch main "$REMOTE" "$TELEMETRY_DIR"
     else
-      timeout 90 git -C "$TELEMETRY_DIR" fetch --quiet origin main && git -C "$TELEMETRY_DIR" reset --quiet --hard origin/main
+      # With an existing clone, a failed or timed-out fetch warns to stderr and
+      # proceeds to import-remote from the existing checkout. Only reset if the
+      # fetch succeeded. Persistent staleness is caught by quota-watch fleet-stale (>3h).
+      if timeout 90 git -C "$TELEMETRY_DIR" fetch --quiet origin main; then
+        git -C "$TELEMETRY_DIR" reset --quiet --hard origin/main
+      else
+        echo "llm-fleet-import: warning: git fetch failed; continuing with existing clone" >&2
+      fi
     fi
 
     if [ -n "$DB_PATH" ]; then
@@ -73,10 +80,7 @@ let
     fi
 
     tree=$(git add outlook.json && git write-tree)
-    pub_at=$(jq -r '.published_at // empty' outlook.json 2>/dev/null || true)
-    if [ -z "$pub_at" ]; then
-      pub_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    fi
+    pub_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     commit=$(git commit-tree "$tree" -m "outlook $pub_at")
     git update-ref refs/heads/outlook "$commit"
 
@@ -176,7 +180,7 @@ Check:
 
   systemd.services.llm-outlook-publish = {
     description = "Publish quota outlook to fleet telemetry repo";
-    after = [ "network-online.target" ];
+    after = [ "network-online.target" "systemd-tmpfiles-setup.service" ];
     wants = [ "network-online.target" ];
     path = commonPath;
     serviceConfig = {
