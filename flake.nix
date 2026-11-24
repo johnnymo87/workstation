@@ -192,6 +192,7 @@
       opencode-launch = p.callPackage ./pkgs/opencode-launch { };
       opencode-serve-auth-sh = p.callPackage ./pkgs/opencode-serve-auth-sh { };
       reset-workspace = p.callPackage ./pkgs/reset-workspace { };
+      turn-cut-notice = p.callPackage ./pkgs/turn-cut-notice { };
       inherit ro-shell;
       self-compact-plugin = p.callPackage ./pkgs/self-compact-plugin { };
       session-state-plugin = p.callPackage ./pkgs/session-state-plugin { };
@@ -1661,6 +1662,44 @@
         [ "$(grep -c '^ok: ' "$TMPDIR/sr.txt")" = 13 ] || {
           echo "GATE FAILURE: expected 13 'ok:' lines, got" \
                "$(grep -c '^ok: ' "$TMPDIR/sr.txt")." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      # workstation-dg6: reset-workspace tells sessions whose turn its serve
+      # restarts cut. Two suites: the python tool (hermetic: temp sqlite, fake
+      # honk, fake pigeon, no sockets) and the reset's shell wiring, driven
+      # against the BUILT script with fakes (proves every failure is non-fatal
+      # and pins the call-site order).
+      turn-cut-notice = devboxPkgs.runCommand "turn-cut-notice-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        python3 ${self}/pkgs/turn-cut-notice/test_turn_cut_notice.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^OK' "$TMPDIR/out.txt" || { echo "GATE FAILURE: suite not OK." >&2; exit 1; }
+        grep -qE '^Ran ([3-9][0-9]|[0-9]{3,}) tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: fewer than 30 tests ran; the suite was gutted." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
+      reset-workspace-turn-cut-tests = devboxPkgs.runCommand "reset-workspace-turn-cut-tests" {
+        nativeBuildInputs = [
+          devboxPkgs.bash devboxPkgs.gawk devboxPkgs.gnused
+          devboxPkgs.coreutils devboxPkgs.gnugrep
+        ];
+        RESET_WORKSPACE_BIN = "${(localPkgsFor devboxSystem).reset-workspace}/bin/reset-workspace";
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        bash pkgs/reset-workspace/test-turn-cut.sh 2>&1 | tee "$TMPDIR/tc.txt"
+        grep -q '^all reset-workspace turn-cut tests passed' "$TMPDIR/tc.txt" || {
+          echo "GATE FAILURE: turn-cut wiring suite did not pass." >&2
+          exit 1
+        }
+        [ "$(grep -c '^ok: ' "$TMPDIR/tc.txt")" -ge 13 ] || {
+          echo "GATE FAILURE: expected at least 13 'ok:' lines." >&2
           exit 1
         }
         touch $out
