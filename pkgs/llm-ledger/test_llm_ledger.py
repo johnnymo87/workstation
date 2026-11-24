@@ -3881,6 +3881,29 @@ class TestTeamclaudeUsageIngest(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM teamclaude_hourly").fetchone()[0], 1)
         conn.close()
 
+    def test_disappeared_teamclaude_log_warns_after_prior_ingest(self):
+        with open(self.tc_log, "w") as f:
+            f.write(self._tc_line("2026-11-24T13:05:00.000Z", account="acct-a@example.com", inp=1_000_000, outp=0))
+        w1 = []
+        llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log, warnings=w1,
+        )
+        self.assertEqual(w1, [])
+
+        os.remove(self.tc_log)
+        w2 = []
+        counts = llm_ledger.run_ingest(
+            db_path=self.db_path, events_path=self.events_path, raw_dir=self.raw_dir,
+            host="cloudbox", samples_path=self.samples_path,
+            samples_archive=os.path.join(self.tmpdir.name, "arch"),
+            teamclaude_log=self.tc_log, warnings=w2,
+        )
+        self.assertEqual(counts["tc_rows"], 0)
+        self.assertTrue(any("teamclaude log disappeared" in w for w in w2))
+
 
 if __name__ == "__main__":
     unittest.main()

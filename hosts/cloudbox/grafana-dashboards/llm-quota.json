@@ -767,7 +767,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Fleet Max notional $/h by serving account across cloudbox (teamclaude usage log), devbox, and Mac. Average $/h within each bucket aligned to UTC.",
+      "description": "Fleet Max notional $/h by serving account across cloudbox (teamclaude usage log), devbox, and Mac. Average $/h within each bucket aligned to UTC. Note: the usage-based seat also routes through TeamClaude and appears here at list price rather than in Cash $ panels.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -833,7 +833,7 @@
         "type": "frser-sqlite-datasource",
         "uid": "llm-ledger"
       },
-      "description": "Fleet Max notional spend, requests, and list-price token units (opus-5.5 basis) by account and host over the selected range.",
+      "description": "Fleet Max notional spend, requests, and list-price token units (opus-5.5 basis) by account and host over the selected range. Note: the usage-based seat routes through TeamClaude and appears here at list price (excluded from quota-watch k, not in Cash $ panels).",
       "fieldConfig": {
         "defaults": {
           "custom": {

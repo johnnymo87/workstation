@@ -102,6 +102,7 @@ def aggregate_cfp_events(lines, host: str, now: dt.datetime, since: dt.datetime)
     account='' and summed cost_usd.
     """
     cur_hour = now.astimezone(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    route_since = since - dt.timedelta(hours=1)
     routes: dict[str, str] = {}
     usages: list[dict] = []
     first_hour: dt.datetime | None = None
@@ -120,11 +121,15 @@ def aggregate_cfp_events(lines, host: str, now: dt.datetime, since: dt.datetime)
         if h is not None and (first_hour is None or h < first_hour):
             first_hour = h
         if ltype == "route":
+            if h is not None and (h < route_since or h >= cur_hour):
+                continue
             req_id = r.get("requestId")
             model = r.get("model")
             if isinstance(req_id, str) and req_id and isinstance(model, str) and model:
                 routes[req_id] = model
         elif ltype == "usage":
+            if h is None or h < since or h >= cur_hour:
+                continue
             backend = r.get("backend")
             if not isinstance(backend, str) or not backend or backend == "max":
                 continue

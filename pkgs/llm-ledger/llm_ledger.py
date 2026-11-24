@@ -1380,13 +1380,20 @@ def step_teamclaude_tail_and_archive(
 ) -> dict[str, Any]:
     """Tail local teamclaude usage.jsonl into teamclaude_usage and gzip raw archive.
 
-    Optional input: if log_path is None or does not exist yet, returns 0 rows with no warning.
+    Optional until first seen: if log_path is None, or does not exist yet and
+    was never ingested before (no tc_inode in ingest_state), returns 0 rows
+    with no warning. If it was previously ingested and vanishes, records a
+    warning so a broken/deleted log does not fail silently.
     """
-    if not log_path or not os.path.exists(log_path):
+    if not log_path:
         return {"tc_rows": 0, "tc_malformed": 0, "touched_hours": set()}
 
     state = get_ingest_state(conn)
     stored_inode = int(state["tc_inode"]) if "tc_inode" in state else None
+    if not os.path.exists(log_path):
+        if stored_inode is not None:
+            add_warning(warnings, f"teamclaude log disappeared: {log_path}")
+        return {"tc_rows": 0, "tc_malformed": 0, "touched_hours": set()}
     stored_offset = int(state["tc_offset"]) if "tc_offset" in state else 0
     stored_archived_ts = (
         int(state["tc_archived_through_ts"])
