@@ -37,8 +37,8 @@
 # `mcp-remote <url>` in a terminal on the host, forward the callback port it
 # prints (`ssh -L <port>:localhost:<port> <host>`), open the printed URL.
 #
-# Bumping: change `version` + `hash`, then set `pnpmDeps.hash` to lib.fakeHash,
-# build, and copy the hash nix reports.
+# Bumping: change `version` + `hash`, then set both `pnpmDeps.hash` values to
+# lib.fakeHash, build on Linux and on the Mac, and copy each hash nix reports.
 stdenv.mkDerivation (finalAttrs: {
   pname = "mcp-remote";
   version = "0.1.38";
@@ -54,7 +54,15 @@ stdenv.mkDerivation (finalAttrs: {
     inherit (finalAttrs) pname version src;
     pnpm = pnpm_10;
     fetcherVersion = 2;
-    hash = "sha256-ULwS0Z9+r7Si3e8/ZGbv9OVgKEnok3xIJ9EEaDYcCBs=";
+    # Per platform: pnpm fetches only the optional native packages (esbuild,
+    # rollup, ...) for the host's os/cpu, so the store differs on darwin. The
+    # Linux hash was measured on cloudbox (aarch64-linux), the darwin one on
+    # the Mac (aarch64-darwin) on 2026-11-25. When bumping, measure both.
+    hash =
+      if stdenv.hostPlatform.isDarwin then
+        "sha256-dVMHSxCWrWyKZnAteOALH2G76qI1FTnGOTwMULwGh4c="
+      else
+        "sha256-ULwS0Z9+r7Si3e8/ZGbv9OVgKEnok3xIJ9EEaDYcCBs=";
   };
 
   nativeBuildInputs = [
