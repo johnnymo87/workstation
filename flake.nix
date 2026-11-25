@@ -1880,6 +1880,21 @@
         touch $out
       '';
 
+      # Weekly NixOS release-channel EOL checker (.github/scripts/check-channel-eol.py).
+      check-channel-eol-tests = devboxPkgs.runCommand "check-channel-eol-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        python3 .github/scripts/test_check_channel_eol.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 7 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 7 tests'; update the count with the suite." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || { echo "GATE FAILURE: suite not OK." >&2; exit 1; }
+        touch $out
+      '';
+
       # session-owns: the ONE definition of "a live agent session owns this
       # directory" (opencode rows, goose rows, path claims) that every cleanup
       # guard shares (bd workstation-6w7i.19). Hermetic stdlib unittest over
