@@ -2128,9 +2128,18 @@ def commitment_spend(
         f"WHERE q.ts >= ? AND q.ts < ? AND q.backend IN ({ph}) GROUP BY 1, 2, 3",
         (start, end, *COMMITMENT_BACKENDS),
     ).fetchall()
+    remote_rows = conn.execute(
+        "SELECT backend, COALESCE(model, ''), 'fleet:' || host, "
+        "COALESCE(SUM(requests), 0), SUM(cost_usd), "
+        "SUM(CASE WHEN cost_usd IS NULL AND input IS NOT NULL THEN COALESCE(requests, 1) ELSE 0 END), "
+        "0 "
+        "FROM remote_hourly "
+        f"WHERE hour >= ? AND hour < ? AND backend IN ({ph}) GROUP BY 1, 2, 3",
+        (start, end, *COMMITMENT_BACKENDS),
+    ).fetchall()
     neon = {"usd": 0.0, "requests": 0, "unpriced_requests": 0, "no_usage_ok_requests": 0, "by_backend": {}, "by_program": {}}
     total = {"usd": 0.0, "requests": 0, "by_model": {}, "by_backend": {}, "by_program": {}}
-    for backend, model, program, n, usd, unpriced, no_usage in rows:
+    for backend, model, program, n, usd, unpriced, no_usage in list(rows) + list(remote_rows):
         usd = float(usd or 0.0)
         total["usd"] += usd
         total["requests"] += n
@@ -2181,7 +2190,7 @@ def commitment_spend(
         "gateway_error_since": _iso(int(state["gateway_error_since_ms"])) if state.get("gateway_error_since_ms") else None,
         "gateway_polled_at": _iso(int(last_ok)) if last_ok else None,
         "source_through": _iso(newest),
-        "basis": "list price; gateway Gemini rows + cfp agy rows",
+        "basis": "list price; gateway Gemini rows + cfp agy rows + remote_hourly",
         "neon": _round(neon),
         "gcp_commitment": _round(total),
     }
