@@ -1635,6 +1635,8 @@ home.activation.installWorktreeGuardHooks = lib.mkIf isCloudbox (
       # Modern terminal integration
       set -g focus-events on     # Pass focus events to apps (neovim FocusGained/Lost)
       set -s escape-time 10      # Responsive Esc (tmux 3.5+ default is 10ms)
+      set -s extended-keys on    # Forward CSI u / modifyOtherKeys (e.g. Ctrl-Enter) to apps that ask
+      set -as terminal-features ',xterm*:extkeys'
 
       # Truecolor support
       set -ag terminal-overrides ",xterm-256color:RGB"
