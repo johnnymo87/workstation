@@ -110,27 +110,53 @@ def launch_needles(worker_id: str) -> list[str]:
     return out
 
 
-def coordinator_launch_output(goose: sqlite3.Connection | None, tag: str) -> str:
-    """All tool output seen by this tag's coordinator sessions (coord-sessions/<tag>-<ms>).
+DEFAULT_SW_STATE = os.path.expanduser("~/.local/state/stall-watch/state.db")
+LAUNCH_SLACK_MS = 600_000  # stallwatch/launches.py's LAUNCH_SLACK_S
+
+
+def coordinator_sessions(goose: sqlite3.Connection, tag: str, sw_state: str | None) -> list[str]:
+    """This tag's coordinator goose sessions: by folder (coord-sessions/<tag>-<ms>),
+    plus stall-watch's program.coord_session, because a renamed program keeps
+    its old folder (supply-network -> supply-chain-inputs)."""
+    home = re.compile(rf"/coord-sessions/{re.escape(tag)}-\d+/?$")
+    ids = {r["id"] for r in goose.execute("SELECT id, working_dir FROM sessions WHERE working_dir LIKE ?",
+                                          (f"%/coord-sessions/{tag}-%",)) if home.search(r["working_dir"] or "")}
+    if sw_state and os.path.exists(sw_state):
+        try:
+            st = _ro(sw_state)
+            try:
+                ids.update(r[0] for r in st.execute("SELECT coord_session FROM program WHERE tag = ?", (tag,)) if r[0])
+            finally:
+                st.close()
+        except sqlite3.Error:
+            pass  # folder match only
+    return sorted(ids)
+
+
+def coordinator_launch_output(goose: sqlite3.Connection | None, tag: str,
+                              sw_state: str | None = None) -> list[tuple[int, str]]:
+    """(ms, content_json) of every tool output this tag's coordinators saw.
 
     Only tool responses (role=user rows carrying a toolResponse in goose), so
     an id the coordinator merely wrote about does not count as a launch.
     """
     if goose is None:
-        return ""
-    home = re.compile(rf"/coord-sessions/{re.escape(tag)}-\d+/?$")
-    ids = [r["id"] for r in goose.execute("SELECT id, working_dir FROM sessions WHERE working_dir LIKE ?",
-                                          (f"%/coord-sessions/{tag}-%",)) if home.search(r["working_dir"] or "")]
+        return []
+    ids = coordinator_sessions(goose, tag, sw_state)
     if not ids:
-        return ""
+        return []
     q = ",".join("?" * len(ids))
-    rows = goose.execute(f"SELECT content_json FROM messages WHERE session_id IN ({q}) AND role = 'user' "
-                         "AND content_json LIKE '%toolResponse%'", ids)
-    return "\n".join(r["content_json"] or "" for r in rows)
+    rows = goose.execute(f"SELECT created_timestamp, content_json FROM messages WHERE session_id IN ({q}) "
+                         "AND role = 'user' AND content_json LIKE '%toolResponse%'", ids)
+    return [(int(r["created_timestamp"] or 0) * 1000, r["content_json"] or "") for r in rows]
 
 
-def coordinator_launched(worker_id: str, launch_output: str) -> bool:
-    return any(n in launch_output for n in launch_needles(worker_id))
+def coordinator_launched(worker_id: str, created_ms: int, launch_output: list[tuple[int, str]]) -> bool:
+    """A launch prints within seconds of the session's creation; the window
+    keeps out an id the coordinator read later (a log, a Slack thread)."""
+    needles = launch_needles(worker_id)
+    return any(abs(ms - created_ms) <= LAUNCH_SLACK_MS and any(n in txt for n in needles)
+               for ms, txt in launch_output)
 
 
 # --------------------------------------------------------------------------
@@ -900,6 +926,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--db", default=DEFAULT_OC_DB)
     p.add_argument("--goose-db", default=DEFAULT_GOOSE_DB)
     p.add_argument("--lgtm-cache", default=DEFAULT_LGTM_CACHE)
+    p.add_argument("--sw-state", default=DEFAULT_SW_STATE, help="stall-watch state.db (renamed programs' coordinators)")
     p.add_argument("--psql", default=DEFAULT_PSQL, help="command that runs psql against the aigateway DB")
     a = p.parse_args(argv)
     if a.days is not None and a.days <= 0:
@@ -936,7 +963,9 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, gh: GitHub | None
     sessions: list[Session] = []
     loaded: list[Session] = []
     excluded: list[tuple[str, str]] = []
-    launch_output = coordinator_launch_output(gs, a.tag)
+    launch_output = coordinator_launch_output(gs, a.tag, a.sw_state)
+    if not launch_output and start < end and end > LAUNCH_RECORD_FROM_MS:
+        warnings.append(f"no coordinator launch record found for {a.tag}: workers from 2026-11-24 on count only by brief")
     for i in ids:
         if i.startswith(GOOSE_PREFIX):
             s = load_goose_session(gs, i, warnings) if gs else None
@@ -951,7 +980,7 @@ def main(argv: list[str] | None = None, *, run=subprocess.run, gh: GitHub | None
             excluded.append((i, "--exclude"))
         elif i in a.include or is_worker_brief(s.brief):
             sessions.append(s)
-        elif s.created_ms >= LAUNCH_RECORD_FROM_MS and coordinator_launched(i, launch_output):
+        elif s.created_ms >= LAUNCH_RECORD_FROM_MS and coordinator_launched(i, s.created_ms, launch_output):
             sessions.append(s)
         else:
             excluded.append((i, "brief is not a coordinator launch"))

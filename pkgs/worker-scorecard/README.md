@@ -32,14 +32,19 @@ A candidate is a worker when its first user message (the brief) either
 
 or, for a root created on or after 2026-11-24 00:00 ET, when the tag's own
 stall-watch coordinator (a goose session in `coord-sessions/<tag>-<ms>`) has
-the launch in its **tool output**: `native=<id> ` from `honk launch`, or
+the launch in its **tool output** within 10 minutes of the root's creation
+(a renamed program's coordinator keeps its old folder, so `program.coord_session`
+in stall-watch's `state.db` counts too; `--sw-state`): `native=<id> ` from `honk launch`, or
 `Session launched: <id>` / `Tagged session '<id>'` / `--session <id>` from
 opencode-launch. eng-agent-platform #502 retired the coin flip on 11-24, so
 briefs no longer carry an arm line, and their wording varies by coordinator;
 text alone cannot tell a coordinator's worker from a worker's sub-worker that
 copies its brief (`Model:` line included). Text the coordinator wrote itself
 does not count, and neither does a launch by another program's coordinator.
-The date gate keeps the stage-1 A/B numbers as they were.
+The date gate keeps the stage-1 A/B numbers as they were. If no coordinator
+is found for the tag, a warning says so. Residual risk: an id a coordinator's
+tool output shows within those 10 minutes for some other reason (a launcher's
+log read right away) would count.
 
 Everything else (a session Jonathan started by hand, a benchmark, a worker's
 own sub-worker) is listed under "Excluded" with the reason, its $ and its PR
