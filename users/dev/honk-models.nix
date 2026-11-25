@@ -16,7 +16,13 @@
 # for the goose fleet's move to Neon (bead eng-agent-platform-ul4.28.4); it
 # needs goose >= 1.60.2, whose registry knows its 1M context and 64K output;
 # it answered the same check through goose 1.60.2 on 2026-11-24.
+#
+# codex_lb models: honk can switch a session across providers once honk-9qf.15.24
+# part B ships; these ids answer only while codex-lb has a live account.
 { pkgs }:
+let
+  codexLb = import ./codex-lb-models.nix;
+in
 pkgs.writeText "honk-models.json" (builtins.toJSON {
   providers.gcp_vertex_ai = [
     { id = "claude-opus-5-5"; name = "Claude Opus 5.5"; }
@@ -32,4 +38,5 @@ pkgs.writeText "honk-models.json" (builtins.toJSON {
     { id = "gemini-4-hydrogen"; name = "Gemini 4 Hydrogen"; }
     { id = "gemini-4-argon"; name = "Gemini 4 Argon"; }
   ];
+  providers.${codexLb.provider} = map (m: { id = m.id; inherit (m) name; }) codexLb.models;
 })

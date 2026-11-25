@@ -147,6 +147,9 @@
       goose-roles = p.callPackage ./pkgs/goose-roles {
         agentsDir = ./assets/opencode/agents;
         inherit ro-shell goose;
+        astraProvider = (import ./users/dev/codex-lb-models.nix).provider;
+        astraModel = (import ./users/dev/agent-twin-models.nix).astra;
+        fableModel = (import ./users/dev/agent-twin-models.nix).fable;
       };
       goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
       goose-tool-shell = p.callPackage ./pkgs/goose-tool-shell { };
@@ -2151,8 +2154,42 @@
         cd ${self}
         python3 pkgs/goose-roles/test_gen_goose_roles.py 2>&1 | tee "$TMPDIR/gr.txt"
         grep -q '^OK' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: goose-roles suite did not pass." >&2; exit 1; }
-        grep -q '^Ran 16 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 16 tests." >&2; exit 1; }
+        grep -q '^Ran 19 tests' "$TMPDIR/gr.txt" || { echo "GATE FAILURE: expected 19 tests." >&2; exit 1; }
         grep -q 'skipped' "$TMPDIR/gr.txt" && { echo "GATE FAILURE: a test was skipped." >&2; exit 1; }
+        touch $out
+      '';
+
+      goose-custom-provider-codex-lb-check = devboxPkgs.runCommand "goose-custom-provider-codex-lb-check" {
+        nativeBuildInputs = [ (localPkgsFor devboxSystem).goose devboxPkgs.gnugrep devboxPkgs.coreutils devboxPkgs.cacert ];
+        PROVIDER_JSON = self.homeConfigurations.cloudbox.config.home.file.".config/goose/custom_providers/codex_lb.json".source;
+      } ''
+        mkdir -p "$TMPDIR/root/config/custom_providers"
+        cp "$PROVIDER_JSON" "$TMPDIR/root/config/custom_providers/codex_lb.json"
+        export HOME="$TMPDIR"
+        export GOOSE_PATH_ROOT="$TMPDIR/root"
+        export GOOSE_DISABLE_KEYRING=true
+        export SSL_CERT_FILE="${devboxPkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+        export NIX_SSL_CERT_FILE="${devboxPkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+
+        set +e
+        timeout 15 goose run --no-session --provider codex_lb --model gpt-6-astra --text hi >"$TMPDIR/out.txt" 2>&1
+        rc=$?
+        set -e
+
+        cat "$TMPDIR/out.txt"
+
+        if grep -q "Unknown provider" "$TMPDIR/out.txt"; then
+          echo "GATE FAILURE: goose failed to load custom provider codex_lb (reported Unknown provider)." >&2
+          exit 1
+        fi
+        if grep -q "Failed to parse" "$TMPDIR/out.txt" || grep -q "parse error" "$TMPDIR/out.txt"; then
+          echo "GATE FAILURE: goose failed to parse codex_lb.json." >&2
+          exit 1
+        fi
+        if ! grep -q "127.0.0.1:2455" "$TMPDIR/out.txt"; then
+          echo "GATE FAILURE: expected error mentioning 127.0.0.1:2455, proving custom provider loaded and routed to codex-lb." >&2
+          exit 1
+        fi
         touch $out
       '';
 

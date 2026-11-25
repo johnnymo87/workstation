@@ -14,6 +14,7 @@ import sys
 import yaml
 
 ROLES = ["oracle", "adversarial-reviewer", "code-reviewer", "spec-reviewer", "implementer"]
+TWIN_BASES = ["oracle", "adversarial-reviewer"]
 
 READ_ONLY_NOTE = """
 
@@ -64,8 +65,19 @@ def split_frontmatter(text):
     return yaml.safe_load(text[4:end]) or {}, text[end + 5:]
 
 
-def map_model(model, opus_model, sonnet_model, provider):
-    if re.fullmatch(r"anthropic/claude-opus-\d+(?:-\d+)*", model or ""):
+def map_model(model, opus_model, sonnet_model, provider, *, twin=None, astra_model=None, fable_model=None):
+    if twin == "astra":
+        if not re.fullmatch(r"anthropic/claude-opus-\d+(?:-\d+)*", model or ""):
+            raise GenError(f"astra twin requires source pin anthropic/claude-opus-*, got {model!r}")
+        target = astra_model
+        if not re.fullmatch(r"gpt-[a-z0-9.-]+", target or ""):
+            raise GenError(f"unexpected astra target model {target!r}")
+        return target
+    elif twin == "fable":
+        if not re.fullmatch(r"anthropic/claude-opus-\d+(?:-\d+)*", model or ""):
+            raise GenError(f"fable twin requires source pin anthropic/claude-opus-*, got {model!r}")
+        target = fable_model
+    elif re.fullmatch(r"anthropic/claude-opus-\d+(?:-\d+)*", model or ""):
         target = opus_model
     elif re.fullmatch(r"anthropic/claude-sonnet-\d+(?:-\d+)*", model or ""):
         target = sonnet_model
@@ -123,22 +135,58 @@ def _assert_extensions(exts):
             raise GenError("roles must not get summon")
 
 
-def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model):
+def build_role(role, text, *, ro_shell_cmd, provider, opus_model, sonnet_model,
+               twin=None, astra_provider="codex_lb", astra_model="gpt-6-astra", fable_model="claude-fable-5-2"):
     fm, body = split_frontmatter(text)
     for tok in ("{{", "{%", "{#"):
         if tok in body:
             raise GenError(f"{role}: body contains template syntax {tok!r}")
+
+    if twin is None and (role.endswith("-astra") or role.endswith("-fable")):
+        base, twin = role.rsplit("-", 1)
+    else:
+        base = role
+
     ro = is_read_only(fm)
     exts = ro_extensions(ro_shell_cmd) if ro else rw_extensions()
     _assert_extensions(exts)
+
+    clean_desc = clean_description(fm.get("description", ""))
+
+    if twin == "astra":
+        if base not in TWIN_BASES:
+            raise GenError(f"unsupported twin base {base!r}")
+        title = f"{base}-astra"
+        tag = astra_model
+        caution = f"CAUTION — use this {tag} variant ONLY when the user explicitly asks for it; otherwise default to {base}"
+        desc = f"{clean_desc.rstrip('.')}. {caution}"
+        role_provider = astra_provider
+        role_model = map_model(fm.get("model"), opus_model, sonnet_model, role_provider,
+                               twin="astra", astra_model=astra_model, fable_model=fable_model)
+    elif twin == "fable":
+        if base not in TWIN_BASES:
+            raise GenError(f"unsupported twin base {base!r}")
+        title = f"{base}-fable"
+        tag = fable_model.removeprefix("claude-") if fable_model.startswith("claude-") else fable_model
+        caution = f"CAUTION — use this {tag} variant ONLY when the user explicitly asks for it; otherwise default to {base}"
+        desc = f"{clean_desc.rstrip('.')}. {caution}"
+        role_provider = provider
+        role_model = map_model(fm.get("model"), opus_model, sonnet_model, role_provider,
+                               twin="fable", astra_model=astra_model, fable_model=fable_model)
+    else:
+        title = role
+        desc = clean_desc
+        role_provider = provider
+        role_model = map_model(fm.get("model"), opus_model, sonnet_model, role_provider)
+
     return {
         "version": "1.0.0",
-        "title": role,
-        "description": clean_description(fm.get("description", "")),
+        "title": title,
+        "description": desc,
         "instructions": body.strip() + (READ_ONLY_NOTE if ro else IMPLEMENTER_NOTE),
         "extensions": exts,
-        "settings": {"goose_provider": provider,
-                     "goose_model": map_model(fm.get("model"), opus_model, sonnet_model, provider),
+        "settings": {"goose_provider": role_provider,
+                     "goose_model": role_model,
                      "max_turns": READ_ONLY_MAX_TURNS if ro else IMPLEMENTER_MAX_TURNS,
                      "thinking_effort": ROLE_THINKING_EFFORT},
     }
@@ -161,12 +209,17 @@ def _dump(obj, path):
         yaml.safe_dump(obj, fh, sort_keys=False, allow_unicode=True, width=1000)
 
 
-def generate(agents_dir, out_dir, roles, **kw):
+def generate(agents_dir, out_dir, roles, twin_bases=TWIN_BASES, **kw):
     os.makedirs(os.path.join(out_dir, "roles"), exist_ok=True)
     for role in roles:
         with open(os.path.join(agents_dir, f"{role}.md")) as fh:
-            recipe = build_role(role, fh.read(), **kw)
+            text = fh.read()
+        recipe = build_role(role, text, **kw)
         _dump(recipe, os.path.join(out_dir, "roles", f"{role}.yaml"))
+        if role in twin_bases:
+            for twin in ("astra", "fable"):
+                twin_recipe = build_role(role, text, twin=twin, **kw)
+                _dump(twin_recipe, os.path.join(out_dir, "roles", f"{role}-{twin}.yaml"))
     _dump(build_unscoped(kw["ro_shell_cmd"]), os.path.join(out_dir, "unscoped.yaml"))
 
 
@@ -180,10 +233,14 @@ def main():
     p.add_argument("--provider", default="gcp_vertex_ai", choices=["gcp_vertex_ai", "anthropic"])
     p.add_argument("--opus-model", required=True)
     p.add_argument("--sonnet-model", required=True)
+    p.add_argument("--astra-provider", default="codex_lb")
+    p.add_argument("--astra-model", default="gpt-6-astra")
+    p.add_argument("--fable-model", default="claude-fable-5-2")
     a = p.parse_args()
     try:
         generate(a.agents_dir, a.out, ROLES, ro_shell_cmd=a.ro_shell_cmd, provider=a.provider,
-                 opus_model=a.opus_model, sonnet_model=a.sonnet_model)
+                 opus_model=a.opus_model, sonnet_model=a.sonnet_model,
+                 astra_provider=a.astra_provider, astra_model=a.astra_model, fable_model=a.fable_model)
     except GenError as e:
         sys.exit(f"gen_goose_roles: {e}")
 
