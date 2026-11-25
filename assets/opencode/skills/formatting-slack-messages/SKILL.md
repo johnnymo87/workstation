@@ -121,7 +121,7 @@ The MCP exposes a `content_type` parameter on `slack_conversations_add_message`:
 
 | `content_type` | What happens |
 |---|---|
-| `text/markdown` (default) | MCP attempts to translate CommonMark → mrkdwn before sending. Translation is incomplete (`**bold**` → literal `**bold**` is a known failure) and collapses line breaks, joining a final signature line (e.g. `--Claude`) onto the preceding line even after a blank line. |
+| `text/markdown` (default) | MCP attempts to translate CommonMark → mrkdwn before sending. Translation is incomplete (`**bold**` → literal `**bold**` is a known failure) and can join a final signature line onto the preceding line, even across a blank line. |
 | `text/plain` | Sent as-is. **Recommended when you've written native mrkdwn yourself.** |
 
 **Workflow:** write the message in native mrkdwn (single asterisks for bold, etc.) and pass `content_type: "text/plain"` to bypass the translation layer.
