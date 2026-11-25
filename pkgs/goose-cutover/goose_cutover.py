@@ -380,6 +380,18 @@ def quiet_reason_kind(reason: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[0-9_]+|\(.*?\)|=\S+", "", reason.split(":")[0])).strip()
 
 
+# stall-watch's coordinators (and anything they delegate) run every few minutes around the clock,
+# so their writes would keep the quiet window from ever forming (workstation-6w7i.27.17). A turn of
+# theirs in flight is still caught by the instantaneous stall-watch.service and honk checks.
+COORD_SESSIONS_DIR = "/home/dev/.local/state/stall-watch/coord-sessions/"
+NON_COORDINATOR_MAX_ID_SQL = (
+    "WITH RECURSIVE exempt(id) AS ("
+    f" SELECT id FROM sessions WHERE working_dir LIKE '{COORD_SESSIONS_DIR}%'"
+    " UNION SELECT s.id FROM sessions s JOIN exempt e ON s.parent_session_id = e.id"
+    ") SELECT max(id) FROM messages WHERE session_id NOT IN (SELECT id FROM exempt);"
+)
+
+
 def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tuple[bool, str]:
     if script_start_time is not None:
         if runner.now() - script_start_time > 14400:
@@ -405,12 +417,6 @@ def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tu
                     pass
         if last_json is None:
             return False, "no stall-watch tick found in last 15m"
-
-        runs = last_json.get("coordinator", {}).get("runs", 0)
-        if runs == 0:
-            runs = last_json.get("runs", 0)
-        if runs > 0:
-            return False, f"stall-watch coordinator runs > 0: {runs}"
     except Exception as e:
         return False, f"failed checking stall-watch journal: {e}"
 
@@ -419,10 +425,10 @@ def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tu
     if status in ("active", "activating", "reloading"):
         return False, f"stall-watch.service is {status}"
 
-    # 2. Sessions.db max(id) unchanged >= 10 min
+    # 2. Sessions.db max(id) outside stall-watch's coordinator sessions unchanged >= 10 min
     try:
         db_path = "file:/home/dev/.local/share/goose/sessions/sessions.db?mode=ro"
-        res = runner.run(["sqlite3", db_path, "SELECT max(id) FROM messages;"], check=False)
+        res = runner.run(["sqlite3", db_path, NON_COORDINATOR_MAX_ID_SQL], check=False)
         curr_id = res.stdout.strip()
         now = runner.now()
         if obs["last_id"] is None or curr_id != obs["last_id"]:

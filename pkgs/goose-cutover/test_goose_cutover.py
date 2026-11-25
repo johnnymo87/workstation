@@ -880,15 +880,40 @@ class TestGooseCutover(unittest.TestCase):
         self.assertFalse(quiet)
         self.assertIn("no stall-watch tick found", reason)
 
-    def test_d2_coordinator_runs_blocks(self):
+    def test_d2_coordinator_runs_in_last_tick_do_not_block(self):
+        # A finished coordinator run is not activity; one in flight shows as stall-watch.service active.
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
-            lambda a, u, c: a[0] == "journalctl",
-            lambda a, u, e, c: RunResult(0, json.dumps({"ts": int(runner.current_time * 1000), "coordinator": {"runs": 1}}) + "\n")
+            lambda a, u, c: a[0] == "journalctl" and "stall-watch" in " ".join(a),
+            lambda a, u, e, c: RunResult(0, json.dumps({"ts": int(runner.current_time * 1000), "runs": 3, "coordinator": {"runs": 2}}) + "\n")
         ))
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 601
         quiet, reason = goose_cutover.check_quiet(runner)
-        self.assertFalse(quiet)
-        self.assertIn("runs", reason)
+        self.assertTrue(quiet, reason)
+
+    def test_d2_sessions_query_ignores_coordinator_sessions_and_their_delegates(self):
+        import sqlite3
+        db = sqlite3.connect(":memory:")
+        db.executescript(
+            "CREATE TABLE sessions (id TEXT, working_dir TEXT, parent_session_id TEXT);"
+            "CREATE TABLE messages (id INTEGER, session_id TEXT);"
+        )
+        coord = goose_cutover.COORD_SESSIONS_DIR + "goose-1792618687746"
+        db.executemany("INSERT INTO sessions VALUES (?, ?, ?)", [
+            ("worker", "/home/dev/projects/honk", None),
+            ("worker-sub", "/home/dev/projects/honk", "worker"),
+            ("coord", coord, None),
+            ("coord-sub", "/home/dev/projects/x", "coord"),
+            ("coord-sub-sub", "/home/dev/projects/x", "coord-sub"),
+        ])
+        q = lambda: db.execute(goose_cutover.NON_COORDINATOR_MAX_ID_SQL).fetchone()[0]
+        db.executemany("INSERT INTO messages VALUES (?, ?)", [(1, "worker"), (2, "worker-sub")])
+        self.assertEqual(q(), 2)
+        db.executemany("INSERT INTO messages VALUES (?, ?)", [(3, "coord"), (4, "coord-sub"), (5, "coord-sub-sub")])
+        self.assertEqual(q(), 2)
+        db.execute("INSERT INTO messages VALUES (6, 'worker')")
+        self.assertEqual(q(), 6)
 
     def test_d2_sessions_db_changing_blocks(self):
         runner = setup_standard_runner()
