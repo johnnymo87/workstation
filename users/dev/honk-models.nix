@@ -8,7 +8,7 @@
 # `provider/model@default` form. goose switches models only within a session's
 # provider, so only the session's provider's entries are offered.
 #
-# Each id below answered through goose's gcp_vertex_ai provider on cloudbox on
+# Each gcp_vertex_ai id below answered through goose's gcp_vertex_ai provider on cloudbox on
 # 2026-11-19 (`GOOSE_PROVIDER=gcp_vertex_ai GOOSE_MODEL=<id> goose run
 # --no-session --text "Reply with exactly: ok"`). Mirrors the Vertex Claude and
 # Gemini models in opencode's config (users/dev/opencode-config.nix) minus the
@@ -17,8 +17,9 @@
 # needs goose >= 1.60.2, whose registry knows its 1M context and 64K output;
 # it answered the same check through goose 1.60.2 on 2026-11-24.
 #
-# codex_lb models: honk can switch a session across providers once honk-9qf.15.24
-# part B ships; these ids answer only while codex-lb has a live account.
+# codex_lb models (goose custom provider, users/dev/goose-providers.nix): honk
+# switches a session's provider when the picked id belongs to another provider
+# (honk-9qf.15.24). They answer only while the host's codex-lb has a live account.
 { pkgs }:
 let
   codexLb = import ./codex-lb-models.nix;

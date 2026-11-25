@@ -1,16 +1,19 @@
 # Declarative custom provider definition for goose.
 # Deploys ~/.config/goose/custom_providers/codex_lb.json on cloudbox, devbox, and macOS.
 #
-# Facts from goose 1.60.2 source (/tmp/goose-1602, read-only):
+# Facts from goose 1.60.2 source (also parsed and routed by 1.54.0-patched.18):
 # - Declarative providers load from <goose config dir>/custom_providers/*.json once at
 #   provider-registry init (goose-serve restart needed to pick up a new file).
 # - read_to_string follows symlinks, so deploying via pkgs.writeText is safe.
-# - ONE unparseable file fails the whole custom-provider load
-#   (crates/goose-providers/src/declarative.rs load_custom_providers), so build-time
-#   validation matters.
-# - With api_key_env "" and requires_auth false the client sends no auth
-#   (codex-lb accepts that — verified live).
-# - In crates/goose/src/providers/provider_registry.rs (lines 248-252), a declarative
+# - ONE unparseable file fails the whole custom-provider load, and with it goose's
+#   bundled declarative providers (register_declarative_providers returns early);
+#   the native gcp_vertex_ai/anthropic providers are unaffected. Hence the
+#   goose-custom-provider-codex-lb-check flake check.
+# - The empty api_key_env is what makes the client send no auth (requires_auth only
+#   matters when a key name is set); codex-lb injects the account token itself.
+# - Until goose-serve restarts, delegate(source: "*-astra") fails loudly with
+#   "Unknown provider: codex_lb".
+# - In crates/goose/src/providers/provider_registry.rs (around line 253), a declarative
 #   provider's metadata default_model is:
 #     config.models.first().map(|m| m.name.clone()).unwrap_or_default()
 #   so listing gpt-6-astra first in models makes it the provider's default model.
