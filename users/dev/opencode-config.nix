@@ -6,6 +6,8 @@
 let
   isDarwin = pkgs.stdenv.isDarwin;
   useGeminiForAgents = isDarwin || isCloudbox;
+  agentTwinModels = import ./agent-twin-models.nix;
+  codexLbData = import ./codex-lb-models.nix;
   # Persistent operator intent for the cloudbox aigateway. Shared with
   # hosts/cloudbox/configuration.nix (the unit's ConditionPathExists and the
   # canary) via a single-string file so the three readers cannot drift apart —
@@ -334,8 +336,8 @@ let
     mkAgentVariant ({
       inherit base;
       slug = "astra";
-      modelPin = "openai/gpt-6-astra";
-      modelTag = "gpt-6-astra";
+      modelPin = "openai/${agentTwinModels.astra}";
+      modelTag = agentTwinModels.astra;
     } // lib.optionalAttrs (caution != null) { inherit caution; });
 
   # The fable twin: claude-fable-5-2 (released 2026-11-09). Always opt-in: it
@@ -355,8 +357,8 @@ let
     mkAgentVariant {
       inherit base;
       slug = "fable";
-      modelPin = "anthropic/claude-fable-5-2";
-      modelTag = "fable-5-2";
+      modelPin = "anthropic/${agentTwinModels.fable}";
+      modelTag = lib.removePrefix "claude-" agentTwinModels.fable;
     };
 
   # devbox's ANTHROPIC_CLAUDE_CODE_VERSION override, which fable-5-2 needs on
@@ -847,41 +849,7 @@ let
   };
   # Prices: models.dev base tier, $/Mtok. See the LIST-PRICE note above for why
   # the higher (>272k context) tier is omitted and why these are not zero.
-  codexLbModels = {
-    "gpt-6-astra" = mkCodexLbModel {
-      name = "GPT-6 Astra";
-      effort = "high";
-      cost = { input = 10; output = 50; cache_read = 1; cache_write = 12.5; };
-    };
-    # codex-lb advertises ctx=500000 for this slug, but mkCodexLbModel's 272000
-    # limit is kept on purpose: above 272k the whole request bills at the higher
-    # tier (4/15/0.2), which opencode's cost merge cannot represent.
-    "gpt-6.1-sol" = mkCodexLbModel {
-      name = "GPT-6.1 Sol";
-      effort = "high";
-      cost = { input = 2; output = 10; cache_read = 0.1; cache_write = 2.5; };
-    };
-    "gpt-6-luna" = mkCodexLbModel {
-      name = "GPT-6 Luna";
-      effort = "medium";
-      cost = { input = 0.1; output = 0.5; cache_read = 0.01; cache_write = 0.125; };
-    };
-    "gpt-5.6-sol" = mkCodexLbModel {
-      name = "GPT-5.6 Sol";
-      effort = "high";
-      cost = { input = 4; output = 20; cache_read = 0.4; cache_write = 5; };
-    };
-    "gpt-5.6-terra" = mkCodexLbModel {
-      name = "GPT-5.6 Terra";
-      effort = "medium";
-      cost = { input = 2; output = 12; cache_read = 0.2; cache_write = 2.5; };
-    };
-    "gpt-5.6-luna" = mkCodexLbModel {
-      name = "GPT-5.6 Luna";
-      effort = "low";
-      cost = { input = 0.2; output = 1.2; cache_read = 0.02; cache_write = 0.25; };
-    };
-  };
+  codexLbModels = builtins.mapAttrs (_: mkCodexLbModel) codexLbData.catalog;
 
   # Platform overlay:
   # - devbox defaults to the Anthropic subscription path, so sessions
