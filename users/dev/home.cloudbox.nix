@@ -1240,6 +1240,18 @@ lib.mkIf isCloudbox {
     };
   };
 
+  # Default model hook for `honk launch` when `--model` is omitted (honk#59).
+  # Exec wrapper rather than a symlink so the target script's $0 stays inside
+  # its own checkout; fails open to the server default on any error or missing
+  # script.
+  xdg.configFile."honk/default-model-cmd" = {
+    executable = true;
+    text = ''
+      #!/bin/sh
+      exec "${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/model-switch-on-launch.sh" "$@"
+    '';
+  };
+
   # Stable token pre-seed: ensure ~/.local/state/honk exists (0700) and
   # ~/.local/state/honk/secret is a symlink to /run/secrets/pigeon_goose_acp_token.
   # L+ atomically replaces any regular file or broken symlink natively at
