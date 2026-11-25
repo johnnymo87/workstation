@@ -163,6 +163,17 @@ list or blockquote with no blank line is still absorbed into that list item or
 quote; leave a blank line before a trailing signature. Drop this patch once
 upstream bumps `slack-go-util >= v0.4.3`.
 
+**`local-model-signature.patch` is also ours.** When `AGENT_SESSION_ID` is set
+(goose spawns one MCP process per session) and `SLACK_MCP_SIGNATURE_CMD` is an
+absolute path (`agent-model-signature`), `conversations_add_message` and
+`file_upload`'s `initial_comment` pipe the text through
+`agent-model-signature rewrite` on stdin. If the last non-blank line is a
+standalone model signature (`--Claude`, `— Claude`, `--Gemini`, etc.), only the
+model name is swapped to match the session's live model in `sessions.db`
+(tracking mid-session Opus ↔ Gemini switches). Unsigned messages and errors pass
+through unchanged. OpenCode shares one MCP process per serve, so OpenCode
+sessions run the same rewrite in `assets/opencode/plugins/slack-signature.ts`.
+
 **Upgrading:** bump `rev`/`hash` in `pkgs/slack-mcp-server/default.nix` and
 re-download the PR patch. `git apply --check` passing tells you **nothing about
 what the patch now contains** — the branch is mutable, so diff the fresh

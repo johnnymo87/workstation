@@ -1,0 +1,218 @@
+diff --git a/pkg/handler/conversations.go b/pkg/handler/conversations.go
+index 8ab26b5..44040d9 100644
+--- a/pkg/handler/conversations.go
++++ b/pkg/handler/conversations.go
+@@ -218,6 +218,9 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
+ 		ch.logger.Error("Failed to parse add-message params", zap.Error(err))
+ 		return nil, err
+ 	}
++	if params.text != "" {
++		params.text = rewriteModelSignature(ctx, params.text)
++	}
+ 
+ 	var options []slack.MsgOption
+ 	if params.threadTs != "" {
+diff --git a/pkg/handler/file_upload.go b/pkg/handler/file_upload.go
+index 300a75e..dcc217e 100644
+--- a/pkg/handler/file_upload.go
++++ b/pkg/handler/file_upload.go
+@@ -263,6 +263,9 @@ func (ch *ConversationsHandler) FileUploadHandler(ctx context.Context, request m
+ 		ch.logger.Error("Failed to parse file_upload params", zap.Error(err))
+ 		return nil, err
+ 	}
++	if params.initialComment != "" {
++		params.initialComment = rewriteModelSignature(ctx, params.initialComment)
++	}
+ 
+ 	uploadParams := slack.UploadFileParameters{
+ 		Filename:        params.filename,
+diff --git a/pkg/handler/model_signature.go b/pkg/handler/model_signature.go
+new file mode 100644
+index 0000000..4296d96
+--- /dev/null
++++ b/pkg/handler/model_signature.go
+@@ -0,0 +1,94 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"time"
++)
++
++const (
++	modelSignatureTimeout   = 1 * time.Second
++	modelSignatureWaitDelay = 200 * time.Millisecond
++)
++
++// splitBeforeLastNonBlankLine returns the prefix strictly before the last
++// non-blank line, and the remainder starting at that line. If text has no
++// non-blank line, prefix is text and tail is "".
++func splitBeforeLastNonBlankLine(text string) (prefix, tail string) {
++	// Walk backwards over lines to find the start offset of the last non-blank line.
++	end := len(text)
++	for end > 0 {
++		lineEnd := end
++		if end > 0 && text[end-1] == '\n' {
++			end--
++		}
++		lineStart := strings.LastIndexByte(text[:end], '\n') + 1
++		line := text[lineStart:lineEnd]
++		if strings.TrimSpace(line) != "" {
++			return text[:lineStart], text[lineStart:]
++		}
++		end = lineStart
++	}
++	return text, ""
++}
++
++// rewriteModelSignature invokes SLACK_MCP_SIGNATURE_CMD to replace a trailing
++// model signature line (e.g. "--Claude" -> "--Gemini") with the active goose
++// session's live model family.
++//
++// Only active when AGENT_SESSION_ID is set (goose spawns one MCP process per
++// session; OpenCode shares a single MCP process across sessions and rewrites in
++// its tool.execute.before plugin instead).
++//
++// Fail-open everywhere: missing env, non-absolute path, timeout, non-zero exit,
++// empty output, or any mutation outside the last non-blank line all return the
++// original text unchanged. Message text is passed on stdin (never argv) and
++// stderr is discarded so message content never leaks into /proc/*/cmdline or
++// server logs.
++func rewriteModelSignature(ctx context.Context, text string) string {
++	return rewriteModelSignatureWithTimeout(ctx, text, modelSignatureTimeout)
++}
++
++func rewriteModelSignatureWithTimeout(ctx context.Context, text string, timeout time.Duration) string {
++	if text == "" {
++		return text
++	}
++	if os.Getenv("AGENT_SESSION_ID") == "" {
++		return text
++	}
++	cmdPath := os.Getenv("SLACK_MCP_SIGNATURE_CMD")
++	if cmdPath == "" || !filepath.IsAbs(cmdPath) {
++		return text
++	}
++
++	runCtx, cancel := context.WithTimeout(ctx, timeout)
++	defer cancel()
++
++	cmd := exec.CommandContext(runCtx, cmdPath, "rewrite")
++	cmd.Stdin = strings.NewReader(text)
++	var stdout bytes.Buffer
++	cmd.Stdout = &stdout
++	cmd.Stderr = io.Discard
++	cmd.WaitDelay = modelSignatureWaitDelay
++
++	if err := cmd.Run(); err != nil {
++		return text
++	}
++	out := stdout.String()
++	if out == "" {
++		return text
++	}
++
++	// Defence in depth: never accept helper output that altered anything before
++	// the last non-blank line (guards against truncation or a buggy helper).
++	origPrefix, _ := splitBeforeLastNonBlankLine(text)
++	if !strings.HasPrefix(out, origPrefix) {
++		return text
++	}
++	return out
++}
+diff --git a/pkg/handler/model_signature_test.go b/pkg/handler/model_signature_test.go
+new file mode 100644
+index 0000000..38e60ff
+--- /dev/null
++++ b/pkg/handler/model_signature_test.go
+@@ -0,0 +1,84 @@
++package handler
++
++import (
++	"context"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func writeFakeHelper(t *testing.T, script string) string {
++	t.Helper()
++	p := filepath.Join(t.TempDir(), "sig-helper")
++	require.NoError(t, os.WriteFile(p, []byte("#!/bin/sh\n"+script+"\n"), 0o755))
++	return p
++}
++
++func TestUnitRewriteModelSignature(t *testing.T) {
++	t.Run("empty text returns empty without invoking helper", func(t *testing.T) {
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", "/nonexistent/helper")
++		assert.Equal(t, "", rewriteModelSignature(context.Background(), ""))
++	})
++
++	t.Run("passthrough when AGENT_SESSION_ID is unset", func(t *testing.T) {
++		helper := writeFakeHelper(t, `echo "REWRITTEN"`)
++		t.Setenv("AGENT_SESSION_ID", "")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", helper)
++		assert.Equal(t, "Hello.\n\n--Claude", rewriteModelSignature(context.Background(), "Hello.\n\n--Claude"))
++	})
++
++	t.Run("passthrough when SLACK_MCP_SIGNATURE_CMD is unset", func(t *testing.T) {
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", "")
++		assert.Equal(t, "Hello.\n\n--Claude", rewriteModelSignature(context.Background(), "Hello.\n\n--Claude"))
++	})
++
++	t.Run("passthrough when SLACK_MCP_SIGNATURE_CMD is relative", func(t *testing.T) {
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", "relative/helper")
++		assert.Equal(t, "Hello.\n\n--Claude", rewriteModelSignature(context.Background(), "Hello.\n\n--Claude"))
++	})
++
++	t.Run("rewrites via helper stdin/stdout", func(t *testing.T) {
++		helper := writeFakeHelper(t, `
++if [ "$1" != "rewrite" ]; then exit 2; fi
++sed 's/--Claude/--Gemini/'
++`)
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", helper)
++		got := rewriteModelSignature(context.Background(), "Done.\n\n--Claude\n")
++		assert.Equal(t, "Done.\n\n--Gemini\n", got)
++	})
++
++	t.Run("rejects helper output that modifies body before last non-blank line", func(t *testing.T) {
++		helper := writeFakeHelper(t, `printf 'CORRUPTED\n\n--Gemini\n'`)
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", helper)
++		orig := "Original body.\n\n--Claude\n"
++		assert.Equal(t, orig, rewriteModelSignature(context.Background(), orig))
++	})
++
++	t.Run("fail-open on non-zero exit", func(t *testing.T) {
++		helper := writeFakeHelper(t, `echo "bad" >&2; exit 1`)
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", helper)
++		orig := "Done.\n\n--Claude"
++		assert.Equal(t, orig, rewriteModelSignature(context.Background(), orig))
++	})
++
++	t.Run("fail-open on timeout", func(t *testing.T) {
++		helper := writeFakeHelper(t, `sleep 5`)
++		t.Setenv("AGENT_SESSION_ID", "20261125_114")
++		t.Setenv("SLACK_MCP_SIGNATURE_CMD", helper)
++		orig := "Done.\n\n--Claude"
++		start := time.Now()
++		got := rewriteModelSignatureWithTimeout(context.Background(), orig, 50*time.Millisecond)
++		assert.Equal(t, orig, got)
++		assert.Less(t, time.Since(start), 2*time.Second)
++	})
++}

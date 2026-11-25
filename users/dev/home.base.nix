@@ -619,6 +619,8 @@ in
 
     # OpenCode per-session context-window usage ("who should compact?")
     localPkgs.oc-context
+    # Resolve active agent session's model family (Claude/Gemini/GPT) for post signatures
+    localPkgs.agent-model-signature
     localPkgs.oc-search
 
     # OpenCode session list CLI

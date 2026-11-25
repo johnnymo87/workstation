@@ -169,6 +169,7 @@
       nvims = p.callPackage ./pkgs/nvims { };
       oc-auto-attach = p.callPackage ./pkgs/oc-auto-attach { };
       oc-context = p.callPackage ./pkgs/oc-context { };
+      agent-model-signature = p.callPackage ./pkgs/agent-model-signature { };
       oc-attach-reap = p.callPackage ./pkgs/oc-attach-reap { };
       oc-search = p.callPackage ./pkgs/oc-search { };
       oc-cost = p.callPackage ./pkgs/oc-cost { };
@@ -3613,6 +3614,23 @@
       # A `checks.*` entry rather than leaning on pkgs/oc-context's checkPhase,
       # because test-unwired-tests.sh deliberately does not accept checkPhase as
       # evidence -- see the oc-session-list story in its header.
+      # agent-model-signature's suite: hermetic stdlib unittest over temp sqlite
+      # fixtures, wired here so test-unwired-tests.sh and CI verify it directly.
+      agent-model-signature = devboxPkgs.runCommand "agent-model-signature-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
+      } ''
+        python3 ${self}/pkgs/agent-model-signature/test_agent_model_signature.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -qE '^Ran [0-9]+ tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: agent-model-signature suite did not print a 'Ran N tests' summary." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: agent-model-signature suite did not finish OK." >&2
+          exit 1
+        }
+        touch $out
+      '';
+
       oc-context = devboxPkgs.runCommand "oc-context-tests" {
         nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.gnugrep ];
       } ''
