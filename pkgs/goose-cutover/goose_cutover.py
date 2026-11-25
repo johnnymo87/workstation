@@ -381,14 +381,22 @@ def quiet_reason_kind(reason: str) -> str:
 
 
 # stall-watch's coordinators (and anything they delegate) run every few minutes around the clock,
-# so their writes would keep the quiet window from ever forming (workstation-6w7i.27.17). A turn of
-# theirs in flight is still caught by the instantaneous stall-watch.service and honk checks.
+# so their writes would keep the quiet window from ever forming (workstation-6w7i.27.17). Their
+# automated prompts (stall-watch wakes, swarm mail) are not counted; a human typing to a coordinator
+# still is, as is every other session. A turn in flight is caught by the stall-watch.service and
+# honk checks, and D3 repeats them after stopping stall-watch.
 COORD_SESSIONS_DIR = "/home/dev/.local/state/stall-watch/coord-sessions/"
+_TEXT_PREFIX = '[{"type":"text","text":"'
 NON_COORDINATOR_MAX_ID_SQL = (
     "WITH RECURSIVE exempt(id) AS ("
     f" SELECT id FROM sessions WHERE working_dir LIKE '{COORD_SESSIONS_DIR}%'"
     " UNION SELECT s.id FROM sessions s JOIN exempt e ON s.parent_session_id = e.id"
-    ") SELECT max(id) FROM messages WHERE session_id NOT IN (SELECT id FROM exempt);"
+    ") SELECT max(id) FROM messages WHERE session_id NOT IN (SELECT id FROM exempt)"
+    " OR (session_id IN (SELECT id FROM sessions"
+    f" WHERE working_dir LIKE '{COORD_SESSIONS_DIR}%' AND parent_session_id IS NULL)"
+    f" AND role = 'user' AND content_json LIKE '{_TEXT_PREFIX}%'"
+    f" AND content_json NOT LIKE '{_TEXT_PREFIX}[sw wake run=%'"
+    f" AND content_json NOT LIKE '{_TEXT_PREFIX}<swarm_message%');"
 )
 
 
@@ -430,6 +438,8 @@ def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tu
         db_path = "file:/home/dev/.local/share/goose/sessions/sessions.db?mode=ro"
         res = runner.run(["sqlite3", db_path, NON_COORDINATOR_MAX_ID_SQL], check=False)
         curr_id = res.stdout.strip()
+        if res.rc != 0 or not curr_id.isdigit():
+            return False, f"sessions.db query failed (rc={res.rc}): {res.stderr.strip()[:200]}"
         now = runner.now()
         if obs["last_id"] is None or curr_id != obs["last_id"]:
             obs["last_id"] = curr_id
