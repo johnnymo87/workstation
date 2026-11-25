@@ -1887,8 +1887,8 @@
         cd ${self}
         export HOME="$TMPDIR"
         python3 .github/scripts/test_check_channel_eol.py 2>&1 | tee "$TMPDIR/out.txt"
-        grep -q '^Ran 7 tests' "$TMPDIR/out.txt" || {
-          echo "GATE FAILURE: expected 'Ran 7 tests'; update the count with the suite." >&2
+        grep -q '^Ran 9 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 9 tests'; update the count with the suite." >&2
           exit 1
         }
         grep -q '^OK$' "$TMPDIR/out.txt" || { echo "GATE FAILURE: suite not OK." >&2; exit 1; }

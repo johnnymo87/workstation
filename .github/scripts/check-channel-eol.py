@@ -83,8 +83,12 @@ def _default_run_gh(args: list[str], stdin: str | None = None) -> tuple[int, str
 
 
 def branch_exists(repo: str, branch: str, run_gh: Callable[..., tuple[int, str, str]]) -> bool:
-    rc, _, _ = run_gh(["api", f"repos/{repo}/branches/{branch}", "--silent"])
-    return rc == 0
+    rc, _, stderr = run_gh(["api", f"repos/{repo}/branches/{branch}", "--silent"])
+    if rc == 0:
+        return True
+    if "HTTP 404" in stderr or "404" in stderr:
+        return False
+    raise RuntimeError(f"gh api failed for {repo}@{branch} (exit {rc}): {stderr.strip()}")
 
 
 def check_upstream_readiness(
@@ -138,6 +142,8 @@ def run_check(
         today = datetime.datetime.now(datetime.timezone.utc).date()
 
     channels = parse_channels(flake_text)
+    if len(set(channels.values())) != 1:
+        raise ValueError(f"Mismatched release channels in flake.nix: {channels}")
     current = channels["nixpkgs"]
     target = next_channel(current)
     eol = channel_eol(current)

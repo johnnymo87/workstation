@@ -156,6 +156,22 @@ class CheckChannelEolTest(unittest.TestCase):
         close_calls = [c for c in gh.calls if c[0][:3] == ["issue", "close", "55"]]
         self.assertEqual(len(close_calls), 1)
 
+    def test_raises_on_non_404_api_error(self) -> None:
+        def failing_gh(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+            return (1, "", "gh: HTTP 403 API rate limit exceeded")
+
+        with self.assertRaises(RuntimeError):
+            MOD.branch_exists("NixOS/nixpkgs", "nixos-26.11", failing_gh)
+
+    def test_raises_on_mismatched_channels(self) -> None:
+        mismatched = SAMPLE_FLAKE_2605.replace("release-26.05", "release-25.11")
+        with self.assertRaises(ValueError):
+            MOD.run_check(
+                flake_text=mismatched,
+                today=datetime.date(2026, 8, 1),
+                run_gh=FakeGh(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
