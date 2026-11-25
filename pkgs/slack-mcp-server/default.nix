@@ -19,10 +19,11 @@
 # the immutable per-commit URL: .../commit/<sha>.patch.) The vendored copy here
 # was audited at PR head 9555f5901a5d3e738b836f2d1dde6675bf92d096.
 # If PR #334 lands upstream, DELETE that patch rather than carrying a merged
-# change twice; keep the local one until upstream restricts the download host.
+# change twice; keep the local ones until upstream restricts the download host
+# and bumps slack-go-util >= v0.4.3.
 buildGoModule rec {
   pname = "slack-mcp-server";
-  version = "1.3.0-pr334+hostguard";
+  version = "1.3.0-pr334+hostguard+linebreaks";
 
   src = fetchFromGitHub {
     owner = "korotovsky";
@@ -46,9 +47,13 @@ buildGoModule rec {
     # files.info's url_private straight to slack-go, which attaches the bearer
     # token to whatever URL it is given. This restricts that to Slack hosts.
     ./local-restrict-download-host.patch
+    # Ours, until upstream bumps slack-go-util >= v0.4.3. In v0.4.0, goldmark
+    # soft/hard line breaks inside a paragraph were dropped with no separator,
+    # gluing a trailing signature line ("\n--Claude") onto the prior sentence.
+    ./local-preserve-markdown-linebreaks.patch
   ];
 
-  vendorHash = "sha256-+uQRODO9oL8mGKBmdghTxE6R9Fz+3GJFVTi17306gT8=";
+  vendorHash = "sha256-cMKtF5mUzBT4XmkKbrMTfYqVZydBMc4TEHegos9rAwY=";
 
   subPackages = [ "cmd/slack-mcp-server" ];
 
