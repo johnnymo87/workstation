@@ -1328,9 +1328,11 @@ lib.mkIf isCloudbox {
         echo "Git already up to date"
       fi
 
-      # Always attempt switch (handles retry after failed switch)
+      # Always attempt switch (handles retry after failed switch).
+      # Runs the home-manager CLI pinned by the pulled repo's own flake.lock
+      # rather than fetching an unpinned branch tip from GitHub.
       echo "Applying home-manager..."
-      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-26.05 -- switch --flake "$repo#cloudbox"
+      ${pkgs.nix}/bin/nix run "$repo#home-manager" -- switch --flake "$repo#cloudbox"
 
       echo "Update complete"
     '';

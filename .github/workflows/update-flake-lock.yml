@@ -1,0 +1,138 @@
+name: Update flake.lock
+
+on:
+  schedule:
+    # Weekly on Mondays at 07:00 UTC
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: update-flake-lock
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Update stable flake inputs
+        run: |
+          set -euo pipefail
+          cp flake.lock /tmp/flake.lock.before
+          # Update stable-channel inputs only. Explicitly excluded:
+          # - devenv: tag-pinned to match eternal-machinery's devenv.yaml / CI
+          # - honk: bumped alongside feature PRs
+          # - nixpkgs-unstable: rolling unstable for gamebox Sunshine / devbox runner
+          # - nixpkgs-cloudflared: single-purpose overlay input meant to be retired
+          nix flake update nixpkgs home-manager nix-darwin sops-nix disko
+
+      - name: Check for changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet flake.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            python3 - <<'PY' > /tmp/flake-diff.md
+          import datetime, json
+
+          def load(path):
+              with open(path) as f:
+                  lock = json.load(f)
+              nodes = lock["nodes"]
+              out = {}
+              for name, target in nodes["root"]["inputs"].items():
+                  if not isinstance(target, str):
+                      continue
+                  locked = nodes[target].get("locked", {})
+                  lm = locked.get("lastModified")
+                  date = (
+                      datetime.datetime.fromtimestamp(lm, tz=datetime.timezone.utc).strftime("%Y-%m-%d")
+                      if lm
+                      else "?"
+                  )
+                  out[name] = (locked.get("rev", "")[:10], date)
+              return out
+
+          before = load("/tmp/flake.lock.before")
+          after = load("flake.lock")
+          rows = []
+          for name in sorted(set(before) | set(after)):
+              b = before.get(name, ("-", "-"))
+              a = after.get(name, ("-", "-"))
+              if b != a:
+                  rows.append(f"| `{name}` | `{b[0]}` ({b[1]}) | `{a[0]}` ({a[1]}) |")
+
+          print("| Input | Before | After |")
+          print("|---|---|---|")
+          for row in rows:
+              print(row)
+          PY
+          fi
+
+      - name: Create or update PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="auto/update-flake-lock"
+          today=$(date -u +%Y-%m-%d)
+
+          gh auth setup-git
+          git checkout -B "$branch"
+          git add flake.lock
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "chore(deps): update flake.lock (${today})"
+          git push -u origin "$branch" --force
+
+          {
+            echo "Weekly automated update of stable \`flake.lock\` inputs (\`nixpkgs\`, \`home-manager\`, \`nix-darwin\`, \`sops-nix\`, \`disko\`)."
+            echo
+            echo "Excluded inputs: \`devenv\`, \`honk\`, \`nixpkgs-unstable\`, \`nixpkgs-cloudflared\`."
+            echo
+            cat /tmp/flake-diff.md
+            echo
+            echo "**Human-merged (no auto-merge):**"
+            echo "- Merging deploys the \`home-manager\` half to cloudbox and devbox within 4h via \`pull-workstation.timer\`."
+            echo "- System updates (\`nixos-rebuild\` / \`darwin-switch\`) remain manual (stage devbox first, then cloudbox in a quiet window)."
+            echo "- \`aarch64-darwin\` is not yet built by required CI; verify on the Mac if Darwin-sensitive packages moved."
+          } > /tmp/pr-body.md
+
+          pr_state=$(gh pr view "$branch" --json state -q '.state' 2>/dev/null || echo "NONE")
+          if [ "$pr_state" = "OPEN" ]; then
+            pr_number=$(gh pr view "$branch" --json number -q '.number')
+            gh pr edit "$pr_number" \
+              --title "chore(deps): update flake.lock (${today})" \
+              --body-file /tmp/pr-body.md
+            echo "Updated open PR #${pr_number} for ${branch}"
+          else
+            gh pr create \
+              --title "chore(deps): update flake.lock (${today})" \
+              --body-file /tmp/pr-body.md \
+              --label "dependencies,automated" \
+              --head "$branch"
+          fi
+
+      - name: Report workflow status
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/report-workflow-failure.py \
+            --workflow "${{ github.workflow }}" \
+            --status "${{ job.status }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

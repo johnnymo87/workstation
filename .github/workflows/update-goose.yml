@@ -25,9 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
     steps:
       # No persisted GITHUB_TOKEN header: the push below authenticates with UPDATE_TOKEN.
-      - uses: actions/checkout@v4
+      - id: checkout
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -102,3 +104,13 @@ jobs:
                        -q ".[] | select(.headRefName | startswith(\"auto/goose-\")) | select(.headRefName != \"${branch}\") | .number"); do
             gh pr close "$n" --comment "Superseded by ${url}." --delete-branch
           done
+
+      - name: Report workflow status
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/report-workflow-failure.py \
+            --workflow "${{ github.workflow }}" \
+            --status "${{ job.status }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

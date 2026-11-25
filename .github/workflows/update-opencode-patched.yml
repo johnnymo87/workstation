@@ -24,6 +24,7 @@ jobs:
       issues: write
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Install Nix
@@ -272,3 +273,13 @@ jobs:
           } > /tmp/issue-body.md
 
           gh issue create --title "$title" --label "automated" --body-file /tmp/issue-body.md
+
+      - name: Report workflow status
+        if: always() && steps.checkout.outcome == 'success' && steps.patchcheck.outputs.reason != 'diverged'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/report-workflow-failure.py \
+            --workflow "${{ github.workflow }}" \
+            --status "${{ job.status }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
