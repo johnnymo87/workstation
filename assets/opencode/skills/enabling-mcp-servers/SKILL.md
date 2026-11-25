@@ -125,10 +125,12 @@ Things to know about `/mcp` in honk chat:
   `<server>__<tool>` (for example `slack-ro__channels_list`).
 - **Remote servers (datadog, notion) work in goose** through honkd's `mcp-remote` bridge, like
   any other server (both are `!`, so give a reason). datadog has hundreds of tools; turn it off
-  when done. notion needs a one-time OAuth login on the host before it can start: if enabling it
-  fails after about 25 s with "Please authorize this client", ask the human to run
-  `mcp-remote https://mcp.notion.com/mcp` in a terminal there and open the URL it prints (from a
-  laptop, forward the callback port it prints with `ssh -L` first). You cannot do the login.
+  when done. An OAuth server (notion, wiz) needs a one-time login on the host before it can
+  start: if enabling it fails after about 25 s with "Please authorize this client", ask the human
+  to run `mcp-remote <the server's url>` (exactly that binary, not `npx mcp-remote`, which keeps
+  its logins elsewhere) in a terminal there and open the URL it prints (from a laptop, forward
+  the callback port it prints with `ssh -L` first). On the Mac a browser tab may also open by
+  itself; it stops working once the enable gives up. You cannot do the login.
 - The setting is **per session and persistent**. Every client of the session sees it (status
   bar `mcp:slack-ro,...`), and it survives honkd and goose-serve restarts, with one catch: when
   goose reloads a session, it silently drops a server that fails to start (for example after a
