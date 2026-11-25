@@ -259,6 +259,9 @@ Check:
     description = "Publish fleet model-switch state to quota-telemetry (branch model-switch)";
     after = [ "network-online.target" "systemd-tmpfiles-setup.service" ];
     wants = [ "network-online.target" ];
+    unitConfig = {
+      OnFailure = [ "model-switch-publish-failure.service" ];
+    };
     path = commonPath;
     serviceConfig = {
       Type = "oneshot";
@@ -270,9 +273,39 @@ Check:
       TimeoutStartSec = "2min";
       MemoryMax = "256M";
       ExecStart = "${modelSwitchPublishScript}";
+      ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/model-switch-publish-failure/alerted";
       Environment = commonEnv;
       NoNewPrivileges = true;
       ProtectSystem = "full";
+    };
+  };
+
+  systemd.services.model-switch-publish-failure = {
+    description = "Alert that fleet model-switch publish failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "model-switch-publish-failure";
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "model-switch-publish-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show model-switch-publish -p Result --value 2>/dev/null || true)"
+        [ -n "$RESULT" ] || RESULT=unknown
+        ${driftAlert} /var/lib/model-switch-publish-failure/alerted \
+          "model-switch-publish:$RESULT" \
+          "Fleet model-switch publish FAILED (result: $RESULT).
+
+model-switch-publish.service did not complete, so Mac follower state on
+quota-telemetry branch model-switch is going stale (Mac fails closed to Opus
+after 20 minutes).
+
+Check:
+  systemctl status model-switch-publish.service --no-pager
+  journalctl -u model-switch-publish.service -n 50 --no-pager" \
+          3600 21600
+      ''}";
     };
   };
 

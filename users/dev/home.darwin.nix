@@ -219,6 +219,10 @@ lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
   home.packages = [
+    # Nix Python 3 (>= 3.11, with tomllib) on ~/.nix-profile/bin/python3 so
+    # model-switch-on-load.sh and model-switch-on-launch.sh do not fall back to
+    # macOS's /usr/bin/python3 (3.9).
+    pkgs.python3
     # honk CLI + honkd. honkd's --swarm-mcp-bin is the profile's bin/honk (a
     # stable path: goose stores the swarm extension's command per session).
     honkPkg
@@ -555,11 +559,11 @@ lib.mkIf isDarwin {
     # ~/.local/bin; goose-config.nix now warns on every switch while that exists.
     #
     # Provider config mirrors cloudbox's goose-serve (hosts/cloudbox), minus what
-    # a laptop lacks: gcp_vertex_ai pinned by env; Claude through this Mac's cfp
-    # (:8789) when the Max pool is seeded, the same gate opencode's Vertex
-    # baseURL uses, else straight to Vertex; Gemini (the sonnet-tier subagent
-    # roles, pkgs/goose-roles) always straight to Vertex, because cfp is
-    # Claude-only and there is no aigateway here.
+    # a laptop lacks: gcp_vertex_ai pinned by env; Claude and Gemini through this
+    # Mac's cfp (:8789) when the Max pool is seeded (the same gate opencode's
+    # Vertex baseURL uses), else straight to Vertex. With cfp >= v0.16.0 and
+    # CFP_GEMINI_AGY_ENABLED=true, cfp sends gemini-4-neon streaming turns to the
+    # Gemini Enterprise seat (agy) first and passes everything else to Vertex.
     #
     # RESTARTS: home-manager reloads a launchd agent whose plist changed, and the
     # plist names this script's store path, so a goose bump or any edit here

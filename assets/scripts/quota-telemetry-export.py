@@ -19,7 +19,7 @@ Cash row: {host, hour_utc, account: "", backend, model, input, cache_read,
            cache_write_5m, cache_write_1h: 0, output, requests, cost_usd}
 `input` excludes cache (Anthropic usage semantics). Usage: see --help.
 """
-import argparse, collections, datetime as dt, json, os, subprocess, sys
+import argparse, collections, datetime as dt, json, os, sqlite3, subprocess, sys
 
 FIELDS = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
 
@@ -186,6 +186,105 @@ def aggregate_cfp_events(lines, host: str, now: dt.datetime, since: dt.datetime)
     return weeks, first_hour
 
 
+def aggregate_goose_vertex_gemini(
+    db_path: str,
+    host: str,
+    now: dt.datetime,
+    since: dt.datetime,
+    cfp_cash_weeks: dict[str, list[dict]],
+):
+    """Return ({week_key: [rows]}, first_hour) for Mac goose Neon spend that bypassed cfp agy.
+
+    cfp's Gemini handler emits `usage` events for agy 2xx turns only; Vertex fallback
+    turns (after the agy budget fills or on agy errors) have no cfp usage event on hosts
+    without an aigateway. For each complete hour, any excess of goose's `usage_ledger`
+    Neon cost over cfp's `agy` Neon cost is emitted as a `vertex-gemini` row so the
+    fleet cap sees both legs without double-counting agy turns.
+    """
+    cur_hour = now.astimezone(dt.timezone.utc).replace(minute=0, second=0, microsecond=0)
+    since_s = int(since.timestamp())
+    cur_s = int(cur_hour.timestamp())
+
+    agy_by_hour: dict[tuple[str, str], dict] = {}
+    for rows in cfp_cash_weeks.values():
+        for r in rows:
+            if r.get("backend") == "agy":
+                key = (r["hour_utc"], r.get("model") or "")
+                agy_by_hour[key] = r
+
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    first_hour: dt.datetime | None = None
+    acc = collections.defaultdict(lambda: {
+        "input": 0, "cache_read": 0, "cache_write_5m": 0,
+        "output": 0, "requests": 0, "cost_usd": 0.0,
+    })
+    try:
+        min_row = con.execute(
+            "SELECT MIN(created_timestamp) FROM usage_ledger WHERE model LIKE '%gemini-4-neon%'"
+        ).fetchone()
+        if min_row and min_row[0] is not None:
+            first_hour = dt.datetime.fromtimestamp(int(min_row[0]), tz=dt.timezone.utc).replace(
+                minute=0, second=0, microsecond=0
+            )
+        rows = con.execute(
+            "SELECT created_timestamp, model, input_tokens, output_tokens, "
+            "cache_read_tokens, cache_write_tokens, cost "
+            "FROM usage_ledger "
+            "WHERE created_timestamp >= ? AND created_timestamp < ? "
+            "AND model LIKE '%gemini-4-neon%' AND cost IS NOT NULL",
+            (since_s, cur_s),
+        ).fetchall()
+        for ts_s, model, inp, outp, cread, cwrite, cost in rows:
+            if not isinstance(model, str) or not model:
+                continue
+            try:
+                c = float(cost)
+            except (ValueError, TypeError):
+                continue
+            if c <= 0:
+                continue
+            h = dt.datetime.fromtimestamp(int(ts_s), tz=dt.timezone.utc).replace(
+                minute=0, second=0, microsecond=0
+            )
+            a = acc[(h, model)]
+            a["input"] += _int_or_zero(inp)
+            a["output"] += _int_or_zero(outp)
+            a["cache_read"] += _int_or_zero(cread)
+            a["cache_write_5m"] += _int_or_zero(cwrite)
+            a["requests"] += 1
+            a["cost_usd"] += c
+    finally:
+        con.close()
+
+    weeks = collections.defaultdict(list)
+    for (h, model), v in acc.items():
+        h_str = h.strftime("%Y-%m-%dT%H:00Z")
+        agy = agy_by_hour.get((h_str, model))
+        agy_cost = float(agy.get("cost_usd") or 0.0) if agy else 0.0
+        delta_cost = v["cost_usd"] - agy_cost
+        if delta_cost <= 0.001:
+            continue
+        agy_reqs = _int_or_zero(agy.get("requests")) if agy else 0
+        y, w, _ = h.isocalendar()
+        weeks[f"{y}-W{w:02d}"].append({
+            "host": host,
+            "hour_utc": h_str,
+            "account": "",
+            "backend": "vertex-gemini",
+            "model": model,
+            "input": max(0, v["input"] - (_int_or_zero(agy.get("input")) if agy else 0)),
+            "cache_read": max(0, v["cache_read"] - (_int_or_zero(agy.get("cache_read")) if agy else 0)),
+            "cache_write_5m": max(0, v["cache_write_5m"] - (_int_or_zero(agy.get("cache_write_5m")) if agy else 0)),
+            "cache_write_1h": 0,
+            "output": max(0, v["output"] - (_int_or_zero(agy.get("output")) if agy else 0)),
+            "requests": max(1, v["requests"] - agy_reqs),
+            "cost_usd": round(delta_cost, 6),
+        })
+    for w_rows in weeks.values():
+        w_rows.sort(key=_row_sort_key)
+    return weeks, first_hour
+
+
 def git(repo, *args, check=True):
     return subprocess.run(["git", "-C", repo, *args], check=check, capture_output=True, text=True)
 
@@ -196,6 +295,8 @@ def main(argv=None) -> int:
                    os.path.expanduser("~/.local/state/teamclaude/usage.jsonl")))
     p.add_argument("--cfp-events", default=None,
                    help="optional cfp events.jsonl for cash rows (backend <> 'max')")
+    p.add_argument("--goose-db", default=None,
+                   help="optional goose sessions.db for Vertex Gemini fallback rows not in cfp events")
     p.add_argument("--repo", default=os.path.expanduser("~/.local/state/quota-telemetry/repo"))
     p.add_argument("--remote", default="git@github.com:johnnymo87/quota-telemetry.git")
     p.add_argument("--host", default=os.uname().nodename)
@@ -205,10 +306,13 @@ def main(argv=None) -> int:
 
     has_ledger = bool(a.ledger and os.path.exists(a.ledger))
     has_cfp = bool(a.cfp_events and os.path.exists(a.cfp_events))
-    if not has_ledger and not has_cfp:
+    has_goose = bool(a.goose_db and os.path.exists(a.goose_db))
+    if not has_ledger and not has_cfp and not has_goose:
         msg = f"no ledger at {a.ledger}"
         if a.cfp_events:
             msg += f" and no cfp events at {a.cfp_events}"
+        if a.goose_db:
+            msg += f" and no goose db at {a.goose_db}"
         print(f"{msg}; nothing to export")
         return 0
     if not os.path.isdir(os.path.join(a.repo, ".git")):
@@ -247,6 +351,14 @@ def main(argv=None) -> int:
     if has_cfp:
         with open(a.cfp_events, encoding="utf-8", errors="replace") as f:
             cash_weeks, first_cash = aggregate_cfp_events(f, a.host, now, since)
+
+    if has_goose:
+        vg_weeks, first_vg = aggregate_goose_vertex_gemini(a.goose_db, a.host, now, since, cash_weeks)
+        for key, vg_rows in vg_weeks.items():
+            cash_weeks.setdefault(key, []).extend(vg_rows)
+            cash_weeks[key].sort(key=_row_sort_key)
+        if first_vg is not None and (first_cash is None or first_vg < first_cash):
+            first_cash = first_vg
 
     all_weeks = sorted(set(max_weeks) | set(cash_weeks))
     total_exported = 0
