@@ -1289,9 +1289,9 @@ Check:
     glib nss nspr atk at-spi2-atk at-spi2-core cups dbus gtk3
     gdk-pixbuf pango cairo expat libdrm libgbm libxkbcommon
     alsa-lib libnotify libsecret udev libGL fontconfig freetype
-    xorg.libX11 xorg.libXcomposite xorg.libXdamage xorg.libXext
-    xorg.libXfixes xorg.libXrandr xorg.libxcb xorg.libXScrnSaver
-    xorg.libXtst xorg.libxshmfence xorg.libXrender xorg.libXi
+    libx11 libxcomposite libxdamage libxext
+    libxfixes libxrandr libxcb libxscrnsaver
+    libxtst libxshmfence libxrender libxi
   ];
 
   # Nix settings
@@ -1437,7 +1437,7 @@ Check:
     # which doesn't need the plugin set.
     gh gnupg pinentry-curses
     python314 ffmpeg uv
-    xorg.xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
+    xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
   ];
 
   # SSH server

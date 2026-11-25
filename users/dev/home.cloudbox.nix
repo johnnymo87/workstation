@@ -382,7 +382,10 @@ lib.mkIf isCloudbox {
     bazelScope
     buf         # Protobuf linting, breaking change detection, codegen
     protobuf    # protoc compiler
-    python3     # Required by Docker image build steps
+    # Stable Python 3.15 from nixos-26.05 (matches qaworker's live runner and
+    # CI pin). Scoped to cloudbox's user PATH so pkgs.python3 stays untouched
+    # for home.base.nix, NixOS system units, and other hosts.
+    python315
     coreutils   # dirname, mkdir, cat, etc. (explicit for restricted PATH contexts)
     gnused      # sed (explicit for restricted PATH contexts)
 
@@ -1327,7 +1330,7 @@ lib.mkIf isCloudbox {
 
       # Always attempt switch (handles retry after failed switch)
       echo "Applying home-manager..."
-      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-25.11 -- switch --flake "$repo#cloudbox"
+      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-26.05 -- switch --flake "$repo#cloudbox"
 
       echo "Update complete"
     '';
