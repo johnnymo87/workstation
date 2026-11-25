@@ -1184,6 +1184,11 @@ in
     # >=50K context with zero prompt-cache reads (a Vertex-side stuck session),
     # and tells the parent to re-dispatch once. workstation-ke9f.1.
     xdg.configFile."opencode/plugins/cache-miss-breaker.ts".source = "${assetsPath}/opencode/plugins/cache-miss-breaker.ts";
+    # slack-signature: keeps trailing model signatures ("--Claude" / "--Gemini")
+    # on Slack MCP posts accurate for OpenCode sessions, including mid-session
+    # model switches. Goose sessions do the same rewrite inside slack-mcp-server
+    # via SLACK_MCP_SIGNATURE_CMD.
+    xdg.configFile."opencode/plugins/slack-signature.ts".source = "${assetsPath}/opencode/plugins/slack-signature.ts";
    # Subagent routing overrides model selection for plan execution subagents
    # (implementer, spec-reviewer, code-reviewer). Disabled on devbox to let
    # subagents inherit the primary model, giving flexibility to choose at runtime.
@@ -1868,6 +1873,7 @@ in
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           --arg uploads "${slackUploadStagingDir}" \
+          --arg sigcmd "${config.home.homeDirectory}/.nix-profile/bin/agent-model-signature" \
           '.mcp.slack = {
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
@@ -1879,6 +1885,7 @@ in
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_PATHS": $uploads,
+              "SLACK_MCP_SIGNATURE_CMD": $sigcmd,
               "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }
@@ -1965,6 +1972,7 @@ in
           --arg xoxp "${secretRef "slack_mcp_xoxp_token"}" \
           --arg bin "${localPkgs.slack-mcp-server}/bin/slack-mcp-server" \
           --arg uploads "${slackUploadStagingDir}" \
+          --arg sigcmd "${config.home.homeDirectory}/.nix-profile/bin/agent-model-signature" \
           '.mcp.slack = {
             "type": "local",
             "command": [$bin, "--transport", "stdio"],
@@ -1976,6 +1984,7 @@ in
               "SLACK_MCP_ATTACHMENT_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_TOOL": "true",
               "SLACK_MCP_FILE_UPLOAD_PATHS": $uploads,
+              "SLACK_MCP_SIGNATURE_CMD": $sigcmd,
               "SLACK_MCP_LOG_LEVEL": "warn"
             }
           }

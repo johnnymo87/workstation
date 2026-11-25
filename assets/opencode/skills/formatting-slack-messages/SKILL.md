@@ -13,7 +13,7 @@ This skill is the cheat sheet. Read it before writing any Slack message.
 
 The MCP authenticates with the human's `xoxp` User OAuth token, so **every message posts under their name and avatar**. Read one back and it reports their `UserName`, distinguished only by a `BotName` field almost nobody looks at. Three consequences.
 
-**Disclose authorship.** Words you composed end with the signature `— Claude` on its own line after a blank line (the blank line keeps a trailing list or blockquote from absorbing the signature) — exactly that and nothing more — not `— Claude (drafted for <name>)`, not `— Claude, drafted for <name>`, nothing after `Claude`. The post already appears under their name, so naming them again is redundant. Words the human dictated go out verbatim and unsigned. Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
+**Disclose authorship.** Words you composed end with a signature naming your model family (`--Claude`, `--Gemini`, or `--GPT`) on its own line after a blank line (the blank line keeps a trailing list or blockquote from absorbing the signature) — exactly that and nothing more — not `--Claude (drafted for <name>)`, not `--Claude, drafted for <name>`, nothing after the model name. The Slack MCP server (goose) and `slack-signature` plugin (OpenCode) automatically rewrite a trailing signature line to match the session's live model family (including after mid-session model switches); scripts outside the MCP can run `agent-model-signature family`. The post already appears under the human's name, so naming them again is redundant. Words the human dictated go out verbatim and unsigned (the automatic rewrite never adds a signature to an unsigned message). Skip the "I am an AI assistant acting on behalf of" preamble; the signature is the disclosure. Without it, referring to the account owner in the third person reads as them talking about themselves.
 
 **Show the human the draft first.** The first post into a channel or thread, and anything that commits them to something, gets approved before it goes out — notifications carry the full text and cannot be recalled. Once they have approved a thread's shape or said "go ahead", later replies in it do not need re-approval. Reply in-thread (`thread_ts`) unless told otherwise: a top-level post notifies the entire channel. Never `<!here>` or `<!channel>` unasked.
 
@@ -121,7 +121,7 @@ The MCP exposes a `content_type` parameter on `slack_conversations_add_message`:
 
 | `content_type` | What happens |
 |---|---|
-| `text/markdown` (default) | MCP attempts to translate CommonMark → mrkdwn before sending. Translation is incomplete (`**bold**` → literal `**bold**` is a known failure) and can join a final signature line onto the preceding line, even across a blank line. |
+| `text/markdown` (default) | MCP converts CommonMark → Slack Block Kit before sending (`**bold**`, `*italic*`, `[label](url)`, lists, code blocks, and paragraph line breaks all work; leave a blank line before a trailing signature so a list or blockquote doesn't absorb it). Native mrkdwn `*bold*` is parsed as CommonMark italic under this mode. |
 | `text/plain` | Sent as-is. **Recommended when you've written native mrkdwn yourself.** |
 
 **Workflow:** write the message in native mrkdwn (single asterisks for bold, etc.) and pass `content_type: "text/plain"` to bypass the translation layer.

@@ -23,7 +23,7 @@
 # and bumps slack-go-util >= v0.4.3.
 buildGoModule rec {
   pname = "slack-mcp-server";
-  version = "1.3.0-pr334+hostguard+linebreaks";
+  version = "1.3.0-pr334+hostguard+linebreaks+modelsig";
 
   src = fetchFromGitHub {
     owner = "korotovsky";
@@ -51,6 +51,10 @@ buildGoModule rec {
     # soft/hard line breaks inside a paragraph were dropped with no separator,
     # gluing a trailing signature line ("\n--Claude") onto the prior sentence.
     ./local-preserve-markdown-linebreaks.patch
+    # Ours: rewrites a trailing model signature line ("--Claude" -> "--Gemini")
+    # via SLACK_MCP_SIGNATURE_CMD when AGENT_SESSION_ID is set (goose per-session
+    # MCPs), so posts under the user's account name the actual model family.
+    ./local-model-signature.patch
   ];
 
   vendorHash = "sha256-cMKtF5mUzBT4XmkKbrMTfYqVZydBMc4TEHegos9rAwY=";
