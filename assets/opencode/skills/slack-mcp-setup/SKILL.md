@@ -122,7 +122,7 @@ concurrent session, including repo checkouts and multi-MB data exports.
 
 ### Why a pinned build
 
-`pkgs/slack-mcp-server` builds the Go server from a pinned upstream rev with two
+`pkgs/slack-mcp-server` builds the Go server from a pinned upstream rev with
 vendored patches, because:
 
 1. Upstream has **no upload tool** — download only.
@@ -151,12 +151,25 @@ This is why `slack-ro` can keep the download tool at all. "Download is a read"
 is true of *workspace state* and false of *the token* — the guard is what makes
 the read-only variant actually safe to point at hostile input.
 
+**`local-preserve-markdown-linebreaks.patch` is also ours.** Upstream pins
+`github.com/takara2314/slack-go-util v0.4.0`, whose
+`convertInlineMarkdownToMrkdwn` drops goldmark soft and hard line breaks with
+no separator — gluing a trailing signature line (`\n--Claude`) onto the
+preceding paragraph sentence (`…Tuesday.--Claude`). The patch bumps
+`slack-go-util` to `v0.4.3` (upstream PRs #9 and #12, which preserve soft/hard
+line breaks inside paragraphs and paragraph breaks in blockquotes) with unit
+tests. Note that in CommonMark a line placed directly after a bullet/numbered
+list or blockquote with no blank line is still absorbed into that list item or
+quote; leave a blank line before a trailing signature. Drop this patch once
+upstream bumps `slack-go-util >= v0.4.3`.
+
 **Upgrading:** bump `rev`/`hash` in `pkgs/slack-mcp-server/default.nix` and
 re-download the PR patch. `git apply --check` passing tells you **nothing about
 what the patch now contains** — the branch is mutable, so diff the fresh
 download against the vendored copy and re-review anything new (or fetch the
 immutable `.../commit/<sha>.patch` URL). If #334 lands upstream, delete that
-patch; keep the local one until upstream restricts the download host.
+patch; keep the local patches until upstream restricts the download host and
+bumps `slack-go-util >= v0.4.3`.
 
 ## Getting the xoxp Token
 

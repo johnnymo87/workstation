@@ -1,0 +1,115 @@
+diff --git a/go.mod b/go.mod
+index 684fd19..581d2e9 100644
+--- a/go.mod
++++ b/go.mod
+@@ -15,7 +15,7 @@ require (
+ 	github.com/rusq/tagops v0.1.1
+ 	github.com/slack-go/slack v0.19.0
+ 	github.com/stretchr/testify v1.11.1
+-	github.com/takara2314/slack-go-util v0.4.0
++	github.com/takara2314/slack-go-util v0.4.3
+ 	go.uber.org/zap v1.27.1
+ 	golang.ngrok.com/ngrok/v2 v2.1.1
+ 	golang.org/x/net v0.50.0
+diff --git a/go.sum b/go.sum
+index 3527a82..690c5d5 100644
+--- a/go.sum
++++ b/go.sum
+@@ -160,8 +160,8 @@ github.com/stretchr/testify v1.2.2/go.mod h1:a8OnRcib4nhh0OaRAV+Yts87kKdq0PP7pXf
+ github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+ github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+-github.com/takara2314/slack-go-util v0.4.0 h1:sv/Cd95HNvIPDejpTY1bytT68Lb4dXgtcUFQhJZJNis=
+-github.com/takara2314/slack-go-util v0.4.0/go.mod h1:6m63Q+4p5F1qfa5NKfqspSWkgKCM168ZjabHBTXqQj0=
++github.com/takara2314/slack-go-util v0.4.3 h1:I7MDr2cLvfWkgGJmIhG/VYHGv4DASDWwVO4t7XuSOjg=
++github.com/takara2314/slack-go-util v0.4.3/go.mod h1:6m63Q+4p5F1qfa5NKfqspSWkgKCM168ZjabHBTXqQj0=
+ github.com/tidwall/gjson v1.14.2/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
+ github.com/tidwall/gjson v1.17.0 h1:/Jocvlh98kcTfpN2+JzGQWQcqrPQwDrVEMApx/M5ZwM=
+ github.com/tidwall/gjson v1.17.0/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
+diff --git a/pkg/handler/markdown_linebreaks_test.go b/pkg/handler/markdown_linebreaks_test.go
+new file mode 100644
+index 0000000..591736a
+--- /dev/null
++++ b/pkg/handler/markdown_linebreaks_test.go
+@@ -0,0 +1,81 @@
++package handler
++
++import (
++	"testing"
++
++	"github.com/slack-go/slack"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	slackGoUtil "github.com/takara2314/slack-go-util"
++)
++
++// Regression tests for the slack-go-util v0.4.3 bump in
++// local-preserve-markdown-linebreaks.patch. In v0.4.0, soft and hard line
++// breaks inside a paragraph were dropped with no separator, gluing a trailing
++// signature line ("…before Tuesday.\n--Claude") onto the previous sentence
++// ("…before Tuesday.--Claude").
++func TestUnitConvertMarkdownPreservesLineBreaks(t *testing.T) {
++	t.Run("paragraph soft line break before signature", func(t *testing.T) {
++		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(
++			"nothing here needs you before Tuesday.\n--Claude",
++		)
++		require.NoError(t, err)
++		require.Len(t, blocks, 1)
++		sec, ok := blocks[0].(*slack.SectionBlock)
++		require.True(t, ok, "expected SectionBlock, got %T", blocks[0])
++		assert.Equal(t, slack.MarkdownType, sec.Text.Type)
++		assert.Equal(t, "nothing here needs you before Tuesday.\n--Claude", sec.Text.Text)
++	})
++
++	t.Run("paragraph hard line breaks", func(t *testing.T) {
++		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(
++			"line one  \nline two\\\nline three",
++		)
++		require.NoError(t, err)
++		require.Len(t, blocks, 1)
++		sec, ok := blocks[0].(*slack.SectionBlock)
++		require.True(t, ok, "expected SectionBlock, got %T", blocks[0])
++		assert.Equal(t, "line one\nline two\nline three", sec.Text.Text)
++	})
++
++	t.Run("markdown formatting preserved alongside line break", func(t *testing.T) {
++		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(
++			"**Bold** and *italic* and [a link](https://example.com) and `code`.\n--Claude",
++		)
++		require.NoError(t, err)
++		require.Len(t, blocks, 1)
++		sec, ok := blocks[0].(*slack.SectionBlock)
++		require.True(t, ok, "expected SectionBlock, got %T", blocks[0])
++		assert.Equal(t, "*Bold* and _italic_ and <https://example.com|a link> and `code`.\n--Claude", sec.Text.Text)
++	})
++
++	t.Run("bullet list followed by blank line and signature", func(t *testing.T) {
++		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(
++			"- item one\n- item two\n\n--Claude",
++		)
++		require.NoError(t, err)
++		require.Len(t, blocks, 2)
++		_, ok := blocks[0].(*slack.RichTextBlock)
++		require.True(t, ok, "expected RichTextBlock for list, got %T", blocks[0])
++		sec, ok := blocks[1].(*slack.SectionBlock)
++		require.True(t, ok, "expected SectionBlock for signature, got %T", blocks[1])
++		assert.Equal(t, "--Claude", sec.Text.Text)
++	})
++
++	t.Run("multi-paragraph blockquote", func(t *testing.T) {
++		blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(
++			"> first\n>\n> second",
++		)
++		require.NoError(t, err)
++		require.Len(t, blocks, 1)
++		rt, ok := blocks[0].(*slack.RichTextBlock)
++		require.True(t, ok, "expected RichTextBlock, got %T", blocks[0])
++		require.Len(t, rt.Elements, 1)
++		quote, ok := rt.Elements[0].(*slack.RichTextQuote)
++		require.True(t, ok, "expected RichTextQuote, got %T", rt.Elements[0])
++		require.Len(t, quote.Elements, 1)
++		txt, ok := quote.Elements[0].(*slack.RichTextSectionTextElement)
++		require.True(t, ok, "expected RichTextSectionTextElement, got %T", quote.Elements[0])
++		assert.Equal(t, "first\n\nsecond", txt.Text)
++	})
++}
