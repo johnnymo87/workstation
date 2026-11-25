@@ -26,6 +26,10 @@
 # The Mac gets cloudbox's build: its goose-serve is on gcp_vertex_ai too, Claude
 # via its own cfp when the Max pool is seeded, Gemini straight to Vertex
 # (users/dev/home.darwin.nix, workstation-6w7i.17).
+#
+# Twins: oracle and adversarial-reviewer also have -astra and -fable twins.
+# astra twins run on the codex_lb provider (codex-lb on 127.0.0.1:2455) on all
+# hosts; fable twins run on the host's provider (gcp_vertex_ai or anthropic).
 lib.mkIf (isCloudbox || isDevbox || isDarwin) {
   home.file.".config/goose/subagent-roles".source =
     if isDevbox

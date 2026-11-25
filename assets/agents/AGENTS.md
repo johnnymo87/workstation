@@ -115,7 +115,8 @@ harnesses, generated from the same agent definitions
   `adversarial-reviewer-opus`. Which handle to use on which host, and what to do
   when one is unavailable, is in `~/.config/opencode/AGENTS.opencode.md`.
 - **goose:** `delegate` with `source:` one of `oracle`, `adversarial-reviewer`,
-  `code-reviewer`, `spec-reviewer`, `implementer`. The read-only roles get
+  `code-reviewer`, `spec-reviewer`, `implementer` (or twin sources `oracle-astra`,
+  `adversarial-reviewer-astra`, `oracle-fable`, `adversarial-reviewer-fable`). The read-only roles get
   `ro-shell` in place of the developer shell.
 
 Wherever a skill says "dispatch `adversarial-reviewer-opus`" (or the oracle),

@@ -26,6 +26,11 @@
 # this to "anthropic" there. The model ids are the same bare claude-* names on
 # both providers.
 #
+# twins: oracle and adversarial-reviewer also emit -astra and -fable variants
+# from the same source agent .md files. astra routes through the codex_lb provider
+# (ChatGPT subscription pool on 127.0.0.1:2455); fable runs on the host provider
+# (gcp_vertex_ai or anthropic).
+#
 # TODO: remove skills platform extension from role recipes and unscoped.yaml in
 # the A10 PR (bead workstation-6w7i.26.15) once every goose host is >= 1.60.
 # While /var/lib/goose/current still runs 1.54 on NixOS hosts, roles must keep
@@ -34,7 +39,10 @@
 { lib, runCommand, python3, ro-shell, goose, agentsDir,
   provider ? "gcp_vertex_ai",
   opusModel ? "claude-opus-5-5",
-  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-sonnet-5-5") }:
+  sonnetModel ? (if provider == "gcp_vertex_ai" then "gemini-3.8-flash" else "claude-sonnet-5-5"),
+  astraProvider ? (import ../../users/dev/codex-lb-models.nix).provider,
+  astraModel ? (import ../../users/dev/agent-twin-models.nix).astra,
+  fableModel ? (import ../../users/dev/agent-twin-models.nix).fable }:
 
 runCommand "goose-roles" {
   nativeBuildInputs = [ (python3.withPackages (ps: [ ps.pyyaml ])) goose ];
@@ -44,7 +52,9 @@ runCommand "goose-roles" {
 } ''
   python3 ${./gen_goose_roles.py} --agents-dir ${agentsDir} --out $out \
     --ro-shell-cmd ${ro-shell}/bin/ro-shell --provider ${provider} \
-    --opus-model ${opusModel} --sonnet-model ${sonnetModel}
+    --opus-model ${opusModel} --sonnet-model ${sonnetModel} \
+    --astra-provider ${astraProvider} --astra-model ${astraModel} \
+    --fable-model ${fableModel}
   export HOME=$TMPDIR GOOSE_DISABLE_KEYRING=true
   for f in $out/roles/*.yaml $out/unscoped.yaml; do
     goose recipe validate "$f" || { echo "goose-roles: $f failed goose recipe validate" >&2; exit 1; }

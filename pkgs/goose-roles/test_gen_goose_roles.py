@@ -96,6 +96,46 @@ class GenTest(unittest.TestCase):
         with self.assertRaises(g.GenError):
             g.build_role("x", RO.replace("anthropic/claude-opus-5-5", "openai/gpt-6-astra"), **KW)
 
+    def test_twin_roles_generation(self):
+        base_role = g.build_role("oracle", RO, **KW)
+        for provider in ("gcp_vertex_ai", "anthropic"):
+            kw = dict(KW, provider=provider)
+            # astra twin
+            r_astra = g.build_role("oracle", RO, twin="astra", **kw)
+            self.assertEqual(r_astra["title"], "oracle-astra")
+            self.assertEqual(r_astra["settings"]["goose_provider"], "codex_lb")
+            self.assertEqual(r_astra["settings"]["goose_model"], "gpt-6-astra")
+            self.assertEqual(r_astra["settings"]["max_turns"], 80)
+            self.assertEqual(r_astra["settings"]["thinking_effort"], "high")
+            self.assertEqual(r_astra["instructions"], base_role["instructions"])
+            self.assertEqual(r_astra["extensions"], base_role["extensions"])
+            self.assertIn("CAUTION — use this gpt-6-astra variant ONLY when the user explicitly asks for it; otherwise default to oracle", r_astra["description"])
+
+            # fable twin
+            r_fable = g.build_role("oracle", RO, twin="fable", **kw)
+            self.assertEqual(r_fable["title"], "oracle-fable")
+            self.assertEqual(r_fable["settings"]["goose_provider"], provider)
+            self.assertEqual(r_fable["settings"]["goose_model"], "claude-fable-5-2")
+            self.assertEqual(r_fable["settings"]["max_turns"], 80)
+            self.assertEqual(r_fable["settings"]["thinking_effort"], "high")
+            self.assertEqual(r_fable["instructions"], base_role["instructions"])
+            self.assertEqual(r_fable["extensions"], base_role["extensions"])
+            self.assertIn("CAUTION — use this fable-5-2 variant ONLY when the user explicitly asks for it; otherwise default to oracle", r_fable["description"])
+
+    def test_twin_source_without_opus_pin_dies(self):
+        for bad_src in (RW, RO.replace("anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5"),
+                        RO.replace("anthropic/claude-opus-5-5", "openai/gpt-6-astra")):
+            with self.subTest(src=bad_src):
+                with self.assertRaises(g.GenError):
+                    g.build_role("oracle", bad_src, twin="astra", **KW)
+                with self.assertRaises(g.GenError):
+                    g.build_role("oracle", bad_src, twin="fable", **KW)
+
+    def test_base_role_rejects_gpt_model(self):
+        # map_model accepts gpt-* ids ONLY for the astra twin, never for base roles
+        with self.assertRaises(g.GenError):
+            g.build_role("oracle", RO, **dict(KW, opus_model="gpt-6-astra"))
+
     def test_gemini_worker_model(self):
         # cloudbox: sonnet-tier roles run Gemini on gcp_vertex_ai, like opencode's sddModel.
         kw = dict(KW, sonnet_model="gemini-3.8-flash")
@@ -117,9 +157,14 @@ class GenTest(unittest.TestCase):
             self.skipTest("set GOOSE_ROLES_AGENTS_DIR")
         out = tempfile.mkdtemp()
         g.generate(agents, out, g.ROLES, **KW)
+        expected_roles = sorted(
+            list(g.ROLES)
+            + [f"{b}-astra" for b in g.TWIN_BASES]
+            + [f"{b}-fable" for b in g.TWIN_BASES]
+        )
         files = sorted(os.listdir(os.path.join(out, "roles")))
-        self.assertEqual(files, sorted(f"{r}.yaml" for r in g.ROLES))
-        for role in g.ROLES:
+        self.assertEqual(files, sorted(f"{r}.yaml" for r in expected_roles))
+        for role in expected_roles:
             with open(os.path.join(out, "roles", f"{role}.yaml")) as fh:
                 r = yaml.safe_load(fh)
             ro = "ro-shell" in [e["name"] for e in r["extensions"]]
@@ -144,32 +189,56 @@ class GenTest(unittest.TestCase):
         # that host: cloudbox Gemini via the gateway (sddModel); devbox
         # claude-sonnet-5-5 (the agents' own pin, not rewritten there; Jonathan
         # 2026-11-23, workstation-6w7i.29). oracle/adversarial-reviewer: Opus on both.
+        # Twins: *-astra runs gpt-6-astra, *-fable runs claude-fable-5-2 on both hosts.
         missing = [k for k in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX") if not os.environ.get(k)]
         if missing:
             self.skipTest(f"set {', '.join(missing)}")
         sonnet_tier = {"implementer", "code-reviewer", "spec-reviewer"}
         tier_model = {"DEPLOYED_ROLES_CLOUDBOX": "gemini-3.8-flash", "DEPLOYED_ROLES_DEVBOX": "claude-sonnet-5-5"}
+        all_roles = (
+            list(g.ROLES)
+            + [f"{b}-astra" for b in g.TWIN_BASES]
+            + [f"{b}-fable" for b in g.TWIN_BASES]
+        )
         for var in ("DEPLOYED_ROLES_DEVBOX", "DEPLOYED_ROLES_CLOUDBOX"):
-            for role in g.ROLES:
+            for role in all_roles:
                 with self.subTest(host=var, role=role):
-                    with open(os.path.join(os.environ[var], "roles", f"{role}.yaml")) as fh:
+                    file_path = os.path.join(os.environ[var], "roles", f"{role}.yaml")
+                    self.assertTrue(os.path.isfile(file_path), f"{file_path} must exist")
+                    with open(file_path) as fh:
                         model = yaml.safe_load(fh)["settings"]["goose_model"]
-                    self.assertEqual(model, tier_model[var] if role in sonnet_tier else "claude-opus-5-5")
+                    if role.endswith("-astra"):
+                        self.assertEqual(model, "gpt-6-astra")
+                    elif role.endswith("-fable"):
+                        self.assertEqual(model, "claude-fable-5-2")
+                    elif role in sonnet_tier:
+                        self.assertEqual(model, tier_model[var])
+                    else:
+                        self.assertEqual(model, "claude-opus-5-5")
 
     def test_deployed_roles_provider_per_host(self):
         # What home-manager actually deploys on each host (flake check wiring):
         # devbox has no Vertex, so its roles must not name gcp_vertex_ai.
+        # astra twins run on codex_lb on both hosts; fable twins run on the host provider.
         want = {"DEPLOYED_ROLES_DEVBOX": "anthropic", "DEPLOYED_ROLES_CLOUDBOX": "gcp_vertex_ai"}
         missing = [k for k in want if not os.environ.get(k)]
         if missing:
             self.skipTest(f"set {', '.join(missing)}")
+        all_roles = (
+            list(g.ROLES)
+            + [f"{b}-astra" for b in g.TWIN_BASES]
+            + [f"{b}-fable" for b in g.TWIN_BASES]
+        )
         for var, provider in want.items():
             roles_dir = os.path.join(os.environ[var], "roles")
-            for role in g.ROLES:
+            for role in all_roles:
                 with self.subTest(host=var, role=role):
-                    with open(os.path.join(roles_dir, f"{role}.yaml")) as fh:
+                    file_path = os.path.join(roles_dir, f"{role}.yaml")
+                    self.assertTrue(os.path.isfile(file_path), f"{file_path} must exist")
+                    with open(file_path) as fh:
                         r = yaml.safe_load(fh)
-                    self.assertEqual(r["settings"]["goose_provider"], provider)
+                    expected_provider = "codex_lb" if role.endswith("-astra") else provider
+                    self.assertEqual(r["settings"]["goose_provider"], expected_provider)
 
 
 if __name__ == "__main__":
