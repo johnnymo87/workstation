@@ -753,9 +753,14 @@ lib.mkIf isDevbox {
 
       # Always attempt switch (handles retry after failed switch).
       # Runs the home-manager CLI pinned by the pulled repo's own flake.lock
-      # rather than fetching an unpinned branch tip from GitHub.
+      # rather than fetching an unpinned branch tip from GitHub; falls back
+      # only if a rollback lands on a commit before `#home-manager` was exposed.
       echo "Applying home-manager..."
-      ${pkgs.nix}/bin/nix run "$repo#home-manager" -- switch --flake "$repo#dev"
+      if ${pkgs.nix}/bin/nix eval "$repo#packages.aarch64-linux.home-manager.name" >/dev/null 2>&1; then
+        ${pkgs.nix}/bin/nix run "$repo#home-manager" -- switch --flake "$repo#dev"
+      else
+        ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-26.05 -- switch --flake "$repo#dev"
+      fi
 
       echo "Update complete"
     '';

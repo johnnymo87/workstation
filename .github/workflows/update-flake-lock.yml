@@ -91,13 +91,12 @@ jobs:
           branch="auto/update-flake-lock"
           today=$(date -u +%Y-%m-%d)
 
-          gh auth setup-git
           git checkout -B "$branch"
           git add flake.lock
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -m "chore(deps): update flake.lock (${today})"
-          git push -u origin "$branch" --force
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}" --force
 
           {
             echo "Weekly automated update of stable \`flake.lock\` inputs (\`nixpkgs\`, \`home-manager\`, \`nix-darwin\`, \`sops-nix\`, \`disko\`)."

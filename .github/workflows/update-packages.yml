@@ -56,8 +56,7 @@ jobs:
       - name: Run nix-update
         if: env.SKIP != 'true'
         run: |
-          nixpkgs_rev=$(jq -r '.nodes.nixpkgs.locked.rev' flake.lock)
-          nix run "github:NixOS/nixpkgs/${nixpkgs_rev}#nix-update" -- --flake "${{ matrix.package }}"
+          nix run --inputs-from . nixpkgs#nix-update -- --flake "${{ matrix.package }}"
 
       - name: Check for changes
         if: env.SKIP != 'true'
@@ -82,13 +81,12 @@ jobs:
           version="${{ steps.diff.outputs.version }}"
           branch="auto/update-${pkg}"
 
-          gh auth setup-git
           git checkout -B "$branch"
           git add -A
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -m "chore(deps): update ${pkg} to ${version}"
-          git push -u origin "$branch" --force
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}" --force
 
           # gh pr view matches merged/closed PRs too -- only skip if truly open
           pr_state=$(gh pr view "$branch" --json state -q '.state' 2>/dev/null || echo "NONE")

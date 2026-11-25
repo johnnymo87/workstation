@@ -275,7 +275,7 @@ jobs:
           gh issue create --title "$title" --label "automated" --body-file /tmp/issue-body.md
 
       - name: Report workflow status
-        if: always() && steps.checkout.outcome == 'success' && steps.patchcheck.outputs.reason != 'diverged'
+        if: always() && steps.checkout.outcome == 'success' && steps.patchcheck.outputs.reason != 'diverged' && steps.patchcheck.outputs.reason != 'unreachable'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
