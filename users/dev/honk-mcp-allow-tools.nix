@@ -35,7 +35,10 @@
 # incidents, hosts, notebooks, RUM. Measured with tools/list against
 # https://mcp.us3.datadoghq.com/v1/mcp on 2026-11-25: core is 37 tools, 28
 # with readOnlyHint=true once the three `_dd_*` "do-not-call" tools are left
-# out. A worker that needs a write tool or another toolset gets it added here.
+# out. Eight read-only tools from other toolsets (error tracking, monitor
+# groups, downtimes, SLOs, service health) are added, for 36 in all. A worker
+# that needs a write tool (monitor create/update) or another toolset gets it
+# added here.
 { lib, datadog ? true }:
 let
   slackRoReadTools = [
@@ -93,6 +96,16 @@ let
     "search_datadog_rum_events"
     "search_datadog_sdk"
     "search_datadog_spans"
+    # Read-only tools from outside core (toolsets=all), for error triage,
+    # monitor status and service health.
+    "analyze_datadog_error_tracking_errors"
+    "apm_get_service_health"
+    "get_datadog_error_tracking_issue"
+    "list_downtimes"
+    "monitor_groups_search"
+    "search_datadog_error_tracking_issues"
+    "search_datadog_slos"
+    "validate_monitor_definition"
   ];
 
   # The core toolset's tools with readOnlyHint=false. execute_code_write can
