@@ -214,6 +214,51 @@ class TestMainExportAndImportRoundTrip(unittest.TestCase):
         self.assertEqual(fah[0][0:2], ("mac", "acct-m"))
         conn.close()
 
+    def test_goose_db_exports_vertex_gemini_delta_without_double_counting_agy(self):
+        # Hour 13: cfp agy recorded $10.00 of Neon; goose usage_ledger recorded $14.50 total
+        # (so $4.50 fell back to Vertex). Hour 12: cfp agy recorded $8.00; goose recorded $8.00 (no delta).
+        with open(self.events, "w") as f:
+            f.write(json.dumps({"type": "route", "ts": _ms("2026-11-24T12:10:00Z"), "requestId": "a1", "model": "gemini-4-neon"}) + "\n")
+            f.write(json.dumps({"type": "usage", "ts": _ms("2026-11-24T12:10:00Z"), "requestId": "a1", "backend": "agy", "cost": 8.0, "usage": {"input": 1000, "output": 200}}) + "\n")
+            f.write(json.dumps({"type": "route", "ts": _ms("2026-11-24T13:10:00Z"), "requestId": "a2", "model": "gemini-4-neon"}) + "\n")
+            f.write(json.dumps({"type": "usage", "ts": _ms("2026-11-24T13:10:00Z"), "requestId": "a2", "backend": "agy", "cost": 10.0, "usage": {"input": 2000, "output": 400}}) + "\n")
+
+        goose_db = os.path.join(self.tmpdir.name, "sessions.db")
+        gcon = sqlite3.connect(goose_db)
+        gcon.execute(
+            "CREATE TABLE usage_ledger ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, created_timestamp INTEGER, "
+            "model TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, "
+            "cache_write_tokens INTEGER, cost REAL)"
+        )
+        t12 = int(dt.datetime(2026, 11, 24, 12, 10, tzinfo=dt.timezone.utc).timestamp())
+        t13 = int(dt.datetime(2026, 11, 24, 13, 10, tzinfo=dt.timezone.utc).timestamp())
+        gcon.executemany(
+            "INSERT INTO usage_ledger (session_id, created_timestamp, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost) "
+            "VALUES (?, ?, ?, ?, ?, 0, 0, ?)",
+            [
+                ("s1", t12, "gemini-4-neon", 1000, 200, 8.0),
+                ("s1", t13, "gemini-4-neon", 2000, 400, 10.0),
+                ("s1", t13 + 60, "gemini-4-neon", 900, 100, 4.5),
+                ("s1", t13 + 90, "claude-opus-5-5", 500, 100, 3.0),
+            ],
+        )
+        gcon.commit()
+        gcon.close()
+
+        now = dt.datetime(2026, 11, 24, 15, 0, tzinfo=dt.timezone.utc)
+        since = dt.datetime(2026, 11, 23, 0, 0, tzinfo=dt.timezone.utc)
+        with open(self.events) as f:
+            cfp_weeks, _ = qte.aggregate_cfp_events(f, "mac", now, since)
+        vg_weeks, _ = qte.aggregate_goose_vertex_gemini(goose_db, "mac", now, since, cfp_weeks)
+        all_vg = [r for rows in vg_weeks.values() for r in rows]
+        self.assertEqual(len(all_vg), 1)
+        self.assertEqual(all_vg[0]["hour_utc"], "2026-11-24T13:00Z")
+        self.assertEqual(all_vg[0]["backend"], "vertex-gemini")
+        self.assertEqual(all_vg[0]["model"], "gemini-4-neon")
+        self.assertAlmostEqual(all_vg[0]["cost_usd"], 4.5, places=6)
+        self.assertEqual(all_vg[0]["requests"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

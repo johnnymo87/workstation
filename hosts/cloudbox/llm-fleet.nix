@@ -18,7 +18,7 @@ let
     "HOME=/home/dev"
     "\"GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15\""
   ];
-  commonPath = [ pkgs.git pkgs.openssh pkgs.coreutils pkgs.findutils llmLedger ];
+  commonPath = [ pkgs.git pkgs.openssh pkgs.coreutils pkgs.findutils pkgs.python3 llmLedger ];
 
   fleetImportScript = pkgs.writeShellScript "llm-fleet-import" ''
     set -euo pipefail
@@ -107,12 +107,68 @@ let
 
     exit 0
   '';
+
+  modelSwitchPublishScript = pkgs.writeShellScript "model-switch-publish" ''
+    set -euo pipefail
+
+    PUBLISH_DIR="/var/lib/llm-fleet/model-switch"
+    REMOTE="git@github.com:johnnymo87/quota-telemetry.git"
+    BRANCH="model-switch"
+    REPO_DIR="/home/dev/projects/eng-agent-platform"
+    FEED="/var/lib/llm-ledger/commitment-spend.json"
+
+    export HOME="/home/dev"
+    export PYTHONPATH="$REPO_DIR"
+    export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15"
+
+    if [ ! -f "$HOME/.local/state/model-switch/state.json" ]; then
+      echo "model-switch-publish: no state.json yet; skipping" >&2
+      exit 0
+    fi
+
+    if [ ! -d "$PUBLISH_DIR/.git" ]; then
+      mkdir -p "$PUBLISH_DIR"
+      cd "$PUBLISH_DIR"
+      git init -q -b "$BRANCH"
+      git remote add origin "$REMOTE"
+    else
+      cd "$PUBLISH_DIR"
+    fi
+
+    python3 -m stallwatch.modelswitch export-fleet --feed "$FEED" --leader cloudbox > fleet-state.json.tmp
+    mv -f fleet-state.json.tmp fleet-state.json
+
+    tree=$(git add fleet-state.json && git write-tree)
+    pub_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    commit=$(git commit-tree "$tree" -m "model-switch $pub_at")
+    git update-ref "refs/heads/$BRANCH" "$commit"
+
+    pushed=0
+    for try in 1 2 3; do
+      if timeout 30 git push -q -f origin "refs/heads/$BRANCH:refs/heads/$BRANCH"; then
+        pushed=1
+        break
+      fi
+      echo "model-switch-publish: git push attempt $try failed" >&2
+      if [ "$try" -lt 3 ]; then
+        sleep 5
+      fi
+    done
+
+    if [ "$pushed" -ne 1 ]; then
+      echo "model-switch-publish: ERROR: all 3 git push attempts failed to origin refs/heads/$BRANCH" >&2
+      exit 1
+    fi
+
+    git reflog expire --expire=now --all && git gc --prune=now -q || true
+  '';
 in
 {
   systemd.tmpfiles.rules = [
     "d /var/lib/llm-fleet 0750 dev dev -"
     "d /var/lib/llm-fleet/telemetry 0750 dev dev -"
     "d /var/lib/llm-fleet/outlook 0750 dev dev -"
+    "d /var/lib/llm-fleet/model-switch 0750 dev dev -"
   ];
 
   systemd.services.llm-fleet-import = {
@@ -196,6 +252,70 @@ Check:
       Environment = commonEnv;
       NoNewPrivileges = true;
       ProtectSystem = "full";
+    };
+  };
+
+  systemd.services.model-switch-publish = {
+    description = "Publish fleet model-switch state to quota-telemetry (branch model-switch)";
+    after = [ "network-online.target" "systemd-tmpfiles-setup.service" ];
+    wants = [ "network-online.target" ];
+    unitConfig = {
+      OnFailure = [ "model-switch-publish-failure.service" ];
+    };
+    path = commonPath;
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      SupplementaryGroups = [ "llm-ledger" ];
+      UMask = "0027";
+      Nice = 10;
+      TimeoutStartSec = "2min";
+      MemoryMax = "256M";
+      ExecStart = "${modelSwitchPublishScript}";
+      ExecStartPost = "${pkgs.coreutils}/bin/rm -f /var/lib/model-switch-publish-failure/alerted";
+      Environment = commonEnv;
+      NoNewPrivileges = true;
+      ProtectSystem = "full";
+    };
+  };
+
+  systemd.services.model-switch-publish-failure = {
+    description = "Alert that fleet model-switch publish failed";
+    serviceConfig = {
+      Type = "oneshot";
+      User = "dev";
+      Group = "dev";
+      StateDirectory = "model-switch-publish-failure";
+      TimeoutStartSec = 60;
+      ExecStart = "${pkgs.writeShellScript "model-switch-publish-failure" ''
+        set -u
+        export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.curl pkgs.jq pkgs.systemd ]}
+        RESULT="$(systemctl show model-switch-publish -p Result --value 2>/dev/null || true)"
+        [ -n "$RESULT" ] || RESULT=unknown
+        ${driftAlert} /var/lib/model-switch-publish-failure/alerted \
+          "model-switch-publish:$RESULT" \
+          "Fleet model-switch publish FAILED (result: $RESULT).
+
+model-switch-publish.service did not complete, so Mac follower state on
+quota-telemetry branch model-switch is going stale (Mac fails closed to Opus
+after 20 minutes).
+
+Check:
+  systemctl status model-switch-publish.service --no-pager
+  journalctl -u model-switch-publish.service -n 50 --no-pager" \
+          3600 21600
+      ''}";
+    };
+  };
+
+  systemd.timers.model-switch-publish = {
+    description = "Publish fleet model-switch state every 2 minutes";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnCalendar = "*:0/2";
+      AccuracySec = "15s";
+      Persistent = true;
     };
   };
 }

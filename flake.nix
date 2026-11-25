@@ -2071,8 +2071,8 @@
 
         # aigateway Gemini ingest + GCP-commitment feed (bead ul4.28.4).
         python3 pkgs/llm-ledger/test_gateway_gemini.py 2>&1 | tee "$TMPDIR/gw.txt"
-        grep -q '^Ran 22 tests' "$TMPDIR/gw.txt" || {
-          echo "GATE FAILURE: expected 'Ran 22 tests' from test_gateway_gemini.py. If you" >&2
+        grep -q '^Ran 23 tests' "$TMPDIR/gw.txt" || {
+          echo "GATE FAILURE: expected 'Ran 23 tests' from test_gateway_gemini.py. If you" >&2
           echo "added or removed tests deliberately, update the count here in the same commit." >&2
           exit 1
         }
@@ -2093,8 +2093,8 @@
         cd ${self}
         export HOME="$TMPDIR"
         python3 assets/scripts/test_quota_telemetry_export.py 2>&1 | tee "$TMPDIR/qte.txt"
-        grep -q '^Ran 5 tests' "$TMPDIR/qte.txt" || {
-          echo "GATE FAILURE: expected 'Ran 5 tests' from test_quota_telemetry_export.py. If you" >&2
+        grep -q '^Ran 6 tests' "$TMPDIR/qte.txt" || {
+          echo "GATE FAILURE: expected 'Ran 6 tests' from test_quota_telemetry_export.py. If you" >&2
           echo "added or removed tests deliberately, update the count here in the same commit." >&2
           exit 1
         }

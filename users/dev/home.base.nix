@@ -626,6 +626,18 @@ in
     # OpenCode session list CLI
     localPkgs.oc-session-list
 
+    # Fleet goose Opus <-> Neon model-switch CLI (eng-agent-platform)
+    (pkgs.writeShellScriptBin "model-switch" ''
+      set -euo pipefail
+      repo="${config.home.homeDirectory}/${if isDarwin then "Code" else "projects"}/eng-agent-platform"
+      if [ ! -f "$repo/stallwatch/modelswitch.py" ]; then
+        echo "model-switch: eng-agent-platform checkout not found at $repo" >&2
+        exit 1
+      fi
+      export PYTHONPATH="$repo''${PYTHONPATH:+:$PYTHONPATH}"
+      exec ${pkgs.python3}/bin/python3 -m stallwatch.modelswitch "$@"
+    '')
+
     # Boot a PROVABLY isolated throwaway `opencode serve` (verifies via
     # /proc/<pid>/fd that it holds no handle on the production DB). The
     # hand-rolled XDG_DATA_HOME recipe does NOT isolate the database, because

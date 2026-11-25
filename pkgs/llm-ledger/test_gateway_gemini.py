@@ -329,6 +329,31 @@ class TestRunIngestWiring(GatewayBase):
         self.assertAlmostEqual(hourly[0][3], 4.8)
         self.assertAlmostEqual(json.loads(Path(feed).read_text())["neon"]["usd"], 4.8)
 
+    def test_remote_hourly_mac_agy_neon_counted_in_commitment_spend(self):
+        # Local cloudbox gateway Neon row ($4.80)
+        self.step(FakePsql([gw_line("local1", T0)]), now_ms=T0 + 60_000)
+        # Remote Mac agy Neon row ($12.50) + remote Mac max Claude row (must NOT be counted)
+        hour_ms = (T0 // 3_600_000) * 3_600_000
+        self.conn.execute(
+            "INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+            "VALUES (?, ?, '', 'agy', 'gemini-4-neon', 10, 100000, 5000, 0, 0, 0, 12.50)",
+            ("mac", hour_ms),
+        )
+        self.conn.execute(
+            "INSERT INTO remote_hourly (host, hour, account, backend, model, requests, input, output, cache_read, cache_write_5m, cache_write_1h, cost_usd) "
+            "VALUES (?, ?, 'acct-a', 'max', 'claude-opus-5-5', 5, 50000, 2000, 0, 0, 0, 99.00)",
+            ("mac", hour_ms),
+        )
+        self.conn.commit()
+        feed = llm_ledger.commitment_spend(self.conn, now_ms=T0 + 120_000)
+        self.assertTrue(feed["complete"])
+        self.assertAlmostEqual(feed["neon"]["usd"], 17.30, places=2)
+        self.assertEqual(feed["neon"]["requests"], 11)
+        self.assertAlmostEqual(feed["neon"]["by_backend"]["vertex-gemini"], 4.80, places=2)
+        self.assertAlmostEqual(feed["neon"]["by_backend"]["agy"], 12.50, places=2)
+        self.assertAlmostEqual(feed["neon"]["by_program"]["fleet:mac"], 12.50, places=2)
+        self.assertAlmostEqual(feed["gcp_commitment"]["usd"], 17.30, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ let
   # The same package users/dev/goose-config.nix puts on PATH. Its own name:
   # `pkgs.goose` in nixpkgs is the pressly/goose database migration tool.
   gooseCli = pkgs.callPackage ../../pkgs/goose { };
+  pythonWithWebsockets = pkgs.python3.withPackages (ps: [ ps.websockets ]);
   servePool = (import ./serve-pool.nix).forHost.darwin;
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 
@@ -218,6 +219,10 @@ lib.mkIf isDarwin {
   # Screenshot-to-devbox script (macOS only, uses screencapture + pbcopy)
   # Note: No runtimeInputs for openssh - we want the system SSH which supports UseKeychain
   home.packages = [
+    # Nix Python 3 (>= 3.11, with tomllib) on ~/.nix-profile/bin/python3 so
+    # model-switch-on-load.sh and model-switch-on-launch.sh do not fall back to
+    # macOS's /usr/bin/python3 (3.9).
+    pkgs.python3
     # honk CLI + honkd. honkd's --swarm-mcp-bin is the profile's bin/honk (a
     # stable path: goose stores the swarm extension's command per session).
     honkPkg
@@ -554,11 +559,11 @@ lib.mkIf isDarwin {
     # ~/.local/bin; goose-config.nix now warns on every switch while that exists.
     #
     # Provider config mirrors cloudbox's goose-serve (hosts/cloudbox), minus what
-    # a laptop lacks: gcp_vertex_ai pinned by env; Claude through this Mac's cfp
-    # (:8789) when the Max pool is seeded, the same gate opencode's Vertex
-    # baseURL uses, else straight to Vertex; Gemini (the sonnet-tier subagent
-    # roles, pkgs/goose-roles) always straight to Vertex, because cfp is
-    # Claude-only and there is no aigateway here.
+    # a laptop lacks: gcp_vertex_ai pinned by env; Claude and Gemini through this
+    # Mac's cfp (:8789) when the Max pool is seeded (the same gate opencode's
+    # Vertex baseURL uses), else straight to Vertex. With cfp >= v0.16.0 and
+    # CFP_GEMINI_AGY_ENABLED=true, cfp sends gemini-4-neon streaming turns to the
+    # Gemini Enterprise seat (agy) first and passes everything else to Vertex.
     #
     # RESTARTS: home-manager reloads a launchd agent whose plist changed, and the
     # plist names this script's store path, so a goose bump or any edit here
@@ -590,13 +595,18 @@ lib.mkIf isDarwin {
             [ -n "$GH_TOKEN_VAL" ] && export GH_TOKEN="$GH_TOKEN_VAL"
             unset GH_TOKEN_VAL
 
-            # Claude: cfp, under the same two conditions its own wrapper starts on
-            # (a seeded Max pool and a proxy apiKey); otherwise straight to Vertex.
+            # Claude + Gemini: route through cfp under the same two conditions
+            # its own wrapper starts on (a seeded Max pool and a proxy apiKey);
+            # otherwise straight to Vertex. With cfp >= v0.16.0 and
+            # CFP_GEMINI_AGY_ENABLED=true, cfp sends gemini-4-neon streaming
+            # turns to the Gemini Enterprise seat (agy, $200/day default) and
+            # passes everything else unchanged to Vertex.
             # Read at start only: this Mac has no nightly restart, so after seeding
             # or un-seeding teamclaude, kickstart goose-serve.
             if ${localPkgs.teamclaude}/bin/teamclaude-seeded \
               && [ -n "$(${pkgs.jq}/bin/jq -r '.proxy.apiKey // empty' "$TEAMCLAUDE_CONFIG" 2>/dev/null || true)" ]; then
               export GCP_VERTEX_HOST=http://127.0.0.1:8789
+              export GCP_VERTEX_GEMINI_HOST=http://127.0.0.1:8789
             fi
 
             cfg="$HOME/.config/goose/config.yaml"
@@ -718,8 +728,10 @@ lib.mkIf isDarwin {
               --mcp-self-grant \
               --swarm-default \
               --project-mcp \
+              --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags \
               --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk \
-              --swarm-pigeon-url http://127.0.0.1:4731
+              --swarm-pigeon-url http://127.0.0.1:4731 \
+              --on-load-model-cmd ${config.home.homeDirectory}/Code/eng-agent-platform/stallwatch/model-switch-on-load.sh
           ''}"
         ];
         EnvironmentVariables = {
@@ -740,6 +752,100 @@ lib.mkIf isDarwin {
         ThrottleInterval = 30;
         StandardOutPath = "${config.home.homeDirectory}/Library/Logs/honkd.out.log";
         StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/honkd.err.log";
+      };
+    };
+
+    # Fleet model-switch follower sync (bead eng-agent-platform-ul4.28.16):
+    # pulls cloudbox's published fleet-state.json (branch `model-switch` of
+    # johnnymo87/quota-telemetry) every 2 minutes and imports it into
+    # ~/.local/state/model-switch/ while preserving Mac-local pins (prod-data
+    # Opus pins, revert pins).
+    model-switch-sync = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "model-switch-sync" ''
+            set -euo pipefail
+
+            STATE_DIR="$HOME/.local/state/model-switch"
+            REPO_DIR="$STATE_DIR/fleet-repo"
+            ENG_REPO="$HOME/Code/eng-agent-platform"
+            REMOTE="git@github.com:johnnymo87/quota-telemetry.git"
+            BRANCH="model-switch"
+
+            if [ ! -f "$ENG_REPO/stallwatch/modelswitch.py" ]; then
+              echo "model-switch-sync: $ENG_REPO not ready; skipping" >&2
+              exit 0
+            fi
+
+            mkdir -p "$STATE_DIR"
+            chmod 700 "$STATE_DIR"
+
+            if ! ${pkgs.git}/bin/git -C "$REPO_DIR" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+              rm -rf "''${REPO_DIR:?}"
+              ${pkgs.coreutils}/bin/timeout 60 ${pkgs.git}/bin/git clone --quiet --depth 1 --branch "$BRANCH" "$REMOTE" "$REPO_DIR"
+            else
+              ${pkgs.coreutils}/bin/timeout 60 ${pkgs.git}/bin/git -C "$REPO_DIR" fetch --quiet --depth 1 origin "$BRANCH"
+              ${pkgs.git}/bin/git -C "$REPO_DIR" update-ref "refs/heads/$BRANCH" FETCH_HEAD
+              ${pkgs.git}/bin/git -C "$REPO_DIR" reflog expire --expire=now --all
+              ${pkgs.git}/bin/git -C "$REPO_DIR" prune --expire=now
+            fi
+
+            TMP_FILE="$(${pkgs.coreutils}/bin/mktemp "$STATE_DIR/.fleet-state.XXXXXX")"
+            trap 'rm -f "$TMP_FILE"' EXIT
+            ${pkgs.git}/bin/git -C "$REPO_DIR" show "HEAD:fleet-state.json" > "$TMP_FILE"
+
+            export PYTHONPATH="$ENG_REPO''${PYTHONPATH:+:$PYTHONPATH}"
+            ${pkgs.python3}/bin/python3 -m stallwatch.modelswitch import-fleet "$TMP_FILE"
+          ''}"
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          PATH = "${pkgs.git}/bin:${pkgs.coreutils}/bin:/usr/bin:/bin";
+          GIT_SSH_COMMAND = "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3";
+        };
+        RunAtLoad = true;
+        StartInterval = 120;
+        ProcessType = "Background";
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/model-switch-sync.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/model-switch-sync.err.log";
+      };
+    };
+
+    # Fleet model-switch controller in follower mode (bead eng-agent-platform-ul4.28.16):
+    # runs every 60s against local goose sessions.db + honkd (:4280) to move
+    # idle sessions at cold-cache boundary and apply all reverts (error,
+    # toolcap, cache-stuck, false-completion). Never flips fleet state.json or
+    # pages the coordinator on cap trip (cloudbox owns fleet state).
+    model-switch-ctl = {
+      enable = true;
+      config = {
+        ProgramArguments = [
+          "${pkgs.writeShellScript "model-switch-ctl-darwin" ''
+            set -euo pipefail
+            ENG_REPO="$HOME/Code/eng-agent-platform"
+            if [ ! -f "$ENG_REPO/stallwatch/modelswitchctl.py" ]; then
+              exit 0
+            fi
+            cd "$ENG_REPO"
+            export PYTHONPATH="$ENG_REPO''${PYTHONPATH:+:$PYTHONPATH}"
+            exec ${pythonWithWebsockets}/bin/python3 -m stallwatch.modelswitchctl --apply --follower
+          ''}"
+        ];
+        EnvironmentVariables = {
+          HOME = config.home.homeDirectory;
+          PATH = lib.concatStringsSep ":" [
+            "${config.home.homeDirectory}/.nix-profile/bin"
+            "/run/current-system/sw/bin"
+            "/usr/bin"
+            "/bin"
+          ];
+        };
+        RunAtLoad = false;
+        StartInterval = 60;
+        ProcessType = "Background";
+        StandardOutPath = "${config.home.homeDirectory}/Library/Logs/model-switch-ctl.out.log";
+        StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/model-switch-ctl.err.log";
       };
     };
 
@@ -1297,6 +1403,16 @@ lib.mkIf isDarwin {
           # teamclaude's status, which is always false at the default of 0.
           # Off = remove the line.
           CFP_OPUS_MAX_FINAL_WINDOW = "true";
+
+          # Gemini through cfp (cfp >= v0.16.0, bead eng-agent-platform-ul4.28.16):
+          # goose-serve's GCP_VERTEX_GEMINI_HOST points at cfp, which sends
+          # gemini-4-neon streamGenerateContent to the Gemini Enterprise seat
+          # (agy) under CFP_GEMINI_AGY_BUDGET_DOLLARS (default $200/day, list
+          # price, spend-agy-gemini.json), and forwards everything else
+          # unchanged to Vertex (CFP_AIGATEWAY_URL). Seat turns emit `agy`
+          # usage events into CFP_EVENTS_PATH, exported hourly by
+          # quota-telemetry-export into cloudbox's fleet Neon ledger and cap.
+          CFP_GEMINI_AGY_ENABLED = "true";
 
           CFP_BUDGET_DOLLARS = "100";
           CFP_IDLE_MIGRATE_SECONDS = "300";
@@ -2022,6 +2138,16 @@ EOF
       ${pkgs.coreutils}/bin/timeout 10 /bin/launchctl kickstart "gui/$UID/org.nix-community.home.$agent" 2>/dev/null || true
     done
   '';
+
+  # Default model hook for `honk launch` when `--model` is omitted (honk#59,
+  # parity with cloudbox in home.cloudbox.nix).
+  xdg.configFile."honk/default-model-cmd" = {
+    executable = true;
+    text = ''
+      #!/bin/sh
+      exec "${config.home.homeDirectory}/Code/eng-agent-platform/stallwatch/model-switch-on-launch.sh" "$@"
+    '';
+  };
 
   # Tmux extra config (disable if you have existing tmux config)
   # Uncomment if tmux conflicts:
