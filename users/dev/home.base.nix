@@ -576,6 +576,13 @@ in
     # counterpart to `opencode-launch --mcp`, which is launch-time only).
     localPkgs.oc-mcp-enable
 
+    # mcp-remote (pkgs/mcp-remote): honkd's --mcp-remote-bin, which gives goose
+    # sessions opencode.json's remote MCP servers that send headers (datadog)
+    # or need OAuth (notion). On PATH so the one-time OAuth login is
+    # `mcp-remote <url>` in a terminal, and so honkd can name the stable
+    # profile path rather than a store path goose would persist per session.
+    localPkgs.mcp-remote
+
     # Identity-resolving `gh` wrapper for lgtm's multi-reviewer feature.
     # Dispatched review sessions invoke `lgtm-gh` (not `gh`) so the review
     # posts under the reviewer identity lgtm wrote into .lgtm-reviewer; it

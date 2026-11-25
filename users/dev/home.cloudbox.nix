@@ -1195,6 +1195,11 @@ lib.mkIf isCloudbox {
   #   (honk#24; reason required for `!` servers; removing the flag + restart hides the tools
   #   from newly spawned swarm servers). Needs honk with honk#24: an older honkd refuses
   #   the unknown flags and fails to start.
+  # - --mcp-remote-bin: catalog remote servers that send headers (datadog's Bearer {file:} PAT)
+  #   or need OAuth (notion) reach goose as stdio servers through pkgs/mcp-remote; the
+  #   header secret is read at spawn into an env var, OAuth logins live in ~/.mcp-auth/
+  #   (honk#55, honk-9qf.15.17). Notion needs a one-time `mcp-remote
+  #   https://mcp.notion.com/mcp` login in a terminal. An older honkd refuses the flag.
   # - --session-tags-bin: /quote's model trim (honk `_honk/oneshot`) runs on a throwaway goose
   #   session; honkd copies the quoted session's session-tags tag onto it so trim spend lands
   #   under the same program (honk#45). An older honkd refuses the flag and fails to start.
@@ -1222,7 +1227,7 @@ lib.mkIf isCloudbox {
     };
     Service = {
       Type = "simple";
-      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma ${import ./honk-mcp-allow-tools.nix { inherit lib; }} --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token --on-load-model-cmd ${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/model-switch-on-load.sh";
+      ExecStart = "${honkPkg}/bin/honkd --listen 127.0.0.1:4280 --models-file ${import ./honk-models.nix { inherit pkgs; }} --upstream http://127.0.0.1:4080/acp --allow-production-upstream --upstream-secret-file /run/secrets/pigeon_goose_acp_token --turn-hook-url http://127.0.0.1:4731/goose/turn-event --turn-hook-token-file /run/secrets/pigeon_daemon_auth_token --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json --mcp-no-confirm slack-ro,figma ${import ./honk-mcp-allow-tools.nix { inherit lib; }} --mcp-remote-bin ${config.home.homeDirectory}/.nix-profile/bin/mcp-remote --mcp-self-grant --swarm-default --project-mcp --session-tags-bin ${config.home.homeDirectory}/.nix-profile/bin/session-tags --swarm-mcp-bin ${config.home.homeDirectory}/.nix-profile/bin/honk --swarm-pigeon-url http://127.0.0.1:4731 --swarm-pigeon-token-file /run/secrets/pigeon_daemon_auth_token --on-load-model-cmd ${config.home.homeDirectory}/projects/eng-agent-platform/stallwatch/model-switch-on-load.sh";
       Restart = "always";
       RestartSec = 5;
       RestartSteps = 10;

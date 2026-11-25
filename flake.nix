@@ -139,6 +139,7 @@
       # two can never drift to different @devcycle/cli versions.
       dvc = p.callPackage ./pkgs/dvc { };
       figma-mcp-server = p.callPackage ./pkgs/figma-mcp-server { };
+      mcp-remote = p.callPackage ./pkgs/mcp-remote { };
       gclpr = p.callPackage ./pkgs/gclpr { };
       git-work = p.callPackage ./pkgs/git-work { };
       worktree-guard-hook = p.callPackage ./pkgs/worktree-guard-hook { };

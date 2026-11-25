@@ -714,6 +714,7 @@ lib.mkIf isDarwin {
               --mcp-catalog ${config.home.homeDirectory}/.config/opencode/opencode.json \
               --mcp-no-confirm slack-ro,figma \
               ${import ./honk-mcp-allow-tools.nix { inherit lib; }} \
+              --mcp-remote-bin ${config.home.homeDirectory}/.nix-profile/bin/mcp-remote \
               --mcp-self-grant \
               --swarm-default \
               --project-mcp \
