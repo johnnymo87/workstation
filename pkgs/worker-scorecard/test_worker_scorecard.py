@@ -664,5 +664,119 @@ class TestMain(TempDir):
         self.assertIn("gateway ledger unavailable: all Gemini priced from the card", d["warnings"])
 
 
+# Real post-#502 brief openings (2026-11-24/25), trimmed.
+BRIEF_MODEL = ("Model: follow\n\nYou're a worker for the stall-watcher program on cloudbox, in "
+               "~/projects/eng-agent-platform (stall-watch lives in stallwatch/). Make your own git worktree")
+BRIEF_NO_LINES = ("You're a worker for the stall-watcher program on cloudbox, in ~/projects/eng-agent-platform "
+                  "(stall-watch lives in stallwatch/). Make your own git worktree before editing.")
+BRIEF_HONK = ("You are a honk-program worker, started by stall-watch's honk coordinator at Jonathan's explicit "
+              "request.\n...\nModel: follow")
+BRIEF_TAGLINE = ("You are a worker for Jonathan on cloudbox. Program tag: supply-chain-inputs. Coordinator: "
+                 "gse_0dc87024-4ffd-44de-8e2c-3c85b3775366.\nModel: opus (this changes production data)")
+HUMAN = "i somehow broke the stall watcher swarm coordinator with my message to it"
+COORD_DIR = "/home/dev/.local/state/stall-watch/coord-sessions/stall-watcher-1795400000000"
+
+
+def tool_out(t):
+    return json.dumps([{"type": "toolResponse", "id": "toolu_1", "toolResult": {"status": "success", "value": {
+        "content": [{"type": "text", "text": t}]}}}])
+
+
+class TestLaunchRecord(TempDir):
+    def test_needles(self):
+        self.assertIn("native=20261125_30 ", ws.launch_needles("goose:20261125_30"))
+        self.assertIn("Tagged session 'ses_x'", ws.launch_needles("ses_x"))
+        out = [(1000_000, tool_out("native=20261125_30 gse=gse_8a7c6e20 tag=stall-watcher prompt=ok"))]
+        self.assertTrue(ws.coordinator_launched("goose:20261125_30", 1000_000, out))
+        # a prefix of another id is not a launch of this one
+        self.assertFalse(ws.coordinator_launched("goose:20261125_3", 1000_000, out))
+        # read later (a log, a Slack thread), outside the launch window
+        self.assertFalse(ws.coordinator_launched("goose:20261125_30", 1000_000 + 3600_000, out))
+
+    def test_post_502_briefs_are_not_recognised_by_text(self):
+        for b in (BRIEF_MODEL, BRIEF_NO_LINES, BRIEF_TAGLINE):
+            self.assertFalse(ws.is_worker_brief(b))
+
+    def build(self):
+        now = dt.datetime(2026, 11, 26, tzinfo=dt.timezone.utc)
+        t = ws.LAUNCH_RECORD_FROM_MS + 3600_000
+        oc = os.path.join(self.dir, "oc.db")
+        con = make_oc_db(oc)
+        b = OcBuilder(con)
+        briefs = [("ses_ocworker", t, BRIEF_NO_LINES), ("ses_human", t, HUMAN),
+                  ("ses_subworker", t, BRIEF_MODEL), ("ses_mentioned", t, BRIEF_HONK),
+                  ("ses_before", ws.LAUNCH_RECORD_FROM_MS - 3600_000, BRIEF_NO_LINES)]
+        for sid, ts, brief in briefs:
+            b.session(sid, t=ts, title=sid)
+            b.user(sid, ts, text(brief))
+            b.asst(sid, ts + 1, "claude-opus-5-5@default", out=1000)
+        con.commit()
+        g = os.path.join(self.dir, "g.db")
+        gc = make_goose_db(g)
+        gc.execute("INSERT INTO sessions VALUES ('20261125_1','coord',?,'2026-11-24 06:00:00',NULL,NULL)", (COORD_DIR,))
+        gc.execute("INSERT INTO sessions VALUES ('20261125_9','honk coord',?,'2026-11-24 06:00:00',NULL,NULL)",
+                   (COORD_DIR.replace("stall-watcher", "honk"),))
+        # a renamed program keeps its coordinator's old folder; stall-watch's state.db names it
+        gc.execute("INSERT INTO sessions VALUES ('20261019_2','sci coord',?,'2026-10-19 06:00:00',NULL,NULL)",
+                   (COORD_DIR.replace("stall-watcher", "supply-network"),))
+        self.sw = os.path.join(self.dir, "sw.db")
+        st = sqlite3.connect(self.sw)
+        st.execute("CREATE TABLE program (tag TEXT, coord_session TEXT)")
+        st.execute("INSERT INTO program VALUES ('supply-chain-inputs', '20261019_2')")
+        st.commit()
+        st.close()
+        for sid, brief in [("20261125_30", BRIEF_MODEL), ("20261125_31", BRIEF_TAGLINE), ("20261125_2", BRIEF_TAGLINE)]:
+            gc.execute("INSERT INTO sessions VALUES (?,'w','/w',?,NULL,NULL)",
+                       (sid, dt.datetime.fromtimestamp(t / 1000, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")))
+            gc.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp, metadata_json) "
+                       "VALUES (?, 'user', ?, ?, '{}')", (sid, json.dumps([text(brief)]), t // 1000))
+        rows = [("20261125_1", "user", tool_out("native=20261125_30 gse=gse_8a7c tag=stall-watcher prompt=ok")),
+                ("20261125_1", "user", tool_out("Session launched: ses_ocworker\nTagged session 'ses_ocworker' as 'stall-watcher'")),
+                ("20261125_1", "user", tool_out("Tagged session 'ses_before' as 'stall-watcher'")),
+                # the coordinator writing about an id is not a launch
+                ("20261125_1", "assistant", json.dumps([text("Tagged session 'ses_mentioned' --session ses_mentioned")])),
+                # another program's coordinator launched this one
+                ("20261125_9", "user", tool_out("native=20261125_31 gse=gse_1 tag=honk prompt=ok")),
+                ("20261019_2", "user", tool_out("native=20261125_2 gse=gse_2 tag=supply-chain-inputs prompt=ok")),
+                # pigeon's Slack reply for a session Jonathan started, read by the coordinator hours later
+                ("20261125_1", "user", tool_out("🏷 Tagged session 'ses_human' as 'stall-watcher'"))]
+        for sid, role, cj in rows:
+            late = 5 * 3600 if "ses_human" in cj else 0
+            gc.execute("INSERT INTO messages (session_id, role, content_json, created_timestamp, metadata_json) "
+                       "VALUES (?, ?, ?, ?, '{}')", (sid, role, cj, t // 1000 + late))
+        gc.commit()
+        cache = os.path.join(self.dir, "cache.json")
+        with open(cache, "w") as f:
+            json.dump({"version": 3, "scannedThrough": 0, "candidates": {}}, f)
+        run = FakeRun(tagged=["ses_ocworker", "ses_human", "ses_subworker", "ses_mentioned", "ses_before",
+                              "goose:20261125_30", "goose:20261125_31", "goose:20261125_1"])
+        return oc, g, cache, run, now
+
+    def test_launch_record_counts_post_502_workers_only(self):
+        oc, g, cache, run, now = self.build()
+        out = io.StringIO()
+        ws.main(["stall-watcher", "--json", "--db", oc, "--goose-db", g, "--lgtm-cache", cache, "--psql", "psql",
+                 "--sw-state", self.sw], run=run, gh=FakeGitHub(), now=now, out=out)
+        d = json.loads(out.getvalue())
+        self.assertEqual(sorted(w["worker_id"] for w in d["workers"]), ["goose:20261125_30", "ses_ocworker"])
+        self.assertEqual(sorted(i for i, _ in d["excluded"]),
+                         ["goose:20261125_1", "goose:20261125_31", "ses_before", "ses_human", "ses_mentioned",
+                          "ses_subworker"])
+
+    def test_renamed_program_uses_state_db_coordinator(self):
+        oc, g, cache, run, now = self.build()
+        run.tagged = ["goose:20261125_2", "goose:20261125_31"]
+        args = ["supply-chain-inputs", "--json", "--db", oc, "--goose-db", g, "--lgtm-cache", cache, "--psql", "psql"]
+        out = io.StringIO()
+        ws.main(args + ["--sw-state", self.sw], run=run, gh=FakeGitHub(), now=now, out=out)
+        d = json.loads(out.getvalue())
+        self.assertEqual([w["worker_id"] for w in d["workers"]], ["goose:20261125_2"])
+        out = io.StringIO()
+        ws.main(args + ["--sw-state", os.path.join(self.dir, "missing.db")], run=run, gh=FakeGitHub(), now=now, out=out)
+        d = json.loads(out.getvalue())
+        self.assertEqual(d["workers"], [])
+        self.assertTrue(any("no coordinator launch record" in w for w in d["warnings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
