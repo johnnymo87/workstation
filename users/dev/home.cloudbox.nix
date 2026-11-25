@@ -1340,6 +1340,10 @@ lib.mkIf isCloudbox {
   systemd.user.services.pull-workstation = {
     Unit = {
       Description = "Pull workstation updates and apply home-manager";
+      # DO NOT REMOVE. A switch that changes this unit's own file makes sd-switch
+      # stop it mid-activation, which leaves changed units stopped and the
+      # generation never current. See the same unit in home.devbox.nix.
+      X-SwitchMethod = "keep-old";
     };
     Service = {
       Type = "oneshot";

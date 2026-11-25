@@ -763,6 +763,16 @@ lib.mkIf isDevbox {
   systemd.user.services.pull-workstation = {
     Unit = {
       Description = "Pull workstation updates and apply home-manager";
+      # DO NOT REMOVE. This unit runs the switch, so a switch that changes this
+      # unit's file (any bump of pkgs.nix/pkgs.git in PATH below) makes sd-switch
+      # stop it -- killing the activation from inside, after it has stopped the
+      # other changed units and before it starts them again. The generation never
+      # becomes current, so every later run repeats the same stop and dies the
+      # same way. Happened on devbox 2026-11-25 with the 26.05 bump (#975):
+      # teamclaude stayed down and every Anthropic request through cfp-shaper
+      # (:3457) failed with 502. keep-old leaves the running oneshot alone; the
+      # next run picks up the new unit file after the daemon-reload.
+      X-SwitchMethod = "keep-old";
     };
     Service = {
       Type = "oneshot";
