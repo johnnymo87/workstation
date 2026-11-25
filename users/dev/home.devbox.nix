@@ -753,7 +753,7 @@ lib.mkIf isDevbox {
 
       # Always attempt switch (handles retry after failed switch)
       echo "Applying home-manager..."
-      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-25.11 -- switch --flake "$repo#dev"
+      ${pkgs.nix}/bin/nix run github:nix-community/home-manager/release-26.05 -- switch --flake "$repo#dev"
 
       echo "Update complete"
     '';

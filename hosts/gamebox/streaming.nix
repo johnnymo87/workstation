@@ -207,12 +207,12 @@ in
 
   # --- Power / Wake-on-LAN -------------------------------------------------
   services.logind.settings.Login.IdleAction = "ignore";
-  systemd.sleep.extraConfig = ''
-    AllowSuspend=no
-    AllowHibernation=no
-    AllowHybridSleep=no
-    AllowSuspendThenHibernate=no
-  '';
+  systemd.sleep.settings.Sleep = {
+    AllowSuspend = "no";
+    AllowHibernation = "no";
+    AllowHybridSleep = "no";
+    AllowSuspendThenHibernate = "no";
+  };
   # Ethernet only (used once the box moves home); Wi-Fi cannot wake from S5.
   networking.interfaces.enp0s31f6.wakeOnLan.enable = true;
 

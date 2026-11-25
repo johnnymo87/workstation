@@ -6461,9 +6461,9 @@ EOF
     glib nss nspr atk at-spi2-atk at-spi2-core cups dbus gtk3
     gdk-pixbuf pango cairo expat libdrm libgbm libxkbcommon
     alsa-lib libnotify libsecret udev libGL fontconfig freetype
-    xorg.libX11 xorg.libXcomposite xorg.libXdamage xorg.libXext
-    xorg.libXfixes xorg.libXrandr xorg.libxcb xorg.libXScrnSaver
-    xorg.libXtst xorg.libxshmfence xorg.libXrender xorg.libXi
+    libx11 libxcomposite libxdamage libxext
+    libxfixes libxrandr libxcb libxscrnsaver
+    libxtst libxshmfence libxrender libxi
   ];
 
   # Nix settings
@@ -6556,7 +6556,7 @@ EOF
     # /home/dev/.nix-profile ahead of pkgs.neovim so the wrapper wins.
     gh gnupg pinentry-curses
     nodejs  # For pigeon
-    xorg.xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
+    xvfb  # Provides `Xvfb`; prebuilt Cypress spawns it for headless e2e
     # teamclaude CLI on PATH so Max-account management is a plain `teamclaude
     # login` / `teamclaude accounts` (no store-path resolution). Resolves to the
     # module-level `teamclaude` let-binding above (same derivation the

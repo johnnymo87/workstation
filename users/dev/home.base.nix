@@ -379,36 +379,10 @@ let
     opencodeFrontdoor = pkgs.callPackage ../../pkgs/opencode-frontdoor { };
   };
 
-  # Azure CLI with msal 1.34.0 patch and azure-devops extension (work machines)
-  # NOTE: azure-cli 2.79.0 ships msal 1.33.0 which has a bug where
-  # `az login --use-device-code` crashes with "Session.request() got
-  # an unexpected keyword argument 'claims_challenge'". Fixed in msal 1.34.0.
-  # Remove this block when nixpkgs bumps azure-cli to >= 2.83.0.
-  azureCliPatched = let
-    msal134 = pkgs.python3Packages.msal.overridePythonAttrs (old: rec {
-      version = "1.34.0";
-      src = pkgs.python3Packages.fetchPypi {
-        inherit (old) pname;
-        inherit version;
-        hash = "sha256-drqDtxbqWm11sCecCsNToOBbggyh9mgsDrf0UZDEPC8=";
-      };
-    });
-    msal134Path = "${msal134}/${pkgs.python3.sitePackages}";
-    msal133 = pkgs.python3Packages.msal;
-    msal133Path = "${msal133}/${pkgs.python3.sitePackages}";
-    azWithExts = pkgs.azure-cli.withExtensions (with pkgs.azure-cli.extensions; [
-      azure-devops
-    ]);
-  in azWithExts.overrideAttrs (old: {
-    postFixup = (old.postFixup or "") + ''
-      for f in $out/bin/az $out/bin/.az-wrapped $out/bin/.az-wrapped_; do
-        if [ -f "$f" ]; then
-          substituteInPlace "$f" \
-            --replace-quiet "${msal133Path}" "${msal134Path}"
-        fi
-      done
-    '';
-  });
+  # Azure CLI with azure-devops extension (work machines)
+  azureCliWithExts = pkgs.azure-cli.withExtensions (with pkgs.azure-cli.extensions; [
+    azure-devops
+  ]);
 
   # bb-test-log: fetch the raw, untruncated test.log of a single target from a
   # BuildBuddy invocation. Built on top of the BuildBuddy enterprise HTTP API
@@ -703,7 +677,7 @@ in
     pkgs.zip
     pkgs.jdk21
     # Cloud / Kubernetes
-    azureCliPatched
+    azureCliWithExts
     pkgs.awscli2       # AWS CLI (EKS kubeconfig credential plugin, ba exec SSO)
     pkgs.kubelogin     # Azure AD credential plugin for kubectl
     pkgs.kubectl       # Kubernetes CLI (for AKS clusters)

@@ -4,7 +4,7 @@
   fetchFromGitHub,
   fetchPnpmDeps,
   pnpmConfigHook,
-  pnpm_10,
+  pnpm,
   nodejs,
   makeWrapper,
 }:
@@ -52,23 +52,18 @@ stdenv.mkDerivation (finalAttrs: {
 
   pnpmDeps = fetchPnpmDeps {
     inherit (finalAttrs) pname version src;
-    pnpm = pnpm_10;
-    fetcherVersion = 2;
-    # Per platform: pnpm fetches only the optional native packages (esbuild,
-    # rollup, ...) for the host's os/cpu, so the store differs on darwin. The
-    # Linux hash was measured on cloudbox (aarch64-linux), the darwin one on
-    # the Mac (aarch64-darwin) on 2026-11-25. When bumping, measure both.
-    hash =
-      if stdenv.hostPlatform.isDarwin then
-        "sha256-dVMHSxCWrWyKZnAteOALH2G76qI1FTnGOTwMULwGh4c="
-      else
-        "sha256-ULwS0Z9+r7Si3e8/ZGbv9OVgKEnok3xIJ9EEaDYcCBs=";
+    inherit pnpm;
+    fetcherVersion = 4;
+    # pnpm >= 11 sets pnpm_config_force_ignores_platform=true in fetchPnpmDeps
+    # (and fetcherVersion = 4 dumps the v11 SQLite index to text for
+    # reproducibility). Measured on aarch64-linux; verify on aarch64-darwin.
+    hash = "sha256-GpHA4DbEPSgmGzaEDMQKFjMXr8hvJj6B3nymu6f6dmk=";
   };
 
   nativeBuildInputs = [
     nodejs
     pnpmConfigHook
-    pnpm_10
+    pnpm
     makeWrapper
   ];
 
