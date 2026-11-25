@@ -42,4 +42,19 @@ check(tabby.session_label(nil, nil) == nil, "nil oc_session_id with nil title")
 check(tabby.session_label("bash", "ses_xyz") == nil, "opencode ses_ oc_session_id with arbitrary title bash")
 check(tabby.session_label("node", "ses_123") == nil, "opencode ses_ oc_session_id with arbitrary title node")
 
+-- 8. stall-watch coordinator goose tabs: strip leading `stallwatch-` and trailing `-<digits>`
+check(tabby.session_label("stallwatch-honk-1792619184012", "goose:20261021_40") == "honk", "coordinator single-word program")
+check(tabby.session_label("stallwatch-foo-alerts-1792501106112", "goose:20261020_3") == "foo-alerts", "coordinator hyphenated program")
+check(tabby.session_label("stallwatch-my-cool-prog-123", "goose:1_1") == "my-cool-prog", "coordinator multi-hyphen program")
+check(tabby.session_label("stallwatch-v2-1792619184012", "goose:1_1") == "v2", "coordinator program containing digits")
+check(tabby.session_label("stallwatch-2026-1792619184012", "goose:1_1") == "2026", "coordinator numeric program")
+
+-- 9. non-coordinator titles must remain unchanged
+check(tabby.session_label("fix-pr-12345", "goose:1_1") == "fix-pr-12345", "goose title ending in -digits without stallwatch- prefix")
+check(tabby.session_label("stallwatch-picker", "goose:1_1") == "stallwatch-picker", "goose title starting with stallwatch- without -digits suffix")
+check(tabby.session_label("stallwatch-1792619184012", "goose:1_1") == "stallwatch-1792619184012", "degenerate stallwatch-<digits> with no program name")
+check(tabby.session_label("stallwatch--12345", "goose:1_1") == "stallwatch--12345", "degenerate stallwatch--<digits> with empty program name")
+check(tabby.session_label("OC | stallwatch-honk-1792619184012", "ses_123") == "stallwatch-honk-1792619184012", "opencode OC title is not stripped")
+check(tabby.session_label("stallwatch-honk-1792619184012", nil) == nil, "non-goose buffer with coordinator-like title -> nil")
+
 print("LUA_TEST_OK " .. N)

@@ -18,6 +18,12 @@ function M.session_label(term_title, oc_session_id)
       return "OpenCode"
     end
     if type(oc_session_id) == "string" and oc_session_id:match("^goose:") and term_title ~= "" and not term_title:match("^term://") then
+      -- Stall-watch coordinator sessions are named `stallwatch-<program>-<epoch_ms>`.
+      -- Display only the program name; leave non-coordinator titles intact.
+      local coord = term_title:match("^stallwatch%-(.+)%-%d+$")
+      if coord then
+        return coord
+      end
       return term_title
     end
   end
