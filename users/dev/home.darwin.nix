@@ -13,6 +13,8 @@ let
   pigeonNativeCheck = import ./pigeon-native-check.nix {
     inherit pkgs;
     repo = "${config.home.homeDirectory}/Code/pigeon";
+    # The Command Line Tools in /usr/bin (on the agent's PATH) build it.
+    buildTools = [ ];
   };
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 

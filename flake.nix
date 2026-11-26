@@ -873,7 +873,7 @@
             && lib.hasInfix "exec ${macNodeDir}/node" macScript;
           "macbook: latched, alarmed, fails with 78" =
             lib.hasInfix "--latch" macBeforeExec && lib.hasInfix "--alarm" macBeforeExec
-            && lib.hasInfix "|| exit 78" macBeforeExec;
+            && lib.hasInfix "3) exit 78 ;;" macBeforeExec;
         };
         failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
         scriptCheck = host: ''
@@ -884,7 +884,7 @@
             echo "GATE FAILURE: ${host} start script does not run ensure-native-modules.sh before exec'ing the daemon" >&2; exit 1; }
           for want in '--node-dir ${self.nixosConfigurations.${host}.pkgs.nodejs}/bin' \
               'exec ${self.nixosConfigurations.${host}.pkgs.nodejs}/bin/node ' \
-              '--build-path ' '--latch ' '--alarm' '|| exit 78'; do
+              '--build-path ' '--latch ' '--alarm' '3) exit 78 ;;'; do
             ${g} -qF -- "$want" "$s" || { echo "GATE FAILURE: ${host} start script lacks '$want'" >&2; exit 1; }
           done
           w=$(${g} -n 'PIGEON_SLACK_ALARM_WEBHOOK_URL=' "$s" | head -1 | cut -d: -f1)

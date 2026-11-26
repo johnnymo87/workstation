@@ -17,6 +17,11 @@
 # the unit's `path` would leak them into the tmux panes pigeon spawns (see the
 # note on cloudbox's `path`). They reach the rebuild only.
 #
+# Only exit 3 from the script means "better-sqlite3 does not load and the
+# rebuild failed (or already failed for this node)". Any other failure means
+# the script itself broke (a bad edit on pigeon main, say); that must not stop
+# the daemon, so it warns and starts it anyway, as before this existed.
+#
 # A failed rebuild posts once to the #alerts webhook, latches in
 # ~/.local/state/pigeon/native-rebuild-failed so later starts fail fast instead
 # of recompiling, and exits 78; the systemd units list 78 in
@@ -27,21 +32,27 @@
 # Missing script (a checkout older than pigeon-odrg): warn and start anyway.
 #
 # POSIX sh: the Mac's agent runs this under /bin/sh.
-{ pkgs, repo }:
+#
+# buildTools: what node-gyp needs that the service's PATH lacks. The NixOS
+# default was measured on cloudbox (it fails without sed and grep too). The Mac
+# passes [] because the agent's PATH already has /usr/bin, whose Command Line
+# Tools compiled it from a launchd-like env (measured 2026-11-26, ~25s); nix's
+# darwin toolchain would add ~1.4 GiB to the agent's closure for nothing.
+{ pkgs, repo, buildTools ? [ pkgs.python3 pkgs.gnumake pkgs.stdenv.cc pkgs.gnused pkgs.gnugrep ] }:
 let
-  buildPath = pkgs.lib.makeBinPath [
-    pkgs.python3
-    pkgs.gnumake
-    pkgs.stdenv.cc
-    pkgs.gnused
-    pkgs.gnugrep
-  ];
+  buildArg = pkgs.lib.optionalString (buildTools != [ ])
+    "--build-path ${pkgs.lib.makeBinPath buildTools} ";
 in ''
   ensure_native="${repo}/scripts/ensure-native-modules.sh"
   if [ -x "$ensure_native" ]; then
-    "$ensure_native" --node-dir ${pkgs.nodejs}/bin --repo "${repo}" \
-      --build-path ${buildPath} \
-      --latch "$HOME/.local/state/pigeon/native-rebuild-failed" --alarm || exit 78
+    ensure_rc=0
+    "$ensure_native" --node-dir ${pkgs.nodejs}/bin --repo "${repo}" ${buildArg}\
+      --latch "$HOME/.local/state/pigeon/native-rebuild-failed" --alarm || ensure_rc=$?
+    case "$ensure_rc" in
+      0) ;;
+      3) exit 78 ;;
+      *) echo "pigeon-daemon: $ensure_native failed unexpectedly (exit $ensure_rc); starting anyway" >&2 ;;
+    esac
   else
     echo "pigeon-daemon: $ensure_native missing; starting without the native-module check" >&2
   fi
