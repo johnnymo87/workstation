@@ -24,6 +24,11 @@ lib.mkIf isDarwin {
 
   # Export TERMINFO_DIRS so non-Nix programs can find tmux-256color
   # macOS doesn't ship tmux terminfo entries, causing issues with system ncurses
-  home.sessionVariables.TERMINFO_DIRS = lib.mkDefault
-    "${pkgs.ncurses}/share/terminfo:${pkgs.tmux}/share/terminfo:/usr/share/terminfo";
+  #
+  # Normal priority, not mkDefault: home-manager 26.05's
+  # modules/targets/darwin/terminfo.nix sets its own mkDefault value, and two
+  # mkDefaults conflict, which broke home-switch on the Mac. This value keeps
+  # ours and adds home-manager's profile dir, so nothing it exposed is lost.
+  home.sessionVariables.TERMINFO_DIRS =
+    "${pkgs.ncurses}/share/terminfo:${pkgs.tmux}/share/terminfo:${config.home.profileDirectory}/share/terminfo:/usr/share/terminfo";
 }
