@@ -1825,9 +1825,14 @@ Check:
     #
     # beam.smp is deliberately not in --prefer because it would match the main
     # dev BEAM and docker BEAMs, not just runaway test jobs.
+    #
+    # NixOS 26.05 made dbus-broker the default bus, so the bus process is
+    # dbus-broker (plus its launcher, whose 15-char comm is dbus-broker-lau)
+    # rather than dbus-daemon. Both names are listed so the avoid rule holds
+    # on either implementation.
     extraArgs = [
       "--prefer" "(^|/)(node|bun|headless_shell|nix-build)$"
-      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd|cloudflared)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|dbus-broker|dbus-broker-lau|agetty|dhcpcd|cloudflared)$"
     ];
   };
 
