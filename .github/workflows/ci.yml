@@ -316,3 +316,58 @@ jobs:
       - name: Disk space after
         if: always()
         run: df -h /
+
+  # Advisory macOS (aarch64-darwin) build of public third-party packages.
+  #
+  # Catches Darwin-only hash and build breaks (e.g. fetchPnpmDeps producing a
+  # different hash on aarch64-darwin, as in #977 for mcp-remote) before merge.
+  #
+  # Deliberately NOT in branch protection required contexts (advisory), and
+  # deliberately DOES NOT save to the GitHub Actions Nix store cache:
+  #   - Linux's `check` job already uses ~7 GB of the 10 GB repo cache quota.
+  #   - `checks.aarch64-darwin` (`home-mac`, `darwin-system`) includes private
+  #     claude-failover-proxy assets and is NOT built here.
+  darwin-packages:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v14
+
+      - name: Build public Darwin packages
+        run: |
+          set -euo pipefail
+          pkgs=(
+            mcp-remote
+            figma-mcp-server
+            dvc
+            slack-mcp-server
+            beads
+            bb
+            gws
+            gclpr
+            terraform
+            ask-question
+            opencode-frontdoor
+          )
+          targets=()
+          for p in "${pkgs[@]}"; do
+            targets+=(".#packages.aarch64-darwin.${p}")
+          done
+          nix build --no-link --print-build-logs --keep-going "${targets[@]}"
+
+      - name: Verify no private binaries entered store
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          matches=(/nix/store/*-claude-failover-proxy-* /nix/store/*-cfp-shaper-*)
+          shopt -u nullglob
+          if [ ${#matches[@]} -gt 0 ]; then
+            echo "::error::Tripwire fired: private binaries found in Nix store!"
+            printf '%s\n' "${matches[@]}"
+            exit 1
+          fi
+          echo "Store is clean: no private binaries found."
