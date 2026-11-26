@@ -1,16 +1,16 @@
--- Treesitter configuration (grammars provided by nix, no runtime install)
-require("nvim-treesitter.configs").setup({
-  auto_install = false,
-  highlight = {
-    enable = true,
-    additional_vim_regex_highlighting = false,
-  },
-  incremental_selection = {
-    enable = true,
-  },
-  indent = {
-    enable = true,
-  },
+-- Treesitter (grammars provided by nix, no runtime install).
+-- nvim-treesitter's `main` branch (nixpkgs 26.05) dropped the
+-- `nvim-treesitter.configs` module: highlighting is now Neovim's own
+-- vim.treesitter.start(), and indent is opt-in per buffer. Incremental
+-- selection is built into Neovim 0.12 (`an`/`in` in visual mode).
+vim.api.nvim_create_autocmd("FileType", {
+  group = vim.api.nvim_create_augroup("user_treesitter", { clear = true }),
+  callback = function(args)
+    -- pcall: a filetype with no installed grammar is fine, just unhighlighted.
+    if pcall(vim.treesitter.start, args.buf) then
+      vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+    end
+  end,
 })
 
 -- Telescope configuration
