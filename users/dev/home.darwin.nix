@@ -8,6 +8,14 @@ let
   gooseCli = pkgs.callPackage ../../pkgs/goose { };
   pythonWithWebsockets = pkgs.python3.withPackages (ps: [ ps.websockets ]);
   servePool = (import ./serve-pool.nix).forHost.darwin;
+  # pigeon-odrg: rebuild better-sqlite3 at start if a switch changed the
+  # daemon's Node ABI. See ./pigeon-native-check.nix.
+  pigeonNativeCheck = import ./pigeon-native-check.nix {
+    inherit pkgs;
+    repo = "${config.home.homeDirectory}/Code/pigeon";
+    # The Command Line Tools in /usr/bin (on the agent's PATH) build it.
+    buildTools = [ ];
+  };
   routingDbPath = "/Users/jonathan.mohrbacher/Code/pigeon/packages/daemon/data/pigeon-daemon.db";
 
   # frontdoor darwin convergence (workstation-r7uh) -- the opaque single-port
@@ -890,6 +898,7 @@ lib.mkIf isDarwin {
               echo "pigeon-daemon: pigeon-slack-alarm-webhook not in Keychain; no Slack direct-fallback alarm" >&2
             fi
             unset w
+            ${pigeonNativeCheck}
             cd "${config.home.homeDirectory}/Code/pigeon/packages/daemon"
             exec ${pkgs.nodejs}/bin/node \
               "${config.home.homeDirectory}/Code/pigeon/node_modules/tsx/dist/cli.mjs" \

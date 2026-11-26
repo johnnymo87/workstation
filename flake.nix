@@ -843,6 +843,62 @@
           echo "cloudbox-pigeon-slack-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 4 script checks passed" > $out
         '';
 
+      # pigeon-daemon survives a Node change from a system switch (pigeon-odrg).
+      # cloudbox's 26.05 switch moved the daemon to a new Node ABI and it
+      # crash-looped 54 times on ERR_DLOPEN_FAILED until better-sqlite3 was
+      # rebuilt by hand. Every machine's start script must run pigeon's
+      # scripts/ensure-native-modules.sh BEFORE it execs the daemon, under the
+      # daemon's own node, with the build tools the rebuild needs, and a failed
+      # rebuild must stop the systemd units restarting (exit 78) rather than
+      # recompile on every restart. Eval half: unit settings and the Mac's
+      # script string. Build half: line order in the built systemd scripts.
+      pigeon-native-check-wiring = let
+        lib = devboxPkgs.lib;
+        g = "${devboxPkgs.gnugrep}/bin/grep";
+        unit = host: self.nixosConfigurations.${host}.config.systemd.services.pigeon-daemon.serviceConfig;
+        prevents78 = host: let v = (unit host).RestartPreventExitStatus or null; in
+          v != null && builtins.elem "78" (lib.splitString " " (toString v));
+        hm = self.homeConfigurations.${mac.hostname}.config;
+        macAgent = hm.launchd.agents.pigeon-daemon.config;
+        macScript = lib.concatStringsSep "\n" macAgent.ProgramArguments;
+        macNodeDir = builtins.unsafeDiscardStringContext (builtins.head (lib.splitString ":" macAgent.EnvironmentVariables.PATH));
+        macBeforeExec = builtins.head (lib.splitString "exec " macScript);
+        checks = {
+          "devbox: exit 78 stops restarts" = prevents78 "devbox";
+          "cloudbox: exit 78 stops restarts" = prevents78 "cloudbox";
+          "macbook: check runs before the daemon's exec" =
+            lib.hasInfix "/Code/pigeon/scripts/ensure-native-modules.sh" macBeforeExec;
+          "macbook: --node-dir is the node first on the agent's PATH" =
+            lib.hasInfix "--node-dir ${macNodeDir}" macBeforeExec
+            && lib.hasInfix "exec ${macNodeDir}/node" macScript;
+          "macbook: latched, alarmed, fails with 78" =
+            lib.hasInfix "--latch" macBeforeExec && lib.hasInfix "--alarm" macBeforeExec
+            && lib.hasInfix "3) exit 78 ;;" macBeforeExec;
+        };
+        failed = builtins.attrNames (lib.filterAttrs (_: ok: !ok) checks);
+        scriptCheck = host: ''
+          s=${(unit host).ExecStart}
+          e=$(${g} -n 'scripts/ensure-native-modules.sh' "$s" | head -1 | cut -d: -f1)
+          x=$(${g} -n '^exec .*/bin/node ' "$s" | head -1 | cut -d: -f1)
+          [ -n "$e" ] && [ -n "$x" ] && [ "$e" -lt "$x" ] || {
+            echo "GATE FAILURE: ${host} start script does not run ensure-native-modules.sh before exec'ing the daemon" >&2; exit 1; }
+          for want in '--node-dir ${self.nixosConfigurations.${host}.pkgs.nodejs}/bin' \
+              'exec ${self.nixosConfigurations.${host}.pkgs.nodejs}/bin/node ' \
+              '--build-path ' '--latch ' '--alarm' '3) exit 78 ;;'; do
+            ${g} -qF -- "$want" "$s" || { echo "GATE FAILURE: ${host} start script lacks '$want'" >&2; exit 1; }
+          done
+          w=$(${g} -n 'PIGEON_SLACK_ALARM_WEBHOOK_URL=' "$s" | head -1 | cut -d: -f1)
+          [ -n "$w" ] && [ "$w" -lt "$e" ] || {
+            echo "GATE FAILURE: ${host} runs the check before the alarm webhook is exported" >&2; exit 1; }
+        '';
+      in
+        assert lib.assertMsg (failed == [ ]) "pigeon-native-check-wiring failed: ${lib.concatStringsSep "; " failed}";
+        devboxPkgs.runCommand "pigeon-native-check-wiring" { } ''
+          ${scriptCheck "devbox"}
+          ${scriptCheck "cloudbox"}
+          echo "pigeon-native-check-wiring: ${toString (builtins.length (builtins.attrNames checks))} eval + 2 hosts x 8 script checks passed" > $out
+        '';
+
       # cloudbox Grafana loopback exposure and security wiring (workstation-4si2.3).
       # Loopback bind on 127.0.0.1:3000 is explicit and guarded because cloudbox
       # has a public IP and no NixOS firewall. Eval half: module options, secrets,
