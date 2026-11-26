@@ -6812,9 +6812,13 @@ EOF
     freeMemKillThreshold = 5;    # SIGKILL when <5% RAM free (~1.6 GB)
     freeSwapKillThreshold = 100; # Always true — trigger on RAM alone
     reportInterval = 15;
+    # NixOS 26.05 made dbus-broker the default bus (live here since the
+    # 2026-11-26 reboot), so the bus processes are dbus-broker and its launcher,
+    # whose 15-char comm is dbus-broker-lau. dbus-daemon stays listed so the
+    # rule holds on either implementation.
     extraArgs = [
       "--prefer" "(^|/)(node|bun|bazel|java|kotlin-language-server|docker)$"
-      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|agetty|dhcpcd)$"
+      "--avoid" "(^|/)(sshd|systemd|systemd-journald|systemd-logind|dbus-daemon|dbus-broker|dbus-broker-lau|agetty|dhcpcd)$"
     ];
   };
 
