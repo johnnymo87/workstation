@@ -13,6 +13,12 @@ let
   # that state. pigeon already created the routing schema there (checksum
   # e5c8e409..., version 1) so serves boot-assert clean.
   servePool = (import ../../users/dev/serve-pool.nix).forHost.devbox;
+  # pigeon-odrg: rebuild better-sqlite3 at start if a switch changed the
+  # daemon's Node ABI. See users/dev/pigeon-native-check.nix.
+  pigeonNativeCheck = import ../../users/dev/pigeon-native-check.nix {
+    inherit pkgs;
+    repo = "/home/dev/projects/pigeon";
+  };
   routingDbPath = "/home/dev/projects/pigeon/packages/daemon/data/pigeon-daemon.db";
 
   # goose itself is NOT bound here: goose-serve runs /var/lib/goose/current,
@@ -521,10 +527,15 @@ in
         export PIGEON_DAEMON_AUTH_TOKEN="$(cat /run/secrets/pigeon_daemon_auth_token)"
         # frontdoor-exempt(C1): pigeon is the router the door DEPENDS on; door->pigeon->door is a startup cycle
         export OPENCODE_URL="http://127.0.0.1:4096"
+        ${pigeonNativeCheck}
         exec ${pkgs.nodejs}/bin/node /home/dev/projects/pigeon/node_modules/tsx/dist/cli.mjs /home/dev/projects/pigeon/packages/daemon/src/index.ts
       ''}";
       Restart = "on-failure";
       RestartSec = 5;
+      # 78 = pigeonNativeCheck: better-sqlite3 does not load and a rebuild did
+      # not fix it. Restarting cannot help, so stop and show as failed. Fix
+      # node_modules (the journal names the command), then restart by hand.
+      RestartPreventExitStatus = 78;
 
       # workstation-9f7a: pigeon's logs get their own journal, so its retention
       # stops being decided by whichever unit on the box is noisiest.
