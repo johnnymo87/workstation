@@ -33,8 +33,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@v4
 
       - name: Install Nix
@@ -182,3 +184,13 @@ jobs:
             pr_number=$(gh pr view "$branch" --json number -q '.number')
             gh pr merge "$pr_number" --auto --squash
           fi
+
+      - name: Report workflow status
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/report-workflow-failure.py \
+            --workflow "${{ github.workflow }}" \
+            --status "${{ job.status }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

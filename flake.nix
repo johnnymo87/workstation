@@ -131,6 +131,10 @@
         cfp-prefetch-darwin = p.callPackage ./pkgs/cfp-prefetch-darwin { };
         home-manager = home-manager.packages.${system}.home-manager;
       };
+      # Exposed so pull-workstation on cloudbox/devbox can run the exact
+      # home-manager CLI pinned by the pulled flake.lock (`nix run "$repo#home-manager"`)
+      # instead of fetching an unpinned branch tip from GitHub on every run.
+      home-manager = home-manager.packages.${system}.home-manager;
       codex-lb-status = p.callPackage ./pkgs/codex-lb-status { };
       # Server half of EM's sandboxed history shell; deployed by hosts/devbox/em-history-shell.nix.
       em-history-shell = p.callPackage ./pkgs/em-history-shell { };
@@ -1850,6 +1854,21 @@
         cd ${self}
         export HOME="$TMPDIR"
         python3 .github/scripts/test_update_goose_pin.py 2>&1 | tee "$TMPDIR/out.txt"
+        grep -q '^Ran 8 tests' "$TMPDIR/out.txt" || {
+          echo "GATE FAILURE: expected 'Ran 8 tests'; update the count with the suite." >&2
+          exit 1
+        }
+        grep -q '^OK$' "$TMPDIR/out.txt" || { echo "GATE FAILURE: suite not OK." >&2; exit 1; }
+        touch $out
+      '';
+
+      # Scheduled update-workflow failure alerting (.github/scripts/report-workflow-failure.py).
+      report-workflow-failure-tests = devboxPkgs.runCommand "report-workflow-failure-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 ];
+      } ''
+        cd ${self}
+        export HOME="$TMPDIR"
+        python3 .github/scripts/test_report_workflow_failure.py 2>&1 | tee "$TMPDIR/out.txt"
         grep -q '^Ran 8 tests' "$TMPDIR/out.txt" || {
           echo "GATE FAILURE: expected 'Ran 8 tests'; update the count with the suite." >&2
           exit 1

@@ -17,31 +17,46 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    # Runs on aarch64-linux to match flake.nix's `systems` (aarch64-linux,
+    # aarch64-darwin) so nix-update can build arm64 FODs (e.g. vendorHash).
+    runs-on: ubuntu-24.04-arm
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      issues: write
     strategy:
       fail-fast: false
       matrix:
-        package: [beads]
+        include:
+          # beads carries Dolt cross-clone schema migrations (see
+          # migrating-beads-schema); never auto-merge it.
+          - package: beads
+            auto_merge: false
     steps:
       - name: Check filter
         if: inputs.package && inputs.package != matrix.package
         run: echo "SKIP=true" >> "$GITHUB_ENV"
 
       - name: Checkout repository
+        id: checkout
         if: env.SKIP != 'true'
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Nix
         if: env.SKIP != 'true'
         uses: DeterminateSystems/nix-installer-action@v14
+        with:
+          # Determinate Nix enables lazy-trees by default, which causes
+          # upstream nix-update's nix-instantiate to fail with ENOENT on
+          # unmaterialized /nix/store/...-source paths.
+          extra-conf: |
+            lazy-trees = false
 
       - name: Run nix-update
         if: env.SKIP != 'true'
         run: |
-          nix-shell -p nix-update --run "nix-update --flake ${{ matrix.package }}"
+          nix run --inputs-from . nixpkgs#nix-update -- --flake "${{ matrix.package }}"
 
       - name: Check for changes
         if: env.SKIP != 'true'
@@ -50,7 +65,7 @@ jobs:
           if git diff --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            version=$(nix eval --raw ".#packages.x86_64-linux.${{ matrix.package }}.version" 2>/dev/null || echo "unknown")
+            version=$(nix eval --raw ".#packages.aarch64-linux.${{ matrix.package }}.version" 2>/dev/null || echo "unknown")
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "version=$version" >> "$GITHUB_OUTPUT"
           fi
@@ -59,7 +74,9 @@ jobs:
         if: env.SKIP != 'true' && steps.diff.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.UPDATE_TOKEN }}
+          AUTO_MERGE: ${{ matrix.auto_merge }}
         run: |
+          set -euo pipefail
           pkg="${{ matrix.package }}"
           version="${{ steps.diff.outputs.version }}"
           branch="auto/update-${pkg}"
@@ -69,19 +86,39 @@ jobs:
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               commit -m "chore(deps): update ${pkg} to ${version}"
-          git push -u origin "$branch" --force
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}" --force
 
-          # Create or update PR
-          # gh pr view matches merged/closed PRs too — only skip if truly open
+          # gh pr view matches merged/closed PRs too -- only skip if truly open
           pr_state=$(gh pr view "$branch" --json state -q '.state' 2>/dev/null || echo "NONE")
           if [ "$pr_state" = "OPEN" ]; then
             echo "PR already open for $branch, force-pushed update"
           else
-            pr_url=$(gh pr create \
+            {
+              echo "Automated update of \`${pkg}\` to \`${version}\` via \`nix-update\`."
+              if [ "$pkg" = "beads" ]; then
+                echo
+                echo "**Human-merged (no auto-merge):** upgrading \`bd\` can trigger cross-clone Dolt schema migrations across hosts. Follow the \`migrating-beads-schema\` skill (single-migrator discipline) before merging."
+              fi
+            } > /tmp/pr-body.md
+
+            gh pr create \
               --title "chore(deps): update ${pkg} to ${version}" \
-              --body "Automated update of \`${pkg}\` to \`${version}\` via \`nix-update\`." \
+              --body-file /tmp/pr-body.md \
               --label "dependencies,automated" \
-              --head "$branch")
-            pr_number=$(gh pr view "$branch" --json number -q '.number')
-            gh pr merge "$pr_number" --auto --squash
+              --head "$branch"
+
+            if [ "$AUTO_MERGE" = "true" ]; then
+              pr_number=$(gh pr view "$branch" --json number -q '.number')
+              gh pr merge "$pr_number" --auto --squash
+            fi
           fi
+
+      - name: Report workflow status
+        if: always() && env.SKIP != 'true' && steps.checkout.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/scripts/report-workflow-failure.py \
+            --workflow "${{ github.workflow }} (${{ matrix.package }})" \
+            --status "${{ job.status }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
