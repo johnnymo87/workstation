@@ -647,6 +647,22 @@ else
   bad "no pressure-v3-$today11.tsv was written" "files: $(ls "$out11")"
 fi
 
+# =================================================================================================
+# 12. goose-serve (workstation-6w7i.7): a SYSTEM unit, found by name under system.slice.
+# =================================================================================================
+root12="$tmpdir/cg12"; out12="$tmpdir/out12"
+mkcg "$root12" 100 1000
+mkcg "$root12/system.slice" 1
+mkcg "$root12/system.slice/goose-serve.service" 3000000000
+run_sampler "$root12" "$out12"
+tsv12="$(find "$out12" -name 'pressure-v3-*.tsv' | head -1)"
+got="$(field "$tsv12" goose-serve mem_current)"
+if [ "$got" = "3000000000" ]; then
+  ok "goose-serve row reads system.slice/goose-serve.service"
+else
+  bad "goose-serve row missing or wrong" "got: '$got' want 3000000000" "subjects: $(subjects "$tsv12")"
+fi
+
 # --- summary -------------------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 if [ "$FAIL" -eq 0 ]; then

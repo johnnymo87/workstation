@@ -24,8 +24,15 @@ let
   # goose itself is NOT bound here: goose-serve runs /var/lib/goose/current,
   # the approved binary (modules/goose-current.nix).
   agent-secret-env-sh = pkgs.callPackage ../../pkgs/agent-secret-env-sh { };
-  # GOOSE_SHELL for goose-serve's tool shells (workstation-pp9r.4).
-  goose-tool-shell = pkgs.callPackage ../../pkgs/goose-tool-shell { };
+  # GOOSE_SHELL for goose-serve's tool shells (workstation-pp9r.4), each
+  # command in its own capped user scope under goose-agent.slice
+  # (workstation-6w7i.7; sizes and slice name in lib/goose-agent.nix, the
+  # slice itself ships from users/dev/goose-agent.nix).
+  gooseAgent = import ../../lib/goose-agent.nix;
+  goose-tool-shell = pkgs.callPackage ../../pkgs/goose-tool-shell {
+    inherit (gooseAgent) sliceName;
+    inherit (gooseAgent.hosts.devbox) scopeMemoryMax scopeMemorySwapMax;
+  };
   cfp-shaper = (pkgs.callPackage ../../pkgs/claude-failover-proxy { }).shaper;
 
   # lgtm author-side shepherd for the repos devbox owns (lgtm-5ksr.5). See
@@ -691,8 +698,29 @@ in
         # future OOMScoreAdjust here BELOW 500, or the raise-only wrapper no-ops
         # and goose ties with its shells. pkgs/goose-tool-shell; bead
         # workstation-pp9r.4.
+        #
+        # Since workstation-6w7i.7 the same wrapper also runs each command in
+        # its own transient user scope under goose-agent.slice (per-command and
+        # aggregate caps in lib/goose-agent.nix), so tool commands no longer
+        # count against this unit's MemoryMax at all; the floor above now
+        # matters only on the wrapper's degrade path (no user manager), where
+        # commands run in this cgroup as before. Like the floor, this reaches
+        # goose at its next restart (environment), nightly at the latest.
         "GOOSE_SHELL=${goose-tool-shell}/bin/bash"
       ];
+      # Tool commands no longer live in this cgroup, so stopping the unit no
+      # longer kills them; without this they would outlive goose and the turn
+      # that started them. Stopping every goose-agent scope keeps the
+      # pre-6w7i.7 semantics on every stop or restart (deploy, crash, nightly).
+      # The SCOPES, not the slice: a slice with a stop job still queued makes
+      # systemd refuse new scopes in it, which would fail goose's first tool
+      # calls after the restart. Scopes carry TimeoutStopSec=30 (the wrapper),
+      # inside this 60s bound. `-` prefix: never fail the stop over it. Runs as
+      # dev (User=), which needs the user bus at /run/user/<uid>.
+      ExecStopPost = "-${pkgs.writeShellScript "goose-serve-stop-tools" ''
+        export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u)"
+        exec ${pkgs.coreutils}/bin/timeout 60 ${pkgs.systemd}/bin/systemctl --user stop 'goose-agent-*.scope'
+      ''}";
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail
 

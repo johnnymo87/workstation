@@ -400,6 +400,13 @@ NON_COORDINATOR_MAX_ID_SQL = (
 )
 
 
+# goose's per-command tool scopes (workstation-6w7i.7; slice name in
+# lib/goose-agent.nix, a child of goose.slice under dev's user manager).
+GOOSE_AGENT_SLICE_CGROUP = (
+    "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/goose.slice/goose-agent.slice"
+)
+
+
 def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tuple[bool, str]:
     if script_start_time is not None:
         if runner.now() - script_start_time > 14400:
@@ -467,6 +474,25 @@ def check_quiet(runner: Runner, script_start_time: Optional[float] = None) -> tu
                         return False, f"goose-serve PID {pid} has oom_score_adj={score} >= 500"
         except Exception as e:
             return False, f"failed checking goose-serve cgroup procs: {e}"
+
+    # 3b. goose tool commands in their own scopes (workstation-6w7i.7). Since
+    # then they no longer live in goose-serve's cgroup, so 3 alone would pass
+    # with a command (or something it backgrounded) still running, and D7's
+    # restart would kill it (goose-serve's ExecStopPost stops these scopes).
+    # Every process in a goose-agent scope is a tool command: any pid = busy.
+    agent_slice = runner.get_env("GOOSE_AGENT_SLICE_CGROUP") or GOOSE_AGENT_SLICE_CGROUP
+    try:
+        for scope in runner.listdir(agent_slice):
+            if not scope.endswith(".scope"):
+                continue
+            procs_path = f"{agent_slice}/{scope}/cgroup.procs"
+            if not runner.exists(procs_path):
+                continue
+            pids = [p.strip() for p in runner.read_file(procs_path).splitlines() if p.strip()]
+            if pids:
+                return False, f"goose tool command still running in {scope} (PID {pids[0]})"
+    except Exception as e:
+        return False, f"failed checking goose-agent scopes: {e}"
 
     # 4. honk list --json via HONK_BIN
     honk_bin = runner.get_env("HONK_BIN") or "/home/dev/.nix-profile/bin/honk"
@@ -1537,7 +1563,10 @@ def main(argv: Optional[list[str]] = None, runner: Optional[Runner] = None) -> i
     if cmd in ("prepare", "deploy"):
         try:
             cgroup = runner.read_file("/proc/self/cgroup")
-            if "goose-serve" in cgroup:
+            # goose-agent: goose's tool commands run in their own scopes
+            # since workstation-6w7i.7, so a goose agent's shell no longer
+            # shows goose-serve here.
+            if "goose-serve" in cgroup or "goose-agent" in cgroup:
                 print("refusing: goose-cutover launcher cannot run inside goose-serve cgroup", file=sys.stderr)
                 return 2
         except Exception as e:

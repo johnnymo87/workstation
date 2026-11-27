@@ -28,6 +28,7 @@
     ./goose-roles.nix
     ./goose-config.nix
     ./goose-providers.nix
+    ./goose-agent.nix
     ./tmux.devbox.nix
     ./tmux.cloudbox.nix
     ./tmux.darwin.nix

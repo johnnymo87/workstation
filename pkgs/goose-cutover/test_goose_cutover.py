@@ -353,6 +353,15 @@ class TestGooseCutover(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
 
+    def test_launcher_refuses_in_goose_agent_scope(self):
+        runner = setup_standard_runner()
+        runner.files["/proc/self/cgroup"] = (
+            "0::/user.slice/user-1000.slice/user@1000.service/goose.slice/"
+            "goose-agent.slice/goose-agent-12-34.scope\n")
+        rc = goose_cutover.main(["prepare", "902"], runner=runner)
+        self.assertEqual(rc, 2)
+        self.assertFalse(any("systemctl" in c["argv"] for c in runner.calls))
+
     def test_launcher_refuses_when_run_lock_busy(self):
         runner = setup_standard_runner()
         runner.cmd_handlers.insert(0, (
@@ -959,6 +968,20 @@ class TestGooseCutover(unittest.TestCase):
         quiet, reason = goose_cutover.check_quiet(runner)
         self.assertFalse(quiet)
         self.assertIn("oom_score_adj", reason)
+
+    def test_d2_goose_agent_scope_blocks(self):
+        runner = setup_standard_runner()
+        goose_cutover.check_quiet(runner)
+        runner.current_time += 601
+        sl = goose_cutover.GOOSE_AGENT_SLICE_CGROUP
+        runner.files[f"{sl}/goose-agent-77-1.scope/cgroup.procs"] = ""
+        runner.files[f"{sl}/memory.max"] = "max\n"
+        quiet, reason = goose_cutover.check_quiet(runner)
+        self.assertNotIn("goose-agent", reason or "", "an EMPTY scope is not busy")
+        runner.files[f"{sl}/goose-agent-78-2.scope/cgroup.procs"] = "4321\n"
+        quiet, reason = goose_cutover.check_quiet(runner)
+        self.assertFalse(quiet)
+        self.assertIn("goose-agent-78-2.scope", reason)
 
     def test_d2_honk_running_blocks(self):
         runner = setup_standard_runner()
