@@ -524,6 +524,138 @@ class GooseSnapshot(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
 
 
+def cut_row(sid, at, title="w", cwd="/w", running=False, message=None, kind="interrupted"):
+    return {"sessionId": sid, "title": title, "cwd": cwd, "running": running,
+            "lastError": {"kind": kind, "message": message or tcn.CUT_MESSAGE, "at": at}}
+
+
+class ResumeGoose(unittest.TestCase):
+    """workstation-6w7i.16: resume turns cut by ANY goose-serve restart."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "gtr", "state.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_(self, rows, pigeon, now=NOW + 60, max_n=30, dry=False):
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = tcn.resume_goose(rows, pigeon, self.state, max_n, dry, now_s=now)
+        return rc, err.getvalue()
+
+    def test_cut_turn_gets_a_resume_notice(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(p.sent), 1)
+        b = p.sent[0]
+        self.assertEqual((b["from"], b["to"], b["kind"]), ("goose-turn-resume", "gse_1", "goose.turn_cut"))
+        self.assertIn("goose-serve restarted", b["payload"])
+        self.assertIn("carry on with the task", b["payload"])
+        self.assertNotIn("reset-workspace (the workspace reset", b["payload"])
+
+    def test_only_once_per_cut(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p)
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_a_later_cut_of_the_same_session_is_told_again(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p)
+        self.run_([cut_row("g1", NOW + 600)], p, now=NOW + 660)
+        self.assertEqual(len(p.sent), 2)
+
+    def test_loop_guard(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        for i in range(5):
+            _, err = self.run_([cut_row("g1", NOW + i * 600)], p, now=NOW + i * 600 + 60)
+        self.assertEqual(len(p.sent), tcn.RESUME_CAP)
+        self.assertIn("not looping", err)
+
+    def test_other_errors_and_running_and_delivery_unknown_are_ignored(self):
+        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in ("a", "b", "c", "d")])
+        rows = [
+            cut_row("a", NOW, kind="network", message="connection reset"),
+            cut_row("b", NOW, running=True),
+            cut_row("c", NOW, message="honkd could not tell whether goose got the prompt"),
+            {"sessionId": "d", "running": False, "lastError": None},
+        ]
+        self.run_(rows, p)
+        self.assertEqual(p.sent, [])
+
+    def test_stall_watch_coordinator_skipped_once_quietly(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        row = cut_row("g1", NOW, cwd="/home/dev/.local/state/stall-watch/coord-sessions/x")
+        _, err1 = self.run_([row], p)
+        _, err2 = self.run_([row], p, now=NOW + 120)
+        self.assertEqual(p.sent, [])
+        self.assertIn("stall-watch coordinator", err1)
+        self.assertEqual(err2, "")
+
+    def test_unroutable_skipped_quietly_next_time(self):
+        p = FakePigeon(sessions=[])
+        _, err1 = self.run_([cut_row("g1", NOW)], p)
+        _, err2 = self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertIn("pigeon does not know", err1)
+        self.assertEqual(err2, "")
+
+    def test_send_failure_is_retried_next_run(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")], fail_to={"gse_1"})
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 1)
+        p.fail_to = set()
+        rc, _ = self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_pigeon_down_is_retried(self):
+        p = FakePigeon(fail_sessions=True)
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 1)
+        p.fail_sessions = False
+        p.sessions = [goose_row("g1", "gse_1")]
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_reset_workspace_notice_suppresses_the_resumer(self):
+        snap = {"harness": "goose", "taken_at": NOW - 30,
+                "sessions": [{"native_id": "g1", "title": "w"}]}
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch("time.time", return_value=NOW + 30):
+            tcn.notify([snap], None, p, 30, resume_state=self.state)
+        self.assertEqual(len(p.sent), 1)
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 90)
+        self.assertEqual(len(p.sent), 1, "the reset already told it")
+
+    def test_dry_run_sends_and_records_nothing(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p, dry=True)
+        self.assertEqual(p.sent, [])
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_cli_skips_while_reset_lock_held(self):
+        lock = os.path.join(self.tmp.name, "lock")
+        open(lock, "w").close()
+        import fcntl
+        with open(lock) as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                               "--reset-lock", lock, "--resume-state", self.state])
+        self.assertEqual(rc, 0)
+        self.assertIn("reset-workspace in progress", err.getvalue())
+
+    def test_cli_honk_failure_is_exit_1(self):
+        with mock.patch("sys.stderr", io.StringIO()):
+            rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                           "--reset-lock", "/nonexistent.lock", "--resume-state", self.state])
+        self.assertEqual(rc, 1)
+
+
 class Cli(Base):
     def test_snapshot_opencode_writes_file(self):
         self.fx.session("ses_a", updated=NOW)
