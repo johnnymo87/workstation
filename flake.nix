@@ -2816,8 +2816,8 @@
       goose-canary = devboxPkgs.runCommand "goose-canary-tests" {
         nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.util-linux ];
       } ''
-        cp ${self}/pkgs/goose-canary/*.py .
-        python3 test_goose_canary.py 2>&1 | tee "$TMPDIR/gc.txt"
+        cd ${self}
+        python3 pkgs/goose-canary/test_goose_canary.py 2>&1 | tee "$TMPDIR/gc.txt"
         grep -q '^Ran 13 tests' "$TMPDIR/gc.txt" && grep -q '^OK$' "$TMPDIR/gc.txt" || {
           echo "GATE FAILURE: goose-canary suite did not run 13 tests OK." >&2; exit 1; }
         touch $out
