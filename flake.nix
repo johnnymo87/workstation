@@ -157,6 +157,7 @@
       };
       goose-config-enforce = p.callPackage ./pkgs/goose-config-enforce { };
       goose-tool-shell = p.callPackage ./pkgs/goose-tool-shell { };
+      goose-canary = p.callPackage ./pkgs/goose-canary { };
       goose-link = p.callPackage ./pkgs/goose-link { };
       goose-cutover = p.callPackage ./pkgs/goose-cutover {
         inherit goose-link;
@@ -625,8 +626,8 @@
       } ''
         cd ${self}
         bash pkgs/pressure-sampler/test-pressure-sampler.sh 2>&1 | tee "$TMPDIR/ps.txt"
-        grep -q '^ALL PASS (46 assertions)' "$TMPDIR/ps.txt" || {
-          echo "GATE FAILURE: pressure-sampler suite did not reach ALL PASS (46 assertions)." >&2
+        grep -q '^ALL PASS (47 assertions)' "$TMPDIR/ps.txt" || {
+          echo "GATE FAILURE: pressure-sampler suite did not reach ALL PASS (47 assertions)." >&2
           echo "If you added assertions, bump the pinned count here deliberately." >&2
           exit 1
         }
@@ -2762,6 +2763,63 @@
         SHELL_BIN = "${(localPkgsFor devboxSystem).goose-tool-shell}/bin/bash";
       } ''
         bash ${self}/pkgs/goose-tool-shell/test.sh
+        touch $out
+      '';
+
+      # The SHIPPED GOOSE_SHELL of each host's goose-serve (workstation-6w7i.7):
+      # the scoped build, run through the same suite, pinned to its slice.
+      goose-tool-shell-scoped = let
+        L = devboxPkgs.lib;
+        shellOf = host: L.removePrefix "GOOSE_SHELL="
+          (L.findFirst (e: L.hasPrefix "GOOSE_SHELL=" e)
+            (throw "goose-serve on ${host} sets no GOOSE_SHELL")
+            self.nixosConfigurations.${host}.config.systemd.services.goose-serve.serviceConfig.Environment);
+        ga = import ./lib/goose-agent.nix;
+      in devboxPkgs.runCommand "goose-tool-shell-scoped-tests" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.gnused devboxPkgs.gnugrep ];
+      } (L.concatMapStrings (host: ''
+        echo "== ${host}"
+        EXPECT_SLICE=${ga.sliceName} SHELL_BIN=${shellOf host} bash ${self}/pkgs/goose-tool-shell/test.sh
+      '') [ "cloudbox" "devbox" ] + "touch $out\n");
+
+      # Same guard as agent-slice-wiring, for goose (workstation-6w7i.7): the
+      # slice each host's goose-serve GOOSE_SHELL targets must ship, capped, in
+      # that host's home-manager generation. systemd-run invents an UNCAPPED
+      # transient slice for an undeclared name, so a mismatch stays green.
+      goose-agent-slice-wiring = let
+        L = devboxPkgs.lib;
+        shellOf = host: L.removePrefix "GOOSE_SHELL="
+          (L.findFirst (e: L.hasPrefix "GOOSE_SHELL=" e) ""
+            self.nixosConfigurations.${host}.config.systemd.services.goose-serve.serviceConfig.Environment);
+        pairs = [
+          { host = "cloudbox"; gen = self.homeConfigurations.cloudbox.activationPackage; }
+          { host = "devbox"; gen = self.homeConfigurations.dev.activationPackage; }
+        ];
+      in devboxPkgs.runCommand "goose-agent-slice-wiring-guard" {
+        nativeBuildInputs = [ devboxPkgs.bash devboxPkgs.gnugrep devboxPkgs.coreutils ];
+      } (L.concatMapStrings ({ host, gen }: ''
+        shell_bin=$(readlink -f "${shellOf host}")
+        [ -n "$shell_bin" ] || { echo "FAIL: ${host} goose-serve has no GOOSE_SHELL"; exit 1; }
+        slice=$(grep -oP '^SLICE_NAME="\K[^"]*' "$shell_bin" || true)
+        [ -n "$slice" ] || { echo "FAIL: ${host} GOOSE_SHELL is not scoped (SLICE_NAME empty)"; exit 1; }
+        unit="${gen}/home-files/.config/systemd/user/$slice.slice"
+        [ -e "$unit" ] || { echo "FAIL: ${host} GOOSE_SHELL targets --slice=$slice but no $slice.slice ships"; exit 1; }
+        grep -q '^MemoryMax=' "$unit" || { echo "FAIL: ${host} $slice.slice has no MemoryMax"; exit 1; }
+        grep -q '^MemoryHigh=' "$unit" && { echo "FAIL: ${host} $slice.slice sets MemoryHigh (stall band)"; exit 1; }
+        grep -q 'ExecStopPost=.*goose-serve-stop-tools' \
+          ${self.nixosConfigurations.${host}.config.systemd.units."goose-serve.service".unit}/goose-serve.service \
+          || { echo "FAIL: ${host} goose-serve does not stop $slice.slice on stop"; exit 1; }
+        echo "ok ${host}: GOOSE_SHELL --slice=$slice matches a capped $slice.slice"
+      '') pairs + "touch $out\n");
+
+      # goose-serve + honkd wedge canary (workstation-6w7i.7).
+      goose-canary = devboxPkgs.runCommand "goose-canary-tests" {
+        nativeBuildInputs = [ devboxPkgs.python3 devboxPkgs.bash devboxPkgs.coreutils devboxPkgs.util-linux ];
+      } ''
+        cp ${self}/pkgs/goose-canary/*.py .
+        python3 test_goose_canary.py 2>&1 | tee "$TMPDIR/gc.txt"
+        grep -q '^Ran 13 tests' "$TMPDIR/gc.txt" && grep -q '^OK$' "$TMPDIR/gc.txt" || {
+          echo "GATE FAILURE: goose-canary suite did not run 13 tests OK." >&2; exit 1; }
         touch $out
       '';
 

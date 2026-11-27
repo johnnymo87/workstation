@@ -335,6 +335,20 @@ writeShellApplication {
         done
       fi
 
+      # ---- goose-serve (bead workstation-6w7i.7) -----------------------------
+      # A SYSTEM unit (system.slice/goose-serve.service, User=dev), so none of
+      # the user-manager loops below reach it. Its 14G cap was hit on four days
+      # in 2026-11 with no anon/file record to say whether goose, its tool
+      # commands or page cache filled it. Its tool commands now run in
+      # goose-agent scopes, which the user-slice loop covers (as goose.slice,
+      # the implicit parent of goose-agent.slice). Located by name at depth
+      # 1-2 for the reason given on the serve loop above. Silent when absent:
+      # a host without goose is ordinary.
+      for cg in "$CGROUP_ROOT"/goose-serve.service "$CGROUP_ROOT"/*/goose-serve.service; do
+        [ -d "$cg" ] || continue
+        emit_cgroup "goose-serve" "-" "$cg"
+      done
+
       # ---- bazel -----------------------------------------------------------
       uid=$(id -u)
       umgr="$CGROUP_ROOT/user.slice/user-$uid.slice/user@$uid.service"
