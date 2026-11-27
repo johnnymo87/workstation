@@ -529,6 +529,17 @@ def cut_row(sid, at, title="w", cwd="/w", running=False, message=None, kind="int
             "lastError": {"kind": kind, "message": message or tcn.CUT_MESSAGE, "at": at}}
 
 
+def plain_row(sid, title="w", cwd="/w", running=False):
+    return {"sessionId": sid, "title": title, "cwd": cwd, "running": running, "lastError": None}
+
+
+def journal_line(sid, at, cursor, message=None, kind="interrupted"):
+    fields = {"message": f"Session {sid}: turn failed (kind={kind} ...): x", "sid": sid,
+              "kind": kind, "error_message": message or tcn.CUT_MESSAGE}
+    return json.dumps({"__CURSOR": cursor, "__REALTIME_TIMESTAMP": str(at * 1_000_000),
+                       "MESSAGE": json.dumps({"level": "WARN", "fields": fields})})
+
+
 class ResumeGoose(unittest.TestCase):
     """workstation-6w7i.16: resume turns cut by ANY goose-serve restart."""
 
@@ -539,10 +550,13 @@ class ResumeGoose(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_(self, rows, pigeon, now=NOW + 60, max_n=30, dry=False):
+    def run_(self, rows, pigeon, now=NOW + 60, max_n=30, dry=False, cuts=None, alert=None):
+        if cuts is None:
+            cuts = tcn.cut_turns_from_list(rows)
         err = io.StringIO()
         with mock.patch("sys.stderr", err):
-            rc = tcn.resume_goose(rows, pigeon, self.state, max_n, dry, now_s=now)
+            rc = tcn.resume_goose(cuts, rows, pigeon, self.state, max_n, dry, now_s=now,
+                                  alert_cmd=alert)
         return rc, err.getvalue()
 
     def test_cut_turn_gets_a_resume_notice(self):
@@ -554,6 +568,7 @@ class ResumeGoose(unittest.TestCase):
         self.assertEqual((b["from"], b["to"], b["kind"]), ("goose-turn-resume", "gse_1", "goose.turn_cut"))
         self.assertIn("goose-serve restarted", b["payload"])
         self.assertIn("carry on with the task", b["payload"])
+        self.assertIn("state of the world", b["payload"])
         self.assertNotIn("reset-workspace (the workspace reset", b["payload"])
 
     def test_only_once_per_cut(self):
@@ -568,20 +583,68 @@ class ResumeGoose(unittest.TestCase):
         self.run_([cut_row("g1", NOW + 600)], p, now=NOW + 660)
         self.assertEqual(len(p.sent), 2)
 
-    def test_loop_guard(self):
+    def test_running_again_is_still_resumed(self):
+        # pigeon starts a queued message within a second of the cut; the earlier
+        # task was still never resumed.
         p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
-        for i in range(5):
-            _, err = self.run_([cut_row("g1", NOW + i * 600)], p, now=NOW + i * 600 + 60)
-        self.assertEqual(len(p.sent), tcn.RESUME_CAP)
-        self.assertIn("not looping", err)
+        self.run_([cut_row("g1", NOW, running=True)], p)
+        self.assertEqual(len(p.sent), 1)
 
-    def test_other_errors_and_running_and_delivery_unknown_are_ignored(self):
-        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in ("a", "b", "c", "d")])
+    def test_cut_erased_from_honk_list_is_caught_from_the_journal(self):
+        # The intervening turn ended cleanly and cleared lastError.
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        cuts, cursor = tcn.parse_honkd_journal([
+            journal_line("g1", NOW, "c1"),
+            journal_line("g2", NOW, "c2", message="honkd could not tell whether goose got the prompt"),
+            json.dumps({"__CURSOR": "c3", "MESSAGE": "unrelated"}),
+            "not json",
+        ])
+        self.assertEqual(cuts, [{"native_id": "g1", "at": NOW}])
+        self.assertEqual(cursor, "c3")
+        self.run_([plain_row("g1")], p, cuts=cuts)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_journal_and_list_sightings_of_one_cut_send_one_notice(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        rows = [cut_row("g1", NOW)]
+        cuts = tcn.cut_turns_from_list(rows) + [{"native_id": "g1", "at": NOW + 1}]
+        self.run_(rows, p, cuts=cuts)
+        self.run_(rows, p, cuts=cuts, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_loop_guard_holds_alerts_once_and_releases(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        alerts = os.path.join(self.tmp.name, "alerts")
+        alert = os.path.join(self.tmp.name, "alert.sh")
+        with open(alert, "w") as f:
+            f.write(f'#!/bin/sh\necho "$2" >> {alerts}\n')
+        os.chmod(alert, 0o755)
+        for i in range(4):
+            self.run_([cut_row("g1", NOW + i * 600)], p, now=NOW + i * 600 + 60, alert=alert)
+        self.assertEqual(len(p.sent), tcn.RESUME_CAP)
+        _, err = self.run_([cut_row("g1", NOW + 1800)], p, now=NOW + 1900, alert=alert)
+        with open(alerts) as f:
+            self.assertEqual(f.read().split(), ["resume-cap:g1"], "alerted once")
+        later = NOW + tcn.RESUME_CAP_WINDOW_S + 1000
+        self.run_([plain_row("g1")], p, now=later, cuts=[], alert=alert)
+        self.assertEqual(len(p.sent), tcn.RESUME_CAP + 1, "held cut goes out once the window opens")
+
+    def test_pacing_keeps_the_rest_pending_oldest_first(self):
+        sids = [f"g{i}" for i in range(5)]
+        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in sids])
+        rows = [cut_row(s, NOW + i) for i, s in enumerate(sids)]
+        _, err = self.run_(rows, p, max_n=2)
+        self.assertEqual([b["to"] for b in p.sent], ["gse_g0", "gse_g1"])
+        self.assertIn("3 pending", err)
+        self.run_([plain_row(s) for s in sids], p, max_n=2, cuts=[], now=NOW + 120)
+        self.assertEqual([b["to"] for b in p.sent][2:], ["gse_g2", "gse_g3"])
+
+    def test_other_errors_and_delivery_unknown_are_ignored(self):
+        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in ("a", "c", "d")])
         rows = [
             cut_row("a", NOW, kind="network", message="connection reset"),
-            cut_row("b", NOW, running=True),
             cut_row("c", NOW, message="honkd could not tell whether goose got the prompt"),
-            {"sessionId": "d", "running": False, "lastError": None},
+            plain_row("d"),
         ]
         self.run_(rows, p)
         self.assertEqual(p.sent, [])
@@ -607,9 +670,9 @@ class ResumeGoose(unittest.TestCase):
         rc, _ = self.run_([cut_row("g1", NOW)], p)
         self.assertEqual(rc, 1)
         p.fail_to = set()
-        rc, _ = self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        rc, _ = self.run_([plain_row("g1")], p, now=NOW + 120, cuts=[])
         self.assertEqual(rc, 0)
-        self.assertEqual(len(p.sent), 1)
+        self.assertEqual(len(p.sent), 1, "a cut seen once is kept pending")
 
     def test_pigeon_down_is_retried(self):
         p = FakePigeon(fail_sessions=True)
@@ -649,8 +712,17 @@ class ResumeGoose(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("reset-workspace in progress", err.getvalue())
 
+    def test_cli_holds_while_goose_just_started(self):
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), mock.patch.object(tcn, "goose_uptime_s", return_value=10.0):
+            rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                           "--reset-lock", "/nonexistent.lock", "--resume-state", self.state])
+        self.assertEqual(rc, 0)
+        self.assertIn("holding resumes", err.getvalue())
+
     def test_cli_honk_failure_is_exit_1(self):
-        with mock.patch("sys.stderr", io.StringIO()):
+        with mock.patch("sys.stderr", io.StringIO()), \
+                mock.patch.object(tcn, "goose_uptime_s", return_value=None):
             rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
                            "--reset-lock", "/nonexistent.lock", "--resume-state", self.state])
         self.assertEqual(rc, 1)

@@ -62,12 +62,13 @@ lib.mkIf (isDevbox || isCloudbox) {
   };
 
   # Resume goose turns cut by ANY goose-serve restart -- deploy, crash or the
-  # nightly reset (workstation-6w7i.16). honkd records each cut turn
-  # (`honk list --json` lastError "goose restarted during the turn") until the
-  # session runs again; this tells each such session, through pigeon, that its
-  # turn was cut and to carry on. Skips stall-watch coordinators (they retry
-  # themselves), sessions reset-workspace already told, and anything resumed 3
-  # times in 6h. See `resume-goose` in pkgs/turn-cut-notice.
+  # nightly reset (workstation-6w7i.16). honkd logs each cut turn ("goose
+  # restarted during the turn", with the session id) to its journal and shows
+  # it as `honk list` lastError; this reads both and tells each such session,
+  # through pigeon, that its turn was cut and to carry on. Skips stall-watch
+  # coordinators (they retry themselves) and sessions reset-workspace already
+  # told; paced 8 a minute; holds (and alerts) a session resumed 3 times in 6h.
+  # See `resume-goose` in pkgs/turn-cut-notice.
   systemd.user.services.goose-turn-resume = {
     Unit.Description = "Resume goose turns cut by a goose-serve restart";
     Service = {
@@ -75,6 +76,10 @@ lib.mkIf (isDevbox || isCloudbox) {
       TimeoutStartSec = 300;
       Environment = [
         "TURN_CUT_HONK=${config.home.homeDirectory}/.nix-profile/bin/honk"
+        # Loop-guard alerts (a session resumed 3 times in 6h).
+        "TURN_CUT_ALERT=${driftAlert}"
+        # journalctl (honkd's cut records) and systemctl (goose-serve uptime).
+        "PATH=${pkgs.systemd}/bin"
       ];
       ExecStart = "${localPkgs.turn-cut-notice}/bin/turn-cut-notice resume-goose";
     };

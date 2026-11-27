@@ -6,7 +6,7 @@ Since workstation-6w7i.16 those turns are re-prompted (goose-turn-resume), but
 a false positive would still cost every running turn its in-flight step, so a
 human decides until the probe has a record. honkd is held to the same rule: a
 honkd restart cuts every turn it relays, and goose-turn-resume does not cover
-those (honkd records them as "delivery unknown").
+those (honkd either continues such a turn or records nothing).
 
 "Frozen" means no ACP answer, not "process gone": systemd already restarts a
 dead goose-serve (Restart=always). The probes:
