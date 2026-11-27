@@ -710,13 +710,16 @@ in
       ];
       # Tool commands no longer live in this cgroup, so stopping the unit no
       # longer kills them; without this they would outlive goose and the turn
-      # that started them. Stopping the slice stops every goose-agent scope,
-      # which keeps the pre-6w7i.7 semantics on every stop or restart (deploy,
-      # crash, nightly). `-` prefix: never fail the stop over it. Runs as dev
-      # (User=), which needs the user bus at /run/user/<uid>.
+      # that started them. Stopping every goose-agent scope keeps the
+      # pre-6w7i.7 semantics on every stop or restart (deploy, crash, nightly).
+      # The SCOPES, not the slice: a slice with a stop job still queued makes
+      # systemd refuse new scopes in it, which would fail goose's first tool
+      # calls after the restart. Scopes carry TimeoutStopSec=30 (the wrapper),
+      # inside this 60s bound. `-` prefix: never fail the stop over it. Runs as
+      # dev (User=), which needs the user bus at /run/user/<uid>.
       ExecStopPost = "-${pkgs.writeShellScript "goose-serve-stop-tools" ''
         export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u)"
-        exec ${pkgs.coreutils}/bin/timeout 60 ${pkgs.systemd}/bin/systemctl --user stop ${gooseAgent.sliceName}.slice
+        exec ${pkgs.coreutils}/bin/timeout 60 ${pkgs.systemd}/bin/systemctl --user stop 'goose-agent-*.scope'
       ''}";
       ExecStart = "${pkgs.writeShellScript "goose-serve-start" ''
         set -euo pipefail

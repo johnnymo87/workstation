@@ -35,6 +35,7 @@ lib.mkIf (isDevbox || isCloudbox) {
       # instead of killing; workstation-94g8, h1y6).
       MemoryMax = sizes.sliceMemoryMax;
       MemorySwapMax = sizes.sliceMemorySwapMax;
+      TasksMax = sizes.sliceTasksMax;
     };
   };
 

@@ -584,6 +584,10 @@ class Probe:
         }
         if self.goose_shell:
             env["GOOSE_SHELL"] = self.goose_shell
+            # Production's GOOSE_SHELL scopes each command into production's
+            # goose-agent.slice (workstation-6w7i.7). Keep the probe's tool
+            # calls inside this unit: its cap, its RuntimeMaxSec, its stop.
+            env["GOOSE_TOOL_SHELL_NO_SCOPE"] = "1"
         assert_isolated_env(env, self.root)
         return env
 

@@ -74,7 +74,11 @@ let
         { echo "$OOM_SCORE_ADJ_FLOOR" > /proc/self/oom_score_adj; } 2>/dev/null || true
       fi
 
-      if [ -n "$SLICE_NAME" ]; then
+      # GOOSE_TOOL_SHELL_NO_SCOPE=1 in the goose serve's environment opts that
+      # serve out: goose-upgrade-probe runs a throwaway serve with production's
+      # GOOSE_SHELL, and its tool call must stay inside the probe's own unit
+      # (its cap, its stop) rather than land in production's slice.
+      if [ -n "$SLICE_NAME" ] && [ -z "''${GOOSE_TOOL_SHELL_NO_SCOPE:-}" ]; then
         # goose-serve is a SYSTEM unit (User=dev) and its environment has no
         # XDG_RUNTIME_DIR, which `systemd-run --user` needs to find dev's user
         # manager. Measured: from a system unit running as dev, a --user
@@ -90,9 +94,19 @@ let
         # bash ...` cannot tell "no scope" from "command failed" and would run
         # a failing command twice), and a wedged user bus must cost 3s, not
         # sd-bus's 25s default, per command.
+        #
+        # The probe uses the REAL call's --slice and properties, so whatever
+        # would fail the real call (e.g. the slice has a stop job queued, which
+        # makes systemd refuse to start a scope in it) fails the probe and
+        # degrades, instead of failing the command after the commit to exec.
         if ${pkgs.coreutils}/bin/timeout -k 1 3 \
           "$SYSTEMD_RUN" --user --scope --collect --quiet \
-          --unit="goose-agent-probe-$$-$RANDOM" -- true 2>/dev/null; then
+          --unit="goose-agent-probe-$$-$RANDOM" \
+          -p MemoryMax="$SCOPE_MEMORY_MAX" \
+          -p MemorySwapMax="$SCOPE_MEMORY_SWAP_MAX" \
+          -p OOMPolicy=continue \
+          -p TimeoutStopSec=30 \
+          --slice="$SLICE_NAME" -- true 2>/dev/null; then
           # exec in place: same pid, same process group, so goose's
           # process-group kill (fork patch) still reaches the command.
           # --unit=: never an auto run-pNNN name, which a nested systemd-run
@@ -100,6 +114,10 @@ let
           # --expand-environment=no: systemd would otherwise expand $$ and
           #   ''${VAR} in the payload before bash sees it.
           # OOMPolicy=continue: explicit; a scope defaults to `stop`.
+          # TimeoutStopSec=30: SIGKILL a command that ignores SIGTERM after 30s
+          #   when goose-serve's ExecStopPost stops the scopes, so that stop
+          #   finishes inside its own 60s bound (the user manager's default
+          #   is 90s).
           # The payload is a trampoline so the command still sees $0 == bash,
           # as it did before scoping (systemd-run cannot set argv[0]).
           # shellcheck disable=SC2016 # expanded by the payload bash, on purpose
@@ -108,6 +126,7 @@ let
             -p MemoryMax="$SCOPE_MEMORY_MAX" \
             -p MemorySwapMax="$SCOPE_MEMORY_SWAP_MAX" \
             -p OOMPolicy=continue \
+            -p TimeoutStopSec=30 \
             --expand-environment=no \
             --slice="$SLICE_NAME" \
             -- "$REAL_BASH" -c 'exec -a bash "$0" "$@"' "$REAL_BASH" "$@"

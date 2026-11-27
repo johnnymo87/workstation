@@ -16,6 +16,11 @@
 #     10G cap gave goose AND its tools until now. The slice sits inside
 #     user-1000.slice's 20G, so goose tools now share that bound with the
 #     opencode serves instead of adding 10G beside it.
+#   TasksMax: tool commands also left goose-serve's TasksMax (77020) for
+#     user-1000.slice's pids.max (4096 cloudbox, 2048 devbox), shared with
+#     logins, tmux, honkd, bazel and oc-agent. A fork bomb in one tool command
+#     must hit this fence, not EAGAIN every process dev runs. cloudbox
+#     user-1000 peaked at 1221 pids over 41h (2026-11-27).
 {
   sliceName = "goose-agent";
   hosts = {
@@ -24,12 +29,14 @@
       scopeMemorySwapMax = "2G";
       sliceMemoryMax = "20G";
       sliceMemorySwapMax = "4G";
+      sliceTasksMax = 2048;
     };
     devbox = {
       scopeMemoryMax = "6G";
       scopeMemorySwapMax = "1G";
       sliceMemoryMax = "10G";
       sliceMemorySwapMax = "2G";
+      sliceTasksMax = 1024;
     };
   };
 }

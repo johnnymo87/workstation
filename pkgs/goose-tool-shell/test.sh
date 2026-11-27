@@ -133,12 +133,24 @@ check "scoped: nothing on stderr" "" "$(cat "$tmp_dir/err")"
 check "scoped: probe + one real systemd-run" "2" "$(wc -l < "$FAKE_LOG" | tr -d ' ')"
 real_args="$(sed -n 2p "$FAKE_LOG")"
 for want in "--user" "--scope" "--collect" "--slice=test-agent" "--expand-environment=no" \
-            "-p OOMPolicy=continue" "-p MemoryMax=" "-p MemorySwapMax=" "--unit=goose-agent-"; do
+            "-p OOMPolicy=continue" "-p MemoryMax=" "-p MemorySwapMax=" "-p TimeoutStopSec=30" \
+            "--unit=goose-agent-"; do
   case "$real_args" in
     *"$want"*) ok "scoped: systemd-run gets $want" ;;
     *) bad "scoped: systemd-run lacks $want ($real_args)" ;;
   esac
 done
+probe_args="$(sed -n 1p "$FAKE_LOG")"
+case "$probe_args" in
+  *"--slice=test-agent"*) ok "probe targets the real slice (fails when the real call would)" ;;
+  *) bad "probe lacks --slice ($probe_args)" ;;
+esac
+
+: > "$FAKE_LOG"
+out="$(GOOSE_TOOL_SHELL_NO_SCOPE=1 FAKE_PROBE_RC=0 "$scoped_wrapper" -c 'echo optout' 2>"$tmp_dir/err")"
+check "opt-out: command runs" "optout" "$out"
+check "opt-out: systemd-run never called" "0" "$(wc -l < "$FAKE_LOG" | tr -d ' ')"
+check "opt-out: silent" "" "$(cat "$tmp_dir/err")"
 
 out="$(FAKE_PROBE_RC=0 "$scoped_wrapper" -c 'echo "$0"')"
 check "scoped: \$0 is plain bash" "bash" "$out"
