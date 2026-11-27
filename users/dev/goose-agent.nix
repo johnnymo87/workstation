@@ -1,5 +1,6 @@
-# goose's tool-command slice and its wedge canary, on both NixOS hosts.
-# Bead workstation-6w7i.7.
+# goose's tool-command slice, its wedge canary (bead workstation-6w7i.7) and
+# the resume of turns a goose-serve restart cut (workstation-6w7i.16), on both
+# NixOS hosts.
 #
 # 1. goose-agent.slice: every goose tool command runs in its own transient
 #    user scope under this slice (pkgs/goose-tool-shell, built by the
@@ -9,9 +10,10 @@
 #    goose-serve's own MemoryMax.
 #
 # 2. goose-canary: minutely ACP probe of goose-serve and honkd. ALERT-ONLY:
-#    restarting either ends every goose turn it carries, so until restarts stop
-#    losing turns (workstation-6w7i.16) a human decides. See
-#    pkgs/goose-canary/goose_canary.py.
+#    restarting either cuts every goose turn it carries; see
+#    pkgs/goose-canary/goose_canary.py for why that stays a human's call.
+#
+# 3. goose-turn-resume: re-prompts goose turns a goose-serve restart cut.
 { config, pkgs, lib, localPkgs, isDevbox, isCloudbox, ... }:
 
 let
@@ -57,6 +59,40 @@ lib.mkIf (isDevbox || isCloudbox) {
       ];
       ExecStart = "${localPkgs.goose-canary}/bin/goose-canary";
     };
+  };
+
+  # Resume goose turns cut by ANY goose-serve restart -- deploy, crash or the
+  # nightly reset (workstation-6w7i.16). honkd logs each cut turn ("goose
+  # restarted during the turn", with the session id) to its journal and shows
+  # it as `honk list` lastError; this reads both and tells each such session,
+  # through pigeon, that its turn was cut and to carry on. Skips stall-watch
+  # coordinators (they retry themselves) and sessions reset-workspace already
+  # told; paced 8 a minute; holds (and alerts) a session resumed 3 times in 6h.
+  # See `resume-goose` in pkgs/turn-cut-notice.
+  systemd.user.services.goose-turn-resume = {
+    Unit.Description = "Resume goose turns cut by a goose-serve restart";
+    Service = {
+      Type = "oneshot";
+      TimeoutStartSec = 300;
+      Environment = [
+        "TURN_CUT_HONK=${config.home.homeDirectory}/.nix-profile/bin/honk"
+        # Loop-guard alerts (a session resumed 3 times in 6h).
+        "TURN_CUT_ALERT=${driftAlert}"
+        # journalctl (honkd's cut records) and systemctl (goose-serve uptime).
+        "PATH=${pkgs.systemd}/bin"
+      ];
+      ExecStart = "${localPkgs.turn-cut-notice}/bin/turn-cut-notice resume-goose";
+    };
+  };
+
+  systemd.user.timers.goose-turn-resume = {
+    Unit.Description = "Minutely resume of goose turns cut by a goose-serve restart";
+    Timer = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "1min";
+      AccuracySec = "10s";
+    };
+    Install.WantedBy = [ "timers.target" ];
   };
 
   systemd.user.timers.goose-canary = {

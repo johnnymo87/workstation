@@ -13,6 +13,23 @@ lgtm-shepherd uses to wake sessions) saying the turn was cut and what to do.
     turn-cut-notice snapshot-goose --out FILE [--honk honk]
     turn-cut-notice notify --snapshot FILE [--snapshot FILE ...] [--db PATH]
                            [--pigeon-url URL] [--pigeon-token-file F] [--max N] [--dry-run]
+                           [--resume-state FILE]
+    turn-cut-notice resume-goose [--honk honk] [--resume-state FILE] [--reset-lock F]
+                           [--pigeon-url URL] [--pigeon-token-file F] [--max N]
+                           [--alert CMD] [--dry-run]
+
+`resume-goose` (workstation-6w7i.16) is the same notice for EVERY goose-serve
+restart, not just the nightly one: a deploy, a crash, a restart by hand. It
+needs no snapshot: honkd logs each turn a goose restart cut ("turn failed
+(kind=interrupted ...): goose restarted during the turn", with the session id)
+to its journal, which this follows with a saved cursor. honkd's `honk list`
+lastError is NOT enough on its own: a later turn masks it while it runs and
+erases it when it ends, and pigeon starts a queued message within a second of
+the cut. Both sources are read; the journal is the one that cannot be erased.
+Run every minute by the goose-turn-resume user timer.
+
+NOT covered: turns cut by a honkd restart (honkd either continues them or
+records nothing), and a prompt parked in honkd's announce window at the cut.
 
 Exit codes: 0 ok (including "nothing to do"), 1 something failed (the caller
 logs a warning and carries on -- this tool must never fail a reset), 2 usage.
@@ -36,6 +53,31 @@ import urllib.request
 
 SENDER = "reset-workspace"
 KIND = "reset.turn_cut"
+RESUME_SENDER = "goose-turn-resume"
+RESUME_KIND = "goose.turn_cut"
+# honkd's record of a turn cut by a goose restart (honk crates/honkd/src/turn.rs).
+# NOT its other "interrupted" message, "honkd could not tell whether goose got
+# the prompt": there goose may never have seen the prompt, so "carry on" would
+# be wrong (pigeon tells the human to check the session before resending).
+CUT_KIND = "interrupted"
+CUT_MESSAGE = "goose restarted during the turn"
+# Loop guard: a resume that makes goose crash again must not loop forever.
+RESUME_CAP = 3
+RESUME_CAP_WINDOW_S = 6 * 3600
+RESUME_STATE_KEEP_S = 7 * 24 * 3600
+DEFAULT_RESUME_STATE = os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "goose-turn-resume", "state.json",
+)
+DEFAULT_RESET_LOCK = "/tmp/reset-workspace.lock"
+# Paced, oldest first: the restart may itself have been an OOM, and every
+# resumed turn starts at once on the fresh process.
+DEFAULT_RESUME_MAX = 8
+# First journal read with no saved cursor: how far back to look.
+JOURNAL_FIRST_LOOKBACK = "-2h"
+# Hold resumes until goose-serve has been up this long, so honkd has rebuilt
+# its sessions and a crash loop is visible before more load lands on it.
+MIN_GOOSE_UPTIME_S = 90
 DEFAULT_PIGEON_URL = "http://127.0.0.1:4731"
 DEFAULT_TOKEN_FILE = "/run/secrets/pigeon_daemon_auth_token"
 DEFAULT_MAX = 30
@@ -244,21 +286,38 @@ def _utc(epoch: int) -> str:
 
 
 def notice_text(harness: str, taken_at: int, questions: list[str] | None = None,
-                pending_requests: int = 0) -> str:
+                pending_requests: int = 0, resumer: bool = False) -> str:
     what = (
         "restarted the opencode serve pool" if harness == "opencode"
         else "restarted goose-serve"
     )
+    if resumer:
+        first = (
+            f"goose-serve restarted (a deploy, a crash, or a restart by hand) at about "
+            f"{_utc(taken_at)} while your turn was running. That turn was cut off "
+            "mid-way and will not finish on its own; nothing else will prompt you about it."
+        )
+    else:
+        first = (
+            f"reset-workspace (the workspace reset, normally the nightly 08:00Z run) {what} "
+            f"at about {_utc(taken_at)} while your turn was running. That turn was cut off "
+            "mid-way and will not finish on its own; nothing else will prompt you about it."
+        )
     lines = [
-        f"reset-workspace (the workspace reset, normally the nightly 08:00Z run) {what} "
-        f"at about {_utc(taken_at)} while your turn was running. That turn was cut off "
-        "mid-way and will not finish on its own; nothing else will prompt you about it.",
+        first,
         "",
         "Tool calls that were running may or may not have completed, and any whose "
         "result you cannot see did not report back. Before redoing anything with side "
         "effects (push, commit, post, send, merge, deploy), check whether it already "
         "happened.",
     ]
+    if resumer:
+        lines.append(
+            "The call that was running may not appear in your history at all (goose "
+            "drops a tool request that never got a result), so work out where you got "
+            "to from the state of the world -- git, the PR, the bead, Slack, files -- "
+            "rather than from the conversation alone."
+        )
     if questions:
         lines.append("")
         lines.append(
@@ -277,8 +336,10 @@ def notice_text(harness: str, taken_at: int, questions: list[str] | None = None,
     lines += [
         "",
         "Then carry on with the task you were on. If the turn had in substance "
-        "finished, there is nothing to do. reset-workspace is not a session: do not "
-        "reply to it. (workstation-dg6)",
+        "finished, there is nothing to do. "
+        + ("goose-turn-resume is not a session: do not reply to it. (workstation-6w7i.16)"
+           if resumer else
+           "reset-workspace is not a session: do not reply to it. (workstation-dg6)"),
     ]
     return "\n".join(lines)
 
@@ -334,10 +395,10 @@ class Pigeon:
         o = body.get("origin")
         return o if isinstance(o, str) else None
 
-    def send(self, to: str, payload: str) -> str:
+    def send(self, to: str, payload: str, sender: str = SENDER, kind: str = KIND) -> str:
         status, body = self._req(
             "POST", "/swarm/send",
-            {"from": SENDER, "to": to, "kind": KIND, "priority": "normal", "payload": payload},
+            {"from": sender, "to": to, "kind": kind, "priority": "normal", "payload": payload},
         )
         if status != 202 or not body.get("accepted"):
             raise RuntimeError(f"pigeon answered {status}: {body}")
@@ -401,7 +462,7 @@ def plan_notices(snapshots: list[dict], db: str | None, goose_ids: dict[str, str
 
 
 def notify(snapshots: list[dict], db: str | None, pigeon: Pigeon, max_n: int,
-           dry_run: bool = False) -> int:
+           dry_run: bool = False, resume_state: str | None = None) -> int:
     failed = 0
     goose_ids: dict[str, str] | None = None
     if any(s.get("harness") == "goose" and s.get("sessions") for s in snapshots):
@@ -433,10 +494,290 @@ def notify(snapshots: list[dict], db: str | None, pigeon: Pigeon, max_n: int,
             msg_id = pigeon.send(to, payload)
             sent += 1
             log(f"notified {harness} {label} -> {to} ({msg_id})")
+            if harness == "goose" and resume_state:
+                # So goose-turn-resume does not tell the same cut turn twice.
+                try:
+                    record_sent_locked(resume_state, label.split(" ", 1)[0], int(time.time()))
+                except Exception as e:  # noqa: BLE001 -- worst case: a 2nd notice
+                    log(f"WARNING: could not record the notice in {resume_state}: {e}")
         except Exception as e:  # noqa: BLE001
             failed += 1
             log(f"WARNING: notice to {harness} {label} -> {to} failed: {e}")
     log(f"{'dry run: ' if dry_run else ''}{sent} notified, {skipped} skipped, {failed} failed")
+    return 1 if failed else 0
+
+
+# --------------------------------------------------------------------------
+# resume-goose (workstation-6w7i.16)
+
+
+class _StateLock:
+    """flock on <state>.lock: the resumer and reset-workspace's notify both
+    read-modify-write the state file."""
+
+    def __init__(self, path: str):
+        self.path = path + ".lock"
+        self.f = None
+
+    def __enter__(self):
+        import fcntl
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        self.f = open(self.path, "a")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
+def load_resume_state(path: str) -> dict:
+    try:
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
+    st.setdefault("sent", {})      # native id -> [epoch, ...] notices sent
+    st.setdefault("decided", {})   # native id -> latest cut `at` judged and skipped
+    st.setdefault("pending", {})   # native id -> {"at", "title"}: cuts seen, not yet told
+    st.setdefault("capped", {})    # native id -> cut `at` the loop guard alerted about
+    return st
+
+
+def save_resume_state(path: str, st: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    _write_json(path, st)
+
+
+def record_sent(st: dict, native: str, at: int) -> None:
+    st.setdefault("sent", {}).setdefault(native, []).append(int(at))
+    st.get("pending", {}).pop(native, None)
+
+
+def record_sent_locked(path: str, native: str, at: int) -> None:
+    with _StateLock(path):
+        st = load_resume_state(path)
+        record_sent(st, native, at)
+        save_resume_state(path, st)
+
+
+def prune_resume_state(st: dict, now_s: int) -> None:
+    keep = now_s - RESUME_STATE_KEEP_S
+    for sid in list(st["sent"]):
+        st["sent"][sid] = [t for t in st["sent"][sid] if t >= keep]
+        if not st["sent"][sid]:
+            del st["sent"][sid]
+    for key in ("decided", "capped"):
+        for sid in list(st[key]):
+            if int(st[key][sid]) < keep:
+                del st[key][sid]
+    for sid in list(st["pending"]):
+        if int(st["pending"][sid].get("at", 0)) < keep:
+            del st["pending"][sid]
+
+
+def honk_rows(honk: str, timeout: float = 30) -> list:
+    proc = subprocess.run([honk, "list", "--json"], capture_output=True, text=True,
+                          timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(f"honk list --json exited {proc.returncode}: {proc.stderr.strip()[:300]}")
+    rows = json.loads(proc.stdout or "[]")
+    if not isinstance(rows, list):
+        raise RuntimeError("honk list --json did not return a list")
+    return rows
+
+
+def cut_turns_from_list(rows: list) -> list[dict]:
+    """Cuts honkd still reports as a session's last error. A row that is
+    running again is still a cut: pigeon may have started a queued message
+    since, and the earlier task was never resumed."""
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        err = r.get("lastError")
+        sid = r.get("sessionId")
+        if not isinstance(err, dict) or not isinstance(sid, str) or not sid:
+            continue
+        if err.get("kind") != CUT_KIND or err.get("message") != CUT_MESSAGE:
+            continue
+        try:
+            at = int(err.get("at"))
+        except (TypeError, ValueError):
+            continue
+        out.append({"native_id": sid, "at": at})
+    return out
+
+
+def parse_honkd_journal(lines) -> tuple[list[dict], str | None]:
+    """(cuts, last cursor) from `journalctl -o json` lines of honkd."""
+    cuts, cursor = [], None
+    for line in lines:
+        try:
+            ent = json.loads(line)
+        except ValueError:
+            continue
+        cursor = ent.get("__CURSOR") or cursor
+        msg = ent.get("MESSAGE")
+        if not isinstance(msg, str) or CUT_MESSAGE not in msg:
+            continue
+        try:
+            f = json.loads(msg).get("fields") or {}
+        except (ValueError, AttributeError):
+            continue
+        if f.get("kind") != CUT_KIND or f.get("error_message") != CUT_MESSAGE:
+            continue
+        sid = f.get("sid")
+        if not isinstance(sid, str) or not sid:
+            continue
+        try:
+            at = int(int(ent.get("__REALTIME_TIMESTAMP")) // 1_000_000)
+        except (TypeError, ValueError):
+            at = int(time.time())
+        cuts.append({"native_id": sid, "at": at})
+    return cuts, cursor
+
+
+def read_honkd_journal(cursor: str | None, timeout: float = 30) -> tuple[list[dict], str | None]:
+    cmd = ["journalctl", "--user", "-u", "honkd.service", "-o", "json", "--no-pager"]
+    cmd += [f"--after-cursor={cursor}"] if cursor else [f"--since={JOURNAL_FIRST_LOOKBACK}"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(f"journalctl exited {proc.returncode}: {proc.stderr.strip()[:200]}")
+    cuts, last = parse_honkd_journal(proc.stdout.splitlines())
+    return cuts, last or cursor
+
+
+def reset_lock_held(path: str) -> bool:
+    """True while reset-workspace holds its lock: it restarts goose-serve and
+    sends its own notices. Probe the flock, not the file (never unlinked)."""
+    if not os.path.exists(path):
+        return False
+    import fcntl
+    try:
+        with open(path) as f:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+
+
+def goose_uptime_s() -> float | None:
+    """Seconds since goose-serve last became active, or None if unknown."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", "goose-serve.service", "-p",
+             "ActiveEnterTimestampMonotonic", "--value"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        with open("/proc/uptime", encoding="utf-8") as f:
+            now_mono = float(f.read().split()[0])
+        return now_mono - int(out) / 1e6 if out and int(out) > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def run_alert(alert_cmd: str | None, state_path: str, signature: str, text: str) -> None:
+    if not alert_cmd:
+        return
+    try:
+        subprocess.run([alert_cmd, state_path + ".alert-" + signature.split(":")[0],
+                        signature, text, "900", "14400"], check=False, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        log(f"WARNING: alert failed: {e}")
+
+
+def resume_goose(cuts: list[dict], rows: list, pigeon: Pigeon, state_path: str, max_n: int,
+                 dry_run: bool = False, now_s: int | None = None,
+                 alert_cmd: str | None = None) -> int:
+    """Tell every session a goose restart cut. `cuts` are fresh observations
+    (journal + honk list); they are merged into the state's pending set first,
+    so a cut seen once is never forgotten while it waits (pacing, pigeon down,
+    loop guard)."""
+    now_s = int(time.time()) if now_s is None else int(now_s)
+    row_of = {r.get("sessionId"): r for r in rows if isinstance(r, dict)}
+    with _StateLock(state_path):
+        st = load_resume_state(state_path)
+        prune_resume_state(st, now_s)
+        for c in cuts:
+            sid, at = c["native_id"], int(c["at"])
+            if any(t >= at for t in st["sent"].get(sid, [])):
+                continue  # already told (by us or by reset-workspace)
+            if int(st["decided"].get(sid, -1)) >= at:
+                continue
+            cur = st["pending"].get(sid)
+            if not cur or at > int(cur.get("at", 0)):
+                st["pending"][sid] = {"at": at}
+        todo = []
+        for sid, p in sorted(st["pending"].items(), key=lambda kv: int(kv[1].get("at", 0))):
+            at = int(p.get("at", 0))
+            r = row_of.get(sid) or {}
+            e = {"native_id": sid, "at": at, "title": r.get("title"), "cwd": r.get("cwd")}
+            label = f"{sid} ({e.get('title') or ''})"
+            if not r:
+                log(f"skip goose {label}: not in honk list; cannot tell whether it is a coordinator")
+                st["decided"][sid] = at
+                st["pending"].pop(sid, None)
+                continue
+            if is_stall_watch_coordinator(e):
+                log(f"skip goose {label}: stall-watch coordinator; stall-watch retries its own cut runs")
+                st["decided"][sid] = at
+                st["pending"].pop(sid, None)
+                continue
+            recent = [t for t in st["sent"].get(sid, []) if t >= now_s - RESUME_CAP_WINDOW_S]
+            if len(recent) >= RESUME_CAP:
+                # Kept pending: it goes out once the window opens. Alert once.
+                if int(st["capped"].get(sid, -1)) < at:
+                    st["capped"][sid] = at
+                    log(f"hold goose {label}: resumed {len(recent)} times in "
+                        f"{RESUME_CAP_WINDOW_S // 3600}h; holding until the window opens")
+                    if not dry_run:
+                        run_alert(alert_cmd, state_path, f"resume-cap:{sid}",
+                                  f"goose-turn-resume: session {label} has been cut by a "
+                                  f"goose-serve restart and resumed {len(recent)} times in "
+                                  f"{RESUME_CAP_WINDOW_S // 3600}h. Holding further resumes "
+                                  f"until the window opens: a resumed turn may be what keeps "
+                                  f"crashing goose. Check: journalctl -u goose-serve -n 80; "
+                                  f"journalctl --user -u goose-turn-resume -n 50")
+                continue
+            todo.append((e, label))
+        failed = sent = 0
+        if todo:
+            try:
+                goose_ids = pigeon.goose_ids()
+            except Exception as err:  # noqa: BLE001 -- kept pending; next run
+                log(f"WARNING: could not read pigeon /sessions ({err}); retrying next run")
+                goose_ids = None
+                failed += 1
+            for e, label in todo if goose_ids is not None else []:
+                sid, at = e["native_id"], e["at"]
+                to = goose_ids.get(sid)
+                if not to:
+                    log(f"skip goose {label}: pigeon does not know this goose session; cannot message it")
+                    st["decided"][sid] = at
+                    st["pending"].pop(sid, None)
+                    continue
+                if sent >= max_n:
+                    continue  # paced: stays pending for the next run
+                if dry_run:
+                    sent += 1
+                    log(f"would resume goose {label} -> {to}")
+                    continue
+                try:
+                    msg_id = pigeon.send(to, notice_text("goose", at, resumer=True),
+                                         sender=RESUME_SENDER, kind=RESUME_KIND)
+                    record_sent(st, sid, now_s)
+                    sent += 1
+                    log(f"resumed goose {label} -> {to} ({msg_id})")
+                except Exception as err:  # noqa: BLE001 -- stays pending
+                    failed += 1
+                    log(f"WARNING: notice to goose {label} -> {to} failed: {err}")
+        if not dry_run:
+            save_resume_state(state_path, st)
+    if todo or failed:
+        left = len(st["pending"])
+        log(f"{'dry run: ' if dry_run else ''}{sent} resumed, {failed} failed, {left} pending")
     return 1 if failed else 0
 
 
@@ -466,6 +807,20 @@ def main(argv: list[str] | None = None) -> int:
     nt.add_argument("--pigeon-token-file", default=DEFAULT_TOKEN_FILE)
     nt.add_argument("--max", type=int, default=DEFAULT_MAX)
     nt.add_argument("--dry-run", action="store_true")
+    nt.add_argument("--resume-state", default=DEFAULT_RESUME_STATE,
+                    help="goose-turn-resume's state file; goose notices are recorded there")
+
+    rg = sub.add_parser("resume-goose")
+    rg.add_argument("--honk", default=os.environ.get("TURN_CUT_HONK", "honk"))
+    rg.add_argument("--resume-state", default=DEFAULT_RESUME_STATE)
+    rg.add_argument("--reset-lock", default=DEFAULT_RESET_LOCK)
+    rg.add_argument("--pigeon-url", default=os.environ.get("PIGEON_DAEMON_URL", DEFAULT_PIGEON_URL))
+    rg.add_argument("--pigeon-token-file", default=DEFAULT_TOKEN_FILE)
+    rg.add_argument("--max", type=int, default=DEFAULT_RESUME_MAX)
+    rg.add_argument("--alert", default=os.environ.get("TURN_CUT_ALERT"),
+                    help="opencode-drift-alert-compatible command, for the loop guard")
+    rg.add_argument("--min-goose-uptime", type=float, default=MIN_GOOSE_UPTIME_S)
+    rg.add_argument("--dry-run", action="store_true")
 
     a = ap.parse_args(argv)
     try:
@@ -492,8 +847,37 @@ def main(argv: list[str] | None = None) -> int:
                     log(f"WARNING: unreadable snapshot {p}: {e}")
             pigeon = Pigeon(a.pigeon_url, a.pigeon_token_file)
             db = a.db if a.db and os.path.exists(a.db) else None
-            rc = notify(snaps, db, pigeon, a.max, a.dry_run)
+            rc = notify(snaps, db, pigeon, a.max, a.dry_run, a.resume_state)
             return rc if len(snaps) == len(a.snapshot) else 1
+        if a.cmd == "resume-goose":
+            if reset_lock_held(a.reset_lock):
+                log("reset-workspace in progress; it tells its own cut turns. Next run.")
+                return 0
+            up = goose_uptime_s()
+            if up is not None and up < a.min_goose_uptime:
+                log(f"goose-serve up only {up:.0f}s; holding resumes until {a.min_goose_uptime:.0f}s")
+                return 0
+            rows = honk_rows(a.honk)
+            cuts = cut_turns_from_list(rows)
+            with _StateLock(a.resume_state):
+                cursor = load_resume_state(a.resume_state).get("journal_cursor")
+            rc_j = 0
+            try:
+                jcuts, new_cursor = read_honkd_journal(cursor)
+                cuts += jcuts
+            except Exception as e:  # noqa: BLE001 -- honk list still covers most
+                log(f"WARNING: could not read honkd's journal ({e}); using honk list only")
+                new_cursor, rc_j = cursor, 1
+            pigeon = Pigeon(a.pigeon_url, a.pigeon_token_file)
+            rc = resume_goose(cuts, rows, pigeon, a.resume_state, a.max, a.dry_run,
+                              alert_cmd=a.alert)
+            if not a.dry_run and new_cursor and new_cursor != cursor:
+                # Saved only after the cuts it covered are in the pending set.
+                with _StateLock(a.resume_state):
+                    st = load_resume_state(a.resume_state)
+                    st["journal_cursor"] = new_cursor
+                    save_resume_state(a.resume_state, st)
+            return rc or rc_j
     except Exception as e:  # noqa: BLE001 -- a reset must never die of this tool
         log(f"WARNING: {a.cmd} failed: {type(e).__name__}: {e}")
         return 1

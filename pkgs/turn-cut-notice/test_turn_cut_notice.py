@@ -524,6 +524,210 @@ class GooseSnapshot(unittest.TestCase):
         self.assertFalse(os.path.exists(out))
 
 
+def cut_row(sid, at, title="w", cwd="/w", running=False, message=None, kind="interrupted"):
+    return {"sessionId": sid, "title": title, "cwd": cwd, "running": running,
+            "lastError": {"kind": kind, "message": message or tcn.CUT_MESSAGE, "at": at}}
+
+
+def plain_row(sid, title="w", cwd="/w", running=False):
+    return {"sessionId": sid, "title": title, "cwd": cwd, "running": running, "lastError": None}
+
+
+def journal_line(sid, at, cursor, message=None, kind="interrupted"):
+    fields = {"message": f"Session {sid}: turn failed (kind={kind} ...): x", "sid": sid,
+              "kind": kind, "error_message": message or tcn.CUT_MESSAGE}
+    return json.dumps({"__CURSOR": cursor, "__REALTIME_TIMESTAMP": str(at * 1_000_000),
+                       "MESSAGE": json.dumps({"level": "WARN", "fields": fields})})
+
+
+class ResumeGoose(unittest.TestCase):
+    """workstation-6w7i.16: resume turns cut by ANY goose-serve restart."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "gtr", "state.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_(self, rows, pigeon, now=NOW + 60, max_n=30, dry=False, cuts=None, alert=None):
+        if cuts is None:
+            cuts = tcn.cut_turns_from_list(rows)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = tcn.resume_goose(cuts, rows, pigeon, self.state, max_n, dry, now_s=now,
+                                  alert_cmd=alert)
+        return rc, err.getvalue()
+
+    def test_cut_turn_gets_a_resume_notice(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(p.sent), 1)
+        b = p.sent[0]
+        self.assertEqual((b["from"], b["to"], b["kind"]), ("goose-turn-resume", "gse_1", "goose.turn_cut"))
+        self.assertIn("goose-serve restarted", b["payload"])
+        self.assertIn("carry on with the task", b["payload"])
+        self.assertIn("state of the world", b["payload"])
+        self.assertNotIn("reset-workspace (the workspace reset", b["payload"])
+
+    def test_only_once_per_cut(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p)
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_a_later_cut_of_the_same_session_is_told_again(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p)
+        self.run_([cut_row("g1", NOW + 600)], p, now=NOW + 660)
+        self.assertEqual(len(p.sent), 2)
+
+    def test_running_again_is_still_resumed(self):
+        # pigeon starts a queued message within a second of the cut; the earlier
+        # task was still never resumed.
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW, running=True)], p)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_cut_erased_from_honk_list_is_caught_from_the_journal(self):
+        # The intervening turn ended cleanly and cleared lastError.
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        cuts, cursor = tcn.parse_honkd_journal([
+            journal_line("g1", NOW, "c1"),
+            journal_line("g2", NOW, "c2", message="honkd could not tell whether goose got the prompt"),
+            json.dumps({"__CURSOR": "c3", "MESSAGE": "unrelated"}),
+            "not json",
+        ])
+        self.assertEqual(cuts, [{"native_id": "g1", "at": NOW}])
+        self.assertEqual(cursor, "c3")
+        self.run_([plain_row("g1")], p, cuts=cuts)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_journal_and_list_sightings_of_one_cut_send_one_notice(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        rows = [cut_row("g1", NOW)]
+        cuts = tcn.cut_turns_from_list(rows) + [{"native_id": "g1", "at": NOW + 1}]
+        self.run_(rows, p, cuts=cuts)
+        self.run_(rows, p, cuts=cuts, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_loop_guard_holds_alerts_once_and_releases(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        alerts = os.path.join(self.tmp.name, "alerts")
+        alert = os.path.join(self.tmp.name, "alert.sh")
+        with open(alert, "w") as f:
+            f.write(f'#!/bin/sh\necho "$2" >> {alerts}\n')
+        os.chmod(alert, 0o755)
+        for i in range(4):
+            self.run_([cut_row("g1", NOW + i * 600)], p, now=NOW + i * 600 + 60, alert=alert)
+        self.assertEqual(len(p.sent), tcn.RESUME_CAP)
+        _, err = self.run_([cut_row("g1", NOW + 1800)], p, now=NOW + 1900, alert=alert)
+        with open(alerts) as f:
+            self.assertEqual(f.read().split(), ["resume-cap:g1"], "alerted once")
+        later = NOW + tcn.RESUME_CAP_WINDOW_S + 1000
+        self.run_([plain_row("g1")], p, now=later, cuts=[], alert=alert)
+        self.assertEqual(len(p.sent), tcn.RESUME_CAP + 1, "held cut goes out once the window opens")
+
+    def test_pacing_keeps_the_rest_pending_oldest_first(self):
+        sids = [f"g{i}" for i in range(5)]
+        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in sids])
+        rows = [cut_row(s, NOW + i) for i, s in enumerate(sids)]
+        _, err = self.run_(rows, p, max_n=2)
+        self.assertEqual([b["to"] for b in p.sent], ["gse_g0", "gse_g1"])
+        self.assertIn("3 pending", err)
+        self.run_([plain_row(s) for s in sids], p, max_n=2, cuts=[], now=NOW + 120)
+        self.assertEqual([b["to"] for b in p.sent][2:], ["gse_g2", "gse_g3"])
+
+    def test_other_errors_and_delivery_unknown_are_ignored(self):
+        p = FakePigeon(sessions=[goose_row(s, "gse_" + s) for s in ("a", "c", "d")])
+        rows = [
+            cut_row("a", NOW, kind="network", message="connection reset"),
+            cut_row("c", NOW, message="honkd could not tell whether goose got the prompt"),
+            plain_row("d"),
+        ]
+        self.run_(rows, p)
+        self.assertEqual(p.sent, [])
+
+    def test_stall_watch_coordinator_skipped_once_quietly(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        row = cut_row("g1", NOW, cwd="/home/dev/.local/state/stall-watch/coord-sessions/x")
+        _, err1 = self.run_([row], p)
+        _, err2 = self.run_([row], p, now=NOW + 120)
+        self.assertEqual(p.sent, [])
+        self.assertIn("stall-watch coordinator", err1)
+        self.assertEqual(err2, "")
+
+    def test_unroutable_skipped_quietly_next_time(self):
+        p = FakePigeon(sessions=[])
+        _, err1 = self.run_([cut_row("g1", NOW)], p)
+        _, err2 = self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertIn("pigeon does not know", err1)
+        self.assertEqual(err2, "")
+
+    def test_send_failure_is_retried_next_run(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")], fail_to={"gse_1"})
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 1)
+        p.fail_to = set()
+        rc, _ = self.run_([plain_row("g1")], p, now=NOW + 120, cuts=[])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(p.sent), 1, "a cut seen once is kept pending")
+
+    def test_pigeon_down_is_retried(self):
+        p = FakePigeon(fail_sessions=True)
+        rc, _ = self.run_([cut_row("g1", NOW)], p)
+        self.assertEqual(rc, 1)
+        p.fail_sessions = False
+        p.sessions = [goose_row("g1", "gse_1")]
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 120)
+        self.assertEqual(len(p.sent), 1)
+
+    def test_reset_workspace_notice_suppresses_the_resumer(self):
+        snap = {"harness": "goose", "taken_at": NOW - 30,
+                "sessions": [{"native_id": "g1", "title": "w"}]}
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        with mock.patch("sys.stderr", io.StringIO()), mock.patch("time.time", return_value=NOW + 30):
+            tcn.notify([snap], None, p, 30, resume_state=self.state)
+        self.assertEqual(len(p.sent), 1)
+        self.run_([cut_row("g1", NOW)], p, now=NOW + 90)
+        self.assertEqual(len(p.sent), 1, "the reset already told it")
+
+    def test_dry_run_sends_and_records_nothing(self):
+        p = FakePigeon(sessions=[goose_row("g1", "gse_1")])
+        self.run_([cut_row("g1", NOW)], p, dry=True)
+        self.assertEqual(p.sent, [])
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_cli_skips_while_reset_lock_held(self):
+        lock = os.path.join(self.tmp.name, "lock")
+        open(lock, "w").close()
+        import fcntl
+        with open(lock) as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                               "--reset-lock", lock, "--resume-state", self.state])
+        self.assertEqual(rc, 0)
+        self.assertIn("reset-workspace in progress", err.getvalue())
+
+    def test_cli_holds_while_goose_just_started(self):
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), mock.patch.object(tcn, "goose_uptime_s", return_value=10.0):
+            rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                           "--reset-lock", "/nonexistent.lock", "--resume-state", self.state])
+        self.assertEqual(rc, 0)
+        self.assertIn("holding resumes", err.getvalue())
+
+    def test_cli_honk_failure_is_exit_1(self):
+        with mock.patch("sys.stderr", io.StringIO()), \
+                mock.patch.object(tcn, "goose_uptime_s", return_value=None):
+            rc = tcn.main(["resume-goose", "--honk", "/nonexistent/honk",
+                           "--reset-lock", "/nonexistent.lock", "--resume-state", self.state])
+        self.assertEqual(rc, 1)
+
+
 class Cli(Base):
     def test_snapshot_opencode_writes_file(self):
         self.fx.session("ses_a", updated=NOW)

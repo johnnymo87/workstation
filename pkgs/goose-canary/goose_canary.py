@@ -1,10 +1,12 @@
 """Wedge canary for goose-serve and honkd (bead workstation-6w7i.7).
 
 One pass, run minutely by a user timer on cloudbox and devbox. ALERT-ONLY by
-design: restarting goose-serve ends every in-flight goose turn on the host
-(stall-watch's coordinators included), so until restarts stop losing turns
-(workstation-6w7i.16) a human decides. honkd is held to the same rule because
-a honkd restart cuts every turn it relays.
+design: restarting goose-serve cuts every in-flight goose turn on the host.
+Since workstation-6w7i.16 those turns are re-prompted (goose-turn-resume), but
+a false positive would still cost every running turn its in-flight step, so a
+human decides until the probe has a record. honkd is held to the same rule: a
+honkd restart cuts every turn it relays, and goose-turn-resume does not cover
+those (honkd either continues such a turn or records nothing).
 
 "Frozen" means no ACP answer, not "process gone": systemd already restarts a
 dead goose-serve (Restart=always). The probes:
@@ -294,9 +296,9 @@ def main():
                   f"goose-serve on {host_name} is active but has not answered ACP "
                   f"for {n} consecutive minutes: {why}\n\n"
                   f"Every goose turn on the host is stalled. The canary does NOT "
-                  f"restart it, because a restart ends every in-flight goose turn "
-                  f"(workstation-6w7i.16). Decide, then: sudo systemctl restart "
-                  f"goose-serve.\n\nForensics: {state}/wedge-goose-serve-*\n"
+                  f"restart it. A restart cuts every in-flight turn; goose-turn-resume "
+                  f"re-prompts them within a minute or two (workstation-6w7i.16). "
+                  f"Decide, then: sudo systemctl restart goose-serve.\n\nForensics: {state}/wedge-goose-serve-*\n"
                   f"Check: journalctl -u goose-serve -n 80 --no-pager")
         return 0
     clear(state, "goose")
