@@ -29,7 +29,7 @@ bwrap.
 
 PROTOCOL v2 (EM bead qpmfc.18.16.49.2.14, character memory spec section 3.5) adds her
 skills folder. A `run` names a `character` (or null) and how she may use her folder,
-`own` ("edit", "read", or null with no character):
+`own` ("edit", "read", "journal", or null with no character):
 
 - /skills/own, "edit": COPY IN, COPY OUT. The service copies her folder
   (<base>/skills-own/<history root name>/<key>/) into a fresh size-limited tmpfs (the
@@ -40,6 +40,13 @@ skills folder. A `run` names a `character` (or null) and how she may use her fol
   atomic rename. A killed command, a failed check, a full tmpfs or a folder that
   changed on disk meanwhile keeps nothing, and the answer says why in one sentence.
 - /skills/own, "read": her folder bound read only (a player reads its character's).
+- /skills/own, "journal": her books are read only and her journal is hers to write.
+  The service copies her folder in as for "edit", binds the copy read only at
+  /skills/own and its journal/ folder (made if she has none) read-write at
+  /skills/own/journal. After the command it keeps only journal/, with the same checks,
+  swapped in alone (as a `sync` swaps one skill) and only if her journal on disk is
+  still as it was copied in. Nothing else of hers can change. `ping` names the modes
+  this server takes (`own_modes`), so a client can ask for "journal" only here.
 - /skills/shared: the shared skills AgentOS publishes at boot
   (<base>/skills-shared[-<profile>]/, marker `.agent-skills-shared-root`), read only.
   Missing or unmarked: not mounted.
@@ -137,6 +144,10 @@ SANDBOX_SHARED = "/skills/shared"
 SANDBOX_CHARACTERS = "/skills/characters"
 #: The folder inside `--skills-work` (a tmpfs) that is bound at /skills/own.
 WORK_OWN = "own"
+#: The one skill folder a "journal" run may write, at /skills/own/journal.
+JOURNAL = "journal"
+#: The `own` modes a run with a character may ask for, as `ping` names them.
+OWN_MODES = ("edit", "read", "journal")
 #: Runaway guards, not style rules: files in her whole folder, bytes per file, bytes in
 #: all, folders below /skills/own (a file in /skills/own/a/b/c/ is at depth 4).
 MAX_SKILL_FILES = 2000
@@ -234,7 +245,7 @@ class Request:
     mounts: list[tuple[str, str]] = field(default_factory=list)
     #: Her name key, or None when the run has no character.
     key: str | None = None
-    #: "edit", "read" or None.
+    #: "edit", "read", "journal" or None.
     own: str | None = None
     #: The history root's name, which names its profile root under SKILLS_OWN.
     profile: str = ""
@@ -530,8 +541,8 @@ def check_own(own, key: str | None) -> str | None:
         if own is not None:
             raise Refused("A run with no character has no skills folder to use.")
         return None
-    if own not in ("edit", "read"):
-        raise Refused('With a character, own must be "edit" or "read".')
+    if own not in OWN_MODES:
+        raise Refused('With a character, own must be "edit", "read" or "journal".')
     return own
 
 
@@ -1070,6 +1081,39 @@ def replace_key(store: Store, profile: str, key: str, before: str, tree: Tree) -
     return None
 
 
+def replace_journal(store: Store, profile: str, key: str, before: Tree, journal: Tree) -> str | None:
+    """Swap her journal folder alone for `journal` (`only(tree, JOURNAL)`, EMPTY_TREE for
+    none), but only if her journal on disk still reads as `before`. Her other books are
+    not read for the guard and never written, so a `sync` of another skill meanwhile
+    does not cost her the page. Returns the reason it was not kept, or None."""
+    staged = old = None
+    try:
+        store.lock()
+        try:
+            try:
+                now = store.read_skill(profile, key, JOURNAL)
+            except TreeRefused:
+                now = None
+            if now is None or now.digest() != before.digest():
+                return "they changed while the command ran. Look again and redo the change"
+            try:
+                check_tree(_merge(store.read_key(profile, key).without(JOURNAL), journal))
+            except TreeRefused as err:
+                return str(err)
+            if journal.dirs:
+                staged = store.stage(journal.skill(JOURNAL))
+            mine, staged = staged, None
+            old = _put_skill(store, profile, key, JOURNAL, mine)
+        finally:
+            store.unlock()
+    finally:
+        if staged is not None:
+            store.discard(staged)
+        if old is not None:
+            store.retire(old)
+    return None
+
+
 # --- her skills folder: a run's mounts, copy in and copy out --------------------------
 
 
@@ -1088,6 +1132,19 @@ class EditState:
     store: Store
     work: str
     before: str
+    #: A "journal" run: her journal as copied in (`only(tree, JOURNAL)`), the one part
+    #: copied out. None for an "edit" run, which copies out her whole folder.
+    journal: Tree | None = None
+
+
+def only(tree: Tree, name: str) -> Tree:
+    """The part of `tree` that is the top-level folder `name`, paths as below her
+    folder and in the tree's own order (the order `read_skill` reads it in)."""
+    prefix = name + "/"
+    return Tree(
+        dirs=tuple(d for d in tree.dirs if d == name or d.startswith(prefix)),
+        files=tuple((p, b) for p, b in tree.files if p.startswith(prefix)),
+    )
 
 
 COPY_IN_FAILED = (
@@ -1112,9 +1169,10 @@ def _own_read_mount(request: Request, base: str) -> tuple[str, str | None, str]:
     return ("--ro-bind", host, SANDBOX_OWN) if host else ("--dir", None, SANDBOX_OWN)
 
 
-def _copy_in(store: Store, request: Request, work: str) -> str:
+def _copy_in(store: Store, request: Request, work: str) -> Tree:
     """Copy her folder into `work` (under a shared lock, so no writer swaps it
-    meanwhile) and return its digest. Raises TreeRefused or OSError."""
+    meanwhile) and return it as read. For a "journal" run also make her journal/ in the
+    copy if she has none, so it can be bound there. Raises TreeRefused or OSError."""
     store.lock_shared()
     try:
         before = store.read_key(request.profile, request.key)
@@ -1125,23 +1183,25 @@ def _copy_in(store: Store, request: Request, work: str) -> str:
     fd = _open_dir(work)
     try:
         write_tree(fd, before)
+        if request.own == "journal" and JOURNAL not in before.dirs:
+            os.mkdir(JOURNAL, DIR_MODE, dir_fd=fd)
     finally:
         os.close(fd)
-    return before.digest()
+    return before
 
 
 def skills_mounts(
     request: Request, config: Config, base: str
 ) -> tuple[list[tuple[str, str | None, str]], EditState | None, dict | None]:
     """The /skills mounts of a run, `(bwrap flag, host path or None, sandbox path)`;
-    for an "edit" run the state `finish_edit` needs (her folder is copied into the
-    work tmpfs here); and, when the copy in failed, the answer's `skills` (she then
+    for an "edit" or "journal" run the state `finish_edit` needs (her folder is copied
+    into the work tmpfs here); and, when the copy in failed, the answer's `skills` (she then
     gets her folder read only, rather than no shell at all). Raises `Refused`."""
     mounts: list[tuple[str, str | None, str]] = []
     own_root = os.path.join(os.path.realpath(base), SKILLS_OWN)
     state = None
     fallback = None
-    if request.own == "edit":
+    if request.own in ("edit", "journal"):
         work_base = config.skills_work
         if not work_base or not os.path.isdir(work_base) or os.path.islink(work_base):
             raise Refused(
@@ -1164,8 +1224,15 @@ def skills_mounts(
             shutil.rmtree(work, ignore_errors=True)
             raise
         else:
-            state = EditState(store=store, work=work, before=before)
-            mounts.append(("--bind", work, SANDBOX_OWN))
+            state = EditState(store=store, work=work, before=before.digest())
+            if request.own == "edit":
+                mounts.append(("--bind", work, SANDBOX_OWN))
+            else:
+                # Read only over her books, then her journal writable over that. bwrap
+                # mounts in order, and the journal folder is in the copy (`_copy_in`).
+                state.journal = only(before, JOURNAL)
+                mounts.append(("--ro-bind", work, SANDBOX_OWN))
+                mounts.append(("--bind", os.path.join(work, JOURNAL), SANDBOX_OWN + "/" + JOURNAL))
     elif request.own == "read":
         mounts.append(_own_read_mount(request, base))
     if request.shared is not None:
@@ -1215,7 +1282,8 @@ def finish_edit(
     work_base: str,
     oom_before: int | None = None,
 ) -> dict:
-    """Copy out: what the answer's `skills` says after an "edit" run. A killed command
+    """Copy out: what the answer's `skills` says after an "edit" or "journal" run (a
+    "journal" run keeps only her journal, see `replace_journal`). A killed command
     (stopped by us, killed by a signal, or with an OOM kill in the instance) keeps
     nothing, since a file it was writing may be cut short."""
     oom_after = oom_kills() if oom_before is not None else None
@@ -1240,7 +1308,13 @@ def finish_edit(
             reason = str(err)
         finally:
             os.close(fd)
-    if after is not None and after.digest() == state.before:
+    if after is not None and state.journal is not None:
+        after = only(after, JOURNAL)
+        if after == Tree(dirs=(JOURNAL,), files=()) and not state.journal.dirs:
+            after = EMPTY_TREE  # the empty journal folder made for the bind, left empty
+        if after.digest() == state.journal.digest():
+            return {"changed": False, "kept": True, "why": None}
+    elif after is not None and after.digest() == state.before:
         return {"changed": False, "kept": True, "why": None}
     if killed:
         reason = "the command was stopped before it finished"
@@ -1249,7 +1323,10 @@ def finish_edit(
     if reason is not None:
         return {"changed": False, "kept": False, "why": _not_saved(reason)}
     try:
-        reason = replace_key(state.store, request.profile, request.key, state.before, after)
+        if state.journal is not None:
+            reason = replace_journal(state.store, request.profile, request.key, state.journal, after)
+        else:
+            reason = replace_key(state.store, request.profile, request.key, state.before, after)
     except OSError as err:
         print(f"em-history-shell: could not keep her skills: {err!r}", file=sys.stderr)
         reason = "the service could not write them. Try again later"
@@ -1297,6 +1374,56 @@ def _merge(base_tree: Tree, skill_tree: Tree) -> Tree:
     )
 
 
+def _put_skill(store: Store, profile: str, key: str, skill: str, staged: str | None) -> str | None:
+    """Make her `skill` folder the staged one, or remove it when `staged` is None,
+    making her folder (and the profile root) when a skill arrives and removing them when
+    the last one leaves. Call with the lock held. The staged folder is this function's
+    from the call on (the caller lets go of it first): used up or discarded, even when
+    this raises. Returns the staging name now holding the old folder (to `retire`), or
+    None. If it raises after the swap, it retires the old folder itself."""
+    try:
+        pfd = store.profile_fd(profile, create=staged is not None)
+    except BaseException:
+        if staged is not None:
+            store.discard(staged)
+        raise
+    if pfd is None:
+        if staged is not None:
+            store.discard(staged)
+            raise OSError(errno.ENOENT, "the profile root could not be made")
+        return None  # nothing there to remove
+    old = None
+    try:
+        kfd = _open_child(pfd, key)
+        if kfd is None and staged is not None:
+            os.mkdir(key, DIR_MODE, dir_fd=pfd)
+            os.fsync(pfd)
+            kfd = _open_child(pfd, key)
+        if kfd is not None:
+            try:
+                old = store.put(kfd, skill, staged)
+                staged = None
+                os.fsync(kfd)
+                empty = not os.listdir(kfd)
+            finally:
+                os.close(kfd)
+            if empty:
+                os.rmdir(key, dir_fd=pfd)
+                os.fsync(pfd)
+        gone = not os.listdir(pfd)
+    except BaseException:
+        if old is not None:
+            store.retire(old)
+        raise
+    finally:
+        os.close(pfd)
+        if staged is not None:
+            store.discard(staged)
+    if gone:
+        store.drop_profile(profile)
+    return old
+
+
 def handle_change(msg: dict, base: str) -> dict:
     """A `sync` (write one reviewed skill) or a `remove`, each only if the skill folder
     still hashes to `expect_sha256` (null: it must not exist). Returns the answer body.
@@ -1334,30 +1461,8 @@ def handle_change(msg: dict, base: str) -> dict:
                 except TreeRefused as err:
                     raise Refused(f"The skill cannot be kept: {err}.") from None
                 staged = store.stage(new_skill.skill(skill))
-            pfd = store.profile_fd(profile, create=new_skill is not None)
-            if pfd is None:
-                return {"ok": True} if op == "remove" else {"ok": True, "files_sha256": None}
-            try:
-                kfd = _open_child(pfd, key)
-                if kfd is None and new_skill is not None:
-                    os.mkdir(key, DIR_MODE, dir_fd=pfd)
-                    kfd = _open_child(pfd, key)
-                if kfd is not None:
-                    try:
-                        old = store.put(kfd, skill, staged)
-                        staged = None
-                        os.fsync(kfd)
-                        empty = not os.listdir(kfd)
-                    finally:
-                        os.close(kfd)
-                    if empty:
-                        os.rmdir(key, dir_fd=pfd)
-                        os.fsync(pfd)
-                gone = not os.listdir(pfd)
-            finally:
-                os.close(pfd)
-            if gone:
-                store.drop_profile(profile)
+            mine, staged = staged, None
+            old = _put_skill(store, profile, key, skill, mine)
         finally:
             store.unlock()
             if staged is not None:
@@ -1383,7 +1488,8 @@ def build_argv(
     """The bwrap command line for one command. Pure: no filesystem access. Phase 1's
     argv (history_shell.build_argv) plus, from protocol v2, an empty /skills and the
     `skills` mounts in it (from `skills_mounts`): `("--dir", None, inside)` or
-    `(flag, host, inside)`. Only an "edit" run has a writable one (`--bind`)."""
+    `(flag, host, inside)`. Only an "edit" run (all of /skills/own) and a "journal"
+    run (/skills/own/journal alone) have a writable one (`--bind`)."""
     argv = [
         config.bwrap,
         "--unshare-user",
@@ -1430,7 +1536,8 @@ def build_argv(
     # The root tmpfs (and with it the directories bwrap made above the history
     # mounts) and /dev (a tmpfs of its own, /dev/shm inside it) are read only. Only
     # /scratch and /tmp are writable, each with its own size, and /skills/own in an
-    # "edit" run (a bind of the work tmpfs, which has its own size). --remount-ro is
+    # "edit" run or /skills/own/journal in a "journal" run (binds of the work tmpfs,
+    # which has its own size). --remount-ro is
     # not recursive, so it leaves those mounts as they are.
     for path in ("/", "/dev"):
         argv += ["--remount-ro", path]
@@ -1768,6 +1875,7 @@ def handle_request(
                 "seccomp_sha256": seccomp_sha256(config),
                 "libseccomp_version": config.libseccomp_version,
                 "policy_sha256": config.policy_sha256,
+                "own_modes": list(OWN_MODES),
             },
         )
     if op in ("sync", "remove"):
