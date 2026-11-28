@@ -133,6 +133,7 @@ Projects are declared in `projects.nix` and auto-cloned per platform.
 | [Setting Up Hetzner](.agents/skills/setting-up-hetzner/SKILL.md) | Initial machine setup, hcloud context |
 | [Setting Up Cloudbox](.agents/skills/setting-up-cloudbox/SKILL.md) | GCP ARM VM provisioning with nixos-anywhere |
 | [Rebuilding](.agents/skills/rebuilding/SKILL.md) | How to apply changes to any NixOS host (devbox, cloudbox) |
+| [Predicting Switch Restarts](.agents/skills/predicting-switch-restarts/SKILL.md) | Which units a system or home-manager switch would bounce (`switch-impact.sh` dry run), what that does to live goose and opencode turns, and how to switch safely from inside an agent session |
 | [Troubleshooting NixOS Host](.agents/skills/troubleshooting-nixos-host/SKILL.md) | SSH issues, host keys, NixOS problems (devbox + cloudbox) |
 | [Automated Updates](.agents/skills/automated-updates/SKILL.md) | GitHub Actions + systemd timer update pipeline |
 | [Managing Secrets](.agents/skills/managing-secrets/SKILL.md) | Adding, removing, and using sops-nix secrets |
