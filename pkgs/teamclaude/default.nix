@@ -91,7 +91,7 @@
 
 stdenvNoCC.mkDerivation rec {
   pname = "teamclaude";
-  version = "1.1.21-balanced-fw-ub-cap-seat-ttl-acct-names"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst + per-session cache TTL / usage ledger (#6) + served-account header / pins that hold (#7)
+  version = "1.1.21-balanced-fw-ub-cap-seat-ttl-acct-names-adaptive"; # upstream v1.1.21 + local patches + balanced port + finalWindowHours + usage-based seat exemption + maxDailySpend + usageSeatFirst + per-session cache TTL / usage ledger (#6) + served-account header / pins that hold (#7)
 
   src = fetchFromGitHub {
     # SMALL FORK. Branch feat/balanced-on-v1121 = upstream v1.1.21 (3d5bb6f) +
@@ -243,8 +243,8 @@ stdenvNoCC.mkDerivation rec {
     # ~/.config/teamclaude.json, which this bump removes.
     owner = "johnnymo87";
     repo = "teamclaude";
-    rev = "4e0260a0af08464695bc3a7758f3bf95ccb2f37c"; # feat/balanced-on-v1121 (+ #7 served-account header, #8 cache-ttl name rule)
-    hash = "sha256-L8VNlw36hAwoT9V3KJZlrOKXag9CSK795aJHiBw2iYs=";
+    rev = "d0831f13da51bff2501bc920b9e892d2f395390f"; # feat/balanced-on-v1121 (+ #7 served-account header, #8 cache-ttl name rule, #9 adaptive cache-ttl)
+    hash = "sha256-jR7eIglYF5J8yuJDctI+7ZEURjXT7gVwbUoQ12SHqPs=";
   };
 
   nativeBuildInputs = [ makeWrapper ];
