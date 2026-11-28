@@ -146,7 +146,10 @@ What matters is the tree, not the directory. A throwaway worktree detached at
 freshly fetched `origin/main` deploys the same tree as a pulled root, **provided
 the root has no commits beyond it**:
 `git -C ~/projects/workstation log --oneline origin/main..HEAD` must print
-nothing. A root hotfix (see AGENTS.md) is the case it would revert. Use the
+nothing. A root hotfix (see AGENTS.md) is the case it would revert. So is a
+change someone switched from uncommitted edits or from a branch;
+`predicting-switch-restarts` has the `hm-deploy-rev` check that catches it on
+the home side. Use the
 worktree when you must not pull at the root, for example because other sessions
 have uncommitted work there.
 

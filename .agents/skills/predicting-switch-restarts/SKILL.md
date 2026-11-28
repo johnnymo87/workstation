@@ -18,14 +18,19 @@ It builds both generations, without switching, and prints:
 - **SYSTEM**: `switch-to-configuration dry-activate` (needs `sudo -n`) and the closure delta.
 - **HOME**: the new generation's own `sd-switch --dry-run` against the current
   generation, plus each changed unit file and its `X-SwitchMethod`.
-- `>> WATCHED units named above:` lists any unit from the table below. If one is
-  named, read its row before you switch.
+- `>> WATCHED units named above:` lists any unit from the tables below, and any
+  agent slice. If one is named, read its row before you switch.
+
+**Exit 1 means a prediction is UNKNOWN**: dry-activate failed, sudo wanted a
+password, or there is no sd-switch or no current generation. In that case, do not
+trust `no watched unit named` from that run.
 
 The result is a diff against what is running now. If anyone else switches
-afterwards, run it again. To check the script against a past switch you have a
-journal for, set `SWITCH_IMPACT_OLD_HM=<old generation path>`. Replaying devbox
-HM generation 761→762 printed `Stopping units: teamclaude.service`, which matches
-the journal for 2026-11-28 15:01:03Z.
+afterwards, run it again. `SWITCH_IMPACT_OLD_HM=<generation path>` replays a
+switch from an older generation. sd-switch also reads live unit state, so a
+replay is only faithful from the generation just before the current one. When
+this skill was written, a replay of devbox HM 761→762 printed
+`Stopping units: teamclaude.service`, the same as that switch's journal.
 
 ## What a switch does to a unit
 
@@ -65,7 +70,7 @@ chose.
 | `goose-serve` | system | **never restarted** | `restartIfChanged = false`, `hosts/devbox/configuration.nix`. Picks up changes at the nightly reset (03:00 ET) or a goose cutover. |
 | `honkd` | user | **never restarted** | keep-old, `users/dev/home.devbox.nix` |
 | `opencode-serve@*`, `opencode-frontdoor` | user | **never restarted** | keep-old. They keep running the old opencode until restarted. |
-| goose-agent slice | user | never stopped | keep-old, `users/dev/goose-agent.nix`. Stopping it would kill every goose tool command. |
+| goose-agent slice | user | left alone while it exists in both generations | keep-old, `users/dev/goose-agent.nix`. If it is **added, removed or renamed** (including by rolling back to an old generation), it is stopped. That kills every goose tool command, including a goose session's own switch. |
 | `cfp-shaper` | system | **stopped for the whole activation**, then started | default. goose's Anthropic route is goose → `:3457` cfp-shaper → `:3456` teamclaude. |
 | `teamclaude` | user | **stopped and started** (about 1 s) | no keep-old. Both goose (through cfp-shaper) and opencode reach Anthropic through it. |
 | `pigeon-daemon` | system | restarted | default |
@@ -81,9 +86,18 @@ These are `restartIfChanged = false` system units: `goose-serve`,
 `opencode-serve@`, `opencode-frontdoor` and `aigateway`. `honkd` is a keep-old
 user unit. `teamclaude` and `claude-failover-proxy` are system units with no
 such setting, so they **restart** when changed. Every agent's Claude traffic goes
-through cfp. For what the no-restart units need after a switch (drift, explicit
-restarts), see the `rebuilding` skill's front-door and serve-pool runbook. For
-the actual list, run the script.
+through cfp. Opencode's bash commands run in `oc-agent.slice`, and that slice
+follows the same added/removed/renamed rule as goose's slice above.
+
+`goose-cutover@` runs `switch-to-configuration switch` unattended on cloudbox. Do
+not start a switch while one is running.
+
+For what the no-restart units need after a switch (drift, explicit restarts), see
+the `rebuilding` skill's front-door and serve-pool runbook. For the actual list,
+run the script.
+
+The goose retry section below is devbox evidence. cloudbox's goose reaches Claude
+through Vertex, a different code path, which this skill has not checked.
 
 ## macOS
 
@@ -114,8 +128,10 @@ To see goose sessions that are mid-turn right now: `honk list | grep running`.
 
 ```
 - [ ] hostname matches the target
-- [ ] git fetch; root has nothing beyond origin/main; throwaway worktree at origin/main (never pull/reset the shared root)
-- [ ] switch-impact.sh in that worktree; read every WATCHED unit's row
+- [ ] no other switch running: `systemctl --user is-active pull-workstation` says inactive (cloudbox: no `goose-cutover@` active)
+- [ ] git fetch; root has nothing beyond origin/main; the deployed HM rev is in origin/main (below)
+- [ ] throwaway worktree at origin/main (never pull/reset the shared root)
+- [ ] switch-impact.sh in that worktree exits 0; read every WATCHED unit's row
 - [ ] watched unit bounces + `honk list` shows running turns or a live window -> wait, or get the owner's OK
 - [ ] switch from the worktree
 - [ ] verify: new version active, watched units' ActiveEnterTimestamp
@@ -130,6 +146,9 @@ other people's changes.
 ```bash
 cd ~/projects/workstation && git fetch -q
 git log --oneline origin/main..HEAD          # must print nothing (else: root hotfix; see the rebuilding skill)
+r=$(cat ~/.local/state/hm-deploy-rev)        # the rev of the home config running now
+case $r in *-dirty) echo "STOP: running HM was deployed from uncommitted edits";; esac
+git merge-base --is-ancestor "${r%-dirty}" origin/main || echo "STOP: running HM is not on origin/main"
 wt=$(mktemp -d) && git worktree add --detach "$wt" origin/main
 cd "$wt" && .agents/skills/predicting-switch-restarts/switch-impact.sh .
 sudo nixos-rebuild switch --flake ".#$(hostname)"              # system
@@ -137,8 +156,13 @@ home-manager switch --flake .#dev                              # home: .#dev on 
 cd - && git worktree remove --force "$wt"
 ```
 
-**Your own session survives either switch.** Neither switch restarts goose-serve
-or the opencode serves (rows above), so the shell running it is not killed.
+A `STOP` means the running config has something origin/main lacks, and deploying
+origin/main would revert it. Find out what it is before you switch. The system
+side keeps no such record, so before a system switch, ask whoever deployed last.
+
+**Your own session survives either switch, unless the switch stops the slice your
+shell runs in.** Neither switch restarts goose-serve or the opencode serves (rows
+above), so the shell running it is not killed. The script flags agent slices.
 While the switch runs, your turn is blocked on a tool call rather than waiting
 on a model request, so a cfp-shaper or teamclaude bounce in the middle does not
 cut it. The sessions at risk are the **other** ones with a request in flight.
