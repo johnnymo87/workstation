@@ -4412,6 +4412,9 @@ Check:
         # Pin the config path explicitly so it never depends on XDG_CONFIG_HOME.
         # Matches the default getConfigPath() resolution for the dev user.
         "TEAMCLAUDE_CONFIG=/home/dev/.config/teamclaude.json"
+        # Adaptive per-session 1h prompt-cache TTL rule (teamclaude#9, hot-reloaded
+        # on mtime change; missing file = off). Same path and rule as devbox.
+        "TEAMCLAUDE_CACHE_TTL_FILE=/home/dev/.config/teamclaude-cache-ttl.json"
         # Per-response usage ledger (teamclaude#6): records serving account and
         # 5m/1h cache-write split so llm-ledger can attribute cloudbox Max rows
         # by account and exclude the usage-based seat from k (eng-agent-platform-ul4.26).
@@ -5550,6 +5553,11 @@ Forensics: $DUMP"
         # before the first byte fall back to the gateway. Off = remove the line:
         # Gemini then passes straight through to the gateway.
         "CFP_GEMINI_AGY_ENABLED=true"
+        # Adaptive 1h prompt-cache TTL on the Vertex Claude leg (cfp >= v0.17.0,
+        # mirroring teamclaude#9): observes all settled Claude responses across
+        # backends and upgrades bare cache_control blocks to ttl:"1h" for
+        # sessions whose 24h idle-gap mix beats 5m. Off = remove the line.
+        "CFP_VERTEX_CACHE_TTL_ADAPTIVE=true"
         "CFP_IDLE_MIGRATE_SECONDS=300"
         "CFP_RESET_HOUR=0"
         # Budget rolls over at local midnight; ET matches the system tz and the
