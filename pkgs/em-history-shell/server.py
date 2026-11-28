@@ -1097,17 +1097,13 @@ def replace_journal(store: Store, profile: str, key: str, before: Tree, journal:
             if now is None or now.digest() != before.digest():
                 return "they changed while the command ran. Look again and redo the change"
             try:
-                rest = store.read_key(profile, key).without(JOURNAL)
-            except TreeRefused:
-                rest = EMPTY_TREE  # another book fails a newer rule: the journal still must pass
-            try:
-                check_tree(_merge(rest, journal))
+                check_tree(_merge(store.read_key(profile, key).without(JOURNAL), journal))
             except TreeRefused as err:
                 return str(err)
             if journal.dirs:
                 staged = store.stage(journal.skill(JOURNAL))
-            old = _put_skill(store, profile, key, JOURNAL, staged)
-            staged = None
+            mine, staged = staged, None
+            old = _put_skill(store, profile, key, JOURNAL, mine)
         finally:
             store.unlock()
     finally:
@@ -1381,8 +1377,10 @@ def _merge(base_tree: Tree, skill_tree: Tree) -> Tree:
 def _put_skill(store: Store, profile: str, key: str, skill: str, staged: str | None) -> str | None:
     """Make her `skill` folder the staged one, or remove it when `staged` is None,
     making her folder (and the profile root) when a skill arrives and removing them when
-    the last one leaves. Call with the lock held. The staged folder is used up even when
-    this raises. Returns the staging name now holding the old folder, or None."""
+    the last one leaves. Call with the lock held. The staged folder is this function's
+    from the call on (the caller lets go of it first): used up or discarded, even when
+    this raises. Returns the staging name now holding the old folder (to `retire`), or
+    None. If it raises after the swap, it retires the old folder itself."""
     try:
         pfd = store.profile_fd(profile, create=staged is not None)
     except BaseException:
@@ -1399,6 +1397,7 @@ def _put_skill(store: Store, profile: str, key: str, skill: str, staged: str | N
         kfd = _open_child(pfd, key)
         if kfd is None and staged is not None:
             os.mkdir(key, DIR_MODE, dir_fd=pfd)
+            os.fsync(pfd)
             kfd = _open_child(pfd, key)
         if kfd is not None:
             try:
@@ -1412,6 +1411,10 @@ def _put_skill(store: Store, profile: str, key: str, skill: str, staged: str | N
                 os.rmdir(key, dir_fd=pfd)
                 os.fsync(pfd)
         gone = not os.listdir(pfd)
+    except BaseException:
+        if old is not None:
+            store.retire(old)
+        raise
     finally:
         os.close(pfd)
         if staged is not None:
@@ -1458,8 +1461,8 @@ def handle_change(msg: dict, base: str) -> dict:
                 except TreeRefused as err:
                     raise Refused(f"The skill cannot be kept: {err}.") from None
                 staged = store.stage(new_skill.skill(skill))
-            old = _put_skill(store, profile, key, skill, staged)
-            staged = None
+            mine, staged = staged, None
+            old = _put_skill(store, profile, key, skill, mine)
         finally:
             store.unlock()
             if staged is not None:
