@@ -22,8 +22,10 @@ It builds both generations, without switching, and prints:
   agent slice. If one is named, read its row before you switch.
 
 **Exit 1 means a prediction is UNKNOWN**: dry-activate failed, sudo wanted a
-password, or there is no sd-switch or no current generation. In that case, do not
-trust `no watched unit named` from that run.
+password, or there is no sd-switch or no current generation. Only the section
+that says UNKNOWN is unknown; the other section's prediction stands. Fix the cause
+and rerun until it exits 0. Never act on `no watched unit named` from a section
+that says UNKNOWN.
 
 The result is a diff against what is running now. If anyone else switches
 afterwards, run it again. `SWITCH_IMPACT_OLD_HM=<generation path>` replays a
@@ -77,8 +79,17 @@ chose.
 | `codex-lb`, `oc-tags-serve`, `tmux-main`, `tec-codex-bot*` | user | restarted | no keep-old |
 
 goose-serve's dependency on cfp-shaper is `wants` + `after`, not `requires` or
-`bindsTo`, so stopping cfp-shaper does not stop goose. Both of the switches leave
-goose itself running. What they can cut is goose's **model requests**.
+`bindsTo`, so stopping cfp-shaper does not stop goose. Neither switch stops goose
+itself. A switch that changes cfp-shaper or teamclaude can cut goose's **model
+requests**.
+
+goose's tool commands run in user-manager scopes under the goose-agent slice,
+not in goose-serve's cgroup. So it is the **home** switch that could stop them.
+
+Waiting for an idle moment does not hold back an HM change, because
+pull-workstation switches on its own. To hold one through a live window, stop
+the timer with `systemctl --user stop pull-workstation.timer`. That is a
+hand-stop: any later switch starts the timer again.
 
 ## cloudbox
 
@@ -134,7 +145,7 @@ To see goose sessions that are mid-turn right now: `honk list | grep running`.
 - [ ] switch-impact.sh in that worktree exits 0; read every WATCHED unit's row
 - [ ] watched unit bounces + `honk list` shows running turns or a live window -> wait, or get the owner's OK
 - [ ] switch from the worktree
-- [ ] verify: new version active, watched units' ActiveEnterTimestamp
+- [ ] verify: the closure-delta version is in the unit's ExecStart; watched units' ActiveEnterTimestamp
 ```
 
 **Which checkout.** A switch deploys the whole tree it is run from. A worktree
@@ -153,7 +164,7 @@ wt=$(mktemp -d) && git worktree add --detach "$wt" origin/main
 cd "$wt" && .agents/skills/predicting-switch-restarts/switch-impact.sh .
 sudo nixos-rebuild switch --flake ".#$(hostname)"              # system
 home-manager switch --flake .#dev                              # home: .#dev on devbox, .#cloudbox on cloudbox
-cd - && git worktree remove --force "$wt"
+git -C ~/projects/workstation worktree remove --force "$wt"
 ```
 
 A `STOP` means the running config has something origin/main lacks, and deploying
