@@ -589,6 +589,7 @@ class TestProtocol(Exchange):
                 "seccomp_sha256": hashlib.sha256(b"BPF-fake-program").hexdigest(),
                 "libseccomp_version": LIBSECCOMP,
                 "policy_sha256": POLICY_SHA,
+                "own_modes": ["edit", "read", "journal"],
                 "server": SERVER_PATH,
                 "unit_digest": UNIT_DIGEST,
             },
@@ -1609,6 +1610,148 @@ class TestSkillsRun(SkillsExchange):
         self.assertEqual(argv[i - 2:i], ["--ro-bind", os.path.join(self.skills_own, "agent-history")])
         self.ask(self.run_request(view="jonathan/warrior", command="true"))
         self.assertNotIn("/skills/characters", self.argv())
+
+
+class TestJournalRun(SkillsExchange):
+    """own "journal": her books read only, her journal hers to write. The stand-in
+    sandbox cannot make a mount read only, so these write where the real one refuses
+    (EROFS) and check that the server keeps none of it anyway."""
+
+    PAGE = '"$SKILLS_OWN/journal/page.md"'
+
+    def journal(self, command, character="Lyra Vance", **kw):
+        return self.ask(
+            self.run_request(view="jonathan/warrior", character=character, own="journal",
+                             command=command),
+            **kw,
+        )
+
+    def read(self, *parts):
+        with open(self.her(*parts)) as handle:
+            return handle.read()
+
+    def test_her_books_are_read_only_and_her_journal_writable(self):
+        self.journal("true")
+        argv = self.argv()
+        work = os.path.join(self.work, server.WORK_OWN)
+        i = argv.index("/skills/own")
+        j = argv.index("/skills/own/journal")
+        self.assertEqual(argv[i - 2:i], ["--ro-bind", work])
+        self.assertEqual(argv[j - 2:j], ["--bind", os.path.join(work, "journal")])
+        self.assertLess(i, j)  # bwrap mounts in order: the journal goes over her books
+        self.assertEqual(argv.count("--bind"), 1)
+        self.assertLess(j, argv.index("--remount-ro"))
+
+    def test_her_page_is_kept(self):
+        self.seed("knots/SKILL.md", "knots")
+        answer = self.journal(f"echo dear > {self.PAGE}")
+        self.assertEqual(answer["skills"], {"changed": True, "kept": True, "why": None})
+        self.assertEqual(self.read("journal", "page.md"), "dear\n")
+        self.assertEqual(self.read("knots", "SKILL.md"), "knots")
+        self.assertEqual(self.staging_left(), [])
+        self.assertEqual(os.listdir(self.work), [])
+
+    def test_she_reads_her_books(self):
+        self.seed("knots/SKILL.md", "knots")
+        answer = self.journal('cat "$SKILLS_OWN/knots/SKILL.md"')
+        self.assertEqual(answer["stdout"], "knots")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+
+    def test_nothing_but_her_journal_is_kept(self):
+        self.seed("knots/SKILL.md", "knots")
+        self.seed("journal/SKILL.md", "how to write")
+        answer = self.journal(
+            'echo mine > "$SKILLS_OWN/knots/SKILL.md"; mkdir "$SKILLS_OWN/new";'
+            ' echo x > "$SKILLS_OWN/new/SKILL.md"; rm -r "$SKILLS_OWN/knots";'
+            f" echo dear > {self.PAGE}"
+        )
+        self.assertEqual(answer["skills"], {"changed": True, "kept": True, "why": None})
+        self.assertEqual(self.read("knots", "SKILL.md"), "knots")
+        self.assertFalse(os.path.exists(self.her("new")))
+        self.assertEqual(self.read("journal", "SKILL.md"), "how to write")
+        self.assertEqual(self.read("journal", "page.md"), "dear\n")
+
+    def test_a_change_to_her_books_alone_changes_nothing(self):
+        self.seed("knots/SKILL.md", "knots")
+        answer = self.journal('echo mine > "$SKILLS_OWN/knots/SKILL.md"')
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+        self.assertEqual(self.read("knots", "SKILL.md"), "knots")
+
+    def test_an_untouched_journal_folder_made_for_the_bind_is_not_kept(self):
+        self.seed("knots/SKILL.md", "knots")
+        answer = self.journal('test -d "$SKILLS_OWN/journal"')
+        self.assertEqual(answer["exit_code"], 0)  # it is there for her to write in
+        self.assertEqual(answer["skills"], {"changed": False, "kept": True, "why": None})
+        self.assertFalse(os.path.exists(self.her("journal")))
+        answer = self.journal("true", character="Mira")
+        self.assertFalse(os.path.exists(self.her(key="mira")))  # no folder made either
+
+    def test_her_first_page_makes_her_folder(self):
+        answer = self.journal(f"echo dear > {self.PAGE}")
+        self.assertTrue(answer["skills"]["changed"])
+        self.assertEqual(self.read("journal", "page.md"), "dear\n")
+        self.assertEqual(os.listdir(self.her()), ["journal"])
+
+    def test_she_may_clear_her_page(self):
+        self.seed("journal/page.md", "old page")
+        answer = self.journal(f"rm {self.PAGE}")
+        self.assertTrue(answer["skills"]["changed"])
+        self.assertEqual(os.listdir(self.her("journal")), [])
+
+    def test_a_sync_of_another_book_meanwhile_does_not_cost_her_the_page(self):
+        self.seed("knots/SKILL.md", "old")
+        disk = self.her("knots", "SKILL.md")
+        answer = self.journal(f"echo dear > {self.PAGE}; echo reviewed > {disk}")
+        self.assertEqual(answer["skills"], {"changed": True, "kept": True, "why": None})
+        self.assertEqual(self.read("knots", "SKILL.md"), "reviewed\n")
+        self.assertEqual(self.read("journal", "page.md"), "dear\n")
+
+    def test_her_journal_changed_on_disk_meanwhile_keeps_nothing(self):
+        self.seed("journal/SKILL.md", "old")
+        disk = self.her("journal", "SKILL.md")
+        answer = self.journal(f"echo dear > {self.PAGE}; echo theirs > {disk}")
+        self.assertFalse(answer["skills"]["kept"])
+        self.assertIn("changed while the command ran", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her("journal", "page.md")))
+        self.assertEqual(self.read("journal", "SKILL.md"), "theirs\n")
+        self.assertEqual(self.staging_left(), [])
+
+    def test_a_link_in_her_journal_keeps_nothing(self):
+        answer = self.journal(f'echo dear > {self.PAGE}; ln -s /etc/passwd "$SKILLS_OWN/journal/p"')
+        self.assertFalse(answer["skills"]["kept"])
+        self.assertIn("/skills/own/journal/p is a link", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_a_stopped_command_keeps_nothing(self):
+        answer = self.journal(f"echo dear > {self.PAGE}; sleep 30", limits=Limits(timeout_s=0.7))
+        self.assertIn("stopped before it finished", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her()))
+
+    def test_her_journal_still_counts_against_the_whole_folder(self):
+        self.seed("knots/SKILL.md", "x" * 10)
+        self.patch("MAX_TOTAL_BYTES", 20)
+        answer = self.journal(f"printf 0123456789abc > {self.PAGE}")
+        self.assertFalse(answer["skills"]["kept"])
+        self.assertIn("holds more than", answer["skills"]["why"])
+        self.assertFalse(os.path.exists(self.her("journal")))
+
+    def test_a_failed_copy_in_still_runs_read_only(self):
+        self.seed("knots/SKILL.md", "knots")
+
+        def boom(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        self.patch("_copy_in", boom)
+        answer = self.journal('cat "$SKILLS_OWN/knots/SKILL.md"')
+        self.assertEqual(answer["stdout"], "knots")
+        self.assertEqual(answer["skills"], {"changed": False, "kept": False, "why": server.COPY_IN_FAILED})
+        argv = self.argv()
+        self.assertEqual(argv[argv.index("/skills/own") - 2], "--ro-bind")
+        self.assertNotIn("/skills/own/journal", argv)
+
+    def test_journal_needs_a_character(self):
+        self.assertRefused(self.ask(self.run_request(own="journal")), "refused", "Nothing was run")
+        self.assertFalse(os.path.exists(self.log))
 
 
 class TestSyncRemove(SkillsExchange):

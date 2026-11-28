@@ -144,8 +144,9 @@ let
     # Her skills folders: the only place on disk the service writes. More specific
     # than the ReadOnlyPaths above, so it wins there.
     ReadWritePaths = [ "-${skillsOwn}" ];
-    # The work space of one "edit" run: her folder is copied here and bound at
-    # /skills/own. size is a hard cap on what a command can write there and is charged
+    # The work space of one "edit" or "journal" run: her folder is copied here and
+    # bound at /skills/own (a "journal" run binds it read only and its journal/ folder
+    # writable). size is a hard cap on what a command can write there and is charged
     # to MemoryMax; nr_inodes caps files and folders. The server's own caps (2000 files,
     # 4096 files and folders, 8 MiB) sit below both with room to spare: tmpfs takes at
     # least a 4 KiB page per file, so the largest folder the caps allow needs about
