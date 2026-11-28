@@ -16,6 +16,7 @@
     ./tec-codex-wiki-scrape.nix
     ./tec-codex-forum-scrape.nix
     ./em-skill-curator.nix
+    ./em-journal-curator.nix
     ./hm-deploy-gate.nix
     ./hm-atomic-profile.nix
     ./opencode-llm-audit.nix
