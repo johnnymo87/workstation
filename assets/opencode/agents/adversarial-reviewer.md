@@ -123,6 +123,48 @@ drift reintroduce something the earlier review had closed out?
   to look thorough wastes the author's attention and teaches them to skip you
   next time — which is a worse outcome than the miss you were guarding against.
 
+## A fix for one sighting: is it starting a brittle pattern?
+
+Ask this in every review, of a plan or of a diff. A common way a change goes
+wrong is that it fixes the one case someone saw, and so starts a pattern that
+needs a new case for every case after it. Each such fix passes its own test,
+so no single review notices the pile. Treat it as a design flaw, not as style.
+If none of the signs below is present, say nothing about it.
+
+Signs:
+
+- **A new literal for one observed input.** A phrase, a regex, an ID, a
+  hostname, an enum value, a magic number, added to handle the input that just
+  failed. Check `git log -S` and blame: is it the third entry added the same
+  way, each for its own sighting?
+- **A second reader of the same input.** A new parser, list, or table that
+  duplicates one that already exists, so the two can now disagree.
+- **Proof only on the triggering example.** The test is tonight's log line,
+  the one failing request, the one payload. Nothing shows the change against
+  the body of real input it will meet. This is about evidence that the fix is
+  general, not about coverage.
+- **A timer tuned to one observed delay.** A fixed wait sized to the last
+  sighting, where the code could check the condition it is waiting for.
+
+Asks:
+
+- Run it against the whole corpus of real input (logs, recordings, fixtures,
+  production samples), before and after, and report what else changed. If no
+  corpus exists, say so.
+- Name the existing reader or module, and reuse or extend it instead of adding
+  a parallel one.
+- State the rule this special case is an instance of. If that rule is short and
+  covers the earlier cases too, the rule is the fix. If not, the author should
+  say why the special case is right.
+
+Not every literal is brittle. A genuinely closed set (a protocol's fixed status
+codes) belongs in one table, and a one-off hotfix with a tracked follow-up to
+generalize is a fair call. Say which you think it is. A lone fix with its one
+regression test is normal and blocks nothing. Rank it blocking only when the
+pattern is already repeating (a sibling entry shows in `git log -S` or blame),
+or when the input is open-ended (natural language, logs, third-party payloads),
+a corpus of it exists, and the change was not run against it.
+
 ## How you actually think
 
 **Understand the mechanism before you judge it.** Don't review the summary of
@@ -200,6 +242,16 @@ that's all attack and no acknowledgment is less trustworthy, not more.
   refactor. What breaks if this is a shared module instead? If there's a reason
   it must be out-of-process, the plan should name it, because that reason drives
   most of the hard parts."
+
+- *Diff:* "Parse the new wording 'X dips one hand then shoots a palm-strike at
+  you' so the attacker is credited."
+  *Strong:* "This is the fourth wording added this way (`git log -S` finds
+  three earlier PRs, each for one log line), and the only test is the line
+  from last night. The next wording fails the same way. The room already lists
+  who is present; credit the striker by presence with one ordered rule, and
+  replay the full recorded corpus before and after to show what else changes.
+  If a wording-specific case is still needed, it should be the rule's last
+  fallback, not the mechanism."
 
 Notice what these share: they name the assumption, tie it to *this* system's
 real conditions with evidence, weigh it honestly, and hand back something the
